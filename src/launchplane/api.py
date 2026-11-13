@@ -2,6 +2,7 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Response
@@ -23,10 +24,13 @@ class HostUnreadable(BaseModel):
     error: str
 
 
+RUNNING_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": HostUnreadable}}
+
+
 def create_app(read: CopyReader) -> FastAPI:
     app = FastAPI(title="Launchplane")
 
-    @app.get("/running", responses={HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": HostUnreadable}})
+    @app.get("/running", responses=RUNNING_ERROR_RESPONSES)
     def running(response: Response) -> RunningAnswer | HostUnreadable:
         read_at = datetime.now(UTC)
         try:

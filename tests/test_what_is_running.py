@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import docker
 import pytest
@@ -30,7 +31,7 @@ def refusing_host() -> ContainerHost:
     return ContainerHost(client, "tcp://127.0.0.1:1")
 
 
-def ask_running(read: CopyReader) -> tuple[int, dict[str, object]]:
+def ask_running(read: CopyReader) -> tuple[int, dict[str, Any]]:
     response = TestClient(create_app(read)).get("/running")
     return response.status_code, response.json()
 
@@ -61,7 +62,7 @@ def test_a_refused_connection_raises_with_the_real_error_instead_of_listing_noth
 def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_cannot_be_read() -> None:
     status, body = ask_running(refusing_host().read_copies)
     assert status == 503
-    assert "Connection refused" in str(body["error"])
+    assert "Connection refused" in body["error"]
     assert "copies" not in body
 
 

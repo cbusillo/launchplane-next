@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import docker
 import requests
@@ -82,9 +82,12 @@ class ContainerHost:
         client = docker.DockerClient(base_url=address, tls=tls, version=DOCKER_API_VERSION, timeout=ANSWER_TIMEOUT_SECONDS)
         return cls(client, address)
 
+    def list_marked_containers(self) -> object:
+        return self.client.api.containers(all=True, filters={"label": PRODUCT_LABEL})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
     def read_copies(self) -> list[RunningCopy]:
         try:
-            answer = cast(object, self.client.api.containers(all=True, filters={"label": PRODUCT_LABEL}))  # pyright: ignore[reportUnknownMemberType]
+            answer = self.list_marked_containers()
         except (DockerException, requests.RequestException, ValueError) as error:
             raise ContainerHostError(f"Listing the containers marked {PRODUCT_LABEL} on {self.address} failed: {error}") from error
         return copies_from_answer(answer)
