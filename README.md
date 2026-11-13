@@ -56,7 +56,7 @@ Restoring a backup onto a Live site loses what was written since it was taken. I
 
 ## The move
 
-Copy, update the copy, check it, then switch. The old one is never touched until the new one has passed, so not switching is how a failed release is stopped. Going back after a switch is the same move again with the earlier build, on the data as it is now. The backup is the last resort underneath.
+Copy, update the copy, check it, then switch. The old one is not touched until the new one has passed its checks, so not switching is how a failed release is stopped. Going back after a switch is the same move again with the earlier build, on the data as it is now. The backup is the last resort underneath.
 
 ## What Launchplane stores
 
@@ -66,7 +66,9 @@ Copy, update the copy, check it, then switch. The old one is never touched until
 
 It never stores what is running now. That is always read from the host.
 
-It does not store what should be running either. That is worked out each time from what people decided and from the product's repository: production should run the build of the latest acceptance, testing the latest build of the main branch, and a preview the latest build of its pull request. The status page compares that with what the host reports.
+It does not store what should be running either. That is worked out each time from what people decided and from the product's repository: production should run the build of the latest acceptance or of a hotfix the Director started after it, testing the latest build of the main branch, and a preview the latest build of its pull request. The status page compares that with what the host reports.
+
+The record of what Launchplane did is history. It never answers what is running.
 
 ## What Launchplane asks of a product
 
@@ -78,7 +80,9 @@ Four commands, defined once per kind: check health, back up, restore and scrub, 
 - **Agents:** everything except change which build a Live site runs outside an accepted release, delete Live data, or grant access.
 - **Clients:** see their own products and accept or reject a release. A Client can stop a change and can never merge one.
 
-## Other facts
+## Also required
+
+These are requirements even though the finish-line test does not show them.
 
 - Search engines are told not to index any lane except real production. A prelaunch production site is not indexed either.
 - Sign-in through Authentik lives in shared code, so any product can use it.
@@ -96,3 +100,46 @@ One command, with nobody touching anything:
 - fails a fourth change on purpose, and production stays on the last good build with its data
 - leaves the status page green before, red during the failure and green after, with nothing cleared by hand
 - keeps an acceptance good across a retry
+
+The first step is the one exception to the finish line: it proves the tools. Ruff, the type checker, the tests, CI and inspection each catch a deliberate mistake and pass its fix.
+
+Not part of this finish line, and not built until Chris says: scheduled backups and disaster restore, Launchplane releasing itself, telling the Director when a lane goes red, setting up hosts, the full interface, and Client agents.
+
+## Open, and who settles it
+
+Nothing below is decided. Do not build past one of Chris's questions. Each names the first step it blocks.
+
+**Chris decides**
+
+1. Who accepts during the finish-line test. The test runs with nobody touching anything, and no automated identity may release. Blocks the first release to production.
+2. What happens to writes that reach production while its copy is being updated: a pause, a catch-up, or something else, and how long an interruption is acceptable. Blocks the move for any product with a database.
+3. What the copy of production may do before the switch. It holds production's keys and scheduled jobs, and must not send mail, take payments or push to outside services twice. Blocks the same step.
+4. What "verified" means for a backup, and how long backups are kept. Blocks the first production move.
+5. What scrub must remove, for each kind, and what proves it ran. Blocks any real data reaching testing.
+6. What triggers an acceptance request, what a rejection records, and what happens to a waiting request when a newer build arrives. Blocks the accept page.
+7. How a Client proves who they are, how an agent is told apart from the Director, and who may mark a product Live. Blocks the accept page and the API's first protected call.
+8. Whether a setting that can change what a Live site does, such as a database address or a payment key, needs acceptance or a backup first. Blocks settings changes on production.
+9. What "fresh" production data means before an acceptance request: a new copy each time, a maximum age, or a recheck. Blocks the testing refresh.
+10. What happens to a Client's test session and to previews when testing is rebuilt. Blocks the testing refresh.
+
+**The builder measures, then Chris decides**
+
+11. How long a database copy and update take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
+12. Whether the file store is shared or copied in a move, and how the database and file store are kept consistent with each other.
+13. Whether Dokploy's start-first deploy can do the switch, or Launchplane must do it itself.
+14. How much disk and memory several previews use at once, and what pausing one actually frees.
+
+**The builder proposes in the step that needs it**
+
+15. What a product description contains and where it lives.
+16. How the four commands are called, and where they live for a kind other than Odoo.
+17. How a running copy reports which product, lane and build it is.
+18. How a build proves which repository and commit it came from.
+19. What marks which copy is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
+20. How the status page shows a failed move separately from a lane's health, and what clears it.
+
+## What exists today
+
+- The test bed is two containers. The control container runs a fresh Dokploy and will run Launchplane. The scratch container is a plain Docker host for the pretend products. Neither is connected to anything real.
+- The pretend website and pretend Odoo product do not exist yet. Creating their repositories needs Chris.
+- An earlier build of an Odoo system usually cannot run on a database a later build has updated. Going back after a switch will often find it cannot, and then the choice is Chris's.
