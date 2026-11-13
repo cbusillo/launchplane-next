@@ -16,7 +16,7 @@ Only containers carrying `launchplane.product` are listed. Any other container o
 
 ## The answer
 
-Each copy has `product`, `lane`, `build`, `name` and `state`. A missing lane or build label is `null`. `state` is Launchplane's word, not the host's:
+Each copy has `product`, `lane`, `build`, `name`, `state` and `serves`. A missing lane or build label is `null`. `serves` is the name the proxy sends to this copy, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
 
 | `state` | Docker's states |
 | --- | --- |
@@ -26,7 +26,7 @@ Each copy has `product`, `lane`, `build`, `name` and `state`. A missing lane or 
 | `stopped` | `created`, `exited`, `dead`, `removing` |
 
 - `200` with `copies`: the host was read. An empty list means the host answered and nothing marked is on it.
-- `503` with `error`: the host could not be read, or its answer did not have the expected shape. The error carries the real cause. It never answers "nothing is running".
+- `503` with `error`: the host or the proxy could not be read, or an answer did not have the expected shape. The error carries the real cause. It never answers "nothing is running".
 
 Both carry `read_at`, the moment the host was asked.
 
@@ -63,6 +63,6 @@ Docker on the scratch container listens on `192.168.1.56:2376` only, through the
 
 ## Where it runs for now
 
-On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: `http://launchplane.shiny:8700/running`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated and answers only reads.
+On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: `http://launchplane.shiny:8700/running`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
 
 `tests/test_bed_what_is_running.py` runs against it from a machine that can reach the test bed: `LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py`. It places containers on the scratch container with `lp-scratch` (or `LAUNCHPLANE_SCRATCH_SHELL`). For the unreachable case it drops the control container's traffic to port 2376 on the scratch container's firewall for one call.
