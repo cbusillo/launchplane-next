@@ -50,16 +50,16 @@ The low-level `containers()` call is used because the high-level list turns Dock
 
 ## Certificates
 
-`./scripts/issue-certificates`, run from a machine with `lp-control` and `lp-scratch` (or `LAUNCHPLANE_CONTROL_SHELL` and `LAUNCHPLANE_SCRATCH_SHELL`), makes the test bed match this section. A second run changes nothing and says `kept` for each part.
+`./scripts/issue-certificates`, run from a machine with `lp-control` and `lp-scratch` (or `LAUNCHPLANE_CONTROL_SHELL` and `LAUNCHPLANE_SCRATCH_SHELL`), issues what is missing for this test bed and keeps what exists. A second run changes nothing.
 
-- The certificate authority lives only in `/var/lib/launchplane/ca` on the control container, owned by the `launchplane` user, mode 700. Its key is mode 600.
+- The certificate authority is in `/root/launchplane-ca` on the control container, readable only by root. The `launchplane` user cannot read its key.
 - Every key is a P-256 EC key made on the host that uses it. Only certificate requests and certificates travel.
-- The scratch container's server certificate and key are in `/etc/docker/tls`, named for `docker-lp-scratch.shiny` and its current address. The client certificate (`CN=launchplane`) and key are in `/var/lib/launchplane/tls` on the control container.
-- Certificates are valid for 3650 days. The current ones were issued on 2026-11-13 and expire on 2036-11-10. A run reissues any certificate that expires within a year, no longer matches its key or authority, or no longer names the scratch container's address.
-- `--replace` makes new keys and certificates everywhere, the authority included. That is how to recover from a leaked key.
-- A run restarts Docker on the scratch container, or the `launchplane` service, when its certificates or settings are newer than the running process. Restarting Docker stops the containers on that host.
+- The scratch container's server certificate and key are in `/etc/docker/tls`, named for `docker-lp-scratch.shiny` and the address it had when issued. The client certificate (`CN=launchplane`) and key are in `/var/lib/launchplane/tls` on the control container. The service reads them on each connection, so a new client certificate needs no restart.
+- Certificates are valid for 3650 days. The authority and server certificate were issued on 2026-11-13 and expire on 2036-11-10.
+- To reissue one, delete its `cert.pem`, or its `key.pem` too for a new key, and run the command again. Docker keeps using the old server certificate until it restarts.
+- The command restarts Docker on the scratch container only when it changed Docker's setting, which stops the containers there.
 
-Docker on the scratch container listens on `192.168.1.56:2376` only, through the systemd override `/etc/systemd/system/docker.service.d/launchplane-tls.conf`, and refuses any caller without a certificate from the authority. That address comes from DHCP. If it changes, Docker cannot bind it and does not start. Running the command again rewrites the override and certificate for the new address.
+Docker on the scratch container listens on `192.168.1.56:2376` only, through the systemd override `/etc/systemd/system/docker.service.d/launchplane-tls.conf`, and refuses any caller without a certificate from the authority. That address comes from DHCP. If it changes, Docker cannot bind it and does not start.
 
 ## Where it runs for now
 
