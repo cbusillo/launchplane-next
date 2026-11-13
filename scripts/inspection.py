@@ -21,8 +21,8 @@ ANALYZED_LINE_PREFIX = "Analyzing code in …/"
 RESULTS_INDEX = ".descriptions.json"
 TYPESHED_STDLIB = INSPECTOR.parents[1] / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 SDK_NAME = f"launchplane inspection of {REPOSITORY}"
-SDK_TABLE = INSPECTOR_HOME / "config" / "options" / "jdk.table.xml"
-SDK_TABLE_CACHE = INSPECTOR_HOME / "system" / "global-model-cache"
+INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
+INSPECTOR_CACHES = INSPECTOR_HOME / "system"
 CANARY_FOLDER = REPOSITORY / ".inspection-canary"
 CANARY_SOURCE = "from pathlib import Path\n\n\ndef canary() -> None:\n    Path().no_such_method()\n"
 CANARY_INSPECTION = "PyUnresolvedReferencesInspection"
@@ -86,9 +86,9 @@ def exclusive_inspector_home() -> Generator[None]:
 
 
 def prepare_inspection() -> Path:
-    if not is_interpreter_registered():
-        shutil.rmtree(SDK_TABLE_CACHE, ignore_errors=True)
-        register_interpreter()
+    forget_earlier_inspections()
+    trust_repository()
+    register_interpreter()
     point_project_at_interpreter()
     CANARY_FOLDER.mkdir(exist_ok=True)
     (CANARY_FOLDER / "canary.py").write_text(CANARY_SOURCE)
@@ -101,8 +101,16 @@ def write_inspector_properties() -> Path:
     return properties
 
 
-def is_interpreter_registered() -> bool:
-    return SDK_TABLE.exists() and SDK_NAME in SDK_TABLE.read_text()
+def forget_earlier_inspections() -> None:
+    shutil.rmtree(INSPECTOR_CACHES, ignore_errors=True)
+
+
+def trust_repository() -> None:
+    INSPECTOR_OPTIONS.mkdir(parents=True, exist_ok=True)
+    (INSPECTOR_OPTIONS / "trusted-paths.xml").write_text(
+        '<application><component name="Trusted.Paths"><option name="TRUSTED_PROJECT_PATHS"><map>'
+        f'<entry key={quoteattr(str(REPOSITORY))} value="true" /></map></option></component></application>\n'
+    )
 
 
 def register_interpreter() -> None:
@@ -113,8 +121,8 @@ def register_interpreter() -> None:
         TYPESHED_STDLIB,
     )
     roots = "".join(f'<root url={quoteattr(root.as_uri())} type="simple" />' for root in library_roots)
-    SDK_TABLE.parent.mkdir(parents=True, exist_ok=True)
-    SDK_TABLE.write_text(
+    INSPECTOR_OPTIONS.mkdir(parents=True, exist_ok=True)
+    (INSPECTOR_OPTIONS / "jdk.table.xml").write_text(
         f'<application><component name="ProjectJdkTable"><jdk version="2"><name value={quoteattr(SDK_NAME)} />'
         f'<type value="Python SDK" /><homePath value={quoteattr(sys.executable)} />'
         f'<roots><classPath><root type="composite">{roots}</root></classPath>'
@@ -154,7 +162,8 @@ def require_canary_caught(canary_findings: list[Finding]) -> None:
     if not any(finding.inspection == CANARY_INSPECTION for finding in canary_findings):
         raise InspectionUnknownError(
             f"PyCharm missed the known defect in {CANARY_FOLDER}/canary.py, so it is not resolving the standard library "
-            f"and a clean answer would be false. Delete {SDK_TABLE} so the next run registers the interpreter again."
+            f"and a clean answer would be false. Every run starts from fresh caches, so look for the cause in "
+            f"{INSPECTOR_HOME / 'log' / 'idea.log'} and check that {TYPESHED_STDLIB} exists."
         )
 
 
