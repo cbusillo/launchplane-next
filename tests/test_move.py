@@ -1,18 +1,11 @@
+import json
 from pathlib import PurePosixPath
 
 import pytest
 
 from launchplane.container_host import CommandResult, Service
 from launchplane.move import Mover, Outcome, lane_name
-from launchplane.name_switch import (
-    PROXY_NAME,
-    CheckFailed,
-    NameSwitch,
-    NameSwitchError,
-    config_from_answer,
-    config_pointing,
-    copies_by_name,
-)
+from launchplane.name_switch import LOADED_ROUTES_URL, PROXY_NAME, CheckFailed, NameSwitch, NameSwitchError, routes_file
 from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
 BUILD_A = LaneCopy(product="site", lane="testing", build="site:a")
@@ -149,10 +142,22 @@ def test_copies_in_other_lanes_are_never_touched() -> None:
     assert production.name in host.copies
 
 
+def loaded_from(routes_file_text: str) -> str:
+    http = json.loads(routes_file_text)["http"]
+    routers = {f"{key}@file": router for key, router in http["routers"].items()}
+    services = {f"{key}@file": service for key, service in http["services"].items()}
+    return json.dumps({"routers": routers | INTERNAL_ROUTERS, "services": services | INTERNAL_SERVICES})
+
+
+INTERNAL_ROUTERS = {"api@internal": {"rule": "PathPrefix(`/api`)", "service": "api@internal"}}
+INTERNAL_SERVICES = {"api@internal": {"status": "enabled"}}
+
+
 class ProxyHost:
-    def __init__(self, config: str, answers: list[bool] | None = None) -> None:
-        self.config = config
+    def __init__(self, serving: dict[str, str], answers: list[bool] | None = None, loads: bool = True) -> None:
+        self.loaded = loaded_from(routes_file(serving))
         self.answers = iter(answers or [])
+        self.loads = loads
         self.placed: dict[PurePosixPath, str] = {}
 
     def ensure_service(self, service: Service) -> None:
@@ -163,47 +168,58 @@ class ProxyHost:
 
     def run_in(self, name: str, command: list[str]) -> CommandResult:
         assert name == PROXY_NAME
-        if command[:2] == ["caddy", "reload"]:
-            self.config = self.placed[PurePosixPath(command[-1])]
+        if command[0] == "mv":
+            if self.loads:
+                self.loaded = loaded_from(self.placed[PurePosixPath(command[1])])
             return CommandResult(exit_code=0, output="")
-        if "/dev/null" in command:
-            answered = next(self.answers)
-            return CommandResult(exit_code=0 if answered else 1, output="" if answered else "Connection refused")
-        return CommandResult(exit_code=0, output=self.config)
+        if command[-1] == LOADED_ROUTES_URL:
+            return CommandResult(exit_code=0, output=self.loaded)
+        answered = next(self.answers)
+        return CommandResult(exit_code=0 if answered else 1, output="" if answered else "Connection refused")
 
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None:
         self.placed[path] = content
 
+    def read_log_tail(self, name: str) -> str:
+        return "error while building configuration"
+
+
+def ticking_switch(host: ProxyHost, **seconds: float) -> NameSwitch:
+    clock = iter(range(1000))
+    return NameSwitch(host, sleep=lambda _: None, clock=lambda: next(clock), **seconds)
+
 
 def test_pointing_one_name_keeps_every_other_name_where_it_was() -> None:
-    host = ProxyHost(config_pointing({"production.site.test": "site-p1"}).model_dump_json(by_alias=True))
-    NameSwitch(host).point(NAME, "site-t2")
-    assert copies_by_name(config_from_answer(host.config)) == {"production.site.test": "site-p1", NAME: "site-t2"}
+    host = ProxyHost({"production.site.test": "site-p1"})
+    ticking_switch(host).point(NAME, "site-t2")
+    assert NameSwitch(host).read_serving() == {"production.site.test": "site-p1", NAME: "site-t2"}
 
 
-def test_a_proxy_with_no_configuration_serves_no_name() -> None:
-    assert NameSwitch(ProxyHost("null")).read_serving() == {}
+def test_a_proxy_with_no_routes_serves_no_name() -> None:
+    assert NameSwitch(ProxyHost({})).read_serving() == {}
 
 
-def test_a_configuration_launchplane_did_not_write_is_an_error_not_overwritten() -> None:
-    foreign = '{"apps":{"http":{"servers":{"lanes":{"listen":[":80"],"routes":[{"handle":[{"handler":"file_server"}]}]}}}}}'
-    host = ProxyHost(foreign)
-    with pytest.raises(NameSwitchError, match="not one Launchplane wrote"):
+def test_a_route_launchplane_did_not_write_is_an_error_not_overwritten() -> None:
+    host = ProxyHost({})
+    host.loaded = json.dumps({"routers": {"shop@file": {"rule": "PathPrefix(`/`)", "service": "shop"}}})
+    with pytest.raises(NameSwitchError, match="did not write"):
         NameSwitch(host).point(NAME, "site-t2")
     assert host.placed == {}
 
 
+def test_a_switch_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> None:
+    host = ProxyHost({NAME: "site-t1"}, loads=False)
+    with pytest.raises(NameSwitchError, match=r"still sends it to site-t1[\s\S]*error while building"):
+        ticking_switch(host, load_deadline_seconds=3).point(NAME, "site-t2")
+
+
 def test_a_copy_must_answer_steadily_so_one_answer_between_failures_does_not_pass() -> None:
-    host = ProxyHost("null", answers=[True, False, True, True, True])
-    clock = iter(range(100))
-    switch = NameSwitch(host, steady_seconds=2, check_deadline_seconds=100, sleep=lambda _: None, clock=lambda: next(clock))
-    switch.check_copy("site-t2")
+    host = ProxyHost({}, answers=[True, False, True, True, True])
+    ticking_switch(host, steady_seconds=2, check_deadline_seconds=100).check_copy("site-t2")
     assert next(host.answers, None) is None
 
 
 def test_a_copy_that_never_answers_fails_its_check_with_the_proxys_error() -> None:
-    host = ProxyHost("null", answers=[False] * 10)
-    clock = iter(range(100))
-    switch = NameSwitch(host, steady_seconds=2, check_deadline_seconds=3, sleep=lambda _: None, clock=lambda: next(clock))
+    host = ProxyHost({}, answers=[False] * 10)
     with pytest.raises(CheckFailed, match="Connection refused"):
-        switch.check_copy("site-t2")
+        ticking_switch(host, steady_seconds=2, check_deadline_seconds=3).check_copy("site-t2")
