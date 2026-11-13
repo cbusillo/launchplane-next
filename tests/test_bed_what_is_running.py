@@ -3,6 +3,7 @@ import os
 import shlex
 import socket
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Generator, Iterator
@@ -59,7 +60,7 @@ def clean_scratch() -> Iterator[None]:
 @contextmanager
 def control_cut_off_from_scratch() -> Generator[None]:
     control_address = socket.gethostbyname(CONTROL_HOST_NAME)
-    rule = f"INPUT --source {control_address} --protocol tcp --dport 22 --jump DROP"
+    rule = f"INPUT --source {control_address} --protocol tcp --dport 2376 --jump DROP"
     on_scratch(f"iptables --insert {rule}")
     try:
         yield
@@ -74,7 +75,7 @@ def test_the_running_call_follows_the_host_through_stop_start_and_a_second_lane(
     assert (testing["build"], testing["state"]) == (AWKWARD_BUILD, "running")
 
     on_scratch(f"docker stop --time 1 {PRODUCT}-testing")
-    assert copies_by_lane()["testing"]["state"] == "exited"
+    assert copies_by_lane()["testing"]["state"] == "stopped"
 
     on_scratch(f"docker start {PRODUCT}-testing")
     assert copies_by_lane()["testing"]["state"] == "running"
@@ -83,9 +84,12 @@ def test_the_running_call_follows_the_host_through_stop_start_and_a_second_lane(
     assert {lane: copy["state"] for lane, copy in copies_by_lane().items()} == {"testing": "running", "production": "running"}
 
 
-def test_an_unreachable_scratch_container_is_an_error_not_an_empty_answer() -> None:
+def test_an_unreachable_scratch_container_is_an_error_within_seconds_not_an_empty_answer() -> None:
     with control_cut_off_from_scratch():
+        started = time.monotonic()
         status, body = ask_what_is_running()
+        seconds = time.monotonic() - started
     assert status == 503, body
+    assert seconds < 8
     assert "copies" not in body
-    assert "Connection timed out" in body["error"]
+    assert "timed out" in body["error"]

@@ -28,25 +28,27 @@ You are building the new Launchplane in this repository. `README.md` is the spec
 16. Before a step ends, run `./scripts/inspect` and fix what it finds. If it cannot give an answer, say so in your report and carry on.
 17. The checker reads your work after each step and reports to Chris. You do not wait for it and it does not approve you. What it finds reaches you through Chris.
 18. With each step, report lines added and removed.
+19. Use a maintained library or client before writing your own. Do not write a protocol, a parser or a client that a maintained one already provides.
+20. When a tool or library needs a workaround, stop before writing it. First ask whether the choice that led here is wrong. If the choice was yours, make a better one. If it was Chris's, or you cannot find a better one, tell Chris what misbehaves.
 
 ## Issues and comments
 
-19. Each step has one issue in this repository: what is wanted, why, and how we will know it is done. It states what is true now. It is never a history.
-20. The issue's status lines are where the next session picks up: next actor, next action, last verified. Edit them in place.
-21. A comment is permanent and every later reader pays for it. Post one only for a question, a decision, or the result when a step closes.
-22. Nothing a program can look up goes on an issue: who is working, whether checks passed, what merged.
-23. A fact about how the system behaves goes in this repository's documentation. A fact about the work goes in the issue. Keep no plan or notes file.
+21. Each step has one issue in this repository: what is wanted, why, and how we will know it is done. It states what is true now. It is never a history.
+22. The issue's status lines are where the next session picks up: next actor, next action, last verified. Edit them in place.
+23. A comment is permanent and every later reader pays for it. Post one only for a question, a decision, or the result when a step closes.
+24. Nothing a program can look up goes on an issue: who is working, whether checks passed, what merged.
+25. A fact about how the system behaves goes in this repository's documentation. A fact about the work goes in the issue. Keep no plan or notes file.
 
 ## Style
 
 Ruff, the type checker and inspection enforce most of the style. These are the rules no tool can check.
 
-24. Write no docstrings, except ones a tool shows. Write no comment a name could carry: extract the step and name it for the reason.
-25. When a name cannot carry a constraint, write a test whose name states it.
-26. Keep history out of code. Issue numbers and "this used to" belong in the commit.
-27. One job per function. A function that needs a section comment is two functions.
-28. One implementation of one rule. Two callers that need different guarantees keep their own checks.
-29. Name a yes-or-no function as the question it answers. Use verbs for functions and nouns for values.
-30. An error message says what failed and what was being attempted, in words a person can act on.
-31. A test names the break it catches. No test restates the code.
-32. Fix the cause of a warning before silencing it. A silenced warning is narrow and for a confirmed false alarm only.
+26. Write no docstrings, except ones a tool shows. Write no comment a name could carry: extract the step and name it for the reason.
+27. When a name cannot carry a constraint, write a test whose name states it.
+28. Keep history out of code. Issue numbers and "this used to" belong in the commit.
+29. One job per function. A function that needs a section comment is two functions.
+30. One implementation of one rule. Two callers that need different guarantees keep their own checks.
+31. Name a yes-or-no function as the question it answers. Use verbs for functions and nouns for values.
+32. An error message says what failed and what was being attempted, in words a person can act on.
+33. A test names the break it catches. No test restates the code.
+34. Fix the cause of a warning before silencing it. A silenced warning is narrow and for a confirmed false alarm only.

@@ -1,48 +1,45 @@
-import json
 import os
 from collections.abc import Callable
-from dataclasses import asdict
 from datetime import UTC, datetime
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from launchplane.container_host import ContainerHostError, RunningCopy, read_copies
+import uvicorn
+from fastapi import FastAPI, Response
+from pydantic import BaseModel
+
+from launchplane.container_host import ContainerHost, ContainerHostError
+from launchplane.running_copy import RunningCopy
 
 type CopyReader = Callable[[], list[RunningCopy]]
 
 
-def answer_what_is_running(read: CopyReader, host_name: str) -> tuple[HTTPStatus, dict[str, object]]:
-    read_at = datetime.now(UTC).isoformat(timespec="seconds")
-    try:
-        copies = read()
-    except ContainerHostError as error:
-        return HTTPStatus.SERVICE_UNAVAILABLE, {"host": host_name, "read_at": read_at, "error": str(error)}
-    return HTTPStatus.OK, {"host": host_name, "read_at": read_at, "copies": [asdict(copy) for copy in copies]}
+class RunningAnswer(BaseModel):
+    read_at: datetime
+    copies: list[RunningCopy]
 
 
-def handler_for(read: CopyReader, host_name: str) -> type[BaseHTTPRequestHandler]:
-    class LaunchplaneHandler(BaseHTTPRequestHandler):
-        # noinspection PyPep8Naming
-        def do_GET(self) -> None:
-            if self.path == "/running":
-                self.send_json(*answer_what_is_running(read, host_name))
-            else:
-                self.send_json(HTTPStatus.NOT_FOUND, {"error": f"Nothing answers {self.path}. Ask GET /running."})
+class HostUnreadable(BaseModel):
+    read_at: datetime
+    error: str
 
-        def send_json(self, status: HTTPStatus, body: dict[str, object]) -> None:
-            payload = json.dumps(body, indent=2).encode() + b"\n"
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
 
-    return LaunchplaneHandler
+def create_app(read: CopyReader) -> FastAPI:
+    app = FastAPI(title="Launchplane")
+
+    @app.get("/running", responses={HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": HostUnreadable}})
+    def running(response: Response) -> RunningAnswer | HostUnreadable:
+        read_at = datetime.now(UTC)
+        try:
+            copies = read()
+        except ContainerHostError as error:
+            response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+            return HostUnreadable(read_at=read_at, error=str(error))
+        return RunningAnswer(read_at=read_at, copies=copies)
+
+    return app
 
 
 def serve() -> None:
-    ssh_host = os.environ["LAUNCHPLANE_DOCKER_SSH_HOST"]
     address = os.environ.get("LAUNCHPLANE_LISTEN_ADDRESS", "127.0.0.1")
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
-    handler = handler_for(lambda: read_copies(ssh_host), ssh_host)
-    ThreadingHTTPServer((address, port), handler).serve_forever()
+    uvicorn.run(create_app(ContainerHost.from_environment().read_copies), host=address, port=port)

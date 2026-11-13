@@ -1,98 +1,90 @@
-import json
-import subprocess
-import urllib.parse
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+import os
+from pathlib import Path
+from typing import Literal, cast
+
+import docker
+import requests
+from docker.errors import DockerException
+from docker.tls import TLSConfig
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+
+from launchplane.running_copy import CopyState, RunningCopy
 
 PRODUCT_LABEL = "launchplane.product"
 LANE_LABEL = "launchplane.lane"
 BUILD_LABEL = "launchplane.build"
 
-SSH_CONNECT_TIMEOUT_SECONDS = 5
-ANSWER_TIMEOUT_SECONDS = 20.0
+DOCKER_API_VERSION = "1.47"
+ANSWER_TIMEOUT_SECONDS = 5
 
+type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
 
-@dataclass(frozen=True)
-class RunningCopy:
-    product: str
-    lane: str
-    build: str
-    state: str
-    status: str
-    container: str
-    image: str
+COPY_STATE_FOR_DOCKER_STATE: dict[DockerState, CopyState] = {
+    "created": CopyState.STOPPED,
+    "running": CopyState.RUNNING,
+    "paused": CopyState.PAUSED,
+    "restarting": CopyState.RESTARTING,
+    "removing": CopyState.STOPPED,
+    "exited": CopyState.STOPPED,
+    "dead": CopyState.STOPPED,
+}
 
 
 class ContainerHostError(Exception):
     pass
 
 
-def docker_api_command(ssh: Sequence[str], ssh_host: str) -> list[str]:
-    return [
-        *ssh,
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
-        ssh_host,
-        "docker",
-        "system",
-        "dial-stdio",
-    ]
+class DockerContainerSummary(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    names: list[str] = Field(alias="Names", min_length=1)
+    state: DockerState = Field(alias="State")
+    labels: dict[str, str] = Field(alias="Labels")
 
 
-def listing_request() -> bytes:
-    filters = urllib.parse.quote(json.dumps({"label": [PRODUCT_LABEL]}))
-    return f"GET /containers/json?all=1&filters={filters} HTTP/1.0\r\nHost: docker\r\n\r\n".encode()
+DOCKER_CONTAINER_LIST = TypeAdapter(list[DockerContainerSummary])
 
 
-def ask_docker(ssh: Sequence[str], ssh_host: str, request: bytes, attempt: str) -> bytes:
-    try:
-        result = subprocess.run(  # noqa: S603
-            docker_api_command(ssh, ssh_host),
-            input=request,
-            capture_output=True,
-            timeout=ANSWER_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise ContainerHostError(f"{attempt} got no answer within {ANSWER_TIMEOUT_SECONDS:g} seconds.") from error
-    except OSError as error:
-        raise ContainerHostError(f"{attempt} could not start ssh: {error}") from error
-    if result.returncode != 0:
-        reason = result.stderr.decode(errors="replace").strip() or "no message"
-        raise ContainerHostError(f"{attempt} failed (exit {result.returncode}): {reason}")
-    return result.stdout
-
-
-def response_body(response: bytes, attempt: str) -> bytes:
-    head, _, body = response.partition(b"\r\n\r\n")
-    status_line = head.split(b"\r\n", 1)[0].decode(errors="replace")
-    if status_line.split(" ")[1:2] != ["200"]:
-        raise ContainerHostError(f"{attempt}: Docker answered {status_line!r}: {body.decode(errors='replace').strip()}")
-    return body
-
-
-def copy_from(container: dict[str, Any]) -> RunningCopy:
-    labels: dict[str, str] = container["Labels"]
+def copy_from(summary: DockerContainerSummary) -> RunningCopy:
+    if PRODUCT_LABEL not in summary.labels:
+        raise ContainerHostError(f"Docker listed {summary.names[0]} for the {PRODUCT_LABEL} filter, but it has no such label.")
     return RunningCopy(
-        product=labels[PRODUCT_LABEL],
-        lane=labels.get(LANE_LABEL, ""),
-        build=labels.get(BUILD_LABEL, ""),
-        state=container["State"],
-        status=container["Status"],
-        container=container["Names"][0].removeprefix("/"),
-        image=container["Image"],
+        product=summary.labels[PRODUCT_LABEL],
+        lane=summary.labels.get(LANE_LABEL),
+        build=summary.labels.get(BUILD_LABEL),
+        name=summary.names[0].removeprefix("/"),
+        state=COPY_STATE_FOR_DOCKER_STATE[summary.state],
     )
 
 
-def read_copies(ssh_host: str, ssh: Sequence[str] = ("ssh",)) -> list[RunningCopy]:
-    attempt = f"Listing the containers marked {PRODUCT_LABEL} on {ssh_host}"
-    body = response_body(ask_docker(ssh, ssh_host, listing_request(), attempt), attempt)
+def copies_from_answer(answer: object) -> list[RunningCopy]:
     try:
-        containers: list[dict[str, Any]] = json.loads(body)
-        return [copy_from(container) for container in containers]
-    except (ValueError, TypeError, KeyError, IndexError) as error:
-        raise ContainerHostError(f"{attempt}: Docker's answer was not the container list asked for: {error!r}") from error
+        summaries = DOCKER_CONTAINER_LIST.validate_python(answer)
+    except ValidationError as error:
+        raise ContainerHostError(f"Docker's container list did not have the expected shape, so nothing was read: {error}") from error
+    return [copy_from(summary) for summary in summaries]
+
+
+class ContainerHost:
+    def __init__(self, client: docker.DockerClient, address: str) -> None:
+        self.client = client
+        self.address = address
+
+    @classmethod
+    def from_environment(cls) -> ContainerHost:
+        address = os.environ["LAUNCHPLANE_CONTAINER_HOST"]
+        credentials = Path(os.environ["LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS"])
+        tls = TLSConfig(
+            client_cert=(str(credentials / "cert.pem"), str(credentials / "key.pem")),
+            ca_cert=str(credentials / "ca.pem"),
+            verify=True,
+        )
+        client = docker.DockerClient(base_url=address, tls=tls, version=DOCKER_API_VERSION, timeout=ANSWER_TIMEOUT_SECONDS)
+        return cls(client, address)
+
+    def read_copies(self) -> list[RunningCopy]:
+        try:
+            answer = cast(object, self.client.api.containers(all=True, filters={"label": PRODUCT_LABEL}))  # pyright: ignore[reportUnknownMemberType]
+        except (DockerException, requests.RequestException, ValueError) as error:
+            raise ContainerHostError(f"Listing the containers marked {PRODUCT_LABEL} on {self.address} failed: {error}") from error
+        return copies_from_answer(answer)

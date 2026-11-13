@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 User=launchplane
 WorkingDirectory=/var/lib/launchplane
-Environment=LAUNCHPLANE_DOCKER_SSH_HOST=docker-lp-scratch.shiny
+Environment=LAUNCHPLANE_CONTAINER_HOST=tcp://docker-lp-scratch.shiny:2376
+Environment=LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS=/var/lib/launchplane/tls
 Environment=LAUNCHPLANE_LISTEN_ADDRESS=0.0.0.0
 Environment=LAUNCHPLANE_LISTEN_PORT=8700
 ExecStart=/opt/launchplane/.venv/bin/launchplane
