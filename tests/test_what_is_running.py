@@ -25,10 +25,10 @@ def serve_running() -> Iterator[ServeRunning]:
     servers: list[ThreadingHTTPServer] = []
 
     def start(read: CopyReader) -> str:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(read, "scratch"))
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        servers.append(server)
-        return f"http://127.0.0.1:{server.server_port}/running"
+        started = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(read, "scratch"))
+        threading.Thread(target=started.serve_forever, daemon=True).start()
+        servers.append(started)
+        return f"http://127.0.0.1:{started.server_port}/running"
 
     yield start
     for server in servers:

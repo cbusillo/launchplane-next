@@ -22,6 +22,7 @@ def answer_what_is_running(read: CopyReader, host_name: str) -> tuple[HTTPStatus
 
 def handler_for(read: CopyReader, host_name: str) -> type[BaseHTTPRequestHandler]:
     class LaunchplaneHandler(BaseHTTPRequestHandler):
+        # noinspection PyPep8Naming
         def do_GET(self) -> None:
             if self.path == "/running":
                 self.send_json(*answer_what_is_running(read, host_name))

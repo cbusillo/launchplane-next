@@ -126,7 +126,7 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 
 11. How long a database copy and update take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
 12. Whether the file store is shared or copied in a move, and how the database and file store are kept consistent with each other.
-13. Whether Dokploy's start-first deploy can do the switch, or Launchplane must do it itself.
+13. Whether a container manager such as Dokploy is needed at all, or Docker and a reverse proxy directly are enough. Measure the first move both ways where that is cheap, and report what each needed.
 14. How much disk and memory several previews use at once, and what pausing one actually frees.
 
 **The builder proposes in the step that needs it**
@@ -140,6 +140,6 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 
 ## What exists today
 
-- The test bed is two containers. The control container runs a fresh Dokploy and will run Launchplane. The scratch container is a plain Docker host for the pretend products. Neither is connected to anything real.
+- The test bed is two containers. The control container will run Launchplane. The scratch container is a plain Docker host for the pretend products. A fresh Dokploy is installed on the control container and is not used. Neither container is connected to anything real.
 - The pretend website and pretend Odoo product do not exist yet. Creating their repositories needs Chris.
 - An earlier build of an Odoo system usually cannot run on a database a later build has updated. Going back after a switch will often find it cannot, and then the choice is Chris's.
