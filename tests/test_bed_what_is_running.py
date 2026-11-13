@@ -88,4 +88,4 @@ def test_an_unreachable_scratch_container_is_an_error_not_an_empty_answer() -> N
         status, body = ask_what_is_running()
     assert status == 503, body
     assert "copies" not in body
-    assert "docker-lp-scratch.shiny" in body["error"]
+    assert "Connection timed out" in body["error"]

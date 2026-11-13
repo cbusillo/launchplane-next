@@ -12,11 +12,12 @@ from launchplane.container_host import ContainerHostError, RunningCopy, read_cop
 
 type ServeRunning = Callable[[CopyReader], str]
 
-UNREACHABLE_DOCKER = ("sh", "-c", 'echo "ssh: connect to host scratch port 22: Connection timed out" >&2; exit 1', "docker")
+UNREACHABLE_SSH = ("sh", "-c", 'echo "ssh: connect to host scratch port 22: Connection timed out" >&2; exit 255', "ssh")
+DOCKER_REFUSING_SSH = ("sh", "-c", r'printf "HTTP/1.0 500 Internal Server Error\r\n\r\n{\"message\":\"disk full\"}"', "ssh")
 
 
 def unreachable_host() -> list[RunningCopy]:
-    return read_copies("ssh://scratch", docker=UNREACHABLE_DOCKER)
+    return read_copies("scratch", ssh=UNREACHABLE_SSH)
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def serve_running() -> Iterator[ServeRunning]:
     servers: list[ThreadingHTTPServer] = []
 
     def start(read: CopyReader) -> str:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(read, "ssh://scratch"))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(read, "scratch"))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         servers.append(server)
         return f"http://127.0.0.1:{server.server_port}/running"
@@ -38,6 +39,11 @@ def serve_running() -> Iterator[ServeRunning]:
 def test_an_unreachable_host_raises_with_the_real_error_instead_of_listing_nothing() -> None:
     with pytest.raises(ContainerHostError, match="Connection timed out"):
         unreachable_host()
+
+
+def test_a_docker_error_answer_raises_with_dockers_message_instead_of_listing_nothing() -> None:
+    with pytest.raises(ContainerHostError, match="disk full"):
+        read_copies("scratch", ssh=DOCKER_REFUSING_SSH)
 
 
 def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_cannot_be_read(serve_running: ServeRunning) -> None:

@@ -40,8 +40,8 @@ def handler_for(read: CopyReader, host_name: str) -> type[BaseHTTPRequestHandler
 
 
 def serve() -> None:
-    docker_host = os.environ["LAUNCHPLANE_DOCKER_HOST"]
+    ssh_host = os.environ["LAUNCHPLANE_DOCKER_SSH_HOST"]
     address = os.environ.get("LAUNCHPLANE_LISTEN_ADDRESS", "127.0.0.1")
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
-    handler = handler_for(lambda: read_copies(docker_host), docker_host)
+    handler = handler_for(lambda: read_copies(ssh_host), ssh_host)
     ThreadingHTTPServer((address, port), handler).serve_forever()
