@@ -1,0 +1,35 @@
+[project]
+name = "launchplane"
+version = "0.0.0"
+requires-python = ">=3.15"
+
+[dependency-groups]
+dev = ["ruff", "pyright", "pytest"]
+
+[tool.ruff]
+line-length = 133
+target-version = "py315"
+
+[tool.ruff.lint]
+select = [
+    "E", "F",
+    "ANN", "UP", "B", "I", "G", "BLE",
+    "FURB", "SIM", "C4", "PERF",
+    "ASYNC", "FAST",
+    "DTZ",
+    "S",
+    "PTH",
+    "T20", "ERA",
+    "C90",
+    "RUF",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.15"
