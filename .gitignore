@@ -1,0 +1,6 @@
+.venv/
+.idea/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+.inspection-canary/
