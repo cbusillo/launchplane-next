@@ -22,6 +22,7 @@ BUILD_B = "nginx:1.31.8-alpine"
 BUILD_C = "hashicorp/http-echo:1.0"
 ANSWER_A = "nginx/1.30.6"
 ANSWER_B = "nginx/1.31.8"
+PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
 
 
 @dataclass
@@ -48,6 +49,7 @@ class RequestLoop:
     def run(self) -> None:
         while self.running:
             self.request_once()
+            time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
 
     def answers_in_order(self) -> list[str]:
         return [answer for index, answer in enumerate(self.answers) if index == 0 or self.answers[index - 1] != answer]

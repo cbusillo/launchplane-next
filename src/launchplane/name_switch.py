@@ -114,6 +114,7 @@ def loaded_routes_from_answer(answer: str) -> LoadedRoutes:
         ) from error
 
 
+# noinspection HttpUrlsUsage
 def copy_url(copy_name: str) -> str:
     return f"http://{copy_name}:{COPY_PORT}"
 

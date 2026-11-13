@@ -37,7 +37,7 @@ class FakeHost:
         self.actions.append(f"retire {name}")
 
     def read_log_tail(self, name: str) -> str:
-        return "listening on :5678"
+        return f"{self.copies[name].build} listening on :5678"
 
 
 class FakeSwitch:
@@ -159,12 +159,13 @@ class ProxyHost:
         self.answers = iter(answers or [])
         self.loads = loads
         self.placed: dict[PurePosixPath, str] = {}
+        self.log = "error while building configuration"
 
     def ensure_service(self, service: Service) -> None:
         pass
 
     def is_running(self, name: str) -> bool:
-        return True
+        return name == PROXY_NAME and self.loaded != ""
 
     def run_in(self, name: str, command: list[str]) -> CommandResult:
         assert name == PROXY_NAME
@@ -178,10 +179,11 @@ class ProxyHost:
         return CommandResult(exit_code=0 if answered else 1, output="" if answered else "Connection refused")
 
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None:
+        assert name == PROXY_NAME
         self.placed[path] = content
 
     def read_log_tail(self, name: str) -> str:
-        return "error while building configuration"
+        return f"{name}: {self.log}"
 
 
 def ticking_switch(host: ProxyHost, **seconds: float) -> NameSwitch:

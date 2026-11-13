@@ -203,9 +203,10 @@ class ContainerHost:
     def run_in(self, name: str, command: list[str]) -> CommandResult:
         with self.attempting(f"Running {command[0]} in {name}"):
             result = self.client.containers.get(name).exec_run(command)
-        if result.exit_code is None or not isinstance(result.output, bytes):
+        exit_code, output = result.exit_code, result.output
+        if exit_code is None or not isinstance(output, bytes):
             raise ContainerHostError(f"Running {command[0]} in {name} on {self.address} returned before the command finished.")
-        return CommandResult(exit_code=result.exit_code, output=result.output.decode(errors="replace").strip())
+        return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())
 
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None:
         with self.attempting(f"Placing {path} in {name}"):
