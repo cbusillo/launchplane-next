@@ -13,6 +13,7 @@ LANE_DOMAIN = "test"
 class Outcome(StrEnum):
     SWITCHED = "switched"
     UNCHANGED = "unchanged"
+    CLEANED_UP = "cleaned up"
     CHECK_FAILED = "check failed"
 
 
@@ -60,9 +61,11 @@ class Mover:
     def lane_copies(self, product: str, lane: str) -> dict[str, RunningCopy]:
         return {copy.name: copy for copy in self.host.read_copies() if (copy.product, copy.lane) == (product, lane)}
 
-    def remove_all_but(self, copies: dict[str, RunningCopy], keep: set[str | None]) -> None:
-        for name in copies.keys() - keep:
+    def remove_all_but(self, copies: dict[str, RunningCopy], keep: set[str | None]) -> bool:
+        leftovers = copies.keys() - keep
+        for name in leftovers:
             self.host.remove_copy(name)
+        return bool(leftovers)
 
     def start_fresh_unless_running(self, target: LaneCopy, existing: RunningCopy | None) -> None:
         if existing is not None and existing.state == CopyState.RUNNING:
@@ -84,7 +87,8 @@ class Mover:
         )
 
         if serving == target.name and target.name in copies:
-            self.remove_all_but(copies, keep={serving})
+            if self.remove_all_but(copies, keep={serving}):
+                return result.model_copy(update={"outcome": Outcome.CLEANED_UP})
             return result
 
         self.remove_all_but(copies, keep={serving, target.name})

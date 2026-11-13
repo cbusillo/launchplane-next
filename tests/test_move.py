@@ -122,7 +122,7 @@ def test_a_copy_left_by_an_abandoned_move_is_removed_by_a_move_elsewhere() -> No
     host, switch = lane_serving(BUILD_A)
     host.place(BUILD_B)
     result = Mover(host, switch).move(BUILD_A)
-    assert result.outcome == Outcome.UNCHANGED
+    assert result.outcome == Outcome.CLEANED_UP
     assert set(host.copies) == {BUILD_A.name}
 
 

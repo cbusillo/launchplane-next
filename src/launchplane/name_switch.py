@@ -102,6 +102,10 @@ def config_pointing(copies: dict[str, str]) -> ProxyConfig:
     return ProxyConfig(apps=Apps(http=Http(servers={SERVER_NAME: Server(listen=[f":{COPY_PORT}"], routes=routes)})))
 
 
+def copy_url(copy_name: str) -> str:
+    return f"http://{copy_name}:{COPY_PORT}/"
+
+
 def config_from_answer(answer: str) -> ProxyConfig | None:
     try:
         return PROXY_CONFIG.validate_json(answer)
@@ -146,7 +150,7 @@ class NameSwitch:
             raise NameSwitchError(f"The proxy refused to point {name} at {copy_name}: {result.output}")
 
     def request_copy(self, copy_name: str) -> CommandResult:
-        url = f"http://{copy_name}:{COPY_PORT}/"
+        url = copy_url(copy_name)
         return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), url])
 
     def check_copy(self, copy_name: str) -> None:
@@ -159,7 +163,7 @@ class NameSwitch:
                 answering_since = None
                 if now - started >= self.check_deadline_seconds:
                     raise CheckFailed(
-                        f"{copy_name} did not answer {COPY_PORT}/ from the proxy within {self.check_deadline_seconds:g} s: "
+                        f"{copy_url(copy_name)} did not answer the proxy with success within {self.check_deadline_seconds:g} s: "
                         f"{result.output}"
                     )
             elif answering_since is None:
