@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+control_shell="${LAUNCHPLANE_CONTROL_SHELL:-lp-control}"
+cd "$(dirname "$0")/.."
+git archive --format=tar HEAD | $control_shell '
+set -eu
+mkdir -p /opt/launchplane
+find /opt/launchplane -mindepth 1 -maxdepth 1 ! -name .venv -exec rm -rf {} +
+tar -x -C /opt/launchplane
+cd /opt/launchplane
+UV_PYTHON_INSTALL_DIR=/opt/uv-python uv sync --locked --no-dev --no-editable --python 3.15 --quiet
+install -m 644 deploy/launchplane.service /etc/systemd/system/launchplane.service
+systemctl daemon-reload
+systemctl enable --quiet launchplane
+systemctl restart launchplane
+sleep 1
+systemctl is-active launchplane
+'
