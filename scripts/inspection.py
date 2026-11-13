@@ -10,6 +10,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from xml.etree import ElementTree
 from xml.sax.saxutils import quoteattr
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -20,12 +21,12 @@ INSPECTED_FOLDERS = ("src", "tests", "scripts")
 ANALYZED_LINE_PREFIX = "Analyzing code in …/"
 RESULTS_INDEX = ".descriptions.json"
 TYPESHED_STDLIB = INSPECTOR.parents[1] / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
-SDK_NAME = f"launchplane inspection of {REPOSITORY}"
+DEFAULT_INTERPRETER_NAME = "launchplane inspection"
+PROJECT_SETTINGS = REPOSITORY / ".idea" / "misc.xml"
 INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
 CANARY_FOLDER = REPOSITORY / ".inspection-canary"
 CANARY_SOURCE = "from pathlib import Path\n\n\ndef canary() -> None:\n    Path().no_such_method()\n"
-CANARY_INSPECTION = "PyUnresolvedReferencesInspection"
 
 
 class InspectionUnknownError(Exception):
@@ -41,6 +42,14 @@ class Finding:
 
     def __str__(self) -> str:
         return f"{self.file}:{self.line}: {self.description} [{self.inspection}]"
+
+
+CANARY_FINDING = Finding(
+    file=f"{CANARY_FOLDER.name}/canary.py",
+    line=5,
+    inspection="PyUnresolvedReferencesInspection",
+    description="Unresolved attribute reference 'no_such_method' for class 'Path'",
+)
 
 
 def read_findings(output: Path) -> list[Finding]:
@@ -72,10 +81,28 @@ def unanalyzed_files(folder: Path, inspector_log: str) -> list[str]:
     return [source for source in expected if source not in analyzed]
 
 
+def require_inspector_installed() -> None:
+    for required in (INSPECTOR, TYPESHED_STDLIB):
+        if not required.exists():
+            raise InspectionUnknownError(f"PyCharm 2026.3 is not installed where this script expects it: {required} is missing.")
+
+
+def require_inspector_home_reachable() -> None:
+    if not INSPECTOR_HOME.parent.is_dir():
+        raise InspectionUnknownError(
+            f"The folder that holds PyCharm's inspection home, {INSPECTOR_HOME.parent}, does not exist. "
+            "Mount the Developer-Artifacts volume, then run ./scripts/inspect again."
+        )
+
+
 @contextmanager
 def exclusive_inspector_home() -> Generator[None]:
-    INSPECTOR_HOME.mkdir(parents=True, exist_ok=True)
-    with (INSPECTOR_HOME / "inspection.lock").open("w") as lock:
+    try:
+        INSPECTOR_HOME.mkdir(exist_ok=True)
+        lock = (INSPECTOR_HOME / "inspection.lock").open("w")
+    except OSError as error:
+        raise InspectionUnknownError(f"Could not open PyCharm's inspection home {INSPECTOR_HOME}: {error}") from error
+    with lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -87,12 +114,14 @@ def exclusive_inspector_home() -> Generator[None]:
 
 def prepare_inspection() -> Path:
     forget_earlier_inspections()
-    trust_repository()
-    register_interpreter()
-    point_project_at_interpreter()
-    CANARY_FOLDER.mkdir(exist_ok=True)
-    (CANARY_FOLDER / "canary.py").write_text(CANARY_SOURCE)
-    return write_inspector_properties()
+    try:
+        trust_repository()
+        register_interpreter(project_interpreter_name())
+        CANARY_FOLDER.mkdir(exist_ok=True)
+        (CANARY_FOLDER / "canary.py").write_text(CANARY_SOURCE)
+        return write_inspector_properties()
+    except (OSError, ElementTree.ParseError) as error:
+        raise InspectionUnknownError(f"Could not prepare PyCharm to inspect this repository: {error}") from error
 
 
 def write_inspector_properties() -> Path:
@@ -102,7 +131,15 @@ def write_inspector_properties() -> Path:
 
 
 def forget_earlier_inspections() -> None:
-    shutil.rmtree(INSPECTOR_CACHES, ignore_errors=True)
+    try:
+        shutil.rmtree(INSPECTOR_CACHES)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise InspectionUnknownError(
+            f"Could not clear PyCharm's caches in {INSPECTOR_CACHES}, so this run could reuse a broken project state: {error}. "
+            "Remove that folder by hand, then run ./scripts/inspect again."
+        ) from error
 
 
 def trust_repository() -> None:
@@ -113,7 +150,7 @@ def trust_repository() -> None:
     )
 
 
-def register_interpreter() -> None:
+def register_interpreter(name: str) -> None:
     library_roots = (
         Path(sysconfig.get_path("stdlib")),
         Path(sysconfig.get_path("stdlib")) / "lib-dynload",
@@ -123,19 +160,31 @@ def register_interpreter() -> None:
     roots = "".join(f'<root url={quoteattr(root.as_uri())} type="simple" />' for root in library_roots)
     INSPECTOR_OPTIONS.mkdir(parents=True, exist_ok=True)
     (INSPECTOR_OPTIONS / "jdk.table.xml").write_text(
-        f'<application><component name="ProjectJdkTable"><jdk version="2"><name value={quoteattr(SDK_NAME)} />'
+        f'<application><component name="ProjectJdkTable"><jdk version="2"><name value={quoteattr(name)} />'
         f'<type value="Python SDK" /><homePath value={quoteattr(sys.executable)} />'
         f'<roots><classPath><root type="composite">{roots}</root></classPath>'
         '<sourcePath><root type="composite" /></sourcePath></roots></jdk></component></application>\n'
     )
 
 
-def point_project_at_interpreter() -> None:
-    (REPOSITORY / ".idea").mkdir(exist_ok=True)
-    (REPOSITORY / ".idea" / "misc.xml").write_text(
-        f'<project version="4"><component name="ProjectRootManager" version="2" project-jdk-name={quoteattr(SDK_NAME)}'
-        ' project-jdk-type="Python SDK" /></project>\n'
-    )
+def project_interpreter_name() -> str:
+    settings = read_project_settings()
+    root_manager = settings.find("component[@name='ProjectRootManager']")
+    if root_manager is None:
+        root_manager = ElementTree.SubElement(settings, "component", name="ProjectRootManager", version="2")
+    if (name := root_manager.get("project-jdk-name")) is not None:
+        return name
+    root_manager.set("project-jdk-name", DEFAULT_INTERPRETER_NAME)
+    root_manager.set("project-jdk-type", "Python SDK")
+    PROJECT_SETTINGS.parent.mkdir(exist_ok=True)
+    ElementTree.ElementTree(settings).write(PROJECT_SETTINGS, encoding="UTF-8", xml_declaration=True)
+    return DEFAULT_INTERPRETER_NAME
+
+
+def read_project_settings() -> ElementTree.Element:
+    if not PROJECT_SETTINGS.exists():
+        return ElementTree.Element("project", version="4")
+    return ElementTree.parse(PROJECT_SETTINGS).getroot()  # noqa: S314 PyCharm's own settings file in this checkout
 
 
 def run_inspector(folder: Path, properties: Path) -> list[Finding]:
@@ -159,15 +208,17 @@ def run_inspector(folder: Path, properties: Path) -> list[Finding]:
 
 
 def require_canary_caught(canary_findings: list[Finding]) -> None:
-    if not any(finding.inspection == CANARY_INSPECTION for finding in canary_findings):
+    if CANARY_FINDING not in canary_findings:
         raise InspectionUnknownError(
-            f"PyCharm missed the known defect in {CANARY_FOLDER}/canary.py, so it is not resolving the standard library "
+            f"PyCharm did not report '{CANARY_FINDING}' in {CANARY_FOLDER}, so it is not resolving the standard library "
             f"and a clean answer would be false. Every run starts from fresh caches, so look for the cause in "
             f"{INSPECTOR_HOME / 'log' / 'idea.log'} and check that {TYPESHED_STDLIB} exists."
         )
 
 
 def inspect_repository() -> list[Finding]:
+    require_inspector_installed()
+    require_inspector_home_reachable()
     with exclusive_inspector_home():
         properties = prepare_inspection()
         require_canary_caught(run_inspector(CANARY_FOLDER, properties))
