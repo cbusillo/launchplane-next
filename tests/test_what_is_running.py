@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from launchplane.api import CopyReader, create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, copies_from_answer
-from launchplane.running_copy import CopyState, RunningCopy
+from launchplane.move import MoveResult
+from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
@@ -31,8 +32,16 @@ def refusing_host() -> ContainerHost:
     return ContainerHost(client, "tcp://127.0.0.1:1")
 
 
+def no_move(target: LaneCopy) -> MoveResult:
+    raise AssertionError(f"Reading what is running asked for a move to {target.build}")
+
+
+def app_reading(read: CopyReader, serving: dict[str, str] | None = None) -> TestClient:
+    return TestClient(create_app(read, lambda: serving or {}, no_move))
+
+
 def ask_running(read: CopyReader) -> tuple[int, dict[str, Any]]:
-    response = TestClient(create_app(read)).get("/running")
+    response = app_reading(read).get("/running")
     return response.status_code, response.json()
 
 
@@ -68,6 +77,17 @@ def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_
 
 def test_the_running_call_reads_the_host_on_every_request() -> None:
     answers = iter([[], copies_from_answer(saved_container_list())])
-    client = TestClient(create_app(lambda: next(answers)))
+    client = app_reading(lambda: next(answers))
     assert client.get("/running").json()["copies"] == []
     assert len(client.get("/running").json()["copies"]) == 4
+
+
+def test_the_running_call_names_the_copy_the_proxy_points_at_and_no_other() -> None:
+    copies = copies_from_answer(saved_container_list())
+    body = app_reading(lambda: copies, serving={"production.site.test": "site-production"}).get("/running").json()
+    assert {copy["name"]: copy["serves"] for copy in body["copies"]} == {
+        "site-production": "production.site.test",
+        "site-testing": None,
+        "site-preview-7": None,
+        "site-unmarked-lane": None,
+    }
