@@ -71,9 +71,16 @@ function copyItem(copy) {
   return item;
 }
 
-/** @param {LaneName} entry */
-function nameStatus(entry) {
+/**
+ * @param {LaneName} entry
+ * @param {Copy[]} allCopies
+ */
+function nameStatus(entry, allCopies) {
   if (entry.answers) return element("div", health(true), "Serving: ", code(entry.name), " answers.");
+  const target = allCopies.find((copy) => copy.name === entry.sends_to);
+  if (target?.state === "running") {
+    return element("div", health(false), "The copy behind ", code(entry.name), " is running, and does not answer with success: ", entry.error);
+  }
   return element("div", health(false), "Nothing is serving ", code(entry.name), ": ", entry.error);
 }
 
@@ -94,7 +101,7 @@ function routeElsewhere(copyName, allCopies) {
  */
 function laneSection(entry, laneCopies, allCopies) {
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A name with no copy on the host";
-  const section = element("section", {}, element("h2", {}, title), nameStatus(entry));
+  const section = element("section", {}, element("h2", {}, title), nameStatus(entry, allCopies));
   if (entry.sends_to && !laneCopies.some((copy) => copy.name === entry.sends_to)) {
     section.append(routeElsewhere(entry.sends_to, allCopies));
   }

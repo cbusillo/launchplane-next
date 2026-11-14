@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from launchplane.api import CopyReader, NameChecker, create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, copies_from_answer
-from launchplane.move import MoveResult
+from launchplane.move import MoveResult, RetireResult
 from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
@@ -37,6 +37,10 @@ def no_move(target: LaneCopy) -> MoveResult:
     raise AssertionError(f"Reading what is running asked for a move to {target.build}")
 
 
+def no_retire(product: str, lane: str) -> RetireResult:
+    raise AssertionError(f"Reading what is running asked to retire {lane} of {product}")
+
+
 def every_name_answers(_name: str) -> str | None:
     return None
 
@@ -44,7 +48,7 @@ def every_name_answers(_name: str) -> str | None:
 def app_reading(
     read: CopyReader, serving: dict[str, str] | None = None, why_name_fails: NameChecker = every_name_answers
 ) -> TestClient:
-    return TestClient(create_app(read, lambda: serving or {}, why_name_fails, no_move))
+    return TestClient(create_app(read, lambda: serving or {}, why_name_fails, no_move, no_retire))
 
 
 def ask_running(read: CopyReader) -> tuple[int, dict[str, Any]]:

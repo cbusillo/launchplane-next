@@ -27,6 +27,20 @@ class MoveResult(BaseModel):
     error: str | None = None
 
 
+class RetireOutcome(StrEnum):
+    RETIRED = "retired"
+    UNCHANGED = "unchanged"
+
+
+class RetireResult(BaseModel):
+    product: str
+    lane: str
+    name: str
+    outcome: RetireOutcome
+    route_removed_to: str | None
+    retired_copies: list[str]
+
+
 class CopyHost(Protocol):
     def read_copies(self) -> list[RunningCopy]: ...
     def start_copy(self, copy: LaneCopy, name: str) -> None: ...
@@ -40,6 +54,7 @@ class Switch(Protocol):
     def read_serving(self) -> dict[str, str]: ...
     def check_copy(self, copy_name: str) -> None: ...
     def point(self, name: str, copy_name: str) -> None: ...
+    def unpoint(self, name: str) -> None: ...
 
 
 def lane_name(product: str, lane: str) -> str:
@@ -113,3 +128,26 @@ class Mover:
         if serving_copy is not None:
             self.host.retire_copy(serving_copy.name)
         return result.model_copy(update={"outcome": Outcome.SWITCHED, "serving": candidate})
+
+    def retire(self, product: str, lane: str) -> RetireResult:
+        with self.one_at_a_time:
+            return self.retire_now(product, lane)
+
+    def retire_now(self, product: str, lane: str) -> RetireResult:
+        name = lane_name(product, lane)
+        self.switch.ensure_ready_for(name)
+        route_removed_to = self.switch.read_serving().get(name)
+        if route_removed_to is not None:
+            self.switch.unpoint(name)
+        copies = sorted(self.lane_copies(product, lane))
+        for copy_name in copies:
+            self.host.retire_copy(copy_name)
+        changed = route_removed_to is not None or bool(copies)
+        return RetireResult(
+            product=product,
+            lane=lane,
+            name=name,
+            outcome=RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
+            route_removed_to=route_removed_to,
+            retired_copies=copies,
+        )
