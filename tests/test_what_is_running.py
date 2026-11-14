@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from launchplane.api import CopyReader, NameChecker, create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, copies_from_answer
-from launchplane.move import MoveResult, RetireResult
+from launchplane.decide import MoveResult, RetireResult
 from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"

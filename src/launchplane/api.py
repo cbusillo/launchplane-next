@@ -11,9 +11,10 @@ from fastapi import FastAPI, Path, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from launchplane.act import Lanes
 from launchplane.container_host import ContainerHost, ContainerHostError
-from launchplane.move import Mover, MoveResult, Outcome, RetireResult, lane_name
-from launchplane.name_switch import NameSwitch, NameSwitchError
+from launchplane.decide import MoveResult, Outcome, RetireResult, lane_name
+from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.running_copy import LaneCopy, RunningCopy
 
 type CopyReader = Callable[[], list[RunningCopy]]
@@ -23,7 +24,7 @@ type MoveRequester = Callable[[LaneCopy], MoveResult]
 type RetireRequester = Callable[[str, str], RetireResult]
 
 SLUG = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
-UNREADABLE = (ContainerHostError, NameSwitchError)
+UNREADABLE = (ContainerHostError, ProxyError)
 
 
 class CopyAnswer(RunningCopy):
@@ -158,7 +159,7 @@ def serve() -> None:
     address = os.environ.get("LAUNCHPLANE_LISTEN_ADDRESS", "127.0.0.1")
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
-    switch = NameSwitch(host)
-    mover = Mover(host, switch)
-    app = create_app(host.read_copies, switch.read_serving, switch.why_name_fails, mover.move, mover.retire)
+    proxy = TraefikProxy(host)
+    lanes = Lanes(host, proxy)
+    app = create_app(host.read_copies, proxy.read_serving, proxy.why_name_fails, lanes.move, lanes.retire)
     uvicorn.run(app, host=address, port=port)
