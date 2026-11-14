@@ -2,7 +2,7 @@
 
 `POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The lane answers at the name `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
-For now a build is a container image reference, and the copy must answer HTTP on port 80. Each copy Launchplane starts gets a new container name: `{product}-{lane}-` followed by 12 random hex digits. The prefix is for people reading `docker ps`. Which product, lane and build a copy is comes from its labels, never from its name, so product `a-b` lane `c` and product `a` lane `b-c` stay apart. A name is never used twice, because a route names its copy: a replacement that took the name of a stopped serving copy would receive the name's traffic the moment it started, before its check.
+For now a build is a container image reference, and the copy must answer HTTP on port 80. Each copy Launchplane starts gets a new container name: `{product}-{lane}-` followed by 12 random hex digits. The prefix is for people reading `docker ps`. Which product, lane and build a copy is comes from its labels, never from its name, so product `a-b` lane `c` and product `a` lane `b-c` stay apart. The name is random because a route names its copy: a replacement that took the name of a stopped serving copy would receive the name's traffic the moment it started, before its check.
 
 ## What it does
 
@@ -53,9 +53,9 @@ Killed between starting the new copy and switching, then asked again, measured o
 ## Known and not fixed
 
 - **A slow reader can lose the end of a large download when the old copy stops.** Measured: a 24 MiB download read at 1.8 MB/s across a move lost its last 2.4 to 2.9 MB in 4 of 4 runs. nginx counts the request done once the bytes are in its kernel send queue, exits, and Docker tears down the copy's network before the queue drains. Not fixed: it needs a large response, a throttled reader and a move at that moment. Comes back if a real product kind shows it.
-- **A move can erase another lane's switch that was written but not yet loaded.** A switch writes other names as the proxy has loaded them, so a route written just before a crash is overwritten. Not fixed: it needs a crash in that window, and asking for that lane again repairs it. Comes back at the first step with two real lanes; one routes file per lane would remove it.
+- **A move can erase another lane's switch that was written but not yet loaded.** A switch writes other names as the proxy has loaded them. A route written just before a crash, or one the proxy has not loaded when that lane's move gave up at its timeout, is overwritten by the next move of any other lane, with no crash needed in the second case. Not fixed: the name stays on the copy the proxy was already sending it to, and asking for that lane again repairs it. Comes back at the first step with two real lanes; one routes file per lane would remove it.
 - **Asking for the old build while its copy is still stopping answers `check failed` for a good build and removes that copy by force.** Confirmed once on the test bed, after a kill during retirement. Not fixed: asking again works, and the name never moves.
-- **Copy names are 48 random bits and are not checked against names a route already points at.**
+- **Copy names are 48 random bits and are not checked against names a route already points at.** A clash with a container that exists makes Docker refuse the start, and the move answers `503`. A clash with a route to a copy that no longer exists would send that name's traffic to the new copy before its check. Not fixed: a lane starts a handful of copies, so the chance is far below anything else here. Comes back if names get shorter or copies are started at a rate where a clash becomes plausible.
 - **Untried:** HTTPS, long-lived connections, two Launchplane processes at once.
 
 ## The proxy

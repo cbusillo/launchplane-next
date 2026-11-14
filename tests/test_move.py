@@ -88,9 +88,10 @@ def lane_serving(copy: LaneCopy, name: str) -> tuple[FakeHost, FakeSwitch]:
 
 def test_the_old_copy_is_retired_only_after_the_name_points_at_the_new_one() -> None:
     host, switch = lane_serving(BUILD_A, COPY_A)
-    Mover(host, switch).move(BUILD_B)
+    result = Mover(host, switch).move(BUILD_B)
     new = host.copy_of(BUILD_B.build)
     assert host.actions == ["start site:b", f"check {new}", f"point {new}", f"retire {COPY_A}"]
+    assert (result.outcome, result.serving) == (Outcome.SWITCHED, new)
 
 
 def test_a_failed_check_switches_nothing_removes_the_copy_and_reports_its_error_and_log() -> None:
@@ -114,15 +115,18 @@ def test_asking_again_for_the_build_already_serving_changes_nothing() -> None:
 def test_a_copy_left_running_before_the_switch_is_checked_and_switched_to_without_starting_another() -> None:
     host, switch = lane_serving(BUILD_A, COPY_A)
     host.place(BUILD_B, COPY_B)
-    Mover(host, switch).move(BUILD_B)
+    result = Mover(host, switch).move(BUILD_B)
     assert host.actions == [f"check {COPY_B}", f"point {COPY_B}", f"retire {COPY_A}"]
+    assert result.serving == COPY_B
 
 
 def test_a_copy_left_stopped_before_the_switch_is_replaced_by_a_fresh_one() -> None:
     host, switch = lane_serving(BUILD_A, COPY_A)
     host.place(BUILD_B, COPY_B, CopyState.STOPPED)
-    Mover(host, switch).move(BUILD_B)
-    assert host.actions[:2] == [f"retire {COPY_B}", "start site:b"]
+    result = Mover(host, switch).move(BUILD_B)
+    new = host.copy_of(BUILD_B.build)
+    assert host.actions == [f"retire {COPY_B}", "start site:b", f"check {new}", f"point {new}", f"retire {COPY_A}"]
+    assert result.serving == new
 
 
 def test_a_copy_left_by_an_abandoned_move_is_removed_by_a_move_elsewhere() -> None:
@@ -144,8 +148,12 @@ def test_a_replacement_for_a_stopped_serving_copy_gets_no_request_before_it_pass
     host = FakeHost()
     mover = Mover(host, FakeSwitch(host))
     mover.move(BUILD_B)
-    host.place(BUILD_B, host.copy_of(BUILD_B.build), CopyState.STOPPED)
-    assert mover.move(BUILD_B).outcome == Outcome.SWITCHED
+    stopped = host.copy_of(BUILD_B.build)
+    host.place(BUILD_B, stopped, CopyState.STOPPED)
+    host.actions.clear()
+    result = mover.move(BUILD_B)
+    new = result.serving
+    assert host.actions == ["start site:b", f"check {new}", f"point {new}", f"retire {stopped}"]
 
 
 def test_two_lanes_whose_product_and_lane_join_to_the_same_text_never_share_a_copy() -> None:
