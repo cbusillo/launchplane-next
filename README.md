@@ -124,22 +124,23 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 9. What "fresh" production data means before an acceptance request: a new copy each time, a maximum age, or a recheck. Blocks the testing refresh.
 10. What happens to a Client's test session and to previews when testing is rebuilt. Blocks the testing refresh.
 11. How a real host is attached, and how its certificates are issued and renewed without stopping what runs on it. Restarting Docker stops its containers unless Docker is set to keep them running.
+12. How a product that cannot run two copies at once is moved. Discord Blue holds one Discord connection and one shared state volume. Its new copy may start, but must not connect or write state until the old one has stopped, and then catches up what arrived in the gap. That gap is normal and does not turn the status page red. Going back puts back the earlier image. Blocks the move for Discord Blue, or any product like it.
 
 **The builder measures, then Chris decides**
 
-12. How long a database copy and update take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
-13. Whether the file store is shared or copied in a move, and how the database and file store are kept consistent with each other.
-14. Whether a container manager such as Dokploy is needed at all, or Docker and a reverse proxy directly are enough. Measure the first move both ways where that is cheap, and report what each needed.
-15. How much disk and memory several previews use at once, and what pausing one actually frees.
+13. How long a database copy and update take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
+14. Whether the file store is shared or copied in a move, and how the database and file store are kept consistent with each other.
+15. Whether a container manager such as Dokploy is needed at all, or Docker and a reverse proxy directly are enough. Measure the first move both ways where that is cheap, and report what each needed.
+16. How much disk and memory several previews use at once, and what pausing one actually frees.
 
 **The builder proposes in the step that needs it**
 
-16. What a product description contains and where it lives.
-17. How the four commands are called, and where they live for a kind other than Odoo.
-18. How a running copy reports which product, lane and build it is.
-19. How a build proves which repository and commit it came from.
-20. What marks which copy is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
-21. How the status page shows a failed move separately from a lane's health, and what clears it.
+17. What a product description contains and where it lives.
+18. How the four commands are called, and where they live for a kind other than Odoo.
+19. How a running copy reports which product, lane and build it is.
+20. How a build proves which repository and commit it came from.
+21. What marks which copy is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
+22. How the status page shows a failed move separately from a lane's health, and what clears it.
 
 ## What exists today
 
