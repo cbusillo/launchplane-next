@@ -26,7 +26,7 @@ TARGET = LaneCopy(product="site", lane="testing", build="b")
 FRESH = "site-testing-new"
 
 
-def copy(name: str, build: str, state: CopyState = CopyState.RUNNING) -> RunningCopy:
+def lane_copy(name: str, build: str, state: CopyState = CopyState.RUNNING) -> RunningCopy:
     return RunningCopy(product="site", lane="testing", build=build, name=name, state=state)
 
 
@@ -60,11 +60,11 @@ class Case:
     serving: str | None
 
 
-OLD = copy("old", "a")
-SAME = copy("same", "b")
-WAITING = copy("waiting", "b")
-STOPPED_SAME = copy("same", "b", CopyState.STOPPED)
-STRAY = copy("stray", "c")
+OLD = lane_copy("old", "a")
+SAME = lane_copy("same", "b")
+WAITING = lane_copy("waiting", "b")
+STOPPED_SAME = lane_copy("same", "b", CopyState.STOPPED)
+STRAY = lane_copy("stray", "c")
 SWITCH_FROM_OLD = [f"start {FRESH}", f"check {FRESH}", f"route {FRESH}", f"await {FRESH}", "retire old"]
 
 MOVES = {
@@ -82,7 +82,7 @@ MOVES = {
         (OLD, WAITING), "old", "old", ["check waiting", "route waiting", "await waiting", "retire old"], Outcome.SWITCHED, "waiting"
     ),
     "a stopped copy left before the switch is retired and replaced": Case(
-        (OLD, copy("left", "b", CopyState.STOPPED)), "old", "old", ["retire left", *SWITCH_FROM_OLD], Outcome.SWITCHED, FRESH
+        (OLD, lane_copy("left", "b", CopyState.STOPPED)), "old", "old", ["retire left", *SWITCH_FROM_OLD], Outcome.SWITCHED, FRESH
     ),
     "a stopped serving copy is replaced by a new copy, checked before any request": Case(
         (STOPPED_SAME,),

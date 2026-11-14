@@ -30,7 +30,7 @@ class FakeHost:
         self.actions.append(f"retire {name}")
 
     def read_log_tail(self, name: str) -> str:
-        return f"{name} listening on :5678"
+        return f"{self.copies[name].build} listening on :5678"
 
 
 class FakeProxy:

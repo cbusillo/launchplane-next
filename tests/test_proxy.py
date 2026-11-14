@@ -48,7 +48,7 @@ class ProxyHost:
         self.loaded = loaded_from(self.files)
 
     def ensure_service(self, service: Service) -> None:
-        self.running = True
+        self.running = service.name == PROXY_NAME
 
     def is_running(self, name: str) -> bool:
         return name == PROXY_NAME and self.running
@@ -69,9 +69,11 @@ class ProxyHost:
         return CommandResult(exit_code=0, output="")
 
     def read_file(self, name: str, path: PurePosixPath) -> str | None:
+        assert name == PROXY_NAME
         return self.files.get(path)
 
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None:
+        assert name == PROXY_NAME
         self.files[path] = content
 
     def read_log_tail(self, name: str) -> str:
