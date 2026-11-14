@@ -1,20 +1,24 @@
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http import HTTPStatus
+from importlib.resources import files
 from typing import Annotated, Any
 
 import uvicorn
 from fastapi import FastAPI, Path, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from launchplane.container_host import ContainerHost, ContainerHostError
-from launchplane.move import Mover, MoveResult, Outcome
+from launchplane.move import Mover, MoveResult, Outcome, lane_name
 from launchplane.name_switch import NameSwitch, NameSwitchError
 from launchplane.running_copy import LaneCopy, RunningCopy
 
 type CopyReader = Callable[[], list[RunningCopy]]
 type ServingReader = Callable[[], dict[str, str]]
+type NameChecker = Callable[[str], str | None]
 type MoveRequester = Callable[[LaneCopy], MoveResult]
 
 SLUG = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -25,9 +29,19 @@ class CopyAnswer(RunningCopy):
     serves: str | None
 
 
+class NameAnswer(BaseModel):
+    name: str
+    product: str | None
+    lane: str | None
+    sends_to: str | None
+    answers: bool
+    error: str | None
+
+
 class RunningAnswer(BaseModel):
     read_at: datetime
     copies: list[CopyAnswer]
+    names: list[NameAnswer]
 
 
 class HostUnreadable(BaseModel):
@@ -55,18 +69,60 @@ def answers_for(copies: list[RunningCopy], serving: dict[str, str]) -> list[Copy
     return [CopyAnswer(**copy.model_dump(), serves=name_served_by.get(copy.name)) for copy in copies]
 
 
-def create_app(read: CopyReader, read_serving: ServingReader, move: MoveRequester) -> FastAPI:
+def lane_owners(copies: list[RunningCopy], serving: dict[str, str]) -> dict[str, RunningCopy | None]:
+    copies_by_name = {copy.name: copy for copy in copies}
+    routed = {name: copies_by_name.get(copy_name) for name, copy_name in serving.items()}
+    marked = {lane_name(copy.product, copy.lane): copy for copy in copies if copy.lane is not None}
+    return routed | marked
+
+
+def name_answer(name: str, owner: RunningCopy | None, sends_to: str | None, failure: str | None) -> NameAnswer:
+    error = f"The proxy sends {name} to no copy." if sends_to is None else failure
+    return NameAnswer(
+        name=name,
+        product=None if owner is None else owner.product,
+        lane=None if owner is None else owner.lane,
+        sends_to=sends_to,
+        answers=error is None,
+        error=error,
+    )
+
+
+def failures_at_once(names: list[str], why_name_fails: NameChecker) -> dict[str, str | None]:
+    if not names:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        return dict(zip(names, pool.map(why_name_fails, names), strict=True))
+
+
+def name_answers(copies: list[RunningCopy], serving: dict[str, str], why_name_fails: NameChecker) -> list[NameAnswer]:
+    owners = lane_owners(copies, serving)
+    failures = failures_at_once(sorted(serving), why_name_fails)
+    return [name_answer(name, owners[name], serving.get(name), failures.get(name)) for name in sorted(owners)]
+
+
+def running_page() -> str:
+    return files("launchplane").joinpath("running.html").read_text()
+
+
+def create_app(read: CopyReader, read_serving: ServingReader, why_name_fails: NameChecker, move: MoveRequester) -> FastAPI:
     app = FastAPI(title="Launchplane")
+    page = running_page()
+
+    @app.get("/", response_class=HTMLResponse)
+    def show_running() -> str:
+        return page
 
     @app.get("/running", responses=RUNNING_ERROR_RESPONSES)
     def running(response: Response) -> RunningAnswer | HostUnreadable:
         read_at = datetime.now(UTC)
         try:
-            copies = answers_for(read(), read_serving())
+            copies, serving = read(), read_serving()
+            names = name_answers(copies, serving, why_name_fails)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=read_at, error=str(error))
-        return RunningAnswer(read_at=read_at, copies=copies)
+        return RunningAnswer(read_at=read_at, copies=answers_for(copies, serving), names=names)
 
     @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
     def move_lane(
@@ -91,5 +147,5 @@ def serve() -> None:
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
     switch = NameSwitch(host)
-    app = create_app(host.read_copies, switch.read_serving, Mover(host, switch).move)
+    app = create_app(host.read_copies, switch.read_serving, switch.why_name_fails, Mover(host, switch).move)
     uvicorn.run(app, host=address, port=port)

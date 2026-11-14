@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Launchplane: what is running</title>
+<style>
+  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --muted: #6e7781; --line: #8c959f66; }
+  @media (prefers-color-scheme: dark) { :root { --ok: #3fb950; --bad: #f85149; --muted: #8b949e; } }
+  body { font: 16px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 46rem; padding: 1rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.1rem; margin: 0 0 .25rem; }
+  #reading { color: var(--muted); margin: 0 0 1rem; }
+  #reading[role=alert] { color: inherit; border: 2px solid var(--bad); border-radius: .5rem; padding: .75rem; }
+  section { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; margin-bottom: 1rem; }
+  ul { list-style: none; padding: 0; margin: .5rem 0 0; }
+  li { border-top: 1px solid var(--line); padding: .5rem 0 0; margin-top: .5rem; }
+  code { font-size: .9em; overflow-wrap: anywhere; }
+  small { display: block; font-size: 1em; color: var(--muted); }
+  [data-health=ok] { color: var(--ok); }
+  [data-health=bad] { color: var(--bad); }
+  [data-tag] { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
+</style>
+</head>
+<body>
+<h1>What is running</h1>
+<p id="reading">Reading the host…</p>
+<main id="lanes"></main>
+<script>
+"use strict";
+/** @typedef {{product: string, lane: ?string, build: ?string, name: string, state: string, serves: ?string}} Copy */
+/** @typedef {{name: string, product: ?string, lane: ?string, sends_to: ?string, answers: boolean, error: ?string}} LaneName */
+/** @typedef {{read_at: string, copies: Copy[], names: LaneName[]}} Running */
+const READ_EVERY_MS = 1000;
+const GIVE_UP_AFTER_MS = 15000;
+const reading = document.getElementById("reading");
+const lanes = document.getElementById("lanes");
+let lastGoodReadAt = null;
+
+/**
+ * @param {string} tag
+ * @param {Object<string, string>} attributes
+ * @param {...(Node|string)} children
+ */
+function element(tag, attributes, ...children) {
+  const made = document.createElement(tag);
+  for (const [key, value] of Object.entries(attributes)) made.setAttribute(key, value);
+  made.append(...children);
+  return made;
+}
+
+function code(text) {
+  return element("code", {}, text);
+}
+
+function health(isGood) {
+  return { "data-health": isGood ? "ok" : "bad" };
+}
+
+function clockTime(isoTime) {
+  return new Date(isoTime).toLocaleTimeString();
+}
+
+/** @param {Copy} copy */
+function copyItem(copy) {
+  const state = element("span", { "data-tag": "", ...health(copy.state === "running") }, copy.state);
+  const item = element("li", {}, code(copy.name), " ", state);
+  if (copy.serves) item.append(" ", element("span", { "data-tag": "" }, "the name points here"));
+  item.append(element("div", {}, "build ", code(copy.build ?? "not marked")));
+  return item;
+}
+
+/** @param {LaneName} entry */
+function nameStatus(entry) {
+  if (entry.answers) return element("div", health(true), "Serving: ", code(entry.name), " answers.");
+  return element("div", health(false), "Nothing is serving ", code(entry.name), ": ", entry.error);
+}
+
+/**
+ * @param {string} copyName
+ * @param {Copy[]} allCopies
+ */
+function routeElsewhere(copyName, allCopies) {
+  const copy = allCopies.find((each) => each.name === copyName);
+  const where = copy ? `, a copy of ${copy.product} · ${copy.lane ?? "no lane"}.` : ", which is not on the host.";
+  return element("small", {}, "The proxy sends it to ", code(copyName), where);
+}
+
+/**
+ * @param {LaneName} entry
+ * @param {Copy[]} laneCopies
+ * @param {Copy[]} allCopies
+ */
+function laneSection(entry, laneCopies, allCopies) {
+  const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A name with no copy on the host";
+  const section = element("section", {}, element("h2", {}, title), nameStatus(entry));
+  if (entry.sends_to && !laneCopies.some((copy) => copy.name === entry.sends_to)) {
+    section.append(routeElsewhere(entry.sends_to, allCopies));
+  }
+  if (laneCopies.length) section.append(element("ul", {}, ...laneCopies.map(copyItem)));
+  return section;
+}
+
+/**
+ * @param {Copy} copy
+ * @param {LaneName} entry
+ */
+function isOfLane(copy, entry) {
+  return entry.product !== null && copy.product === entry.product && copy.lane === entry.lane;
+}
+
+/** @param {Running} answer */
+function showRunning(answer) {
+  lastGoodReadAt = answer.read_at;
+  reading.removeAttribute("role");
+  reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
+  const sections = answer.names.map((entry) => laneSection(entry, answer.copies.filter((copy) => isOfLane(copy, entry)), answer.copies));
+  const withoutLane = answer.copies.filter((copy) => copy.lane === null);
+  if (withoutLane.length) sections.push(element("section", {}, element("h2", {}, "Copies with no lane"), element("ul", {}, ...withoutLane.map(copyItem))));
+  if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
+  lanes.replaceChildren(...sections);
+}
+
+function showProblem(text) {
+  const since = lastGoodReadAt
+    ? `It last could at ${clockTime(lastGoodReadAt)}, ${Math.round((Date.now() - Date.parse(lastGoodReadAt)) / 1000)} s ago.`
+    : "It has not read the host since this page opened.";
+  reading.setAttribute("role", "alert");
+  reading.textContent = `${text} ${since} Nothing below is shown until it can.`;
+  lanes.replaceChildren();
+}
+
+async function readRunning() {
+  const response = await fetch("running", { cache: "no-store", signal: AbortSignal.timeout(GIVE_UP_AFTER_MS) });
+  const answer = await response.json();
+  if (response.ok) showRunning(answer);
+  else showProblem(`Launchplane cannot read the host: ${answer.error ?? JSON.stringify(answer)}`);
+}
+
+async function keepReading() {
+  try {
+    await readRunning();
+  } catch (error) {
+    showProblem(`This page cannot get an answer from Launchplane: ${error.message}.`);
+  }
+  setTimeout(keepReading, READ_EVERY_MS);
+}
+
+keepReading();
+</script>
+</body>
+</html>

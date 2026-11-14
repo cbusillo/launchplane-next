@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -6,7 +7,7 @@ import docker
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.api import CopyReader, create_app
+from launchplane.api import CopyReader, NameChecker, create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, copies_from_answer
 from launchplane.move import MoveResult
 from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
@@ -36,8 +37,14 @@ def no_move(target: LaneCopy) -> MoveResult:
     raise AssertionError(f"Reading what is running asked for a move to {target.build}")
 
 
-def app_reading(read: CopyReader, serving: dict[str, str] | None = None) -> TestClient:
-    return TestClient(create_app(read, lambda: serving or {}, no_move))
+def every_name_answers(_name: str) -> str | None:
+    return None
+
+
+def app_reading(
+    read: CopyReader, serving: dict[str, str] | None = None, why_name_fails: NameChecker = every_name_answers
+) -> TestClient:
+    return TestClient(create_app(read, lambda: serving or {}, why_name_fails, no_move))
 
 
 def ask_running(read: CopyReader) -> tuple[int, dict[str, Any]]:
@@ -91,3 +98,50 @@ def test_the_running_call_names_the_copy_the_proxy_points_at_and_no_other() -> N
         "site-preview-7": None,
         "site-unmarked-lane": None,
     }
+
+
+def names_answer(copies: list[RunningCopy], serving: dict[str, str], why_name_fails: NameChecker) -> dict[str, dict[str, Any]]:
+    body = app_reading(lambda: copies, serving, why_name_fails).get("/running").json()
+    return {entry["name"]: entry for entry in body["names"]}
+
+
+def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_proxy() -> None:
+    def no_request(name: str) -> str | None:
+        raise AssertionError(f"Asked through the proxy for {name}, which it routes nowhere")
+
+    copy = RunningCopy(product="site", lane="testing", build="b1", name="site-testing-1", state=CopyState.RUNNING)
+    entry = names_answer([copy], {}, no_request)["testing.site.test"]
+    assert (entry["product"], entry["lane"], entry["sends_to"], entry["answers"]) == ("site", "testing", None, False)
+    assert "no copy" in entry["error"]
+
+
+def test_a_stopped_serving_copy_leaves_its_name_not_answering_with_the_proxys_error() -> None:
+    copy = RunningCopy(product="site", lane="testing", build="b1", name="site-testing-1", state=CopyState.STOPPED)
+    entry = names_answer([copy], {"testing.site.test": copy.name}, lambda name: "502 Bad Gateway")["testing.site.test"]
+    assert (entry["sends_to"], entry["answers"], entry["error"]) == (copy.name, False, "502 Bad Gateway")
+
+
+def test_a_route_to_a_copy_that_is_gone_is_shown_not_dropped() -> None:
+    entry = names_answer([], {"testing.gone.test": "gone-testing-1"}, lambda name: "502 Bad Gateway")["testing.gone.test"]
+    assert (entry["product"], entry["sends_to"], entry["answers"]) == (None, "gone-testing-1", False)
+
+
+def test_the_page_loads_without_reading_the_host_so_it_can_say_the_host_is_unreadable() -> None:
+    def unreadable() -> list[RunningCopy]:
+        raise AssertionError("Serving the page read the host")
+
+    response = app_reading(unreadable).get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+
+
+def test_names_are_asked_at_once_so_names_that_hang_do_not_add_up() -> None:
+    serving = {f"testing.site{number}.test": f"site{number}-testing" for number in range(3)}
+    all_waiting = threading.Barrier(len(serving), timeout=5)
+
+    def hang_until_every_name_is_asked(_name: str) -> str | None:
+        all_waiting.wait()
+        return "download timed out"
+
+    entries = names_answer([], serving, hang_until_every_name_is_asked)
+    assert {entry["error"] for entry in entries.values()} == {"download timed out"}
