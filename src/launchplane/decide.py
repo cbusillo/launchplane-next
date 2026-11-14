@@ -99,15 +99,9 @@ class ReadAgain:
 
 
 @dataclass(frozen=True)
-class MovePlan:
+class Plan[Answer]:
     actions: tuple[Action, ...]
-    answer: MoveResult
-
-
-@dataclass(frozen=True)
-class RetirePlan:
-    actions: tuple[Action, ...]
-    answer: RetireResult
+    answer: Answer
 
 
 START_PROXY_THEN_READ_AGAIN = ReadAgain((StartProxy(),))
@@ -133,7 +127,7 @@ def retire_all_but(copies: dict[str, RunningCopy], keep: set[str | None]) -> tup
     return tuple(Retire(name) for name in sorted(copies) if name not in keep)
 
 
-def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str) -> ReadAgain | MovePlan:
+def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str) -> ReadAgain | Plan[MoveResult]:
     if isinstance(seen.route, ProxyNotRunning):
         return START_PROXY_THEN_READ_AGAIN
     name = lane_name(target.product, target.lane)
@@ -148,7 +142,7 @@ def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str) -> ReadA
     if is_running_build(serving_copy, target.build):
         leftovers = retire_all_but(copies, keep={serving})
         outcome = Outcome.CLEANED_UP if leftovers else Outcome.UNCHANGED
-        return MovePlan((*settle, *leftovers), unchanged.model_copy(update={"outcome": outcome}))
+        return Plan((*settle, *leftovers), unchanged.model_copy(update={"outcome": outcome}))
 
     left_waiting = copy_left_waiting(copies, serving, target.build)
     candidate = left_waiting or fresh_copy_name
@@ -163,10 +157,10 @@ def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str) -> ReadA
         AwaitRoute(name, candidate),
         *retire_old,
     )
-    return MovePlan(actions, unchanged.model_copy(update={"outcome": Outcome.SWITCHED, "serving": candidate}))
+    return Plan(actions, unchanged.model_copy(update={"outcome": Outcome.SWITCHED, "serving": candidate}))
 
 
-def decide_retire(seen: LaneSeen, product: str, lane: str) -> ReadAgain | RetirePlan:
+def decide_retire(seen: LaneSeen, product: str, lane: str) -> ReadAgain | Plan[RetireResult]:
     if isinstance(seen.route, ProxyNotRunning):
         return START_PROXY_THEN_READ_AGAIN
     name = lane_name(product, lane)
@@ -182,4 +176,4 @@ def decide_retire(seen: LaneSeen, product: str, lane: str) -> ReadAgain | Retire
         route_removed_to=route_to,
         retired_copies=copies,
     )
-    return RetirePlan((*await_written_route(seen.route, name), *unroute, *(Retire(copy) for copy in copies)), answer)
+    return Plan((*await_written_route(seen.route, name), *unroute, *(Retire(copy) for copy in copies)), answer)

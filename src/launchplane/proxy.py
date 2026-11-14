@@ -2,6 +2,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
 
@@ -103,8 +104,8 @@ def route_text(name: str, copy_name: str) -> str:
     return json.dumps({"http": {"routers": {name: router}, "services": {name: service}}}, indent=2)
 
 
-def copy_behind(router: LoadedRouter, routes: LoadedRoutes) -> str:
-    service = routes.services.get(router.service + FROM_ROUTES_FILE)
+def copy_behind(router: LoadedRouter, routes: LoadedRoutes, suffix: str) -> str:
+    service = routes.services.get(router.service + suffix)
     if not isinstance(service, LoadedService):
         raise ProxyError(f"The proxy sends {router.rule} to {router.service}, which is not a service Launchplane wrote.")
     url = service.load_balancer.servers[0].url
@@ -121,9 +122,9 @@ def name_of(router: LoadedRouter) -> str:
     return match["name"]
 
 
-def copies_by_name(routes: LoadedRoutes) -> dict[str, str]:
-    file_routers = (router for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE))
-    return {name_of(router): copy_behind(router, routes) for router in file_routers}
+def copies_by_name(routes: LoadedRoutes, suffix: str = FROM_ROUTES_FILE) -> dict[str, str]:
+    file_routers = (router for key, router in routes.routers.items() if key.endswith(suffix))
+    return {name_of(router): copy_behind(router, routes, suffix) for router in file_routers}
 
 
 def loaded_routes_from_answer(answer: str) -> dict[str, str]:
@@ -139,33 +140,20 @@ def written_route_from_file(text: str, name: str) -> str:
         http = WrittenRoutes.model_validate_json(text).http
     except ValidationError as error:
         raise ProxyError(f"The routes file {route_file_of(name)} did not have the expected shape: {error}") from error
-    routes = copies_by_name(
-        LoadedRoutes(
-            routers={key + FROM_ROUTES_FILE: router for key, router in http.routers.items()},
-            services={key + FROM_ROUTES_FILE: service for key, service in http.services.items()},
-        )
-    )
+    routes = copies_by_name(http, suffix="")
     if set(routes) != {name}:
         raise ProxyError(f"The routes file {route_file_of(name)} should route only {name}, and it routes {sorted(routes)}.")
     return routes[name]
 
 
+@dataclass(frozen=True)
 class TraefikProxy:
-    def __init__(
-        self,
-        host: ServiceHost,
-        steady_seconds: float = 3,
-        check_deadline_seconds: float = 20,
-        load_deadline_seconds: float = 10,
-        sleep: Callable[[float], None] = time.sleep,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.host = host
-        self.steady_seconds = steady_seconds
-        self.check_deadline_seconds = check_deadline_seconds
-        self.load_deadline_seconds = load_deadline_seconds
-        self.sleep = sleep
-        self.clock = clock
+    host: ServiceHost
+    steady_seconds: float = 3
+    check_deadline_seconds: float = 20
+    load_deadline_seconds: float = 10
+    sleep: Callable[[float], None] = time.sleep
+    clock: Callable[[], float] = time.monotonic
 
     def start(self) -> None:
         self.host.ensure_service(PROXY)
