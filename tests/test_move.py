@@ -323,6 +323,25 @@ def test_unpointing_one_name_keeps_every_other_name_where_the_proxy_sends_it() -
     assert NameSwitch(host).read_serving() == {"production.site.test": "site-p1"}
 
 
+class HostThatSeesTheProxy(FakeHost):
+    def __init__(self, proxy: ProxyHost) -> None:
+        super().__init__()
+        self.proxy = proxy
+
+    def retire_copy(self, name: str) -> None:
+        assert NAME not in NameSwitch(self.proxy).read_serving(), f"{name} was stopped while the proxy still sent {NAME} to it"
+        super().retire_copy(name)
+
+
+def test_retiring_stops_no_copy_until_the_proxy_has_loaded_the_name_gone() -> None:
+    proxy = ProxyHost({NAME: COPY_A})
+    proxy.loads_on_write = False
+    host = HostThatSeesTheProxy(proxy)
+    host.place(BUILD_A, COPY_A)
+    result = Mover(host, ticking_switch(proxy)).retire("site", "testing")
+    assert result.retired_copies == [COPY_A]
+
+
 def test_a_proxy_with_no_routes_serves_no_name() -> None:
     assert NameSwitch(ProxyHost({})).read_serving() == {}
 

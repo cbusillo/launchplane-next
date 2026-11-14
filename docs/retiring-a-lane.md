@@ -12,7 +12,9 @@ Retiring a lane that holds data is not decided. Chris decides what happens to th
 2. If the proxy sends the name to a copy, it removes that route and waits until the proxy reports the route gone. Every other name is written as the proxy has loaded it.
 3. It retires every copy of the lane, in name order: Docker sends the stop signal, waits up to 30 s, then removes the copy.
 
-The name goes first so that no new request reaches a copy that is stopping. A request the copy already holds is finished during its stop grace. Stopping the copies first would leave the name sending requests to a copy that refuses them.
+The name goes first so that no new request reaches a copy that is stopping. Stopping the copies first would leave the name sending requests to a copy that refuses them.
+
+A request the copy already holds gets its answer only if the product finishes it within 30 s of the stop signal, and only if the product finishes held requests when it gets that signal at all. After 30 s Docker kills the copy and the request is cut off. A product that exits at once on its stop signal drops what it holds. The test bed's builds finish their requests: nginx on `SIGQUIT`, gunicorn on `SIGTERM`.
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
@@ -32,7 +34,9 @@ The proxy and the host show what is left, so asking again finishes the job. Meas
 
 ## Known and not fixed
 
-- Removing a route has the same gap as pointing one: another lane's route that is written but not yet loaded can be overwritten (see [the move](the-move.md#known-and-not-fixed)).
+- **Retiring can erase another lane's switch that is written but not yet loaded.** Removing a route rewrites the routes file the way a move does, writing every other name as the proxy has loaded it. This is the same entry as in [the move](the-move.md#known-and-not-fixed), with the same reason it is not fixed: the name always points at one copy, and asking for that lane again repairs it. Comes back at the first step with two real lanes. One routes file per lane would remove it.
+- **A name of another lane that points at the retiring lane's copy is left pointing at nothing.** Retiring removes only the lane's own name, then removes the copy. Not fixed: Launchplane only ever points a lane's name at a copy of that lane, so this needs a route nobody wrote through Launchplane. Comes back if one name can ever be sent to another lane's copy, for example to share a copy between lanes.
+- **Changes the unit tests do not catch.** Each of these leaves every unit test passing: removing the lock that retiring shares with the move, removing the wait for the lane's written route to load before the route is read, answering a host or proxy failure with `200` instead of `503`, and undoing the page's wording for a running copy that does not answer with success. Not fixed: only watching the page catches the wording, and nothing catches the `200`. The first two need two calls at once or a crash at one moment, which the fakes do not model. Comes back when one of them breaks without a test noticing, or when the API or the page gets a test of its own.
 
 ## On the test bed
 
