@@ -1,5 +1,4 @@
-import hashlib
-import json
+import secrets
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
@@ -29,7 +28,6 @@ class LaneCopy(BaseModel):
     lane: str
     build: str
 
-    @property
-    def name(self) -> str:
-        identity = json.dumps([self.product, self.lane, self.build])
-        return f"{self.product}-{self.lane}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
+
+def new_copy_name(copy: LaneCopy) -> str:
+    return f"{copy.product}-{copy.lane}-{secrets.token_hex(6)}"

@@ -130,11 +130,6 @@ def written_routes_from_file(text: str) -> LoadedRoutes:
     )
 
 
-def routes_not_loaded(written: dict[str, str], loaded: dict[str, str]) -> str:
-    differing = sorted(name for name in written.keys() | loaded.keys() if written.get(name) != loaded.get(name))
-    return "; ".join(f"{name} is written to {written.get(name)} and still sends it to {loaded.get(name)}" for name in differing)
-
-
 # noinspection HttpUrlsUsage
 def copy_url(copy_name: str) -> str:
     return f"http://{copy_name}:{COPY_PORT}"
@@ -163,10 +158,10 @@ class NameSwitch:
         self.sleep = sleep
         self.clock = clock
 
-    def ensure_ready(self) -> None:
+    def ensure_ready_for(self, name: str) -> None:
         self.host.ensure_service(PROXY)
         self.wait_until_answering()
-        self.wait_until_loaded(self.read_written())
+        self.wait_until_sends(name, self.read_written().get(name))
 
     def wait_until_answering(self) -> None:
         started = self.clock()
@@ -192,13 +187,14 @@ class NameSwitch:
             return {}
         return copies_by_name(written_routes_from_file(text))
 
-    def wait_until_loaded(self, written: dict[str, str]) -> None:
+    def wait_until_sends(self, name: str, copy_name: str | None) -> None:
         started = self.clock()
-        while (loaded := self.read_serving()) != written:
+        while (loaded := self.read_serving().get(name)) != copy_name:
             if self.clock() - started >= self.load_deadline_seconds:
                 raise NameSwitchError(
                     f"The proxy did not load its routes file within {self.load_deadline_seconds:g} s: "
-                    f"{routes_not_loaded(written, loaded)}. The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
+                    f"{name} is written to {copy_name} and still sends it to {loaded}. "
+                    f"The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
                 )
             self.sleep(POLL_SECONDS)
 
@@ -209,9 +205,8 @@ class NameSwitch:
             raise NameSwitchError(f"Putting the proxy's new routes in place failed: {result.output}")
 
     def point(self, name: str, copy_name: str) -> None:
-        routes = self.read_serving() | {name: copy_name}
-        self.write_routes(routes)
-        self.wait_until_loaded(routes)
+        self.write_routes(self.read_serving() | {name: copy_name})
+        self.wait_until_sends(name, copy_name)
 
     def request_copy(self, copy_name: str) -> CommandResult:
         url = copy_url(copy_name) + "/"

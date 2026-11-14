@@ -143,13 +143,13 @@ class ContainerHost:
         except NotFound:
             self.client.networks.create(LANE_NETWORK, driver="bridge")
 
-    def start_copy(self, copy: LaneCopy) -> None:
-        with self.attempting(f"Starting {copy.name} from build {copy.build}"):
+    def start_copy(self, copy: LaneCopy, name: str) -> None:
+        with self.attempting(f"Starting {name} from build {copy.build}"):
             self.ensure_lane_network()
             self.ensure_image(copy.build)
             self.client.containers.run(
                 copy.build,
-                name=copy.name,
+                name=name,
                 detach=True,
                 labels={PRODUCT_LABEL: copy.product, LANE_LABEL: copy.lane, BUILD_LABEL: copy.build},
                 network=LANE_NETWORK,

@@ -5,7 +5,7 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from launchplane.name_switch import CheckFailed
-from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
+from launchplane.running_copy import CopyState, LaneCopy, RunningCopy, new_copy_name
 
 LANE_DOMAIN = "test"
 
@@ -29,14 +29,14 @@ class MoveResult(BaseModel):
 
 class CopyHost(Protocol):
     def read_copies(self) -> list[RunningCopy]: ...
-    def start_copy(self, copy: LaneCopy) -> None: ...
+    def start_copy(self, copy: LaneCopy, name: str) -> None: ...
     def remove_copy(self, name: str) -> None: ...
     def retire_copy(self, name: str) -> None: ...
     def read_log_tail(self, name: str) -> str: ...
 
 
 class Switch(Protocol):
-    def ensure_ready(self) -> None: ...
+    def ensure_ready_for(self, name: str) -> None: ...
     def read_serving(self) -> dict[str, str]: ...
     def check_copy(self, copy_name: str) -> None: ...
     def point(self, name: str, copy_name: str) -> None: ...
@@ -52,8 +52,12 @@ def failure_report(error: CheckFailed, log_tail: str) -> str:
     return f"{error}\nThe copy's last log lines:\n{log_tail}"
 
 
-def is_running(copy: RunningCopy | None) -> bool:
-    return copy is not None and copy.state == CopyState.RUNNING
+def is_running_build(copy: RunningCopy | None, build: str) -> bool:
+    return copy is not None and copy.state == CopyState.RUNNING and copy.build == build
+
+
+def copy_left_waiting(copies: dict[str, RunningCopy], serving: str | None, build: str) -> str | None:
+    return next((name for name, copy in copies.items() if name != serving and is_running_build(copy, build)), None)
 
 
 class Mover:
@@ -71,11 +75,10 @@ class Mover:
             self.host.retire_copy(name)
         return bool(leftovers)
 
-    def start_fresh_unless_running(self, target: LaneCopy, existing: RunningCopy | None) -> None:
-        if is_running(existing):
-            return
-        self.host.remove_copy(target.name)
-        self.host.start_copy(target)
+    def start_new_copy(self, target: LaneCopy) -> str:
+        name = new_copy_name(target)
+        self.host.start_copy(target, name)
+        return name
 
     def move(self, target: LaneCopy) -> MoveResult:
         with self.one_at_a_time:
@@ -83,28 +86,30 @@ class Mover:
 
     def move_now(self, target: LaneCopy) -> MoveResult:
         name = lane_name(target.product, target.lane)
-        self.switch.ensure_ready()
+        self.switch.ensure_ready_for(name)
         copies = self.lane_copies(target.product, target.lane)
         serving = self.switch.read_serving().get(name)
         result = MoveResult(
             product=target.product, lane=target.lane, build=target.build, name=name, outcome=Outcome.UNCHANGED, serving=serving
         )
 
-        if serving == target.name and is_running(copies.get(target.name)):
+        serving_copy = None if serving is None else copies.get(serving)
+        if is_running_build(serving_copy, target.build):
             if self.retire_all_but(copies, keep={serving}):
                 return result.model_copy(update={"outcome": Outcome.CLEANED_UP})
             return result
 
-        self.retire_all_but(copies, keep={serving, target.name})
-        self.start_fresh_unless_running(target, copies.get(target.name))
+        left_waiting = copy_left_waiting(copies, serving, target.build)
+        self.retire_all_but(copies, keep={serving, left_waiting})
+        candidate = left_waiting or self.start_new_copy(target)
         try:
-            self.switch.check_copy(target.name)
+            self.switch.check_copy(candidate)
         except CheckFailed as error:
-            report = failure_report(error, self.host.read_log_tail(target.name))
-            self.host.remove_copy(target.name)
+            report = failure_report(error, self.host.read_log_tail(candidate))
+            self.host.remove_copy(candidate)
             return result.model_copy(update={"outcome": Outcome.CHECK_FAILED, "error": report})
 
-        self.switch.point(name, target.name)
-        if serving is not None and serving in copies.keys() - {target.name}:
-            self.host.retire_copy(serving)
-        return result.model_copy(update={"outcome": Outcome.SWITCHED, "serving": target.name})
+        self.switch.point(name, candidate)
+        if serving_copy is not None:
+            self.host.retire_copy(serving_copy.name)
+        return result.model_copy(update={"outcome": Outcome.SWITCHED, "serving": candidate})
