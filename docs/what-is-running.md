@@ -1,6 +1,6 @@
 # What is running
 
-`GET /running` answers which marked copies exist on the container host, read from the host at the moment of asking. Nothing is stored between calls.
+`GET /running` answers which marked copies exist on the container host and which names the proxy sends where, read from the host at the moment of asking. Nothing is stored between calls. `GET /` is the same answer drawn for a person.
 
 ## How a running copy says what it is
 
@@ -25,10 +25,25 @@ Each copy has `product`, `lane`, `build`, `name`, `state` and `serves`. A missin
 | `restarting` | `restarting` |
 | `stopped` | `created`, `exited`, `dead`, `removing` |
 
-- `200` with `copies`: the host was read. An empty list means the host answered and nothing marked is on it.
+Each name has `name`, `product`, `lane`, `sends_to`, `answers` and `error`. The names are every name the proxy routes and every lane that has a copy on the host, so a route to a copy that is gone is shown, not dropped. `product` and `lane` come from a copy of that lane, or from the copy the route sends to, and are `null` when neither is on the host. `sends_to` is the copy the proxy's loaded route names, or `null`. `answers` is whether a request for `/` with that name, made inside the proxy, succeeded just now, the same request real traffic makes; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped copy. A name the proxy routes nowhere is not requested.
+
+- `200` with `copies` and `names`: the host was read. An empty list means the host answered and nothing marked is on it.
 - `503` with `error`: the host or the proxy could not be read, or an answer did not have the expected shape. The error carries the real cause. It never answers "nothing is running".
 
 Both carry `read_at`, the moment the host was asked.
+
+## The page
+
+`GET /` is one HTML file, `src/launchplane/running.html`, with its style and script inline. It loads nothing else, needs no build step and no framework. FastAPI serves it as it is and it reads no host itself, so it opens even when the host cannot be read.
+
+- The script asks `/running` once a second, each time after the last answer arrived, so a slow host never piles up requests. It gives up on one answer after 15 s.
+- Each lane shows its name, whether the name answers and the real error if not, and its copies with build, state and whether the name points at it. A route to a copy that is not on the host is shown as such. Copies with no lane label are listed apart.
+- When Launchplane answers `503`, or cannot be reached, the page shows the error and when it last read the host, and hides the lanes. It never shows an empty list for an answer it did not get. The time of the last good read is kept only by the open page, not by Launchplane.
+- Text is built with DOM text nodes, never as HTML, so a label cannot inject markup.
+
+Measured on the test bed from the control container: listing the copies takes about 1 ms, reading the proxy's routes about 30 ms, and asking one name through the proxy about 30 ms. A whole `/running` with one lane and two dangling routes answered the Mac in 0.14 to 0.16 s, against 0.03 s before names were asked. During a move from one nginx build to another, a poll every 0.2 s saw the second copy at 0.5 s, the name pass to it at 5.8 s, and the old copy gone when the move answered, so a poll a second shows each stage.
+
+Like `/running`, the page reads containers and routes at two moments, so during a switch it can show the retired copy and nothing serving for one read.
 
 ## How Launchplane reaches the host
 
@@ -63,6 +78,6 @@ Docker on the scratch container listens on `192.168.1.56:2376` only, through the
 
 ## Where it runs for now
 
-On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: `http://launchplane.shiny:8700/running`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
+On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: the page at `http://launchplane.shiny:8700/` and the call at `http://launchplane.shiny:8700/running`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
 
 `tests/test_bed_what_is_running.py` runs against it from a machine that can reach the test bed: `LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py`. It places containers on the scratch container with `lp-scratch` (or `LAUNCHPLANE_SCRATCH_SHELL`). For the unreachable case it drops the control container's traffic to port 2376 on the scratch container's firewall for one call.

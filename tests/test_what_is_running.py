@@ -36,7 +36,7 @@ def no_move(target: LaneCopy) -> MoveResult:
     raise AssertionError(f"Reading what is running asked for a move to {target.build}")
 
 
-def every_name_answers(name: str) -> str | None:
+def every_name_answers(_name: str) -> str | None:
     return None
 
 

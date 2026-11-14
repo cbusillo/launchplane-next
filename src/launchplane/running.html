@@ -12,15 +12,15 @@
   h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
   h2 { font-size: 1.1rem; margin: 0 0 .25rem; }
   #reading { color: var(--muted); margin: 0 0 1rem; }
-  #reading.problem { color: inherit; border: 2px solid var(--bad); border-radius: .5rem; padding: .75rem; }
+  #reading[role=alert] { color: inherit; border: 2px solid var(--bad); border-radius: .5rem; padding: .75rem; }
   section { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; margin-bottom: 1rem; }
   ul { list-style: none; padding: 0; margin: .5rem 0 0; }
   li { border-top: 1px solid var(--line); padding: .5rem 0 0; margin-top: .5rem; }
-  .code { font-family: ui-monospace, monospace; font-size: .9em; overflow-wrap: anywhere; }
-  .ok { color: var(--ok); }
-  .bad { color: var(--bad); }
-  .muted { color: var(--muted); }
-  .tag { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
+  code { font-size: .9em; overflow-wrap: anywhere; }
+  small { display: block; font-size: 1em; color: var(--muted); }
+  [data-health=ok] { color: var(--ok); }
+  [data-health=bad] { color: var(--bad); }
+  [data-tag] { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
 </style>
 </head>
 <body>
@@ -29,62 +29,85 @@
 <main id="lanes"></main>
 <script>
 "use strict";
+/** @typedef {{product: string, lane: ?string, build: ?string, name: string, state: string, serves: ?string}} Copy */
+/** @typedef {{name: string, product: ?string, lane: ?string, sends_to: ?string, answers: boolean, error: ?string}} LaneName */
+/** @typedef {{read_at: string, copies: Copy[], names: LaneName[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
 const lanes = document.getElementById("lanes");
 let lastGoodReadAt = null;
 
-function element(tag, className, ...children) {
+/**
+ * @param {string} tag
+ * @param {Object<string, string>} attributes
+ * @param {...(Node|string)} children
+ */
+function element(tag, attributes, ...children) {
   const made = document.createElement(tag);
-  if (className) made.className = className;
+  for (const [key, value] of Object.entries(attributes)) made.setAttribute(key, value);
   made.append(...children);
   return made;
 }
 
 function code(text) {
-  return element("span", "code", text);
+  return element("code", {}, text);
+}
+
+function health(isGood) {
+  return { "data-health": isGood ? "ok" : "bad" };
 }
 
 function clockTime(isoTime) {
   return new Date(isoTime).toLocaleTimeString();
 }
 
+/** @param {Copy} copy */
 function copyItem(copy) {
-  const state = element("span", copy.state === "running" ? "tag ok" : "tag bad", copy.state);
-  const item = element("li", "", code(copy.name), " ", state);
-  if (copy.serves) item.append(" ", element("span", "tag", "the name points here"));
-  item.append(element("div", "", "build ", code(copy.build ?? "not marked")));
+  const state = element("span", { "data-tag": "", ...health(copy.state === "running") }, copy.state);
+  const item = element("li", {}, code(copy.name), " ", state);
+  if (copy.serves) item.append(" ", element("span", { "data-tag": "" }, "the name points here"));
+  item.append(element("div", {}, "build ", code(copy.build ?? "not marked")));
   return item;
 }
 
+/** @param {LaneName} entry */
 function nameStatus(entry) {
-  if (entry.answers) return element("div", "ok", "Serving: ", code(entry.name), " answers.");
-  return element("div", "bad", "Nothing is serving ", code(entry.name), ": ", entry.error);
+  if (entry.answers) return element("div", health(true), "Serving: ", code(entry.name), " answers.");
+  return element("div", health(false), "Nothing is serving ", code(entry.name), ": ", entry.error);
 }
 
+/**
+ * @param {LaneName} entry
+ * @param {Copy[]} copies
+ */
 function laneSection(entry, copies) {
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A name with no copy on the host";
-  const section = element("section", "", element("h2", "", title), nameStatus(entry));
+  const section = element("section", {}, element("h2", {}, title), nameStatus(entry));
   if (entry.sends_to && !copies.some((copy) => copy.name === entry.sends_to)) {
-    section.append(element("div", "muted", "The proxy sends it to ", code(entry.sends_to), ", which is not on the host."));
+    section.append(element("small", {}, "The proxy sends it to ", code(entry.sends_to), ", which is not on the host."));
   }
-  if (copies.length) section.append(element("ul", "", ...copies.map(copyItem)));
+  if (copies.length) section.append(element("ul", {}, ...copies.map(copyItem)));
   return section;
 }
 
+/**
+ * @param {Copy} copy
+ * @param {LaneName} entry
+ */
 function isOfLane(copy, entry) {
   return entry.product !== null && copy.product === entry.product && copy.lane === entry.lane;
 }
 
+/** @param {Running} answer */
 function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
-  reading.className = "";
+  reading.removeAttribute("role");
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
   const sections = answer.names.map((entry) => laneSection(entry, answer.copies.filter((copy) => isOfLane(copy, entry))));
   const withoutLane = answer.copies.filter((copy) => copy.lane === null);
-  if (withoutLane.length) sections.push(element("section", "", element("h2", "", "Copies with no lane"), element("ul", "", ...withoutLane.map(copyItem))));
-  if (!sections.length) sections.push(element("p", "", "The host answered, and nothing marked for Launchplane is on it."));
+  if (withoutLane.length) sections.push(element("section", {}, element("h2", {}, "Copies with no lane"), element("ul", {}, ...withoutLane.map(copyItem))));
+  if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
   lanes.replaceChildren(...sections);
 }
 
@@ -92,7 +115,7 @@ function showProblem(text) {
   const since = lastGoodReadAt
     ? `It last could at ${clockTime(lastGoodReadAt)}, ${Math.round((Date.now() - Date.parse(lastGoodReadAt)) / 1000)} s ago.`
     : "It has not read the host since this page opened.";
-  reading.className = "problem";
+  reading.setAttribute("role", "alert");
   reading.textContent = `${text} ${since} Nothing below is shown until it can.`;
   lanes.replaceChildren();
 }
