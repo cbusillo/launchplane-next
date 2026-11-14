@@ -33,7 +33,7 @@ The proxy and the host show what is left, so asking again finishes the job. Meas
 
 ## Measured
 
-- Retiring a lane of one idle nginx copy takes 2.47 to 2.52 s, mostly Traefik loading the route change. Asking again takes 0.10 s.
+- Retiring a lane of one idle nginx copy takes 2.06 to 2.14 s, mostly Traefik loading the route change. Asking again takes 0.07 s.
 - With a 5 s request in flight, the page's poll sees the name gone and the copy still there, then the copy gone. The request answers 200 with its whole body.
 
 ## Known and not fixed

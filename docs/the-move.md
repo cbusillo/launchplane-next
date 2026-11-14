@@ -100,8 +100,8 @@ Traefik loads a change asynchronously: it waits up to 2 s to group file events. 
 
 ### Measured
 
-- A move from one build to another takes 3.5 to 5.8 s: 3 s of check, up to 2 s for Traefik to load the route, and the old copy's stop.
-- Asking again for a finished move takes 0.08 s.
+- A move from one build to another takes 6.2 to 6.4 s in 4 moves: 3 s of check, up to 2 s for Traefik to load the route, polled every 0.5 s, the old copy's stop, and a read of the host and the proxy before each of the five steps.
+- Asking again for a finished move takes 0.07 s.
 - Five test-bed tests, run three times with the request loop running throughout: no request failed.
 - Changing one lane's file while a second lane's file stayed: 120 changes, each confirmed loaded, with a request loop on each name. About 9,300 requests, none failed at the proxy. Each change loaded in 0.64 to 2.27 s. Two requests to the steady lane failed in the Mac's lookup of `docker-lp-scratch.shiny` (`gaierror`), before reaching the proxy. Against the address, none failed. The test-bed request loops use the host name, so a lookup failure there can fail a test without the proxy dropping anything.
 

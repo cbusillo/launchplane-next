@@ -59,6 +59,7 @@ class FakeProxy:
         return LaneRoute(loaded=self.loaded.get(name), written=self.written.get(name))
 
     def await_route(self, name: str, copy_name: str | None) -> None:
+        assert self.written.get(name) == copy_name, f"awaited {name} at {copy_name}, written to {self.written.get(name)}"
         self.loaded = dict(self.written)
         self.while_awaiting()
 
