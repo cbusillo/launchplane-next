@@ -38,7 +38,7 @@ It is retired once the switch is loaded: Docker sends it the image's stop signal
 
 A leftover copy found by a later call is retired the same way, because it may be an old copy whose retirement a crash cut short.
 
-Measured on the test bed: a 64 MiB download from build A, read at about 4 MiB/s and started 1 s before the move to B, finished in full. With 10 s and no grace on a retry, the same download was cut off.
+Measured on the test bed, a 24 MiB download from build A, read at about 1.8 MB/s and started 1 s before the move to B: nginx finished writing it and exited 8 s after the switch, well inside the grace. The client still lost the last 3.7 MB. When a copy's process exits, Docker removes its network, and with it the bytes the copy had written that were still waiting in its socket buffers for a slow reader. Untried: whether a short response to a quick reader ever loses its tail this way.
 
 There is no data, so keeping it gives nothing that the move back cannot: going back is the same move with the earlier build, and the image stays on the host so it starts at once. A kept copy would also be a second copy of the lane that every reader has to explain.
 
