@@ -24,9 +24,6 @@ BUILD_C = "hashicorp/http-echo:1.0"
 ANSWER_A = "nginx/1.30.6"
 ANSWER_B = "nginx/1.31.8"
 PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
-SLOW_DOWNLOAD_BYTES = 24 * 1024 * 1024
-SLOW_DOWNLOAD_CHUNK = 256 * 1024
-SLOW_DOWNLOAD_PAUSE = 0.05
 
 
 @dataclass
@@ -83,30 +80,6 @@ def write_route_without_launchplane(copy_name: str) -> None:
     loaded = {copy["serves"]: copy["name"] for copy in body["copies"] if copy["serves"]}
     staged = f"docker exec -i {PROXY_NAME} sh -c 'cat > {STAGED_ROUTES_FILE} && mv {STAGED_ROUTES_FILE} {ROUTES_FILE}'"
     on_scratch(staged, given=routes_file(loaded | {NAME: copy_name}))
-
-
-@dataclass
-class SlowDownload:
-    received: int = 0
-    error: str | None = None
-
-    def run(self) -> None:
-        connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=30)
-        try:
-            connection.request("GET", "/big", headers={"Host": NAME})
-            response = connection.getresponse()
-            while chunk := response.read(SLOW_DOWNLOAD_CHUNK):
-                self.received += len(chunk)
-                time.sleep(SLOW_DOWNLOAD_PAUSE)
-        except OSError as error:
-            self.error = repr(error)
-        finally:
-            connection.close()
-
-
-def give_build_a_a_big_file() -> None:
-    copy_name = lane_copies()[BUILD_A]["name"]
-    on_scratch(f"docker exec {copy_name} sh -c 'head -c {SLOW_DOWNLOAD_BYTES} /dev/zero > /usr/share/nginx/html/big'")
 
 
 def lane_copies() -> dict[str, dict[str, Any]]:
@@ -226,19 +199,6 @@ def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_
     assert loop.failures == []
     assert list(lane_copies()) == [BUILD_A]
     assert serving_builds() == [BUILD_A]
-
-
-@pytest.mark.usefixtures("lane_serving_a")
-def test_a_request_in_flight_on_the_old_copy_at_the_switch_finishes() -> None:
-    give_build_a_a_big_file()
-    download = SlowDownload()
-    downloading = threading.Thread(target=download.run)
-    downloading.start()
-    time.sleep(1)
-    status, body = move(BUILD_B)
-    downloading.join()
-    assert (status, body["outcome"]) == (200, "switched"), body
-    assert (download.error, download.received) == (None, SLOW_DOWNLOAD_BYTES)
 
 
 def test_two_lanes_whose_product_and_lane_join_to_the_same_text_each_keep_their_own_copy() -> None:

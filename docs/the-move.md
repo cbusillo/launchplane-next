@@ -38,19 +38,6 @@ It is retired once the switch is loaded: Docker sends it the image's stop signal
 
 A leftover copy found by a later call is retired the same way, because it may be an old copy whose retirement a crash cut short.
 
-A request in flight at the switch can still lose its tail. Measured on the test bed with a 24 MiB download from build A, read from the Mac at about 1.8 MB/s and started 1 s before the move to B, with packet captures on the scratch container, `ss` in the old copy's network namespace and Docker's events. The tail was lost in 4 of 4 runs (2.4 to 2.9 MB); at about 5 MB/s the download finished before the switch and nothing was lost. In one run:
-
-| Time (s) | What happened |
-| --- | --- |
-| 0 | Docker sends nginx `SIGQUIT`. The proxy is holding nginx back to the reader's pace; nginx's kernel send queue to the proxy holds about 3.4 MB. |
-| 1.600 | nginx logs `GET /big 200 25165824`: it has handed the last byte to the kernel. It closes the socket, which enters FIN-WAIT-1 with 2,946,121 bytes still queued. |
-| about 1.67 | nginx's process has exited. |
-| 1.690 / 1.703 / 1.726 | Docker disconnects the copy from the lane network, reports it dead (exit 0), and destroys it. |
-
-The queued bytes were never sent, and neither was a FIN or a reset. The proxy had received and acknowledged every byte nginx sent and passed all of them to the reader, so the loss is on the copy-to-proxy connection, inside the old copy, after nginx counts the request as done. The proxy never learns the connection is gone: the reader saw its download stop with no error and waited until its own 30 s timeout. A product that finishes its requests on its stop signal does not protect this tail, because "finished" means handed to the kernel, not received. Untried: whether a short response to a quick reader ever loses its tail this way.
-
-While a copy is being stopped, its name no longer resolves on the lane network (`wget: bad address`). If Launchplane is killed while it waits for an old copy to stop, Docker still finishes the stop. Asking afterwards for the old copy's build, while that copy is still stopping, takes it for a copy left by an interrupted move: its check fails, the call answers `check failed` for a good build, and the copy is removed by force, which cuts any request it is still finishing. Measured once: the copy had already exited by then, so nothing was cut, and the name stayed on the serving copy throughout.
-
 There is no data, so keeping it gives nothing that the move back cannot: going back is the same move with the earlier build, and the image stays on the host so it starts at once. A kept copy would also be a second copy of the lane that every reader has to explain.
 
 ## Which copy is serving, after a crash too
@@ -62,6 +49,14 @@ Launchplane writes a route by renaming a new routes file into place, and Traefik
 To finish or abandon a half-done move, Launchplane needs no record of its own. The host shows every copy of the lane and the proxy shows the serving one, so a copy that exists and is not serving is left over. Asking for the same build finishes the move. Asking for the serving build removes the leftover. Either way the name pointed at exactly one copy the whole time.
 
 Killed between starting the new copy and switching, then asked again, measured on the test bed: the leftover copy was checked and switched to, or removed, with no request failing. With a route to the new copy written but not yet loaded when the old build was asked for, the move waited for the route, then switched back to the old build, again with no request failing.
+
+## Known and not fixed
+
+- **A slow reader can lose the end of a large download when the old copy stops.** Measured: a 24 MiB download read at 1.8 MB/s across a move lost its last 2.4 to 2.9 MB in 4 of 4 runs. nginx counts the request done once the bytes are in its kernel send queue, exits, and Docker tears down the copy's network before the queue drains. Not fixed: it needs a large response, a throttled reader and a move at that moment. Comes back if a real product kind shows it.
+- **A move can erase another lane's switch that was written but not yet loaded.** A switch writes other names as the proxy has loaded them, so a route written just before a crash is overwritten. Not fixed: it needs a crash in that window, and asking for that lane again repairs it. Comes back at the first step with two real lanes; one routes file per lane would remove it.
+- **Asking for the old build while its copy is still stopping answers `check failed` for a good build and removes that copy by force.** Confirmed once on the test bed, after a kill during retirement. Not fixed: asking again works, and the name never moves.
+- **Copy names are 48 random bits and are not checked against names a route already points at.**
+- **Untried:** HTTPS, long-lived connections, two Launchplane processes at once.
 
 ## The proxy
 

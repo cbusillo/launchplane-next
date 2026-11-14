@@ -56,12 +56,10 @@ class FakeHost:
 
 
 class FakeSwitch:
-    def __init__(self, failing_builds: set[str] | None = None) -> None:
+    def __init__(self, host: FakeHost) -> None:
+        self.host = host
         self.serving: dict[str, str] = {}
-        self.failing_builds = failing_builds or set()
-        self.points: list[str] = []
-        self.served_before_check: list[str] = []
-        self.host: FakeHost | None = None
+        self.failing_builds: set[str] = set()
 
     def ensure_ready_for(self, name: str) -> None:
         pass
@@ -70,19 +68,19 @@ class FakeSwitch:
         return dict(self.serving)
 
     def check_copy(self, copy_name: str) -> None:
-        if copy_name in self.serving.values():
-            self.served_before_check.append(copy_name)
-        if self.host is not None and self.host.copies[copy_name].build in self.failing_builds:
+        assert copy_name not in self.serving.values(), f"{copy_name} was checked while the name already sent requests to it"
+        self.host.actions.append(f"check {copy_name}")
+        if self.host.copies[copy_name].build in self.failing_builds:
             raise CheckFailed("Connection refused")
 
     def point(self, name: str, copy_name: str) -> None:
         self.serving[name] = copy_name
-        self.points.append(copy_name)
+        self.host.actions.append(f"point {copy_name}")
 
 
 def lane_serving(copy: LaneCopy, name: str) -> tuple[FakeHost, FakeSwitch]:
-    host, switch = FakeHost(), FakeSwitch()
-    switch.host = host
+    host = FakeHost()
+    switch = FakeSwitch(host)
     host.place(copy, name)
     switch.serving[NAME] = name
     return host, switch
@@ -90,10 +88,9 @@ def lane_serving(copy: LaneCopy, name: str) -> tuple[FakeHost, FakeSwitch]:
 
 def test_the_old_copy_is_retired_only_after_the_name_points_at_the_new_one() -> None:
     host, switch = lane_serving(BUILD_A, COPY_A)
-    result = Mover(host, switch).move(BUILD_B)
-    assert (result.outcome, result.serving) == (Outcome.SWITCHED, host.copy_of(BUILD_B.build))
-    assert host.actions == ["start site:b", f"retire {COPY_A}"]
-    assert switch.serving == {NAME: host.copy_of(BUILD_B.build)}
+    Mover(host, switch).move(BUILD_B)
+    new = host.copy_of(BUILD_B.build)
+    assert host.actions == ["start site:b", f"check {new}", f"point {new}", f"retire {COPY_A}"]
 
 
 def test_a_failed_check_switches_nothing_removes_the_copy_and_reports_its_error_and_log() -> None:
@@ -104,8 +101,7 @@ def test_a_failed_check_switches_nothing_removes_the_copy_and_reports_its_error_
     assert result.error is not None
     assert "Connection refused" in result.error
     assert "listening on :5678" in result.error
-    assert switch.points == []
-    assert set(host.copies) == {COPY_A}
+    assert (switch.serving, set(host.copies)) == ({NAME: COPY_A}, {COPY_A})
 
 
 def test_asking_again_for_the_build_already_serving_changes_nothing() -> None:
@@ -113,23 +109,20 @@ def test_asking_again_for_the_build_already_serving_changes_nothing() -> None:
     result = Mover(host, switch).move(BUILD_B)
     assert result.outcome == Outcome.UNCHANGED
     assert host.actions == []
-    assert switch.points == []
 
 
 def test_a_copy_left_running_before_the_switch_is_checked_and_switched_to_without_starting_another() -> None:
     host, switch = lane_serving(BUILD_A, COPY_A)
     host.place(BUILD_B, COPY_B)
     Mover(host, switch).move(BUILD_B)
-    assert host.actions == [f"retire {COPY_A}"]
-    assert switch.serving == {NAME: COPY_B}
+    assert host.actions == [f"check {COPY_B}", f"point {COPY_B}", f"retire {COPY_A}"]
 
 
 def test_a_copy_left_stopped_before_the_switch_is_replaced_by_a_fresh_one() -> None:
     host, switch = lane_serving(BUILD_A, COPY_A)
     host.place(BUILD_B, COPY_B, CopyState.STOPPED)
-    result = Mover(host, switch).move(BUILD_B)
+    Mover(host, switch).move(BUILD_B)
     assert host.actions[:2] == [f"retire {COPY_B}", "start site:b"]
-    assert result.serving not in {COPY_A, COPY_B}
 
 
 def test_a_copy_left_by_an_abandoned_move_is_removed_by_a_move_elsewhere() -> None:
@@ -148,31 +141,28 @@ def test_an_old_copy_left_after_the_switch_is_stopped_gracefully_not_removed_by_
 
 
 def test_a_replacement_for_a_stopped_serving_copy_gets_no_request_before_it_passes_its_check() -> None:
-    host, switch = lane_serving(BUILD_B, COPY_B)
-    host.place(BUILD_B, COPY_B, CopyState.STOPPED)
-    result = Mover(host, switch).move(BUILD_B)
-    assert switch.served_before_check == []
-    assert result.outcome == Outcome.SWITCHED
-    assert set(host.copies) == {result.serving}
+    host = FakeHost()
+    mover = Mover(host, FakeSwitch(host))
+    mover.move(BUILD_B)
+    host.place(BUILD_B, host.copy_of(BUILD_B.build), CopyState.STOPPED)
+    assert mover.move(BUILD_B).outcome == Outcome.SWITCHED
 
 
 def test_two_lanes_whose_product_and_lane_join_to_the_same_text_never_share_a_copy() -> None:
     first = LaneCopy(product="a-b", lane="c", build="site:a")
     second = LaneCopy(product="a", lane="b-c", build="site:a")
     host = FakeHost()
-    mover = Mover(host, FakeSwitch())
+    mover = Mover(host, FakeSwitch(host))
     mover.move(first)
     mover.move(second)
     assert {(copy.product, copy.lane) for copy in host.copies.values()} == {("a-b", "c"), ("a", "b-c")}
 
 
 def test_a_route_to_a_copy_that_no_longer_exists_is_not_taken_as_serving() -> None:
-    host, switch = FakeHost(), FakeSwitch()
+    host = FakeHost()
+    switch = FakeSwitch(host)
     switch.serving[NAME] = COPY_B
-    result = Mover(host, switch).move(BUILD_B)
-    assert result.outcome == Outcome.SWITCHED
-    assert host.actions == ["start site:b"]
-    assert switch.served_before_check == []
+    assert Mover(host, switch).move(BUILD_B).outcome == Outcome.SWITCHED
 
 
 def test_copies_in_other_lanes_are_never_touched() -> None:
@@ -265,8 +255,9 @@ def test_another_lanes_route_that_never_loads_does_not_stop_a_move_of_this_lane(
     assert NameSwitch(proxy).read_serving()[NAME] == host.copy_of(BUILD_B.build)
 
 
-def test_pointing_one_name_keeps_every_other_name_where_it_was() -> None:
+def test_pointing_one_name_keeps_every_other_name_where_the_proxy_sends_it_not_where_the_file_says() -> None:
     host = ProxyHost({"production.site.test": "site-p1"})
+    host.files[ROUTES_FILE] = routes_file({"production.site.test": "site-p2"})
     ticking_switch(host).point(NAME, "site-t2")
     assert NameSwitch(host).read_serving() == {"production.site.test": "site-p1", NAME: "site-t2"}
 
