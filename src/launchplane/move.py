@@ -52,6 +52,10 @@ def failure_report(error: CheckFailed, log_tail: str) -> str:
     return f"{error}\nThe copy's last log lines:\n{log_tail}"
 
 
+def is_running(copy: RunningCopy | None) -> bool:
+    return copy is not None and copy.state == CopyState.RUNNING
+
+
 class Mover:
     def __init__(self, host: CopyHost, switch: Switch) -> None:
         self.host = host
@@ -61,14 +65,14 @@ class Mover:
     def lane_copies(self, product: str, lane: str) -> dict[str, RunningCopy]:
         return {copy.name: copy for copy in self.host.read_copies() if (copy.product, copy.lane) == (product, lane)}
 
-    def remove_all_but(self, copies: dict[str, RunningCopy], keep: set[str | None]) -> bool:
+    def retire_all_but(self, copies: dict[str, RunningCopy], keep: set[str | None]) -> bool:
         leftovers = copies.keys() - keep
         for name in leftovers:
-            self.host.remove_copy(name)
+            self.host.retire_copy(name)
         return bool(leftovers)
 
     def start_fresh_unless_running(self, target: LaneCopy, existing: RunningCopy | None) -> None:
-        if existing is not None and existing.state == CopyState.RUNNING:
+        if is_running(existing):
             return
         self.host.remove_copy(target.name)
         self.host.start_copy(target)
@@ -86,12 +90,12 @@ class Mover:
             product=target.product, lane=target.lane, build=target.build, name=name, outcome=Outcome.UNCHANGED, serving=serving
         )
 
-        if serving == target.name and target.name in copies:
-            if self.remove_all_but(copies, keep={serving}):
+        if serving == target.name and is_running(copies.get(target.name)):
+            if self.retire_all_but(copies, keep={serving}):
                 return result.model_copy(update={"outcome": Outcome.CLEANED_UP})
             return result
 
-        self.remove_all_but(copies, keep={serving, target.name})
+        self.retire_all_but(copies, keep={serving, target.name})
         self.start_fresh_unless_running(target, copies.get(target.name))
         try:
             self.switch.check_copy(target.name)
@@ -101,6 +105,6 @@ class Mover:
             return result.model_copy(update={"outcome": Outcome.CHECK_FAILED, "error": report})
 
         self.switch.point(name, target.name)
-        if serving is not None and serving in copies:
+        if serving is not None and serving in copies.keys() - {target.name}:
             self.host.retire_copy(serving)
         return result.model_copy(update={"outcome": Outcome.SWITCHED, "serving": target.name})

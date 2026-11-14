@@ -2,22 +2,24 @@
 
 `POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The lane answers at the name `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
-For now a build is a container image reference, and the copy must answer HTTP on port 80.
+For now a build is a container image reference, and the copy must answer HTTP on port 80. A copy's container is named `{product}-{lane}-` followed by 12 hex digits of a hash of the product, lane and build together. The prefix is for people reading `docker ps`; the hash keeps lanes apart even when the prefixes are the same, as for product `a-b` lane `c` and product `a` lane `b-c`.
 
 ## What it does
 
-Every call reads the lane's copies from the container host and the proxy's loaded routes, then:
+Every call first waits until the proxy has loaded the routes file as it is written (see below). Then it reads the lane's copies from the container host and the proxy's loaded routes, and:
 
-1. If the proxy already sends the name to a running copy of this build, it removes any other copy of the lane and stops. Nothing else changes.
-2. Otherwise it removes every copy of the lane except the serving one and one of the target build. Those are left over from a move that was interrupted or abandoned.
-3. It starts a copy of the build beside the serving one, unless one is already running.
+1. If the proxy already sends the name to a running copy of this build, it retires any other copy of the lane and stops. Nothing else changes.
+2. Otherwise it retires every copy of the lane except the serving one and one of the target build. Those are left over from a move that was interrupted or abandoned.
+3. It starts a copy of the build beside the serving one, unless one is already running. A copy of the build that exists but is not running, even the serving one, is removed and started fresh.
 4. It checks the copy (see below). If the check fails, it removes the copy and answers why. The name never moved.
 5. It points the name at the new copy and waits until the proxy reports that route loaded.
-6. It stops the old copy, giving it 10 s to finish what it is doing, and removes it.
+6. It retires the old copy.
+
+To retire a copy is to stop it gracefully and then remove it (see "The old copy"). Only a copy that has never served, such as one that failed its check, is removed at once.
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
-| `switched` | 200 | The name now points at a copy of this build. |
+| `switched` | 200 | The name now points at a running copy of this build. |
 | `unchanged` | 200 | It already did. Nothing changed. |
 | `cleaned up` | 200 | It already did, and copies left by an interrupted move were removed. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the copy's last log lines. The copy is gone. |
@@ -32,15 +34,23 @@ The proxy requests `http://<copy>:80/` on the lane network, the path real traffi
 
 ### The old copy
 
-It is stopped and removed once the switch is loaded. There is no data, so keeping it gives nothing that the move back cannot: going back is the same move with the earlier build, and the image stays on the host so it starts at once. A kept copy would also be a second copy of the lane that every reader has to explain.
+It is retired once the switch is loaded: Docker sends it the image's stop signal, waits up to 30 s for it to exit, then kills it and removes it. By then the proxy sends every new request to the new copy, so the old copy only finishes what it already has. A product must finish its requests in flight and exit when it gets its stop signal. The nginx images do: their stop signal is `SIGQUIT`, nginx's graceful shutdown. A request that needs longer than 30 s after the switch is cut off.
+
+A leftover copy found by a later call is retired the same way, because it may be an old copy whose retirement a crash cut short.
+
+Measured on the test bed: a 64 MiB download from build A, read at about 4 MiB/s and started 1 s before the move to B, finished in full. With 10 s and no grace on a retry, the same download was cut off.
+
+There is no data, so keeping it gives nothing that the move back cannot: going back is the same move with the earlier build, and the image stays on the host so it starts at once. A kept copy would also be a second copy of the lane that every reader has to explain.
 
 ## Which copy is serving, after a crash too
 
 The proxy's loaded routes are the only mark. Launchplane writes nothing else. A route sends one name to one copy by its container name, and the copy's labels say which product, lane and build it is. `GET /running` gives each copy a `serves` field: the name the proxy sends to it, or `null`.
 
+Launchplane writes a route by renaming a new routes file into place, and Traefik loads it up to 2 s later. A crash in that gap leaves a file that sends the name to the new copy while the proxy still sends it to the old one. So before every move, Launchplane reads the routes file and waits until the proxy has loaded exactly what it says, or answers `503` with the routes that differ and the proxy's log. Only then does it read which copy is serving.
+
 To finish or abandon a half-done move, Launchplane needs no record of its own. The host shows every copy of the lane and the proxy shows the serving one, so a copy that exists and is not serving is left over. Asking for the same build finishes the move. Asking for the serving build removes the leftover. Either way the name pointed at exactly one copy the whole time.
 
-Killed between starting the new copy and switching, then asked again, measured on the test bed: the leftover copy was checked and switched to, or removed, with no request failing.
+Killed between starting the new copy and switching, then asked again, measured on the test bed: the leftover copy was checked and switched to, or removed, with no request failing. With a route to the new copy written but not yet loaded when the old build was asked for, the move waited for the route, then switched back to the old build, again with no request failing.
 
 ## The proxy
 

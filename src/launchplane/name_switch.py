@@ -48,6 +48,7 @@ class ServiceHost(Protocol):
     def ensure_service(self, service: Service) -> None: ...
     def is_running(self, name: str) -> bool: ...
     def run_in(self, name: str, command: list[str]) -> CommandResult: ...
+    def read_file(self, name: str, path: PurePosixPath) -> str | None: ...
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None: ...
     def read_log_tail(self, name: str) -> str: ...
 
@@ -76,6 +77,10 @@ class LoadedService(Read):
 class LoadedRoutes(Read):
     routers: dict[str, LoadedRouter] = {}
     services: dict[str, LoadedService | dict[str, object]] = {}
+
+
+class WrittenRoutes(Read):
+    http: LoadedRoutes
 
 
 def is_from_routes_file(key: str) -> bool:
@@ -114,6 +119,22 @@ def loaded_routes_from_answer(answer: str) -> LoadedRoutes:
         ) from error
 
 
+def written_routes_from_file(text: str) -> LoadedRoutes:
+    try:
+        http = WrittenRoutes.model_validate_json(text).http
+    except ValidationError as error:
+        raise NameSwitchError(f"The proxy's routes file {ROUTES_FILE} did not have the expected shape: {error}") from error
+    return LoadedRoutes(
+        routers={key + FROM_ROUTES_FILE: router for key, router in http.routers.items()},
+        services={key + FROM_ROUTES_FILE: service for key, service in http.services.items()},
+    )
+
+
+def routes_not_loaded(written: dict[str, str], loaded: dict[str, str]) -> str:
+    differing = sorted(name for name in written.keys() | loaded.keys() if written.get(name) != loaded.get(name))
+    return "; ".join(f"{name} is written to {written.get(name)} and still sends it to {loaded.get(name)}" for name in differing)
+
+
 # noinspection HttpUrlsUsage
 def copy_url(copy_name: str) -> str:
     return f"http://{copy_name}:{COPY_PORT}"
@@ -145,6 +166,7 @@ class NameSwitch:
     def ensure_ready(self) -> None:
         self.host.ensure_service(PROXY)
         self.wait_until_answering()
+        self.wait_until_loaded(self.read_written())
 
     def wait_until_answering(self) -> None:
         started = self.clock()
@@ -164,6 +186,22 @@ class NameSwitch:
             return {}
         return copies_by_name(self.read_loaded_routes())
 
+    def read_written(self) -> dict[str, str]:
+        text = self.host.read_file(PROXY_NAME, ROUTES_FILE)
+        if text is None:
+            return {}
+        return copies_by_name(written_routes_from_file(text))
+
+    def wait_until_loaded(self, written: dict[str, str]) -> None:
+        started = self.clock()
+        while (loaded := self.read_serving()) != written:
+            if self.clock() - started >= self.load_deadline_seconds:
+                raise NameSwitchError(
+                    f"The proxy did not load its routes file within {self.load_deadline_seconds:g} s: "
+                    f"{routes_not_loaded(written, loaded)}. The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
+                )
+            self.sleep(POLL_SECONDS)
+
     def write_routes(self, copies: dict[str, str]) -> None:
         self.host.place_file(PROXY_NAME, STAGED_ROUTES_FILE, routes_file(copies))
         result = self.host.run_in(PROXY_NAME, ["mv", str(STAGED_ROUTES_FILE), str(ROUTES_FILE)])
@@ -171,15 +209,9 @@ class NameSwitch:
             raise NameSwitchError(f"Putting the proxy's new routes in place failed: {result.output}")
 
     def point(self, name: str, copy_name: str) -> None:
-        self.write_routes(self.read_serving() | {name: copy_name})
-        started = self.clock()
-        while (serving := self.read_serving().get(name)) != copy_name:
-            if self.clock() - started >= self.load_deadline_seconds:
-                raise NameSwitchError(
-                    f"The proxy did not load the route of {name} to {copy_name} within {self.load_deadline_seconds:g} s, "
-                    f"and still sends it to {serving}. The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
-                )
-            self.sleep(POLL_SECONDS)
+        routes = self.read_serving() | {name: copy_name}
+        self.write_routes(routes)
+        self.wait_until_loaded(routes)
 
     def request_copy(self, copy_name: str) -> CommandResult:
         url = copy_url(copy_name) + "/"

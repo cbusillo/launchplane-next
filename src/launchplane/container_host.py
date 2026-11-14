@@ -23,7 +23,7 @@ BUILD_LABEL = "launchplane.build"
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
 LANE_NETWORK = "launchplane-lanes"
-RETIRE_GRACE_SECONDS = 10
+RETIRE_GRACE_SECONDS = 30
 LOG_TAIL_LINES = 20
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
@@ -208,6 +208,15 @@ class ContainerHost:
             raise ContainerHostError(f"Running {command[0]} in {name} on {self.address} returned before the command finished.")
         return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())
 
+    def read_file(self, name: str, path: PurePosixPath) -> str | None:
+        with self.attempting(f"Reading {path} in {name}"):
+            container = self.client.containers.get(name)
+            try:
+                chunks, _ = container.get_archive(str(path))
+            except NotFound:
+                return None
+            return only_file_in(b"".join(chunks)).decode()
+
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None:
         with self.attempting(f"Placing {path} in {name}"):
             self.client.containers.get(name).put_archive(str(path.parent), tar_of(path.name, content.encode()))  # pyright: ignore[reportUnknownMemberType]
@@ -220,3 +229,12 @@ def tar_of(file_name: str, content: bytes) -> bytes:
         member.size = len(content)
         tar.addfile(member, io.BytesIO(content))
     return archive.getvalue()
+
+
+def only_file_in(archive: bytes) -> bytes:
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        member = tar.next()
+        content = None if member is None else tar.extractfile(member)
+        if content is None:
+            raise ContainerHostError("Docker answered a file read with an archive that holds no file.")
+        return content.read()

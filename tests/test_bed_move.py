@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from launchplane.name_switch import PROXY_NAME, ROUTES_FILE, STAGED_ROUTES_FILE, routes_file
 from tests.bed import ask, needs_test_bed, on_control, on_scratch, remove_product_copies
 
 pytestmark = needs_test_bed
@@ -23,6 +24,9 @@ BUILD_C = "hashicorp/http-echo:1.0"
 ANSWER_A = "nginx/1.30.6"
 ANSWER_B = "nginx/1.31.8"
 PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
+SLOW_DOWNLOAD_BYTES = 64 * 1024 * 1024
+SLOW_DOWNLOAD_CHUNK = 256 * 1024
+SLOW_DOWNLOAD_PAUSE = 0.06
 
 
 @dataclass
@@ -69,8 +73,40 @@ def request_loop() -> Generator[RequestLoop]:
         thread.join()
 
 
-def move(build: str) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{PRODUCT}/{LANE}/move", {"build": build})
+def move(build: str, product: str = PRODUCT, lane: str = LANE) -> tuple[int, dict[str, Any]]:
+    return ask(f"/lanes/{product}/{lane}/move", {"build": build})
+
+
+def write_route_without_launchplane(copy_name: str) -> None:
+    status, body = ask("/running")
+    assert status == 200, body
+    loaded = {copy["serves"]: copy["name"] for copy in body["copies"] if copy["serves"]}
+    staged = f"docker exec -i {PROXY_NAME} sh -c 'cat > {STAGED_ROUTES_FILE} && mv {STAGED_ROUTES_FILE} {ROUTES_FILE}'"
+    on_scratch(staged, given=routes_file(loaded | {NAME: copy_name}))
+
+
+@dataclass
+class SlowDownload:
+    received: int = 0
+    error: str | None = None
+
+    def run(self) -> None:
+        connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=30)
+        try:
+            connection.request("GET", "/big", headers={"Host": NAME})
+            response = connection.getresponse()
+            while chunk := response.read(SLOW_DOWNLOAD_CHUNK):
+                self.received += len(chunk)
+                time.sleep(SLOW_DOWNLOAD_PAUSE)
+        except OSError as error:
+            self.error = repr(error)
+        finally:
+            connection.close()
+
+
+def give_build_a_a_big_file() -> None:
+    copy_name = lane_copies()[BUILD_A]["name"]
+    on_scratch(f"docker exec {copy_name} sh -c 'head -c {SLOW_DOWNLOAD_BYTES} /dev/zero > /usr/share/nginx/html/big'")
 
 
 def lane_copies() -> dict[str, dict[str, Any]]:
@@ -178,3 +214,47 @@ def test_a_move_killed_before_the_switch_is_cleaned_up_by_asking_for_the_serving
     assert loop.failures == []
     assert loop.answers_in_order() == [ANSWER_A]
     assert list(lane_copies()) == [BUILD_A]
+
+
+@pytest.mark.usefixtures("lane_serving_a")
+def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_not_deleted() -> None:
+    with request_loop() as loop:
+        kill_launchplane_once_build_b_has_started()
+        write_route_without_launchplane(lane_copies()[BUILD_B]["name"])
+        status, body = move(BUILD_A)
+    assert (status, body["outcome"]) == (200, "switched"), body
+    assert loop.failures == []
+    assert list(lane_copies()) == [BUILD_A]
+    assert serving_builds() == [BUILD_A]
+
+
+@pytest.mark.usefixtures("lane_serving_a")
+def test_a_request_in_flight_on_the_old_copy_at_the_switch_finishes() -> None:
+    give_build_a_a_big_file()
+    download = SlowDownload()
+    downloading = threading.Thread(target=download.run)
+    downloading.start()
+    time.sleep(1)
+    status, body = move(BUILD_B)
+    downloading.join()
+    assert (status, body["outcome"]) == (200, "switched"), body
+    assert (download.error, download.received) == (None, SLOW_DOWNLOAD_BYTES)
+
+
+def test_two_lanes_whose_product_and_lane_join_to_the_same_text_each_keep_their_own_copy() -> None:
+    lanes = [("test-bed-x-y", "z"), ("test-bed-x", "y-z")]
+    for product, _ in lanes:
+        remove_product_copies(product)
+    try:
+        for product, lane in lanes:
+            status, body = move(BUILD_A, product, lane)
+            assert (status, body["outcome"]) == (200, "switched"), body
+        status, body = ask("/running")
+        assert status == 200, body
+        serving_copies = {(copy["product"], copy["lane"]): copy["serves"] for copy in body["copies"]}
+        assert {lane: serving_copies.get(lane) for lane in lanes} == {
+            (product, lane): f"{lane}.{product}.test" for product, lane in lanes
+        }
+    finally:
+        for product, _ in lanes:
+            remove_product_copies(product)

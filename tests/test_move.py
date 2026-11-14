@@ -5,7 +5,16 @@ import pytest
 
 from launchplane.container_host import CommandResult, Service
 from launchplane.move import Mover, Outcome, lane_name
-from launchplane.name_switch import LOADED_ROUTES_URL, PROXY_NAME, CheckFailed, NameSwitch, NameSwitchError, routes_file
+from launchplane.name_switch import (
+    LOADED_ROUTES_URL,
+    PROXY_NAME,
+    ROUTES_FILE,
+    STAGED_ROUTES_FILE,
+    CheckFailed,
+    NameSwitch,
+    NameSwitchError,
+    routes_file,
+)
 from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
 BUILD_A = LaneCopy(product="site", lane="testing", build="site:a")
@@ -119,11 +128,29 @@ def test_a_copy_left_by_an_abandoned_move_is_removed_by_a_move_elsewhere() -> No
     assert set(host.copies) == {BUILD_A.name}
 
 
-def test_an_old_copy_left_after_the_switch_is_retired_when_the_move_is_asked_again() -> None:
+def test_an_old_copy_left_after_the_switch_is_stopped_gracefully_not_removed_by_force_when_asked_again() -> None:
     host, switch = lane_serving(BUILD_B)
     host.place(BUILD_A)
     Mover(host, switch).move(BUILD_B)
-    assert set(host.copies) == {BUILD_B.name}
+    assert host.actions == [f"retire {BUILD_A.name}"]
+
+
+def test_a_serving_copy_that_has_stopped_is_replaced_not_reported_unchanged() -> None:
+    host, switch = lane_serving(BUILD_B)
+    host.place(BUILD_B, CopyState.STOPPED)
+    result = Mover(host, switch).move(BUILD_B)
+    assert result.outcome == Outcome.SWITCHED
+    assert host.copies[BUILD_B.name].state == CopyState.RUNNING
+
+
+def test_two_lanes_whose_product_and_lane_join_to_the_same_text_never_share_a_copy() -> None:
+    first = LaneCopy(product="a-b", lane="c", build="site:a")
+    second = LaneCopy(product="a", lane="b-c", build="site:a")
+    host = FakeHost()
+    mover = Mover(host, FakeSwitch())
+    mover.move(first)
+    mover.move(second)
+    assert {(copy.product, copy.lane) for copy in host.copies.values()} == {("a-b", "c"), ("a", "b-c")}
 
 
 def test_a_route_to_a_copy_that_no_longer_exists_is_not_taken_as_serving() -> None:
@@ -155,11 +182,15 @@ INTERNAL_SERVICES = {"api@internal": {"status": "enabled"}}
 
 class ProxyHost:
     def __init__(self, serving: dict[str, str], answers: list[bool] | None = None, loads: bool = True) -> None:
-        self.loaded = loaded_from(routes_file(serving))
+        self.files = {ROUTES_FILE: routes_file(serving)}
+        self.loaded = loaded_from(self.files[ROUTES_FILE])
         self.answers = iter(answers or [])
         self.loads = loads
-        self.placed: dict[PurePosixPath, str] = {}
         self.log = "error while building configuration"
+
+    def load_when_watching(self) -> None:
+        if self.loads:
+            self.loaded = loaded_from(self.files[ROUTES_FILE])
 
     def ensure_service(self, service: Service) -> None:
         pass
@@ -170,17 +201,21 @@ class ProxyHost:
     def run_in(self, name: str, command: list[str]) -> CommandResult:
         assert name == PROXY_NAME
         if command[0] == "mv":
-            if self.loads:
-                self.loaded = loaded_from(self.placed[PurePosixPath(command[1])])
+            self.files[PurePosixPath(command[2])] = self.files.pop(PurePosixPath(command[1]))
+            self.load_when_watching()
             return CommandResult(exit_code=0, output="")
         if command[-1] == LOADED_ROUTES_URL:
             return CommandResult(exit_code=0, output=self.loaded)
         answered = next(self.answers)
         return CommandResult(exit_code=0 if answered else 1, output="" if answered else "Connection refused")
 
+    def read_file(self, name: str, path: PurePosixPath) -> str | None:
+        assert name == PROXY_NAME
+        return self.files.get(path)
+
     def place_file(self, name: str, path: PurePosixPath, content: str) -> None:
         assert name == PROXY_NAME
-        self.placed[path] = content
+        self.files[path] = content
 
     def read_log_tail(self, name: str) -> str:
         return f"{name}: {self.log}"
@@ -188,7 +223,18 @@ class ProxyHost:
 
 def ticking_switch(host: ProxyHost, **seconds: float) -> NameSwitch:
     clock = iter(range(1000))
-    return NameSwitch(host, sleep=lambda _: None, clock=lambda: next(clock), **seconds)
+    return NameSwitch(host, sleep=lambda _: host.load_when_watching(), clock=lambda: next(clock), **seconds)
+
+
+def test_a_route_written_before_a_crash_but_not_yet_loaded_is_waited_for_so_its_copy_is_not_removed() -> None:
+    host = FakeHost()
+    host.place(BUILD_A)
+    host.place(BUILD_B)
+    proxy = ProxyHost({NAME: BUILD_A.name}, answers=[True] * 10)
+    proxy.files[ROUTES_FILE] = routes_file({NAME: BUILD_B.name})
+    Mover(host, ticking_switch(proxy)).move(BUILD_A)
+    proxy.load_when_watching()
+    assert NameSwitch(proxy).read_serving()[NAME] in host.copies
 
 
 def test_pointing_one_name_keeps_every_other_name_where_it_was() -> None:
@@ -206,12 +252,13 @@ def test_a_route_launchplane_did_not_write_is_an_error_not_overwritten() -> None
     host.loaded = json.dumps({"routers": {"shop@file": {"rule": "PathPrefix(`/`)", "service": "shop"}}})
     with pytest.raises(NameSwitchError, match="did not write"):
         NameSwitch(host).point(NAME, "site-t2")
-    assert host.placed == {}
+    assert STAGED_ROUTES_FILE not in host.files
+    assert host.files[ROUTES_FILE] == routes_file({})
 
 
 def test_a_switch_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> None:
     host = ProxyHost({NAME: "site-t1"}, loads=False)
-    with pytest.raises(NameSwitchError, match=r"still sends it to site-t1[\s\S]*error while building"):
+    with pytest.raises(NameSwitchError, match=r"written to site-t2 and still sends it to site-t1[\s\S]*error while building"):
         ticking_switch(host, load_deadline_seconds=3).point(NAME, "site-t2")
 
 

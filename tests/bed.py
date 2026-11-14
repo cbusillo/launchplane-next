@@ -17,8 +17,8 @@ needs_test_bed = pytest.mark.skipif(
 )
 
 
-def on_scratch(command: str) -> str:
-    return subprocess.run([*SCRATCH_SHELL, command], capture_output=True, text=True, check=True).stdout  # noqa: S603
+def on_scratch(command: str, given: str | None = None) -> str:
+    return subprocess.run([*SCRATCH_SHELL, command], input=given, capture_output=True, text=True, check=True).stdout  # noqa: S603
 
 
 def on_control(command: str) -> str:
