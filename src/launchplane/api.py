@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from launchplane.container_host import ContainerHost, ContainerHostError
-from launchplane.move import Mover, MoveResult, Outcome, lane_name
+from launchplane.move import Mover, MoveResult, Outcome, RetireResult, lane_name
 from launchplane.name_switch import NameSwitch, NameSwitchError
 from launchplane.running_copy import LaneCopy, RunningCopy
 
@@ -20,6 +20,7 @@ type CopyReader = Callable[[], list[RunningCopy]]
 type ServingReader = Callable[[], dict[str, str]]
 type NameChecker = Callable[[str], str | None]
 type MoveRequester = Callable[[LaneCopy], MoveResult]
+type RetireRequester = Callable[[str, str], RetireResult]
 
 SLUG = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
 UNREADABLE = (ContainerHostError, NameSwitchError)
@@ -53,15 +54,16 @@ class MoveRequest(BaseModel):
     build: str
 
 
-class MoveNotFinished(BaseModel):
+class NotFinished(BaseModel):
     error: str
 
 
 RUNNING_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": HostUnreadable}}
 MOVE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     HTTPStatus.UNPROCESSABLE_CONTENT.value: {"model": MoveResult},
-    HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": MoveNotFinished},
+    HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
 }
+RETIRE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished}}
 
 
 def answers_for(copies: list[RunningCopy], serving: dict[str, str]) -> list[CopyAnswer]:
@@ -105,7 +107,9 @@ def running_page() -> str:
     return files("launchplane").joinpath("running.html").read_text()
 
 
-def create_app(read: CopyReader, read_serving: ServingReader, why_name_fails: NameChecker, move: MoveRequester) -> FastAPI:
+def create_app(
+    read: CopyReader, read_serving: ServingReader, why_name_fails: NameChecker, move: MoveRequester, retire: RetireRequester
+) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 
@@ -127,17 +131,25 @@ def create_app(read: CopyReader, read_serving: ServingReader, why_name_fails: Na
     @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
     def move_lane(
         product: Annotated[str, SLUG], lane: Annotated[str, SLUG], request: MoveRequest, response: Response
-    ) -> MoveResult | MoveNotFinished:
+    ) -> MoveResult | NotFinished:
         try:
             result = move(LaneCopy(product=product, lane=lane, build=request.build))
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
-            return MoveNotFinished(
+            return NotFinished(
                 error=f"The move of {lane} of {product} to {request.build} stopped, and is safe to ask again: {error}"
             )
         if result.outcome == Outcome.CHECK_FAILED:
             response.status_code = HTTPStatus.UNPROCESSABLE_CONTENT
         return result
+
+    @app.post("/lanes/{product}/{lane}/retire", responses=RETIRE_ERROR_RESPONSES)
+    def retire_lane(product: Annotated[str, SLUG], lane: Annotated[str, SLUG], response: Response) -> RetireResult | NotFinished:
+        try:
+            return retire(product, lane)
+        except UNREADABLE as error:
+            response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+            return NotFinished(error=f"Retiring {lane} of {product} stopped, and is safe to ask again: {error}")
 
     return app
 
@@ -147,5 +159,6 @@ def serve() -> None:
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
     switch = NameSwitch(host)
-    app = create_app(host.read_copies, switch.read_serving, switch.why_name_fails, Mover(host, switch).move)
+    mover = Mover(host, switch)
+    app = create_app(host.read_copies, switch.read_serving, switch.why_name_fails, mover.move, mover.retire)
     uvicorn.run(app, host=address, port=port)

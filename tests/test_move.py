@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 import pytest
 
 from launchplane.container_host import CommandResult, Service
-from launchplane.move import Mover, Outcome, lane_name
+from launchplane.move import Mover, Outcome, RetireOutcome, lane_name
 from launchplane.name_switch import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
@@ -76,6 +76,10 @@ class FakeSwitch:
     def point(self, name: str, copy_name: str) -> None:
         self.serving[name] = copy_name
         self.host.actions.append(f"point {copy_name}")
+
+    def unpoint(self, name: str) -> None:
+        del self.serving[name]
+        self.host.actions.append(f"unpoint {name}")
 
 
 def lane_serving(copy: LaneCopy, name: str) -> tuple[FakeHost, FakeSwitch]:
@@ -181,6 +185,48 @@ def test_copies_in_other_lanes_are_never_touched() -> None:
     assert "site-production-pppppppppppp" in host.copies
 
 
+def test_retiring_takes_the_name_away_before_stopping_any_copy_so_no_new_request_reaches_a_stopping_copy() -> None:
+    host, switch = lane_serving(BUILD_A, COPY_A)
+    host.place(BUILD_B, COPY_B)
+    result = Mover(host, switch).retire("site", "testing")
+    assert host.actions == [f"unpoint {NAME}", f"retire {COPY_A}", f"retire {COPY_B}"]
+    assert (result.outcome, result.route_removed_to, result.retired_copies) == (RetireOutcome.RETIRED, COPY_A, [COPY_A, COPY_B])
+
+
+def test_retiring_a_retired_lane_again_changes_nothing_and_says_so() -> None:
+    host, switch = lane_serving(BUILD_A, COPY_A)
+    mover = Mover(host, switch)
+    mover.retire("site", "testing")
+    host.actions.clear()
+    result = mover.retire("site", "testing")
+    assert (result.outcome, host.actions) == (RetireOutcome.UNCHANGED, [])
+
+
+def test_retiring_a_lane_whose_route_is_gone_but_whose_copy_remains_finishes_by_retiring_the_copy() -> None:
+    host, switch = lane_serving(BUILD_A, COPY_A)
+    del switch.serving[NAME]
+    result = Mover(host, switch).retire("site", "testing")
+    assert (result.outcome, host.actions) == (RetireOutcome.RETIRED, [f"retire {COPY_A}"])
+
+
+def test_a_name_whose_copy_is_gone_is_retired_by_the_product_and_lane_it_names() -> None:
+    host = FakeHost()
+    switch = FakeSwitch(host)
+    switch.serving[NAME] = COPY_A
+    result = Mover(host, switch).retire("site", "testing")
+    assert (result.outcome, switch.serving, host.actions) == (RetireOutcome.RETIRED, {}, [f"unpoint {NAME}"])
+
+
+def test_retiring_a_lane_leaves_every_other_lane_its_name_and_copies() -> None:
+    host, switch = lane_serving(BUILD_A, COPY_A)
+    production = LaneCopy(product="site", lane="production", build="site:a")
+    host.place(production, "site-production-pppppppppppp")
+    switch.serving["production.site.test"] = "site-production-pppppppppppp"
+    Mover(host, switch).retire("site", "testing")
+    assert switch.serving == {"production.site.test": "site-production-pppppppppppp"}
+    assert set(host.copies) == {"site-production-pppppppppppp"}
+
+
 def loaded_from(routes_file_text: str) -> str:
     http = json.loads(routes_file_text)["http"]
     routers = {f"{key}@file": router for key, router in http["routers"].items()}
@@ -268,6 +314,32 @@ def test_pointing_one_name_keeps_every_other_name_where_the_proxy_sends_it_not_w
     host.files[ROUTES_FILE] = routes_file({"production.site.test": "site-p2"})
     ticking_switch(host).point(NAME, "site-t2")
     assert NameSwitch(host).read_serving() == {"production.site.test": "site-p1", NAME: "site-t2"}
+
+
+def test_unpointing_one_name_keeps_every_other_name_where_the_proxy_sends_it() -> None:
+    host = ProxyHost({NAME: "site-t1", "production.site.test": "site-p1"})
+    host.files[ROUTES_FILE] = routes_file({NAME: "site-t1", "production.site.test": "site-p2"})
+    ticking_switch(host).unpoint(NAME)
+    assert NameSwitch(host).read_serving() == {"production.site.test": "site-p1"}
+
+
+class HostThatSeesTheProxy(FakeHost):
+    def __init__(self, proxy: ProxyHost) -> None:
+        super().__init__()
+        self.proxy = proxy
+
+    def retire_copy(self, name: str) -> None:
+        assert NAME not in NameSwitch(self.proxy).read_serving(), f"{name} was stopped while the proxy still sent {NAME} to it"
+        super().retire_copy(name)
+
+
+def test_retiring_stops_no_copy_until_the_proxy_has_loaded_the_name_gone() -> None:
+    proxy = ProxyHost({NAME: COPY_A})
+    proxy.loads_on_write = False
+    host = HostThatSeesTheProxy(proxy)
+    host.place(BUILD_A, COPY_A)
+    result = Mover(host, ticking_switch(proxy)).retire("site", "testing")
+    assert result.retired_copies == [COPY_A]
 
 
 def test_a_proxy_with_no_routes_serves_no_name() -> None:

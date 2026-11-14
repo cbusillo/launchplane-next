@@ -2,14 +2,17 @@ import json
 import os
 import shlex
 import subprocess
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 LAUNCHPLANE_URL = os.environ.get("LAUNCHPLANE_URL", "")
 SCRATCH_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_SCRATCH_SHELL", "lp-scratch"))
+SCRATCH_ADDRESS = os.environ.get("LAUNCHPLANE_SCRATCH_ADDRESS", "docker-lp-scratch.shiny")
 CONTROL_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_CONTROL_SHELL", "lp-control"))
 
 needs_test_bed = pytest.mark.skipif(
@@ -38,3 +41,30 @@ def ask(path: str, body: dict[str, Any] | None = None, timeout: float = 60) -> t
 
 def remove_product_copies(product: str) -> None:
     on_scratch(f"docker rm --force $(docker ps --all --quiet --filter label=launchplane.product={product}) 2>/dev/null || true")
+
+
+def move_lane(product: str, lane: str, build: str) -> tuple[int, dict[str, Any]]:
+    return ask(f"/lanes/{product}/{lane}/move", {"build": build})
+
+
+def retire(product: str, lane: str) -> tuple[int, dict[str, Any]]:
+    return ask(f"/lanes/{product}/{lane}/retire", {})
+
+
+def wait_for(condition: Callable[[], bool], seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, f"waited {seconds} s for {condition.__name__}"
+        time.sleep(0.1)
+
+
+def launchplane_answers() -> bool:
+    try:
+        return ask("/running", timeout=2)[0] == 200
+    except OSError:
+        return False
+
+
+def kill_launchplane() -> None:
+    on_control("systemctl kill --signal=KILL launchplane")
+    wait_for(launchplane_answers, seconds=30)

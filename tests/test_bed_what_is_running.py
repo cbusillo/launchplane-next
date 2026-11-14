@@ -10,7 +10,7 @@ import pytest
 from tests.bed import ask, needs_test_bed, on_scratch, remove_product_copies
 
 CONTROL_HOST_NAME = "launchplane.shiny"
-PRODUCT = "test-bed-site"
+PRODUCT = "test-bed-placed"
 AWKWARD_BUILD = 'build "1", with a comma'
 
 pytestmark = needs_test_bed

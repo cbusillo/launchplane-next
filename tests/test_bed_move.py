@@ -1,8 +1,7 @@
 import http.client
-import os
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,11 +9,10 @@ from typing import Any
 import pytest
 
 from launchplane.name_switch import PROXY_NAME, ROUTES_FILE, STAGED_ROUTES_FILE, routes_file
-from tests.bed import ask, needs_test_bed, on_control, on_scratch, remove_product_copies
+from tests.bed import SCRATCH_ADDRESS, ask, kill_launchplane, move_lane, needs_test_bed, on_scratch, retire, wait_for
 
 pytestmark = needs_test_bed
 
-SCRATCH_ADDRESS = os.environ.get("LAUNCHPLANE_SCRATCH_ADDRESS", "docker-lp-scratch.shiny")
 PRODUCT = "test-bed-site"
 LANE = "testing"
 NAME = f"{LANE}.{PRODUCT}.test"
@@ -70,14 +68,10 @@ def request_loop() -> Generator[RequestLoop]:
         thread.join()
 
 
-def move(build: str, product: str = PRODUCT, lane: str = LANE) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{product}/{lane}/move", {"build": build})
-
-
-def write_route_without_launchplane(copy_name: str) -> None:
+def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:
     status, body = ask("/running")
     assert status == 200, body
-    loaded = {copy["serves"]: copy["name"] for copy in body["copies"] if copy["serves"]}
+    loaded = {entry["name"]: entry["sends_to"] for entry in body["names"] if entry["sends_to"]}
     staged = f"docker exec -i {PROXY_NAME} sh -c 'cat > {STAGED_ROUTES_FILE} && mv {STAGED_ROUTES_FILE} {ROUTES_FILE}'"
     on_scratch(staged, given=routes_file(loaded | {NAME: copy_name}))
 
@@ -103,27 +97,12 @@ def copy_of_build_b_is_on_scratch() -> bool:
     return bool(on_scratch(f"docker ps --quiet {filters}"))
 
 
-def wait_for(condition: Callable[[], bool], seconds: float) -> None:
-    deadline = time.monotonic() + seconds
-    while not condition():
-        assert time.monotonic() < deadline, f"waited {seconds} s for {condition.__name__}"
-        time.sleep(0.1)
-
-
-def launchplane_answers() -> bool:
-    try:
-        return ask("/running", timeout=2)[0] == 200
-    except OSError:
-        return False
-
-
 def kill_launchplane_once_build_b_has_started() -> None:
     mover = threading.Thread(target=move_to_b_cut_short_by_the_kill)
     mover.start()
     wait_for(copy_of_build_b_is_on_scratch, seconds=30)
-    on_control("systemctl kill --signal=KILL launchplane")
+    kill_launchplane()
     mover.join()
-    wait_for(launchplane_answers, seconds=30)
 
 
 def move_to_b_cut_short_by_the_kill() -> None:
@@ -131,13 +110,20 @@ def move_to_b_cut_short_by_the_kill() -> None:
         move(BUILD_B)
 
 
+def move(build: str, product: str = PRODUCT, lane: str = LANE) -> tuple[int, dict[str, Any]]:
+    return move_lane(product, lane, build)
+
+
+def ensure_lane_serves_a() -> None:
+    status, body = move(BUILD_A)
+    assert status == 200, body
+
+
 @pytest.fixture
 def lane_serving_a() -> Iterator[None]:
-    remove_product_copies(PRODUCT)
-    status, body = move(BUILD_A)
-    assert (status, body["outcome"]) == (200, "switched"), body
+    ensure_lane_serves_a()
     yield
-    remove_product_copies(PRODUCT)
+    ensure_lane_serves_a()
 
 
 @pytest.mark.usefixtures("lane_serving_a")
@@ -210,7 +196,7 @@ def test_a_move_killed_before_the_switch_is_cleaned_up_by_asking_for_the_serving
 def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_not_deleted() -> None:
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
-        write_route_without_launchplane(lane_copies()[BUILD_B]["name"])
+        write_route_without_launchplane_keeping_every_loaded_route(lane_copies()[BUILD_B]["name"])
         status, body = move(BUILD_A)
     assert (status, body["outcome"]) == (200, "switched"), body
     assert loop.failures == []
@@ -220,8 +206,6 @@ def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_
 
 def test_two_lanes_whose_product_and_lane_join_to_the_same_text_each_keep_their_own_copy() -> None:
     lanes = [("test-bed-x-y", "z"), ("test-bed-x", "y-z")]
-    for product, _ in lanes:
-        remove_product_copies(product)
     try:
         for product, lane in lanes:
             status, body = move(BUILD_A, product, lane)
@@ -233,5 +217,6 @@ def test_two_lanes_whose_product_and_lane_join_to_the_same_text_each_keep_their_
             (product, lane): f"{lane}.{product}.test" for product, lane in lanes
         }
     finally:
-        for product, _ in lanes:
-            remove_product_copies(product)
+        for product, lane in lanes:
+            status, body = retire(product, lane)
+            assert status == 200, body

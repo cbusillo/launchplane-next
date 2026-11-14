@@ -210,6 +210,10 @@ class NameSwitch:
         self.write_routes(self.read_serving() | {name: copy_name})
         self.wait_until_sends(name, copy_name)
 
+    def unpoint(self, name: str) -> None:
+        self.write_routes({other: copy for other, copy in self.read_serving().items() if other != name})
+        self.wait_until_sends(name, None)
+
     def request_copy(self, copy_name: str) -> CommandResult:
         url = copy_url(copy_name) + "/"
         return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), url])
