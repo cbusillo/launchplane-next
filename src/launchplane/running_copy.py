@@ -1,3 +1,4 @@
+import secrets
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
@@ -18,3 +19,15 @@ class RunningCopy(BaseModel):
     build: str | None
     name: str
     state: CopyState
+
+
+class LaneCopy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    product: str
+    lane: str
+    build: str
+
+
+def new_copy_name(copy: LaneCopy) -> str:
+    return f"{copy.product}-{copy.lane}-{secrets.token_hex(6)}"

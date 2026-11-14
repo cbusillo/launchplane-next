@@ -1,38 +1,23 @@
-import json
-import os
 import shlex
 import socket
-import subprocess
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import pytest
 
-LAUNCHPLANE_URL = os.environ.get("LAUNCHPLANE_URL", "")
-SCRATCH_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_SCRATCH_SHELL", "lp-scratch"))
+from tests.bed import ask, needs_test_bed, on_scratch, remove_product_copies
+
 CONTROL_HOST_NAME = "launchplane.shiny"
 PRODUCT = "test-bed-site"
 AWKWARD_BUILD = 'build "1", with a comma'
 
-pytestmark = pytest.mark.skipif(
-    not LAUNCHPLANE_URL, reason="needs the test bed: set LAUNCHPLANE_URL, e.g. http://launchplane.shiny:8700"
-)
-
-
-def on_scratch(command: str) -> str:
-    return subprocess.run([*SCRATCH_SHELL, command], capture_output=True, text=True, check=True).stdout  # noqa: S603
+pytestmark = needs_test_bed
 
 
 def ask_what_is_running() -> tuple[int, dict[str, Any]]:
-    try:
-        with urllib.request.urlopen(f"{LAUNCHPLANE_URL}/running", timeout=60) as response:  # noqa: S310
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        return error.code, json.loads(error.read())
+    return ask("/running")
 
 
 def copies_by_lane() -> dict[str, dict[str, str]]:
@@ -46,15 +31,11 @@ def place_copy(lane: str, build: str) -> None:
     on_scratch(f"docker run --detach --name {PRODUCT}-{lane} {labels} busybox:1.37 sleep infinity")
 
 
-def remove_copies() -> None:
-    on_scratch(f"docker rm --force $(docker ps --all --quiet --filter label=launchplane.product={PRODUCT}) 2>/dev/null || true")
-
-
 @pytest.fixture
 def clean_scratch() -> Iterator[None]:
-    remove_copies()
+    remove_product_copies(PRODUCT)
     yield
-    remove_copies()
+    remove_product_copies(PRODUCT)
 
 
 @contextmanager
