@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -132,3 +133,15 @@ def test_the_page_loads_without_reading_the_host_so_it_can_say_the_host_is_unrea
     response = app_reading(unreadable).get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
+
+
+def test_names_are_asked_at_once_so_names_that_hang_do_not_add_up() -> None:
+    serving = {f"testing.site{number}.test": f"site{number}-testing" for number in range(3)}
+    all_waiting = threading.Barrier(len(serving), timeout=5)
+
+    def hang_until_every_name_is_asked(name: str) -> str | None:
+        all_waiting.wait()
+        return "download timed out"
+
+    entries = names_answer([], serving, hang_until_every_name_is_asked)
+    assert {entry["error"] for entry in entries.values()} == {"download timed out"}

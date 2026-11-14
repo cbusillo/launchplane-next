@@ -1,5 +1,6 @@
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.resources import files
@@ -75,8 +76,8 @@ def lane_owners(copies: list[RunningCopy], serving: dict[str, str]) -> dict[str,
     return routed | marked
 
 
-def name_answer(name: str, owner: RunningCopy | None, sends_to: str | None, why_name_fails: NameChecker) -> NameAnswer:
-    error = f"The proxy sends {name} to no copy." if sends_to is None else why_name_fails(name)
+def name_answer(name: str, owner: RunningCopy | None, sends_to: str | None, failure: str | None) -> NameAnswer:
+    error = f"The proxy sends {name} to no copy." if sends_to is None else failure
     return NameAnswer(
         name=name,
         product=None if owner is None else owner.product,
@@ -87,9 +88,17 @@ def name_answer(name: str, owner: RunningCopy | None, sends_to: str | None, why_
     )
 
 
+def failures_at_once(names: list[str], why_name_fails: NameChecker) -> dict[str, str | None]:
+    if not names:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        return dict(zip(names, pool.map(why_name_fails, names), strict=True))
+
+
 def name_answers(copies: list[RunningCopy], serving: dict[str, str], why_name_fails: NameChecker) -> list[NameAnswer]:
     owners = lane_owners(copies, serving)
-    return [name_answer(name, owners[name], serving.get(name), why_name_fails) for name in sorted(owners)]
+    failures = failures_at_once(sorted(serving), why_name_fails)
+    return [name_answer(name, owners[name], serving.get(name), failures.get(name)) for name in sorted(owners)]
 
 
 def running_page() -> str:

@@ -78,16 +78,27 @@ function nameStatus(entry) {
 }
 
 /**
- * @param {LaneName} entry
- * @param {Copy[]} copies
+ * @param {string} copyName
+ * @param {Copy[]} allCopies
  */
-function laneSection(entry, copies) {
+function routeElsewhere(copyName, allCopies) {
+  const copy = allCopies.find((each) => each.name === copyName);
+  const where = copy ? `, a copy of ${copy.product} · ${copy.lane ?? "no lane"}.` : ", which is not on the host.";
+  return element("small", {}, "The proxy sends it to ", code(copyName), where);
+}
+
+/**
+ * @param {LaneName} entry
+ * @param {Copy[]} laneCopies
+ * @param {Copy[]} allCopies
+ */
+function laneSection(entry, laneCopies, allCopies) {
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A name with no copy on the host";
   const section = element("section", {}, element("h2", {}, title), nameStatus(entry));
-  if (entry.sends_to && !copies.some((copy) => copy.name === entry.sends_to)) {
-    section.append(element("small", {}, "The proxy sends it to ", code(entry.sends_to), ", which is not on the host."));
+  if (entry.sends_to && !laneCopies.some((copy) => copy.name === entry.sends_to)) {
+    section.append(routeElsewhere(entry.sends_to, allCopies));
   }
-  if (copies.length) section.append(element("ul", {}, ...copies.map(copyItem)));
+  if (laneCopies.length) section.append(element("ul", {}, ...laneCopies.map(copyItem)));
   return section;
 }
 
@@ -104,7 +115,7 @@ function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
   reading.removeAttribute("role");
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
-  const sections = answer.names.map((entry) => laneSection(entry, answer.copies.filter((copy) => isOfLane(copy, entry))));
+  const sections = answer.names.map((entry) => laneSection(entry, answer.copies.filter((copy) => isOfLane(copy, entry)), answer.copies));
   const withoutLane = answer.copies.filter((copy) => copy.lane === null);
   if (withoutLane.length) sections.push(element("section", {}, element("h2", {}, "Copies with no lane"), element("ul", {}, ...withoutLane.map(copyItem))));
   if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
