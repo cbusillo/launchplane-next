@@ -68,10 +68,10 @@ def request_loop() -> Generator[RequestLoop]:
         thread.join()
 
 
-def write_route_without_launchplane(copy_name: str) -> None:
+def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:
     status, body = ask("/running")
     assert status == 200, body
-    loaded = {copy["serves"]: copy["name"] for copy in body["copies"] if copy["serves"]}
+    loaded = {entry["name"]: entry["sends_to"] for entry in body["names"] if entry["sends_to"]}
     staged = f"docker exec -i {PROXY_NAME} sh -c 'cat > {STAGED_ROUTES_FILE} && mv {STAGED_ROUTES_FILE} {ROUTES_FILE}'"
     on_scratch(staged, given=routes_file(loaded | {NAME: copy_name}))
 
@@ -196,7 +196,7 @@ def test_a_move_killed_before_the_switch_is_cleaned_up_by_asking_for_the_serving
 def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_not_deleted() -> None:
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
-        write_route_without_launchplane(lane_copies()[BUILD_B]["name"])
+        write_route_without_launchplane_keeping_every_loaded_route(lane_copies()[BUILD_B]["name"])
         status, body = move(BUILD_A)
     assert (status, body["outcome"]) == (200, "switched"), body
     assert loop.failures == []

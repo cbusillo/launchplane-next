@@ -26,7 +26,7 @@ To retire a copy is to stop it gracefully and then remove it (see "The old copy"
 
 A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again.
 
-One move runs at a time in a Launchplane process. A second call waits for the first.
+One move runs at a time in a Launchplane process. A second call waits for the first. To take a lane away, see [retiring a lane](retiring-a-lane.md).
 
 ### The check
 

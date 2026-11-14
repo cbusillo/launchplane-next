@@ -37,7 +37,7 @@ Both carry `read_at`, the moment the host was asked.
 `GET /` is one HTML file, `src/launchplane/running.html`, with its style and script inline. It loads nothing else, needs no build step and no framework. FastAPI serves it as it is and it reads no host itself, so it opens even when the host cannot be read.
 
 - The script asks `/running` once a second, each time after the last answer arrived, so a slow host never piles up requests. It gives up on one answer after 15 s.
-- Each lane shows its name, whether the name answers and the real error if not, and its copies with build, state and whether the name points at it. A route to another lane's copy names that lane, and a route to a copy that is not on the host says so. Copies with no lane label are listed apart.
+- Each lane shows its name, whether the name answers and the real error if not (a name whose copy is running but does not answer with success says so, and does not say nothing is serving), and its copies with build, state and whether the name points at it. A route to another lane's copy names that lane, and a route to a copy that is not on the host says so. Copies with no lane label are listed apart.
 - When Launchplane answers `503`, or cannot be reached, the page shows the error and when it last read the host, and hides the lanes. It never shows an empty list for an answer it did not get. The time of the last good read is kept only by the open page, not by Launchplane.
 - Text is built with DOM text nodes, never as HTML, so a label cannot inject markup.
 
@@ -85,4 +85,4 @@ Docker on the scratch container listens on `192.168.1.56:2376` only, through the
 
 On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: the page at `http://launchplane.shiny:8700/` and the call at `http://launchplane.shiny:8700/running`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
 
-`tests/test_bed_what_is_running.py` runs against it from a machine that can reach the test bed: `LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py`. It places containers on the scratch container with `lp-scratch` (or `LAUNCHPLANE_SCRATCH_SHELL`). For the unreachable case it drops the control container's traffic to port 2376 on the scratch container's firewall for one call.
+`tests/test_bed_what_is_running.py` runs against it from a machine that can reach the test bed: `LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py`. It places containers of the product `test-bed-placed`, which no route names, on the scratch container with `lp-scratch` (or `LAUNCHPLANE_SCRATCH_SHELL`). For the unreachable case it drops the control container's traffic to port 2376 on the scratch container's firewall for one call.
