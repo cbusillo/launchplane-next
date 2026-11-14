@@ -3,16 +3,21 @@ from dataclasses import dataclass
 import pytest
 
 from launchplane.decide import (
-    Action,
     AwaitRoute,
     Check,
+    CheckRefused,
+    Done,
+    Event,
     LaneRoute,
     LaneSeen,
+    MoveResult,
     Outcome,
     ProxyNotRunning,
-    ReadAgain,
+    RemoveCopy,
+    RemoveRoute,
     Retire,
     RetireOutcome,
+    RetireResult,
     StartCopy,
     StartProxy,
     WriteRoute,
@@ -23,161 +28,108 @@ from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
 NAME = "testing.site.test"
 TARGET = LaneCopy(product="site", lane="testing", build="b")
-FRESH = "site-testing-new"
+FRESH = "site-testing-fresh"
 
 
 def lane_copy(name: str, build: str, state: CopyState = CopyState.RUNNING) -> RunningCopy:
     return RunningCopy(product="site", lane="testing", build=build, name=name, state=state)
 
 
-def step(action: Action) -> str:
-    match action:
-        case StartProxy():
-            return "start proxy"
-        case AwaitRoute(copy=copy_name):
-            return f"await {copy_name}"
-        case StartCopy(name=copy_name):
-            return f"start {copy_name}"
-        case Check(copy=copy_name):
-            return f"check {copy_name}"
-        case WriteRoute(copy=copy_name):
-            return f"route {copy_name}"
-        case Retire(copy=copy_name):
-            return f"retire {copy_name}"
-
-
-def steps(actions: tuple[Action, ...]) -> list[str]:
-    return [step(action) for action in actions]
+OLD = lane_copy("old", "a")
+NEW = lane_copy("new", "b")
+STOPPED_NEW = lane_copy("new", "b", CopyState.STOPPED)
+STRAY = lane_copy("stray", "c")
+STARTED_NEW = StartCopy(TARGET, "new")
+REFUSED = CheckRefused("new", "Connection refused")
 
 
 @dataclass(frozen=True)
 class Case:
     copies: tuple[RunningCopy, ...]
-    loaded: str | None
-    written: str | None
-    steps: list[str]
-    outcome: Outcome
-    serving: str | None
+    route: tuple[str | None, str | None]
+    done: tuple[Event, ...]
+    step: object
 
 
-OLD = lane_copy("old", "a")
-SAME = lane_copy("same", "b")
-WAITING = lane_copy("waiting", "b")
-STOPPED_SAME = lane_copy("same", "b", CopyState.STOPPED)
-STRAY = lane_copy("stray", "c")
-SWITCH_FROM_OLD = [f"start {FRESH}", f"check {FRESH}", f"route {FRESH}", f"await {FRESH}", "retire old"]
+def answer(outcome: Outcome, serving: str | None, error: str | None = None) -> Done[MoveResult]:
+    return Done(MoveResult(product="site", lane="testing", build="b", name=NAME, outcome=outcome, serving=serving, error=error))
+
 
 MOVES = {
-    "a first move starts, checks, then routes": Case(
-        (), None, None, [f"start {FRESH}", f"check {FRESH}", f"route {FRESH}", f"await {FRESH}"], Outcome.SWITCHED, FRESH
+    "with no proxy running, it is started first": Case((), (None, None), (), StartProxy()),
+    "a route written and not loaded is waited for before anything else": Case(
+        (OLD, NEW), ("old", "new"), (), AwaitRoute(NAME, "new")
     ),
-    "the old copy retires only after the route to the new one has loaded": Case(
-        (OLD,), "old", "old", SWITCH_FROM_OLD, Outcome.SWITCHED, FRESH
+    "a first move starts a copy": Case((), (None, None), (), StartCopy(TARGET, FRESH)),
+    "a copy this call started is checked before any route names it": Case((NEW,), (None, None), (STARTED_NEW,), Check("new")),
+    "a copy that passed its check is routed": Case((OLD, NEW), ("old", "old"), (STARTED_NEW, Check("new")), WriteRoute(NAME, "new")),
+    "a copy that stopped after passing is checked again, not routed": Case(
+        (OLD, STOPPED_NEW), ("old", "old"), (STARTED_NEW, Check("new")), Check("new")
     ),
-    "asking for the serving build again changes nothing": Case((SAME,), "same", "same", [], Outcome.UNCHANGED, "same"),
-    "a copy left by an interrupted move is retired when the serving build is asked for": Case(
-        (SAME, STRAY), "same", "same", ["retire stray"], Outcome.CLEANED_UP, "same"
+    "the old copy retires only once the route to the new one has loaded": Case(
+        (OLD, NEW), ("new", "new"), (STARTED_NEW, Check("new"), WriteRoute(NAME, "new")), Retire("old")
     ),
-    "a running copy left before the switch is checked and routed, not started again": Case(
-        (OLD, WAITING), "old", "old", ["check waiting", "route waiting", "await waiting", "retire old"], Outcome.SWITCHED, "waiting"
+    "a finished switch answers switched": Case(
+        (NEW,), ("new", "new"), (STARTED_NEW, Check("new"), WriteRoute(NAME, "new"), Retire("old")), answer(Outcome.SWITCHED, "new")
     ),
-    "a stopped copy left before the switch is retired and replaced": Case(
-        (OLD, lane_copy("left", "b", CopyState.STOPPED)), "old", "old", ["retire left", *SWITCH_FROM_OLD], Outcome.SWITCHED, FRESH
+    "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
+    "a copy left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Retire("stray")),
+    "a finished cleanup answers cleaned up": Case((NEW,), ("new", "new"), (Retire("stray"),), answer(Outcome.CLEANED_UP, "new")),
+    "a running copy left before the switch is checked, not started again": Case((OLD, NEW), ("old", "old"), (), Check("new")),
+    "a copy neither serving nor about to be checked is retired first": Case((OLD, NEW, STRAY), ("old", "old"), (), Retire("stray")),
+    "a stopped copy left before the switch is retired, then replaced": Case((OLD, STOPPED_NEW), ("old", "old"), (), Retire("new")),
+    "a stopped serving copy is replaced, never checked": Case((STOPPED_NEW,), ("new", "new"), (), StartCopy(TARGET, FRESH)),
+    "a serving copy that stopped while its route was awaited is replaced, not kept": Case(
+        (OLD, STOPPED_NEW), ("new", "new"), (AwaitRoute(NAME, "new"),), Retire("old")
     ),
-    "a stopped serving copy is replaced by a new copy, checked before any request": Case(
-        (STOPPED_SAME,),
-        "same",
-        "same",
-        [f"start {FRESH}", f"check {FRESH}", f"route {FRESH}", f"await {FRESH}", "retire same"],
-        Outcome.SWITCHED,
-        FRESH,
+    "a copy this call routed that then stopped is replaced": Case(
+        (STOPPED_NEW,), ("new", "new"), (STARTED_NEW, Check("new"), WriteRoute(NAME, "new")), StartCopy(TARGET, FRESH)
     ),
-    "a route to a copy that is gone is not taken as serving": Case(
-        (), "gone", "gone", [f"start {FRESH}", f"check {FRESH}", f"route {FRESH}", f"await {FRESH}"], Outcome.SWITCHED, FRESH
-    ),
-    "a route written but not loaded is waited for before anything else": Case(
-        (OLD, SAME), "old", "same", ["await same", "retire old"], Outcome.CLEANED_UP, "same"
-    ),
-    "a route written to the old copy but not loaded is waited for, then the move goes on": Case(
-        (OLD, WAITING),
-        "waiting",
-        "old",
-        ["await old", "check waiting", "route waiting", "await waiting", "retire old"],
-        Outcome.SWITCHED,
-        "waiting",
+    "a route to a copy that is gone is not taken as serving": Case((), ("gone", "gone"), (), StartCopy(TARGET, FRESH)),
+    "a copy that failed its check is removed": Case((OLD, NEW), ("old", "old"), (STARTED_NEW, REFUSED), RemoveCopy("new")),
+    "a failed check answers check failed, never switched": Case(
+        (OLD,), ("old", "old"), (STARTED_NEW, REFUSED, RemoveCopy("new")), answer(Outcome.CHECK_FAILED, "old", "Connection refused")
     ),
 }
 
 
 @pytest.mark.parametrize("case", MOVES.values(), ids=MOVES.keys())
-def test_a_move_decides_these_actions_in_this_order(case: Case) -> None:
-    plan = decide_move(LaneSeen(case.copies, LaneRoute(loaded=case.loaded, written=case.written)), TARGET, FRESH)
-    assert not isinstance(plan, ReadAgain)
-    assert steps(plan.actions) == case.steps
-    assert (plan.answer.outcome, plan.answer.serving) == (case.outcome, case.serving)
+def test_a_move_takes_this_step_next(case: Case) -> None:
+    route = ProxyNotRunning() if case.step == StartProxy() else LaneRoute(*case.route)
+    assert decide_move(LaneSeen(case.copies, route), TARGET, FRESH, case.done) == case.step
 
 
-def test_a_failed_check_answers_check_failed_with_the_old_copy_still_serving() -> None:
-    plan = decide_move(LaneSeen((OLD,), LaneRoute(loaded="old", written="old")), TARGET, FRESH)
-    assert not isinstance(plan, ReadAgain)
-    (check,) = (action for action in plan.actions if isinstance(action, Check))
-    assert (check.if_failed.outcome, check.if_failed.serving) == (Outcome.CHECK_FAILED, "old")
-
-
-def test_a_check_is_never_made_of_the_copy_the_written_route_names() -> None:
-    for case in MOVES.values():
-        plan = decide_move(LaneSeen(case.copies, LaneRoute(loaded=case.loaded, written=case.written)), TARGET, FRESH)
-        assert not isinstance(plan, ReadAgain)
-        checked = {action.copy for action in plan.actions if isinstance(action, Check)}
-        assert case.written not in checked
-
-
-@dataclass(frozen=True)
-class RetireCase:
-    copies: tuple[RunningCopy, ...]
-    loaded: str | None
-    written: str | None
-    steps: list[str]
-    outcome: RetireOutcome
-    route_removed_to: str | None
+def retired(route_removed_to: str | None, copies: list[str]) -> Done[RetireResult]:
+    outcome = RetireOutcome.RETIRED if route_removed_to or copies else RetireOutcome.UNCHANGED
+    return Done(
+        RetireResult(
+            product="site", lane="testing", name=NAME, outcome=outcome, route_removed_to=route_removed_to, retired_copies=copies
+        )
+    )
 
 
 RETIRES = {
-    "the route is removed and loaded gone before any copy stops": RetireCase(
-        (OLD, STRAY), "old", "old", ["route None", "await None", "retire old", "retire stray"], RetireOutcome.RETIRED, "old"
+    "with no proxy running, it is started first": Case((OLD,), (None, None), (), StartProxy()),
+    "a route written and not loaded is waited for first": Case((OLD,), ("old", "new"), (), AwaitRoute(NAME, "new")),
+    "the route goes first": Case((OLD,), ("old", "old"), (), RemoveRoute(NAME, "old")),
+    "no copy stops until the proxy has loaded the route gone": Case(
+        (OLD,), ("old", None), (RemoveRoute(NAME, "old"),), AwaitRoute(NAME, None)
     ),
-    "a retired lane is unchanged": RetireCase((), None, None, [], RetireOutcome.UNCHANGED, None),
-    "a lane whose route is gone retires its copies": RetireCase((OLD,), None, None, ["retire old"], RetireOutcome.RETIRED, None),
-    "a route removed but not loaded is waited for before any copy stops": RetireCase(
-        (OLD,), "old", None, ["await None", "retire old"], RetireOutcome.RETIRED, None
+    "copies retire once the route is gone": Case((OLD, STRAY), (None, None), (RemoveRoute(NAME, "old"),), Retire("old")),
+    "a finished retirement answers what it removed": Case(
+        (), (None, None), (RemoveRoute(NAME, "old"), Retire("old")), retired("old", ["old"])
     ),
-    "a route to a copy that is gone is removed": RetireCase(
-        (), "gone", "gone", ["route None", "await None"], RetireOutcome.RETIRED, "gone"
-    ),
+    "a lane whose route was already gone answers no route removed": Case((), (None, None), (Retire("old"),), retired(None, ["old"])),
+    "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
 }
 
 
 @pytest.mark.parametrize("case", RETIRES.values(), ids=RETIRES.keys())
-def test_a_retire_decides_these_actions_in_this_order(case: RetireCase) -> None:
-    plan = decide_retire(LaneSeen(case.copies, LaneRoute(loaded=case.loaded, written=case.written)), "site", "testing")
-    assert not isinstance(plan, ReadAgain)
-    assert steps(plan.actions) == case.steps
-    assert (plan.answer.outcome, plan.answer.route_removed_to) == (case.outcome, case.route_removed_to)
-    assert plan.answer.retired_copies == sorted(copy.name for copy in case.copies)
+def test_a_retire_takes_this_step_next(case: Case) -> None:
+    route = ProxyNotRunning() if case.step == StartProxy() else LaneRoute(*case.route)
+    assert decide_retire(LaneSeen(case.copies, route), "site", "testing", case.done) == case.step
 
 
-def test_with_no_proxy_running_the_first_move_starts_it_and_reads_again() -> None:
-    assert decide_move(LaneSeen((), ProxyNotRunning()), TARGET, FRESH) == ReadAgain((StartProxy(),))
-
-
-def test_with_no_proxy_running_a_retire_starts_it_and_reads_again() -> None:
-    assert decide_retire(LaneSeen((OLD,), ProxyNotRunning()), "site", "testing") == ReadAgain((StartProxy(),))
-
-
-def test_a_lane_only_ever_routes_its_own_name() -> None:
-    plans = [decide_move(LaneSeen(case.copies, LaneRoute(case.loaded, case.written)), TARGET, FRESH) for case in MOVES.values()]
-    plans += [
-        decide_retire(LaneSeen(case.copies, LaneRoute(case.loaded, case.written)), "site", "testing") for case in RETIRES.values()
-    ]
-    names = {action.name for plan in plans for action in plan.actions if isinstance(action, WriteRoute | AwaitRoute)}
-    assert names == {NAME}
+def test_no_step_of_any_case_routes_or_awaits_another_lanes_name() -> None:
+    steps = [case.step for case in [*MOVES.values(), *RETIRES.values()]]
+    assert {step.name for step in steps if isinstance(step, WriteRoute | RemoveRoute | AwaitRoute)} == {NAME}

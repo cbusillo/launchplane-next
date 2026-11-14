@@ -1,10 +1,10 @@
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -62,6 +62,7 @@ class Read(BaseModel):
 class LoadedRouter(Read):
     rule: str
     service: str
+    status: Literal["enabled", "disabled", "warning"]
 
 
 class LoadedServer(Read):
@@ -79,10 +80,6 @@ class LoadedService(Read):
 class LoadedRoutes(Read):
     routers: dict[str, LoadedRouter]
     services: dict[str, LoadedService | dict[str, object]]
-
-
-class WrittenRoutes(Read):
-    http: LoadedRoutes
 
 
 def route_file_of(name: str) -> PurePosixPath:
@@ -104,8 +101,8 @@ def route_text(name: str, copy_name: str) -> str:
     return json.dumps({"http": {"routers": {name: router}, "services": {name: service}}}, indent=2)
 
 
-def copy_behind(router: LoadedRouter, routes: LoadedRoutes, suffix: str) -> str:
-    service = routes.services.get(router.service + suffix)
+def copy_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
+    service = services.get(router.service + FROM_ROUTES_FILE)
     if not isinstance(service, LoadedService):
         raise ProxyError(f"The proxy sends {router.rule} to {router.service}, which is not a service Launchplane wrote.")
     url = service.load_balancer.servers[0].url
@@ -122,9 +119,9 @@ def name_of(router: LoadedRouter) -> str:
     return match["name"]
 
 
-def copies_by_name(routes: LoadedRoutes, suffix: str = FROM_ROUTES_FILE) -> dict[str, str]:
-    file_routers = (router for key, router in routes.routers.items() if key.endswith(suffix))
-    return {name_of(router): copy_behind(router, routes, suffix) for router in file_routers}
+def serving_copies_by_name(routes: LoadedRoutes) -> dict[str, str]:
+    serving = (router for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE) and router.status == "enabled")
+    return {name_of(router): copy_behind(router, routes.services) for router in serving}
 
 
 def loaded_routes_from_answer(answer: str) -> dict[str, str]:
@@ -132,18 +129,14 @@ def loaded_routes_from_answer(answer: str) -> dict[str, str]:
         routes = LoadedRoutes.model_validate_json(answer)
     except ValidationError as error:
         raise ProxyError(f"The proxy's loaded routes did not have the expected shape, so nothing was changed: {error}") from error
-    return copies_by_name(routes)
+    return serving_copies_by_name(routes)
 
 
 def written_route_from_file(text: str, name: str) -> str:
-    try:
-        http = WrittenRoutes.model_validate_json(text).http
-    except ValidationError as error:
-        raise ProxyError(f"The routes file {route_file_of(name)} did not have the expected shape: {error}") from error
-    routes = copies_by_name(http, suffix="")
-    if set(routes) != {name}:
-        raise ProxyError(f"The routes file {route_file_of(name)} should route only {name}, and it routes {sorted(routes)}.")
-    return routes[name]
+    found = COPY_URL.search(text)
+    if found is None or text != route_text(name, found["copy"]):
+        raise ProxyError(f"The routes file {route_file_of(name)} is not the route Launchplane writes for {name}.")
+    return found["copy"]
 
 
 @dataclass(frozen=True)
@@ -192,10 +185,10 @@ class TraefikProxy:
                 )
             self.sleep(POLL_SECONDS)
 
-    def write_route(self, name: str, copy_name: str | None) -> None:
-        if copy_name is None:
-            self.run_or_fail(["rm", "-f", str(route_file_of(name))], f"Removing the route of {name}")
-            return
+    def remove_route(self, name: str) -> None:
+        self.run_or_fail(["rm", "-f", str(route_file_of(name))], f"Removing the route of {name}")
+
+    def write_route(self, name: str, copy_name: str) -> None:
         self.host.place_file(PROXY_NAME, staged_route_file_of(name), route_text(name, copy_name))
         self.run_or_fail(["mv", str(staged_route_file_of(name)), str(route_file_of(name))], f"Putting the route of {name} in place")
 

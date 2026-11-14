@@ -19,7 +19,7 @@ from launchplane.proxy import (
 
 NAME = "testing.site.test"
 OTHER = "production.site.test"
-INTERNAL_ROUTERS = {"api@internal": {"rule": "PathPrefix(`/api`)", "service": "api@internal"}}
+INTERNAL_ROUTERS = {"api@internal": {"rule": "PathPrefix(`/api`)", "service": "api@internal", "status": "enabled"}}
 INTERNAL_SERVICES = {"api@internal": {"status": "enabled"}}
 
 
@@ -29,7 +29,7 @@ def loaded_from(files: dict[PurePosixPath, str]) -> str:
     for path, text in files.items():
         if path.suffix == ".yml":
             http = json.loads(text)["http"]
-            routers |= {f"{key}@file": router for key, router in http["routers"].items()}
+            routers |= {f"{key}@file": router | {"status": "enabled"} for key, router in http["routers"].items()}
             services |= {f"{key}@file": service for key, service in http["services"].items()}
     return json.dumps({"routers": routers, "services": services})
 
@@ -88,7 +88,9 @@ def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
 UNEXPECTED_ANSWERS = {
     "an object with neither routers nor services": {"message": "page not found"},
     "routers without services": {"routers": INTERNAL_ROUTERS},
-    "a router without a rule": {"routers": {"x@file": {"service": "x"}}, "services": {}},
+    "services without routers": {"services": INTERNAL_SERVICES},
+    "a router without a rule": {"routers": {"x@file": {"service": "x", "status": "enabled"}}, "services": {}},
+    "a router without a status": {"routers": {"x@file": {"rule": "Host(`x`)", "service": "x"}}, "services": {}},
 }
 
 
@@ -124,16 +126,34 @@ def test_a_route_written_and_not_yet_loaded_reads_as_both() -> None:
 
 def test_a_route_launchplane_did_not_write_is_an_error() -> None:
     host = ProxyHost({})
-    host.loaded = json.dumps({"routers": {"shop@file": {"rule": "PathPrefix(`/`)", "service": "shop"}}, "services": {}})
+    host.loaded = json.dumps(
+        {"routers": {"shop@file": {"rule": "PathPrefix(`/`)", "service": "shop", "status": "enabled"}}, "services": {}}
+    )
     with pytest.raises(ProxyError, match="did not write"):
         TraefikProxy(host).read_lane_route(NAME)
 
 
-def test_a_lane_file_that_routes_another_name_is_an_error() -> None:
+FOREIGN_LANE_FILES = {
+    "another lane's route": route_text(OTHER, "site-p1"),
+    "its own route plus another": route_text(NAME, "site-t1").replace(f"`{NAME}`", f"`{NAME}`) || Host(`{OTHER}`"),
+    "its own route to a copy on another port": route_text(NAME, "site-t1").replace(":80", ":8080"),
+}
+
+
+@pytest.mark.parametrize("text", FOREIGN_LANE_FILES.values(), ids=FOREIGN_LANE_FILES.keys())
+def test_a_lane_file_that_is_not_exactly_the_route_launchplane_writes_is_an_error(text: str) -> None:
     host = ProxyHost({})
-    host.files[route_file_of(NAME)] = route_text(OTHER, "site-p1")
-    with pytest.raises(ProxyError, match="should route only"):
+    host.files[route_file_of(NAME)] = text
+    with pytest.raises(ProxyError, match="not the route Launchplane writes"):
         TraefikProxy(host).read_lane_route(NAME)
+
+
+def test_a_route_the_proxy_has_disabled_does_not_read_as_serving() -> None:
+    host = ProxyHost({NAME: "site-t1", OTHER: "site-p1"})
+    loaded = json.loads(host.loaded)
+    loaded["routers"][f"{NAME}@file"]["status"] = "disabled"
+    host.loaded = json.dumps(loaded)
+    assert TraefikProxy(host).read_serving() == {OTHER: "site-p1"}
 
 
 def test_writing_a_route_changes_only_that_lanes_file() -> None:
@@ -141,7 +161,7 @@ def test_writing_a_route_changes_only_that_lanes_file() -> None:
     other_file = host.files[route_file_of(OTHER)]
     TraefikProxy(host).write_route(NAME, "site-t2")
     assert host.files == {route_file_of(NAME): route_text(NAME, "site-t2"), route_file_of(OTHER): other_file}
-    TraefikProxy(host).write_route(NAME, None)
+    TraefikProxy(host).remove_route(NAME)
     assert host.files == {route_file_of(OTHER): other_file}
 
 
@@ -154,7 +174,7 @@ def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
     host = ProxyHost({NAME: "site-t1"})
     host.loads_on_write = False
     proxy = ticking(host)
-    proxy.write_route(NAME, None)
+    proxy.remove_route(NAME)
     assert proxy.read_loaded() == {NAME: "site-t1"}
     proxy.await_route(NAME, None)
     assert proxy.read_loaded() == {}

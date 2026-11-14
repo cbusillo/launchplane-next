@@ -2,28 +2,12 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
-from launchplane.decide import (
-    Action,
-    AwaitRoute,
-    Check,
-    LaneRoute,
-    LaneSeen,
-    MoveResult,
-    ProxyNotRunning,
-    ReadAgain,
-    Retire,
-    RetireResult,
-    StartCopy,
-    StartProxy,
-    WriteRoute,
-    decide_move,
-    decide_retire,
-    lane_name,
-)
-from launchplane.proxy import CheckFailed, ProxyError
+from launchplane import decide
+from launchplane.decide import Action, Done, Event, LaneRoute, LaneSeen, MoveResult, ProxyNotRunning, RetireResult
+from launchplane.proxy import CheckFailed
 from launchplane.running_copy import LaneCopy, RunningCopy, new_copy_name
 
-PASSES_TO_START_THE_PROXY = 2
+MOST_STEPS = 50
 
 
 class CopyHost(Protocol):
@@ -38,14 +22,13 @@ class Proxy(Protocol):
     def start(self) -> None: ...
     def read_lane_route(self, name: str) -> ProxyNotRunning | LaneRoute: ...
     def await_route(self, name: str, copy_name: str | None) -> None: ...
-    def write_route(self, name: str, copy_name: str | None) -> None: ...
+    def write_route(self, name: str, copy_name: str) -> None: ...
+    def remove_route(self, name: str) -> None: ...
     def check_copy(self, copy_name: str) -> None: ...
 
 
-class Refused(Exception):
-    def __init__(self, answer: MoveResult) -> None:
-        super().__init__(answer.error)
-        self.answer = answer
+class NotSettled(Exception):
+    pass
 
 
 def failure_report(error: CheckFailed, log_tail: str) -> str:
@@ -62,57 +45,57 @@ class Lanes:
         self.one_at_a_time = threading.Lock()
 
     def read(self, product: str, lane: str) -> LaneSeen:
-        route = self.proxy.read_lane_route(lane_name(product, lane))
+        route = self.proxy.read_lane_route(decide.lane_name(product, lane))
         copies = tuple(copy for copy in self.host.read_copies() if (copy.product, copy.lane) == (product, lane))
         return LaneSeen(copies=copies, route=route)
 
-    def plan[P](self, product: str, lane: str, decide: Callable[[LaneSeen], ReadAgain | P]) -> P:
-        for _ in range(PASSES_TO_START_THE_PROXY):
-            plan = decide(self.read(product, lane))
-            if not isinstance(plan, ReadAgain):
-                return plan
-            self.carry_out(plan.actions)
-        raise ProxyError(f"The proxy was started and still does not run, so {lane} of {product} was not changed.")
-
     def move(self, target: LaneCopy) -> MoveResult:
-        fresh_copy_name = self.name_copy(target)
         with self.one_at_a_time:
-            plan = self.plan(target.product, target.lane, lambda seen: decide_move(seen, target, fresh_copy_name))
-            try:
-                self.carry_out(plan.actions)
-            except Refused as refusal:
-                return refusal.answer
-            return plan.answer
+            return self.settle(
+                target.product, target.lane, lambda seen, done: decide.decide_move(seen, target, self.name_copy(target), done)
+            )
 
     def retire(self, product: str, lane: str) -> RetireResult:
         with self.one_at_a_time:
-            plan = self.plan(product, lane, lambda seen: decide_retire(seen, product, lane))
-            self.carry_out(plan.actions)
-            return plan.answer
+            return self.settle(product, lane, lambda seen, done: decide.decide_retire(seen, product, lane, done))
 
-    def carry_out(self, actions: tuple[Action, ...]) -> None:
-        for action in actions:
-            self.take(action)
+    def settle[Answer](
+        self, product: str, lane: str, next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer]]
+    ) -> Answer:
+        done: list[Event] = []
+        for _ in range(MOST_STEPS):
+            step = next_step(self.read(product, lane), tuple(done))
+            if isinstance(step, Done):
+                return step.answer
+            done.append(self.take(step))
+        raise NotSettled(
+            f"{lane} of {product} did not settle within {MOST_STEPS} steps, so Launchplane stopped. "
+            f"The last step was {done[-1]}. It is safe to ask again."
+        )
 
-    def take(self, action: Action) -> None:
+    def take(self, action: Action) -> Event:
         match action:
-            case StartProxy():
+            case decide.StartProxy():
                 self.proxy.start()
-            case AwaitRoute(name=name, copy=copy_name):
+            case decide.AwaitRoute(name=name, copy=copy_name):
                 self.proxy.await_route(name, copy_name)
-            case StartCopy(copy=copy, name=copy_name):
+            case decide.StartCopy(copy=copy, name=copy_name):
                 self.host.start_copy(copy, copy_name)
-            case Check(copy=copy_name, if_failed=if_failed):
-                self.check_or_remove(copy_name, if_failed)
-            case WriteRoute(name=name, copy=copy_name):
+            case decide.Check(copy=copy_name):
+                return self.check(copy_name)
+            case decide.WriteRoute(name=name, copy=copy_name):
                 self.proxy.write_route(name, copy_name)
-            case Retire(copy=copy_name):
+            case decide.RemoveRoute(name=name):
+                self.proxy.remove_route(name)
+            case decide.Retire(copy=copy_name):
                 self.host.retire_copy(copy_name)
+            case decide.RemoveCopy(copy=copy_name):
+                self.host.remove_copy(copy_name)
+        return action
 
-    def check_or_remove(self, copy_name: str, if_failed: MoveResult) -> None:
+    def check(self, copy_name: str) -> Event:
         try:
             self.proxy.check_copy(copy_name)
         except CheckFailed as error:
-            report = failure_report(error, self.host.read_log_tail(copy_name))
-            self.host.remove_copy(copy_name)
-            raise Refused(if_failed.model_copy(update={"error": report})) from error
+            return decide.CheckRefused(copy_name, failure_report(error, self.host.read_log_tail(copy_name)))
+        return decide.Check(copy_name)
