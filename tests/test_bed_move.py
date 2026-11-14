@@ -88,6 +88,12 @@ def lane_copies() -> dict[str, dict[str, Any]]:
     return {copy["build"]: copy for copy in body["copies"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE)}
 
 
+def lane_name_answer() -> dict[str, Any]:
+    status, body = ask("/running")
+    assert status == 200, body
+    return next(entry for entry in body["names"] if entry["name"] == NAME)
+
+
 def serving_builds() -> list[str]:
     return [build for build, copy in lane_copies().items() if copy["serves"] == NAME]
 
@@ -143,6 +149,17 @@ def test_moving_to_a_new_build_switches_the_name_without_failing_a_request() -> 
     assert loop.answers_in_order() == [ANSWER_A, ANSWER_B]
     assert list(lane_copies()) == [BUILD_B]
     assert serving_builds() == [BUILD_B]
+
+
+@pytest.mark.usefixtures("lane_serving_a")
+def test_a_serving_copy_stopped_by_hand_shows_stopped_and_its_name_answers_nothing() -> None:
+    assert lane_name_answer()["answers"] is True
+    copy_name = lane_copies()[BUILD_A]["name"]
+    on_scratch(f"docker stop --time 1 {copy_name}")
+    assert lane_copies()[BUILD_A]["state"] == "stopped"
+    entry = lane_name_answer()
+    assert (entry["answers"], entry["sends_to"]) == (False, copy_name)
+    assert "502" in entry["error"]
 
 
 @pytest.mark.usefixtures("lane_serving_a")

@@ -32,6 +32,8 @@ LOADED_ROUTES_URL = "http://127.0.0.1:8080/api/rawdata"
 FROM_ROUTES_FILE = "@file"
 HOST_RULE = re.compile(r"Host\(`(?P<name>[^`]+)`\)")
 COPY_URL = re.compile(rf"http://(?P<copy>[^:/]+):{COPY_PORT}")
+# noinspection HttpUrlsUsage
+NAME_URL = f"http://127.0.0.1:{COPY_PORT}/"
 CHECK_REQUEST_SECONDS = 2
 POLL_SECONDS = 0.5
 
@@ -211,6 +213,14 @@ class NameSwitch:
     def request_copy(self, copy_name: str) -> CommandResult:
         url = copy_url(copy_name) + "/"
         return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), url])
+
+    def request_name(self, name: str) -> CommandResult:
+        command = ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), "--header", f"Host: {name}", NAME_URL]
+        return self.host.run_in(PROXY_NAME, command)
+
+    def why_name_fails(self, name: str) -> str | None:
+        result = self.request_name(name)
+        return None if result.succeeded else result.output
 
     def check_copy(self, copy_name: str) -> None:
         started = self.clock()
