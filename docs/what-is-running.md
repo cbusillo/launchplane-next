@@ -37,13 +37,18 @@ Both carry `read_at`, the moment the host was asked.
 `GET /` is one HTML file, `src/launchplane/running.html`, with its style and script inline. It loads nothing else, needs no build step and no framework. FastAPI serves it as it is and it reads no host itself, so it opens even when the host cannot be read.
 
 - The script asks `/running` once a second, each time after the last answer arrived, so a slow host never piles up requests. It gives up on one answer after 15 s.
-- Each lane shows its name, whether the name answers and the real error if not, and its copies with build, state and whether the name points at it. A route to a copy that is not on the host is shown as such. Copies with no lane label are listed apart.
+- Each lane shows its name, whether the name answers and the real error if not, and its copies with build, state and whether the name points at it. A route to another lane's copy names that lane, and a route to a copy that is not on the host says so. Copies with no lane label are listed apart.
 - When Launchplane answers `503`, or cannot be reached, the page shows the error and when it last read the host, and hides the lanes. It never shows an empty list for an answer it did not get. The time of the last good read is kept only by the open page, not by Launchplane.
 - Text is built with DOM text nodes, never as HTML, so a label cannot inject markup.
 
 Measured on the test bed from the control container: listing the copies takes about 1 ms, reading the proxy's routes about 30 ms, and asking one name through the proxy about 30 ms. A whole `/running` with one lane and two dangling routes answered the Mac in 0.14 to 0.16 s, against 0.03 s before names were asked. During a move from one nginx build to another, a poll every 0.2 s saw the second copy at 0.5 s, the name pass to it at 5.8 s, and the old copy gone when the move answered, so a poll a second shows each stage.
 
-Like `/running`, the page reads containers and routes at two moments, so during a switch it can show the retired copy and nothing serving for one read.
+`/running` asks every routed name at the same moment, one thread each, so names that hang cost one request's time limit of 2 s, not 2 s each. Measured with names routed to an address that never answers: 8 such names took 16.3 s when asked in turn, longer than the page's 15 s limit, and 2.1 s asked at once; 16 took 2.2 s. The Docker client keeps 10 connections; beyond that each extra request opens its own and closes it.
+
+### Known and not fixed
+
+- **Like `/running`, the page reads containers and routes at two moments**, so during a switch it can show the retired copy and nothing serving for one read.
+- **No test loads the page or runs its script.** A blank page, polling that stops, old lanes kept after an error, or colours swapped would each pass every test. Chris watching the page is the check for now. Comes back when the page breaks without anyone noticing, or when there is a second page.
 
 ## How Launchplane reaches the host
 

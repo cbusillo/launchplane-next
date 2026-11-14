@@ -139,7 +139,7 @@ def test_names_are_asked_at_once_so_names_that_hang_do_not_add_up() -> None:
     serving = {f"testing.site{number}.test": f"site{number}-testing" for number in range(3)}
     all_waiting = threading.Barrier(len(serving), timeout=5)
 
-    def hang_until_every_name_is_asked(name: str) -> str | None:
+    def hang_until_every_name_is_asked(_name: str) -> str | None:
         all_waiting.wait()
         return "download timed out"
 
