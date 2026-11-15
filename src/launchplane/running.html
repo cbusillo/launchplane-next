@@ -20,8 +20,8 @@
   small { display: block; font-size: 1em; color: var(--muted); }
   [data-health=ok] { color: var(--ok); }
   [data-health=bad] { color: var(--bad); }
-  .row { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; }
-  .label { min-width: 7rem; color: var(--muted); }
+  [data-row] { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; }
+  [data-label] { min-width: 7rem; color: var(--muted); }
   [data-tag] { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
 </style>
 </head>
@@ -69,7 +69,7 @@ function clockTime(isoTime) {
  * @param {...(Node|string)} values
  */
 function row(label, ...values) {
-  return element("div", { class: "row" }, element("span", { class: "label" }, label), ...values);
+  return element("div", { "data-row": "" }, element("span", { "data-label": "" }, label), ...values);
 }
 
 /** @param {Instance} instance */
