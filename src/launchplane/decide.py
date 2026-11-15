@@ -3,7 +3,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from launchplane.instance import DataSet, InstanceState, LaneBuild, RunningInstance, RunningJob
+from launchplane.instance import DataSet, DataSetDatabase, DataSetNetwork, InstanceState, LaneBuild, RunningInstance, RunningJob
 from launchplane.product import Database, Product
 
 LANE_DOMAIN = "test"
@@ -14,6 +14,7 @@ class Outcome(StrEnum):
     UNCHANGED = "unchanged"
     CLEANED_UP = "cleaned up"
     CHECK_FAILED = "check failed"
+    JOB_FAILED = "job failed"
 
 
 class MoveResult(BaseModel):
@@ -81,6 +82,14 @@ class FreshNames:
 
 
 @dataclass(frozen=True)
+class DataSetUse:
+    data_set: str
+    network: str
+    database_container: str
+    database: Database
+
+
+@dataclass(frozen=True)
 class StartProxy:
     pass
 
@@ -92,11 +101,32 @@ class AwaitRoute:
 
 
 @dataclass(frozen=True)
-class EnsureDataSet:
+class CreateDataSetNetwork:
     product: str
     lane: str
     data_set: str
+
+
+@dataclass(frozen=True)
+class CreateDataSetVolume:
+    product: str
+    lane: str
+    data_set: str
+
+
+@dataclass(frozen=True)
+class CreateDatabase:
+    product: str
+    lane: str
+    data_set: str
+    network: str
+    volume: str
     database: Database
+
+
+@dataclass(frozen=True)
+class StartDatabase:
+    container: str
 
 
 @dataclass(frozen=True)
@@ -109,7 +139,7 @@ class AwaitDatabase:
 class StartInstance:
     target: LaneBuild
     container: str
-    data_set: str | None = None
+    use: DataSetUse | None = None
 
 
 @dataclass(frozen=True)
@@ -128,8 +158,13 @@ class WriteRoute:
 class StartJob:
     target: LaneBuild
     instance: str
-    data_set: str | None
+    use: DataSetUse | None
     command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CheckJob:
+    container: str
 
 
 @dataclass(frozen=True)
@@ -150,11 +185,17 @@ class RemoveInstance:
 
 @dataclass(frozen=True)
 class DeleteDataSet:
-    data_set: str
+    found: DataSet
 
 
 @dataclass(frozen=True)
 class CheckRefused:
+    container: str
+    report: str
+
+
+@dataclass(frozen=True)
+class JobRefused:
     container: str
     report: str
 
@@ -170,9 +211,10 @@ class Stop:
 
 
 type ProxyAction = StartProxy | AwaitRoute | WriteRoute | RemoveRoute
-type HostAction = EnsureDataSet | AwaitDatabase | StartInstance | StartJob | Retire | RemoveInstance | DeleteDataSet
-type Action = ProxyAction | HostAction | Check
-type Event = Action | CheckRefused
+type DataSetAction = CreateDataSetNetwork | CreateDataSetVolume | CreateDatabase | StartDatabase | AwaitDatabase | DeleteDataSet
+type InstanceAction = StartInstance | StartJob | Retire | RemoveInstance
+type Action = ProxyAction | DataSetAction | InstanceAction | Check | CheckJob
+type Event = Action | CheckRefused | JobRefused
 
 
 def web_address_of(product: str, lane: str) -> str:
@@ -187,8 +229,10 @@ def change_made_by(event: Event) -> str | None:
     match event:
         case StartProxy():
             return "started the proxy"
-        case EnsureDataSet(data_set=data_set):
-            return f"made the data set {data_set}"
+        case CreateDataSetNetwork(data_set=data_set) | CreateDataSetVolume(data_set=data_set) | CreateDatabase(data_set=data_set):
+            return f"made part of the data set {data_set}"
+        case StartDatabase(container=container):
+            return f"started the database {container}"
         case StartInstance(container=container):
             return f"started the instance {container}"
         case WriteRoute(container=container):
@@ -219,11 +263,11 @@ def disabled_route_stop(web_address: str, loaded: LoadedRoute, done: tuple[Event
 
 
 def is_running_build(instance: RunningInstance | None, build: str) -> bool:
-    return instance is not None and instance.state == InstanceState.RUNNING and instance.build == build
+    return instance is not None and instance.state == InstanceState.RUNNING and instance.is_quiet and instance.build == build
 
 
-def is_serving(instance: RunningInstance | None, build: str, product: Product) -> bool:
-    return instance is not None and is_running_build(instance, build) and (product.database is None) == (instance.data_set is None)
+def is_serving(instance: RunningInstance, build: str, product: Product) -> bool:
+    return is_running_build(instance, build) and (product.database is None) == (instance.data_set is None)
 
 
 def candidate_for(
@@ -242,7 +286,7 @@ def candidate_for(
 def move_outcome(done: tuple[Event, ...]) -> Outcome:
     if any(isinstance(event, WriteRoute) for event in done):
         return Outcome.SWITCHED
-    if any(isinstance(event, Retire | StartJob) for event in done):
+    if any(isinstance(event, Retire | StartJob | StartDatabase) for event in done):
         return Outcome.CLEANED_UP
     return Outcome.UNCHANGED
 
@@ -272,42 +316,104 @@ def lane_data_set(seen: LaneSeen, receiving: RunningInstance | None, fresh: str)
     return names[0] if names else fresh
 
 
-def data_set_step(
-    seen: LaneSeen, data_set: str, fresh: str, target: LaneBuild, database: Database, done: tuple[Event, ...]
-) -> Action | Stop | None:
-    found = next((each for each in seen.data_sets if each.data_set == data_set), None)
-    ensure = EnsureDataSet(target.product, target.lane, data_set, database)
-    if found is None:
-        if data_set != fresh:
-            return Stop(
-                f"The instance receiving visitors uses the data set {data_set}, which is not on the host. Nothing was changed."
-            )
-        return ensure
-    if found.network_is_quiet is False:
-        return Stop(f"The network of the data set {data_set} is not quiet, so no instance is started on it. {changes_so_far(done)}")
-    if found.network_is_quiet is None or not found.has_volume or found.database_container is None:
-        return ensure
-    if found.database_state == InstanceState.STOPPED:
-        return ensure
-    if found.database_state != InstanceState.RUNNING:
-        return Stop(
-            f"The database {found.database_container} of the data set {data_set} is {found.database_state}. {changes_so_far(done)}"
-        )
-    awaited = AwaitDatabase(found.database_container, database)
+def doubled_parts(found: DataSet) -> list[str]:
+    parts: dict[str, tuple[str, ...]] = {
+        "networks": tuple(network.name for network in found.networks),
+        "volumes": found.volumes,
+        "database servers": tuple(database.container for database in found.databases),
+    }
+    return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
+
+
+def network_step(found: DataSet, network: DataSetNetwork, done: tuple[Event, ...]) -> Stop | None:
+    if network.is_quiet:
+        return None
+    return Stop(
+        f"The network {network.name} of the data set {found.data_set} is not quiet, so nothing is started on it. "
+        f"{changes_so_far(done)}"
+    )
+
+
+def database_step(found: DataSet, server: DataSetDatabase, database: Database, done: tuple[Event, ...]) -> Action | Stop | None:
+    if server.state == InstanceState.STOPPED:
+        return StartDatabase(server.container)
+    if server.state != InstanceState.RUNNING:
+        return Stop(f"The database {server.container} of the data set {found.data_set} is {server.state}. {changes_so_far(done)}")
+    awaited = AwaitDatabase(server.container, database)
     return None if awaited in done else awaited
+
+
+def data_set_step(found: DataSet, target: LaneBuild, database: Database, done: tuple[Event, ...]) -> Action | Stop | DataSetUse:
+    doubled = doubled_parts(found)
+    if doubled:
+        return Stop(
+            f"The data set {found.data_set} has {' and '.join(doubled)} carrying its labels, where it should have one of each. "
+            f"Which one is the data set is not Launchplane's to choose. {changes_so_far(done)}"
+        )
+    product, lane = target.product, target.lane
+    if not found.networks:
+        return CreateDataSetNetwork(product, lane, found.data_set)
+    [network] = found.networks
+    if (stop := network_step(found, network, done)) is not None:
+        return stop
+    if not found.volumes:
+        return CreateDataSetVolume(product, lane, found.data_set)
+    if not found.databases:
+        return CreateDatabase(product, lane, found.data_set, network.name, found.volumes[0], database)
+    [server] = found.databases
+    if (step := database_step(found, server, database, done)) is not None:
+        return step
+    return DataSetUse(found.data_set, network.name, server.container, database)
+
+
+def prepared(
+    seen: LaneSeen, data_set: str | None, fresh: str | None, target: LaneBuild, product: Product, done: tuple[Event, ...]
+) -> Action | Stop | DataSetUse | None:
+    if product.database is None or data_set is None:
+        return None
+    found = next((each for each in seen.data_sets if each.data_set == data_set), None)
+    if found is not None:
+        return data_set_step(found, target, product.database, done)
+    if data_set == fresh:
+        return CreateDataSetNetwork(target.product, target.lane, data_set)
+    return Stop(f"The instance receiving visitors uses the data set {data_set}, which is not on the host. {changes_so_far(done)}")
+
+
+def job_step(
+    seen: LaneSeen, serving: RunningInstance, target: LaneBuild, product: Product, use: DataSetUse | None, done: tuple[Event, ...]
+) -> Action | None:
+    own = next((job for job in seen.jobs if job.instance == serving.container), None)
+    if product.job is None:
+        return None if own is None else Retire(own.container)
+    if any(isinstance(event, JobRefused) for event in done):
+        return None
+    if own is None:
+        return StartJob(target, serving.container, use, tuple(product.job.command))
+    started_here = any(isinstance(event, StartJob) and event.instance == serving.container for event in done)
+    if started_here and CheckJob(own.container) not in done:
+        return CheckJob(own.container)
+    if own.state != InstanceState.RUNNING or not own.is_quiet:
+        return Retire(own.container)
+    return None
+
+
+def settled_answer(answer: MoveResult, done: tuple[Event, ...]) -> MoveResult:
+    refused = next((event for event in done if isinstance(event, JobRefused)), None)
+    if refused is None:
+        return answer
+    return answer.model_copy(update={"outcome": Outcome.JOB_FAILED, "error": refused.report})
 
 
 def settle_serving(
     seen: LaneSeen, serving: RunningInstance, target: LaneBuild, product: Product, answer: MoveResult, done: tuple[Event, ...]
-) -> Action | Done[MoveResult]:
-    own_job = next((job for job in seen.jobs if job.instance == serving.container), None)
-    started_here = any(isinstance(event, StartJob) and event.instance == serving.container for event in done)
-    if own_job is not None and (product.job is None or (own_job.state != InstanceState.RUNNING and not started_here)):
-        return Retire(own_job.container)
-    if own_job is None and product.job is not None:
-        return StartJob(target, serving.container, serving.data_set, tuple(product.job.command))
+) -> Action | Done[MoveResult] | Stop:
+    use = prepared(seen, serving.data_set, None, target, product, done)
+    if not (use is None or isinstance(use, DataSetUse)):
+        return use
+    if (step := job_step(seen, serving, target, product, use, done)) is not None:
+        return step
     old = sorted(instance.container for instance in seen.instances if instance.container != serving.container)
-    return Retire(old[0]) if old else Done(answer)
+    return Retire(old[0]) if old else Done(settled_answer(answer, done))
 
 
 def decide_move(
@@ -365,13 +471,12 @@ def replace_receiving(
     strays = sorted(instances.keys() - {receiving_container, candidate})
     if strays:
         return Retire(strays[0])
+    use = prepared(seen, data_set, fresh.data_set, target, product, done)
+    if not (use is None or isinstance(use, DataSetUse)):
+        return use
     if candidate is not None:
         return check_then_route(web_address_of(target.product, target.lane), instances[candidate], product, done)
-    if product.database is not None and data_set is not None:
-        prepare = data_set_step(seen, data_set, fresh.data_set, target, product.database, done)
-        if prepare is not None:
-            return prepare
-    return StartInstance(target, fresh.container, data_set)
+    return StartInstance(target, fresh.container, use)
 
 
 def decide_retire(
@@ -388,12 +493,12 @@ def decide_retire(
         return Retire(min(job.container for job in seen.jobs))
     if seen.instances:
         return Retire(min(instance.container for instance in seen.instances))
-    kept = sorted(data_set.data_set for data_set in seen.data_sets)
-    if delete_data_set is not None and delete_data_set in kept:
-        return DeleteDataSet(delete_data_set)
+    named = next((found for found in seen.data_sets if found.data_set == delete_data_set), None)
+    if named is not None:
+        return DeleteDataSet(named)
     route_removed_to = next((event.container for event in done if isinstance(event, RemoveRoute)), None)
     retired = [event.container for event in done if isinstance(event, Retire)]
-    deleted = next((event.data_set for event in done if isinstance(event, DeleteDataSet)), None)
+    deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
     changed = route_removed_to is not None or bool(retired) or deleted is not None
     return Done(
         RetireResult(
@@ -404,6 +509,6 @@ def decide_retire(
             route_removed_to_container=route_removed_to,
             retired_containers=retired,
             deleted_data_set=deleted,
-            kept_data_sets=kept,
+            kept_data_sets=sorted(found.data_set for found in seen.data_sets),
         )
     )

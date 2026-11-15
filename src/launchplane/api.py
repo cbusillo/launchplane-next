@@ -177,7 +177,7 @@ def create_app(
             return NotFinished(
                 error=f"The move of {lane} of {product} to {request.build} stopped, and is safe to ask again: {error}"
             )
-        if result.outcome == Outcome.CHECK_FAILED:
+        if result.outcome in {Outcome.CHECK_FAILED, Outcome.JOB_FAILED}:
             response.status_code = HTTPStatus.UNPROCESSABLE_CONTENT
         return result
 

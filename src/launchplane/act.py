@@ -3,14 +3,16 @@ from collections.abc import Callable
 from typing import Protocol
 
 from launchplane import decide
-from launchplane.container_host import OnHost
+from launchplane.container_host import DatabaseLink, OnHost, PartStopped
 from launchplane.data_set import DatabaseServer, postgres_server
 from launchplane.decide import (
     Action,
+    DataSetAction,
+    DataSetUse,
     Done,
     Event,
     FreshNames,
-    HostAction,
+    InstanceAction,
     LaneRoute,
     LaneSeen,
     MoveResult,
@@ -19,20 +21,25 @@ from launchplane.decide import (
     RetireResult,
     Stop,
 )
-from launchplane.instance import LaneBuild, new_container_name, new_data_set_name
+from launchplane.instance import DataSet, LaneBuild, new_container_name, new_data_set_name
 from launchplane.product import Product
 from launchplane.proxy import CheckFailed
 
 MOST_STEPS = 50
+JOB_STEADY_SECONDS = 3
 
 
 class InstanceHost(Protocol):
     def read(self) -> OnHost: ...
-    def start_instance(self, target: LaneBuild, container: str, data_set: str | None) -> None: ...
-    def start_job(self, target: LaneBuild, instance: str, data_set: str | None, command: list[str]) -> None: ...
-    def ensure_data_set(self, product: str, lane: str, data_set: str, server: DatabaseServer) -> None: ...
+    def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None: ...
+    def start_job(self, target: LaneBuild, instance: str, link: DatabaseLink | None, command: list[str]) -> None: ...
+    def check_job(self, container: str, steady_seconds: float) -> None: ...
+    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
+    def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
+    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None: ...
+    def start_database(self, container: str) -> None: ...
     def await_database(self, container: str, server: DatabaseServer) -> None: ...
-    def delete_data_set(self, data_set: str) -> None: ...
+    def delete_data_set(self, found: DataSet) -> None: ...
     def remove_instance(self, container: str) -> None: ...
     def retire_instance(self, container: str) -> None: ...
     def read_log_tail(self, container: str) -> str: ...
@@ -54,10 +61,16 @@ class Stopped(Exception):
     pass
 
 
-def failure_report(error: CheckFailed, log_tail: str) -> str:
+def failure_report(error: CheckFailed | PartStopped, log_tail: str) -> str:
     if not log_tail:
-        return f"{error} The instance wrote no log."
-    return f"{error}\nThe instance's last log lines:\n{log_tail}"
+        return f"{error} It wrote no log."
+    return f"{error}\nIts last log lines:\n{log_tail}"
+
+
+def link_for(use: DataSetUse | None) -> DatabaseLink | None:
+    if use is None:
+        return None
+    return DatabaseLink(use.data_set, use.network, use.database_container, postgres_server(use.database))
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -133,10 +146,21 @@ class Lanes:
         match action:
             case decide.Check(container=container, health_path=health_path):
                 return self.check(container, health_path)
+            case decide.CheckJob(container=container):
+                return self.check_job(container)
             case decide.StartProxy() | decide.AwaitRoute() | decide.WriteRoute() | decide.RemoveRoute():
                 self.take_on_proxy(action)
+            case (
+                decide.CreateDataSetNetwork()
+                | decide.CreateDataSetVolume()
+                | decide.CreateDatabase()
+                | decide.StartDatabase()
+                | decide.AwaitDatabase()
+                | decide.DeleteDataSet()
+            ):
+                self.take_on_data_set(action)
             case _:
-                self.take_on_host(action)
+                self.take_on_instance(action)
         return action
 
     def take_on_proxy(self, action: ProxyAction) -> None:
@@ -150,22 +174,32 @@ class Lanes:
             case decide.RemoveRoute(web_address=web_address):
                 self.proxy.remove_route(web_address)
 
-    def take_on_host(self, action: HostAction) -> None:
+    def take_on_data_set(self, action: DataSetAction) -> None:
         match action:
-            case decide.EnsureDataSet(product=product, lane=lane, data_set=data_set, database=database):
-                self.host.ensure_data_set(product, lane, data_set, postgres_server(database))
+            case decide.CreateDataSetNetwork(product=product, lane=lane, data_set=data_set):
+                self.host.create_data_set_network(product, lane, data_set)
+            case decide.CreateDataSetVolume(product=product, lane=lane, data_set=data_set):
+                self.host.create_data_set_volume(product, lane, data_set)
+            case decide.CreateDatabase() as create:
+                server = postgres_server(create.database)
+                self.host.create_database(create.product, create.lane, create.data_set, create.network, create.volume, server)
+            case decide.StartDatabase(container=container):
+                self.host.start_database(container)
             case decide.AwaitDatabase(container=container, database=database):
                 self.host.await_database(container, postgres_server(database))
-            case decide.StartInstance(target=target, container=container, data_set=data_set):
-                self.host.start_instance(target, container, data_set)
-            case decide.StartJob(target=target, instance=instance, data_set=data_set, command=command):
-                self.host.start_job(target, instance, data_set, list(command))
+            case decide.DeleteDataSet(found=found):
+                self.host.delete_data_set(found)
+
+    def take_on_instance(self, action: InstanceAction) -> None:
+        match action:
+            case decide.StartInstance(target=target, container=container, use=use):
+                self.host.start_instance(target, container, link_for(use))
+            case decide.StartJob(target=target, instance=instance, use=use, command=command):
+                self.host.start_job(target, instance, link_for(use), list(command))
             case decide.Retire(container=container):
                 self.host.retire_instance(container)
             case decide.RemoveInstance(container=container):
                 self.host.remove_instance(container)
-            case decide.DeleteDataSet(data_set=data_set):
-                self.host.delete_data_set(data_set)
 
     def check(self, container: str, health_path: str) -> Event:
         try:
@@ -173,3 +207,10 @@ class Lanes:
         except CheckFailed as error:
             return decide.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
         return decide.Check(container, health_path)
+
+    def check_job(self, container: str) -> Event:
+        try:
+            self.host.check_job(container, JOB_STEADY_SECONDS)
+        except PartStopped as error:
+            return decide.JobRefused(container, failure_report(error, self.host.read_log_tail(container)))
+        return decide.CheckJob(container)

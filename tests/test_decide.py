@@ -7,12 +7,17 @@ from launchplane.decide import (
     AwaitDatabase,
     AwaitRoute,
     Check,
+    CheckJob,
     CheckRefused,
+    CreateDatabase,
+    CreateDataSetNetwork,
+    CreateDataSetVolume,
+    DataSetUse,
     DeleteDataSet,
     Done,
-    EnsureDataSet,
     Event,
     FreshNames,
+    JobRefused,
     LaneRoute,
     LaneSeen,
     LoadedRoute,
@@ -25,6 +30,7 @@ from launchplane.decide import (
     RetireOutcome,
     RetireResult,
     RouteStatus,
+    StartDatabase,
     StartInstance,
     StartJob,
     StartProxy,
@@ -33,7 +39,7 @@ from launchplane.decide import (
     decide_move,
     decide_retire,
 )
-from launchplane.instance import DataSet, InstanceState, LaneBuild, RunningInstance, RunningJob
+from launchplane.instance import DataSet, DataSetDatabase, DataSetNetwork, InstanceState, LaneBuild, RunningInstance, RunningJob
 from launchplane.product import Database, Job, Product
 
 WEB_ADDRESS = "testing.site.test"
@@ -42,7 +48,7 @@ FRESH = "site-testing-fresh"
 
 
 def lane_instance(container: str, build: str, state: InstanceState = InstanceState.RUNNING) -> RunningInstance:
-    return RunningInstance(product="site", lane="testing", build=build, container=container, state=state)
+    return RunningInstance(product="site", lane="testing", build=build, container=container, state=state, is_quiet=True)
 
 
 OLD = lane_instance("old", "a")
@@ -214,16 +220,21 @@ DATABASE = Database(image="postgres:18")
 
 
 def data_set(
-    name: str, state: InstanceState | None = InstanceState.RUNNING, *, quiet: bool | None = True, volume: bool = True
+    name: str,
+    state: InstanceState | None = InstanceState.RUNNING,
+    *,
+    quiet: bool | None = True,
+    volume: bool = True,
+    databases: tuple[str, ...] | None = None,
 ) -> DataSet:
+    servers = databases if databases is not None else (() if state is None else (f"database-{name}",))
     return DataSet(
         product="site",
         lane="testing",
         data_set=name,
-        network_is_quiet=quiet,
-        has_volume=volume,
-        database_container=None if state is None else f"database-{name}",
-        database_state=state,
+        networks=() if quiet is None else (DataSetNetwork(name=f"network-{name}", is_quiet=quiet),),
+        volumes=(f"volume-{name}",) if volume else (),
+        databases=tuple(DataSetDatabase(container=server, state=state or InstanceState.RUNNING) for server in servers),
     )
 
 
@@ -231,13 +242,14 @@ def on_data(instance: RunningInstance, name: str) -> RunningInstance:
     return instance.model_copy(update={"data_set": name})
 
 
-def job_of(instance: RunningInstance) -> RunningJob:
+def job_of(instance: RunningInstance, state: InstanceState = InstanceState.RUNNING) -> RunningJob:
     return RunningJob(
         product="site",
         lane="testing",
         build=instance.build,
         container=f"{instance.container}-job",
-        state=InstanceState.RUNNING,
+        state=state,
+        is_quiet=True,
         instance=instance.container,
     )
 
@@ -256,55 +268,90 @@ OLD_ON_D1 = on_data(OLD, "d1")
 NEW_ON_D1 = on_data(NEW, "d1")
 NEW_ON_D2 = on_data(NEW, "d2")
 AWAITED_D1 = AwaitDatabase("database-d1", DATABASE)
+USE_D1 = DataSetUse("d1", "network-d1", "database-d1", DATABASE)
+NEW_JOB = job_of(NEW_ON_D1)
+STARTED_NEW_JOB = StartJob(TARGET, "new", USE_D1, ("job",))
 
 DATA_MOVES = {
-    "a lane with no data set gets a fresh one before any instance": DataCase(
-        (), None, (), (), EnsureDataSet("site", "testing", "fresh-data", DATABASE)
+    "a lane with no data set gets a fresh network before anything else": DataCase(
+        (), None, (), (), CreateDataSetNetwork("site", "testing", "fresh-data")
     ),
-    "a data set left half made is made again, not a second one": DataCase(
-        (), None, (data_set("d1", None, volume=False),), (), EnsureDataSet("site", "testing", "d1", DATABASE)
+    "a data set with a network and no volume gets its volume": DataCase(
+        (), None, (data_set("d1", None, volume=False),), (), CreateDataSetVolume("site", "testing", "d1")
     ),
-    "a stopped database is started again before anything starts on it": DataCase(
-        (), None, (data_set("d1", InstanceState.STOPPED),), (), EnsureDataSet("site", "testing", "d1", DATABASE)
+    "a data set with no database gets one on the network and volume as read": DataCase(
+        (), None, (data_set("d1", None),), (), CreateDatabase("site", "testing", "d1", "network-d1", "volume-d1", DATABASE)
+    ),
+    "a stopped database is started by the name it was read under, not made again": DataCase(
+        (),
+        None,
+        (data_set("d1", databases=("renamed-database",), state=InstanceState.STOPPED),),
+        (),
+        StartDatabase("renamed-database"),
     ),
     "a database is waited for before an instance starts on it": DataCase((), None, (data_set("d1"),), (), AWAITED_D1),
-    "an instance starts on the data set once its database answered": DataCase(
-        (), None, (data_set("d1"),), (AWAITED_D1,), StartInstance(TARGET, FRESH, "d1")
+    "an instance starts on the data set once its database answered, given the names as read": DataCase(
+        (), None, (data_set("d1"),), (AWAITED_D1,), StartInstance(TARGET, FRESH, USE_D1)
     ),
     "a release uses the data set of the instance receiving visitors, even beside another": DataCase(
-        (OLD_ON_D1,), "old", (data_set("d1"), data_set("d2")), (AWAITED_D1,), StartInstance(TARGET, FRESH, "d1")
+        (OLD_ON_D1,), "old", (data_set("d1"), data_set("d2")), (AWAITED_D1,), StartInstance(TARGET, FRESH, USE_D1)
     ),
     "the new instance is checked at the product's health path": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1"),), (StartInstance(TARGET, "new", "d1"),), Check("new", "/health")
+        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1"),), (StartInstance(TARGET, "new", USE_D1), AWAITED_D1), Check("new", "/health")
+    ),
+    "an instance left by an interrupted release waits for its database to be read again before its check": DataCase(
+        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1"),), (), AWAITED_D1
     ),
     "a running instance of the build on another data set is retired, not switched to": DataCase(
         (OLD_ON_D1, NEW_ON_D2), "old", (data_set("d1"), data_set("d2")), (), Retire("new")
     ),
+    "an instance that can reach out is retired, not switched to": DataCase(
+        (OLD_ON_D1, NEW_ON_D1.model_copy(update={"is_quiet": False})), "old", (data_set("d1"),), (), Retire("new")
+    ),
     "the old job stops before the new one starts": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "new", (data_set("d1"),), (), Retire("old-job"), (job_of(OLD_ON_D1),)
+        (OLD_ON_D1, NEW_ON_D1), "new", (data_set("d1"),), (AWAITED_D1,), Retire("old-job"), (job_of(OLD_ON_D1),)
     ),
     "the new job starts once no other job runs, before the old instance retires": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "new", (data_set("d1"),), (), StartJob(TARGET, "new", "d1", ("job",))
+        (OLD_ON_D1, NEW_ON_D1), "new", (data_set("d1"),), (AWAITED_D1,), STARTED_NEW_JOB
+    ),
+    "a job started in this call is checked before anything answers": DataCase(
+        (NEW_ON_D1,), "new", (data_set("d1"),), (AWAITED_D1, STARTED_NEW_JOB), CheckJob("new-job"), (NEW_JOB,)
+    ),
+    "a job that stopped is replaced": DataCase(
+        (NEW_ON_D1,), "new", (data_set("d1"),), (AWAITED_D1,), Retire("new-job"), (job_of(NEW_ON_D1, InstanceState.STOPPED),)
     ),
     "a job left without its instance is stopped first": DataCase(
         (OLD_ON_D1,), "old", (data_set("d1"),), (), Retire("gone-job"), (job_of(lane_instance("gone", "a")),)
     ),
+    "a stopped database under a serving instance is started, not answered unchanged": DataCase(
+        (NEW_ON_D1,), "new", (data_set("d1", InstanceState.STOPPED),), (), StartDatabase("database-d1"), (NEW_JOB,)
+    ),
+    "a serving lane answers only after its database answered just now": DataCase(
+        (NEW_ON_D1,), "new", (data_set("d1"),), (), AWAITED_D1, (NEW_JOB,)
+    ),
 }
 
 
-def next_data_move_step(case: DataCase) -> object:
-    lane_seen = LaneSeen(
-        case.instances,
-        LaneRoute(None if case.receiving is None else LoadedRoute(case.receiving, RouteStatus.ENABLED), case.receiving),
-        case.jobs,
-        case.data_sets,
-    )
-    return decide_move(lane_seen, TARGET, WITH_DATA, FreshNames(FRESH, "fresh-data"), case.done)
+def lane_seen_of(case: DataCase) -> LaneSeen:
+    loaded = None if case.receiving is None else LoadedRoute(case.receiving, RouteStatus.ENABLED)
+    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets)
+
+
+def next_data_move_step(case: DataCase) -> Action | Done[MoveResult] | Stop:
+    return decide_move(lane_seen_of(case), TARGET, WITH_DATA, FreshNames(FRESH, "fresh-data"), case.done)
 
 
 @pytest.mark.parametrize("case", DATA_MOVES.values(), ids=DATA_MOVES.keys())
 def test_a_move_with_data_takes_this_step_next(case: DataCase) -> None:
     assert next_data_move_step(case) == case.step
+
+
+def test_a_job_that_stops_during_its_check_answers_job_failed_with_why_not_switched() -> None:
+    refused = JobRefused("new-job", "The job new-job stopped within 3 s of starting.")
+    done = (STARTED_NEW_JOB, AWAITED_D1, refused, WriteRoute(WEB_ADDRESS, "new"))
+    step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (data_set("d1"),), done, None, (NEW_JOB,)))
+    assert isinstance(step, Done)
+    assert (step.answer.outcome, step.answer.error) == (Outcome.JOB_FAILED, refused.report)
 
 
 DATA_STOPS = {
@@ -313,8 +360,16 @@ DATA_STOPS = {
         "cannot tell which",
     ),
     "a data set whose network is not quiet": (DataCase((), None, (data_set("d1", quiet=False),), (), None), "not quiet"),
+    "a left-over instance on a data set whose network is not quiet": (
+        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1", quiet=False),), (), None),
+        "not quiet",
+    ),
     "a database that keeps restarting": (DataCase((), None, (data_set("d1", InstanceState.RESTARTING),), (), None), "is restarting"),
     "a receiving instance whose data set is gone": (DataCase((OLD_ON_D1,), "old", (), (), None), "not on the host"),
+    "two database servers carrying one data set's labels": (
+        DataCase((), None, (data_set("d1", databases=("database-a", "database-b")),), (), None),
+        "2 database servers (database-a, database-b)",
+    ),
 }
 
 
@@ -325,15 +380,17 @@ def test_a_move_with_data_stops_with_why_instead_of_starting_an_instance(case: D
     assert reason in step.reason
 
 
-def test_a_retire_stops_jobs_before_instances_and_deletes_only_the_data_set_it_is_given() -> None:
+def test_a_retire_stops_jobs_before_instances_and_deletes_every_part_read_of_the_named_data_set() -> None:
+    doubled = data_set("d2", databases=("database-a", "database-b"))
+
     def step(
         instances: tuple[RunningInstance, ...], jobs: tuple[RunningJob, ...], delete: str | None
     ) -> Action | Done[RetireResult] | Stop:
-        lane_seen = LaneSeen(instances, LaneRoute(None, None), jobs, (data_set("d1"), data_set("d2")))
+        lane_seen = LaneSeen(instances, LaneRoute(None, None), jobs, (data_set("d1"), doubled))
         return decide_retire(lane_seen, "site", "testing", delete, ())
 
     assert step((OLD_ON_D1,), (job_of(OLD_ON_D1),), "d1") == Retire("old-job")
-    assert step((), (), "d2") == DeleteDataSet("d2")
+    assert step((), (), "d2") == DeleteDataSet(doubled)
     kept = step((), (), None)
     assert isinstance(kept, Done)
     assert kept.answer.kept_data_sets == ["d1", "d2"]

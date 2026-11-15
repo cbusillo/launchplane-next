@@ -9,24 +9,31 @@ import pytest
 from fastapi.testclient import TestClient
 
 from launchplane.api import WebAddressChecker, create_app
-from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, OnHost, instances_from_answer
+from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, OnHost, on_host_from_answers
 from launchplane.decide import MoveResult, RetireResult
 from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
 
+NO_NETWORKS: dict[str, object] = {"NetworkSettings": {"Networks": {}}}
+SITE = {"launchplane.product": "site"}
 UNEXPECTED_ANSWERS: dict[str, object] = {
     "an object instead of a list": {"message": "page not found"},
-    "a container without a state": [{"Names": ["/site"], "Labels": {"launchplane.product": "site"}}],
-    "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": {"launchplane.product": "site"}}],
-    "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}}],
-    "a container without a name": [{"Names": [], "State": "running", "Labels": {"launchplane.product": "site"}}],
+    "a container without a state": [{"Names": ["/site"], "Labels": SITE} | NO_NETWORKS],
+    "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": SITE} | NO_NETWORKS],
+    "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}} | NO_NETWORKS],
+    "a container without a name": [{"Names": [], "State": "running", "Labels": SITE} | NO_NETWORKS],
+    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE}],
 }
 
 
 def saved_container_list() -> object:
     return json.loads(SAVED_CONTAINER_LIST.read_text())
+
+
+def instances_from_answer(answer: object) -> list[RunningInstance]:
+    return on_host_from_answers(answer, [], {"Volumes": None}).instances
 
 
 def refusing_host() -> ContainerHost:
@@ -64,16 +71,16 @@ def test_a_saved_docker_answer_reads_as_instances_in_launchplane_terms() -> None
     instances = {instance.container: instance for instance in instances_from_answer(saved_container_list())}
     assert instances == {
         "site-production": RunningInstance(
-            product="site", lane="production", build="b2", container="site-production", state=InstanceState.RUNNING
+            product="site", lane="production", build="b2", container="site-production", state=InstanceState.RUNNING, is_quiet=False
         ),
         "site-testing": RunningInstance(
-            product="site", lane="testing", build="b3", container="site-testing", state=InstanceState.STOPPED
+            product="site", lane="testing", build="b3", container="site-testing", state=InstanceState.STOPPED, is_quiet=False
         ),
         "site-preview-7": RunningInstance(
-            product="site", lane="preview-7", build="b4", container="site-preview-7", state=InstanceState.PAUSED
+            product="site", lane="preview-7", build="b4", container="site-preview-7", state=InstanceState.PAUSED, is_quiet=False
         ),
         "site-unmarked-lane": RunningInstance(
-            product="site", lane=None, build=None, container="site-unmarked-lane", state=InstanceState.RUNNING
+            product="site", lane=None, build=None, container="site-unmarked-lane", state=InstanceState.RUNNING, is_quiet=False
         ),
     }
 
@@ -125,14 +132,18 @@ def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_prox
     def no_request(web_address: str) -> str | None:
         raise AssertionError(f"Asked through the proxy for {web_address}, which it routes nowhere")
 
-    instance = RunningInstance(product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING)
+    instance = RunningInstance(
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING, is_quiet=True
+    )
     entry = web_addresses_answer([instance], {}, no_request)["testing.site.test"]
     assert (entry["product"], entry["lane"], entry["sends_to_container"], entry["answers"]) == ("site", "testing", None, False)
     assert "no instance" in entry["error"]
 
 
 def test_a_stopped_instance_receiving_visitors_leaves_its_web_address_not_answering_with_the_proxys_error() -> None:
-    instance = RunningInstance(product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED)
+    instance = RunningInstance(
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, is_quiet=True
+    )
     routes = {"testing.site.test": instance.container}
     entry = web_addresses_answer([instance], routes, lambda _: "502 Bad Gateway")["testing.site.test"]
     assert (entry["sends_to_container"], entry["answers"], entry["error"]) == (instance.container, False, "502 Bad Gateway")

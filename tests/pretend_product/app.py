@@ -14,7 +14,7 @@ from types import FrameType
 
 import psycopg
 
-DATABASE = "host=database user=postgres dbname=postgres connect_timeout=3"
+DATABASE = "connect_timeout=3"
 CREATE_ENTRIES = "CREATE TABLE IF NOT EXISTS entries (id bigserial PRIMARY KEY, body text NOT NULL, build text NOT NULL)"
 CREATE_BEATS = """
     CREATE TABLE IF NOT EXISTS beats

@@ -39,9 +39,9 @@
 <main id="lanes"></main>
 <script>
 "use strict";
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, data_set: ?string, receives_visitors_for: ?string}} Instance */
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, instance: ?string}} Job */
-/** @typedef {{product: string, lane: ?string, data_set: string, network_is_quiet: ?boolean, has_volume: boolean, database_container: ?string, database_state: ?string}} DataSet */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, is_quiet: boolean, data_set: ?string, receives_visitors_for: ?string}} Instance */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, is_quiet: boolean, instance: ?string}} Job */
+/** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string}[]}} DataSet */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
 /** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], web_addresses: WebAddress[]}} Running */
 const READ_EVERY_MS = 1000;
@@ -115,21 +115,49 @@ function stateTag(state) {
 function instanceItem(instance, index, jobs) {
   const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
   if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
+  if (!instance.is_quiet) heading.append(reachesOutTag());
   const container = element("small", { "data-container": "" }, instance.container);
   const item = element("li", {}, heading, container, row("Build", buildCode(instance.build)));
   if (instance.data_set) item.append(row("Data set", code(instance.data_set)));
-  for (const job of jobs.filter((each) => each.instance === instance.container)) item.append(row("Job", stateTag(job.state)));
+  for (const job of jobs.filter((each) => each.instance === instance.container)) item.append(jobRow("Job", job));
   return item;
+}
+
+function reachesOutTag() {
+  return element("span", { "data-tag": "", ...health(false) }, "can reach out");
+}
+
+/**
+ * @param {string} label
+ * @param {Job} job
+ */
+function jobRow(label, job) {
+  const jobRowElement = row(label, stateTag(job.state));
+  if (!job.is_quiet) jobRowElement.append(reachesOutTag());
+  return jobRowElement;
+}
+
+/**
+ * @param {string} kind
+ * @param {string[]} names
+ */
+function partProblem(kind, names) {
+  if (names.length === 0) return `Its ${kind} is missing.`;
+  if (names.length > 1) return `It has ${names.length} of what should be one ${kind}: ${names.join(", ")}.`;
+  return null;
 }
 
 /** @param {DataSet} dataSet */
 function dataSetRows(dataSet) {
-  const database = dataSet.database_state ? stateTag(dataSet.database_state) : element("span", health(false), "missing");
-  const rows = [row("Data set", code(dataSet.data_set), element("span", {}, "database"), database)];
-  const problems = [];
-  if (dataSet.network_is_quiet === null) problems.push("Its network is missing.");
-  if (dataSet.network_is_quiet === false) problems.push("Its network is not quiet: what is attached to it can reach out.");
-  if (!dataSet.has_volume) problems.push("Its volume is missing.");
+  const [database] = dataSet.databases;
+  const state = dataSet.databases.length === 1 ? stateTag(database.state) : element("span", health(false), "not one");
+  const rows = [row("Data set", code(dataSet.data_set), element("span", {}, "database"), state)];
+  const problems = [
+    partProblem("network", dataSet.networks.map((network) => network.name)),
+    partProblem("volume", dataSet.volumes),
+    partProblem("database server", dataSet.databases.map((each) => each.container)),
+    ...dataSet.networks.filter((network) => !network.is_quiet).map((network) => `Its network ${network.name} is not quiet: what is attached to it can reach out.`),
+  ].filter((problem) => problem !== null);
   if (problems.length) rows.push(element("small", health(false), problems.join(" ")));
   return rows;
 }
@@ -137,7 +165,7 @@ function dataSetRows(dataSet) {
 /** @param {Job} job */
 function jobWithoutInstanceItem(job) {
   const container = element("small", { "data-container": "" }, job.container);
-  return element("li", {}, row("Job with no instance", stateTag(job.state)), container, row("Build", buildCode(job.build)));
+  return element("li", {}, jobRow("Job with no instance", job), container, row("Build", buildCode(job.build)));
 }
 
 /**

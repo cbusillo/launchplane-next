@@ -162,6 +162,16 @@ def reaches(container: str, host: str, port: int) -> bool:
     return in_container(container, f"python /app.py reach {host} {port}")[0]
 
 
+def database_of(data_set: dict[str, Any]) -> str:
+    [database] = data_set["databases"]
+    return database["container"]
+
+
+def environment_of(container: str) -> dict[str, str]:
+    lines = on_scratch(f"docker inspect --format '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' {container}").splitlines()
+    return dict(line.split("=", 1) for line in lines if "=" in line)
+
+
 def beats(database_container: str) -> list[str]:
     query = "psql --username=postgres --tuples-only --no-align --command='SELECT run FROM beats ORDER BY at'"
     return on_scratch(f"docker exec {database_container} {query}").split()
@@ -211,7 +221,8 @@ def test_a_lane_brought_up_with_a_fresh_data_set_shows_it_and_keeps_rows_written
     view = lane_view()
     [data_set] = view.data_sets
     assert (body["outcome"], body["data_set"]) == ("switched", data_set["data_set"])
-    assert (data_set["network_is_quiet"], data_set["has_volume"], data_set["database_state"]) == (True, True, "running")
+    assert [(network["is_quiet"], len(data_set["volumes"])) for network in data_set["networks"]] == [(True, 1)]
+    assert [database["state"] for database in data_set["databases"]] == ["running"]
     assert view.receiving()["data_set"] == data_set["data_set"]
     assert [(job["instance"], job["state"]) for job in view.jobs] == [(view.receiving()["container"], "running")]
     write_row("first")
@@ -235,7 +246,7 @@ def test_a_release_that_keeps_the_data_set_switches_without_failing_a_request_an
 def test_during_a_release_the_job_never_runs_twice_at_once(lane_on_a: LaneView) -> None:
     move(BUILD_B)
     time.sleep(2)
-    runs = beats(lane_on_a.data_sets[0]["database_container"])
+    runs = beats(database_of(lane_on_a.data_sets[0]))
     assert len(runs_in_order(runs)) == len(set(runs)) == 2, runs_in_order(runs)
 
 
@@ -260,12 +271,12 @@ def test_an_instance_cannot_reach_another_data_sets_database(lane_on_a: LaneView
     move(BUILD_A, OTHER_LANE)
     other = lane_view(OTHER_LANE).data_sets[0]
     other_address = on_scratch(
-        "docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + other["database_container"]
+        "docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + database_of(other)
     ).strip()
     instance = lane_on_a.receiving()["container"]
     assert reaches(instance, "database", 5432)
     assert not reaches(instance, other_address, 5432)
-    assert not reaches(instance, other["database_container"], 5432)
+    assert not reaches(instance, database_of(other), 5432)
     retire_lane_and_its_data(OTHER_LANE)
 
 
@@ -309,7 +320,9 @@ def receives_visitors(build: str) -> Callable[[LaneView], bool]:
 
 BRING_UP_POINTS: dict[str, Callable[[LaneView], bool]] = {
     "the data set exists": lambda view: bool(view.data_sets),
-    "its database runs": lambda view: any(data_set["database_state"] == "running" for data_set in view.data_sets),
+    "its database runs": lambda view: any(
+        database["state"] == "running" for data_set in view.data_sets for database in data_set["databases"]
+    ),
     "the instance exists": lambda view: bool(view.instances),
     "the instance receives visitors": receives_visitors(BUILD_A),
 }
@@ -349,5 +362,19 @@ def test_a_release_killed_at_this_point_reaches_the_same_end_on_the_same_data_wh
     view = assert_lane_finished_on(BUILD_B)
     assert view.data_sets == lane_on_a.data_sets
     assert rows_read() == ["before the release"]
-    runs = beats(view.data_sets[0]["database_container"])
+    runs = beats(database_of(view.data_sets[0]))
     assert len(runs_in_order(runs)) == len(set(runs)), runs_in_order(runs)
+
+
+def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_shown(lane_on_a: LaneView) -> None:
+    move(BUILD_A, OTHER_LANE)
+    other = lane_view(OTHER_LANE)
+    passwords = [environment_of(database_of(view.data_sets[0]))["POSTGRES_PASSWORD"] for view in (lane_on_a, other)]
+    instance = lane_on_a.receiving()["container"]
+    [job] = lane_on_a.jobs
+    assert passwords[0] != passwords[1]
+    assert environment_of(instance)["PGPASSWORD"] == environment_of(job["container"])["PGPASSWORD"] == passwords[0]
+    assert not in_container(instance, "env PGPASSWORD=wrong python -c 'import psycopg; psycopg.connect(\"connect_timeout=3\")'")[0]
+    shown = json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
+    assert [password in shown for password in passwords] == [False, False]
+    retire_lane_and_its_data(OTHER_LANE)
