@@ -2,7 +2,7 @@
 
 `POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The lane answers at the web address `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
-For now a build is a container image reference, and the instance must answer HTTP on port 80. Each instance Launchplane starts gets a new container name: `{product}-{lane}-` followed by 12 random hex digits. The prefix is for people reading `docker ps`. Which product, lane and build an instance is comes from its labels, never from its container name, so product `a-b` lane `c` and product `a` lane `b-c` stay apart. The container name is random because a route names its instance's container: a replacement that took the container name of a stopped instance receiving visitors would receive them the moment it started, before its check.
+For now a build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a job or a health path of its own says so in its description; how a lane with a database moves is in [a lane with a database](data-sets.md). Each instance Launchplane starts gets a new container name: `{product}-{lane}-` followed by 12 random hex digits. The prefix is for people reading `docker ps`. Which product, lane and build an instance is comes from its labels, never from its container name, so product `a-b` lane `c` and product `a` lane `b-c` stay apart. The container name is random because a route names its instance's container: a replacement that took the container name of a stopped instance receiving visitors would receive them the moment it started, before its check.
 
 ## What it does
 
@@ -35,7 +35,7 @@ One move runs at a time in a Launchplane process. A second call waits for the fi
 
 ### The check
 
-The proxy requests `http://<instance>:80/` on the lane network, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure. It fails if it has not passed after 20 s, with the last error, for example `wget: can't connect to remote host (172.16.0.3): Connection refused`. An instance that answers once and then crashes does not pass.
+The proxy requests `http://<instance>:80<health path>` on the lane network, the path real traffic takes. The health path is the product's, `/` unless its description says otherwise. The instance passes once it has answered with a 2xx for 3 s without a failure. It fails if it has not passed after 20 s, with the last error, for example `wget: can't connect to remote host (172.16.0.3): Connection refused`. An instance that answers once and then crashes does not pass.
 
 ### The old instance
 
@@ -69,7 +69,7 @@ Killed between starting the new instance and switching, then asked again, measur
 
 ## The proxy
 
-Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, on the Docker network `launchplane-lanes` with the instances. Only `src/launchplane/proxy.py` knows it is Traefik.
+Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80. It is attached to the Docker network `launchplane-lanes` with the instances, and to `launchplane-proxy-outside`, a plain bridge network through which port 80 is published. `launchplane-lanes` is quiet: internal, with an isolated gateway, so an instance reaches nothing outside it (see [the quiet network](data-sets.md#the-quiet-network)). Launchplane refuses to start an instance while a `launchplane-lanes` that is not quiet exists; it must be removed and made again, which means retiring every lane and removing the proxy first. Only `src/launchplane/proxy.py` knows it is Traefik.
 
 - Routes are one file per lane, named for the lane's web address, such as `testing.test-bed-site.test.yml`, in the volume `launchplane-proxy-routes`. Traefik watches the folder and merges the files. Launchplane writes a lane's new file beside it as `testing.test-bed-site.test.next`, which Traefik ignores, then renames it over the lane's file, so Traefik never reads half a file. Retiring a lane deletes its file. The file is JSON, which YAML accepts. A lane's file that is not exactly what Launchplane writes for that lane is an error.
 - Traefik's API listens on `127.0.0.1:8080` inside its container only. Launchplane reads `/api/rawdata` and makes its requests by running `wget` inside the proxy container over the existing certificate connection to Docker. No new port is opened and no new key exists.

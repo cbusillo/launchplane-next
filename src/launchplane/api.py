@@ -4,27 +4,32 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.resources import files
+from pathlib import Path
 from typing import Annotated, Any
 
 import uvicorn
-from fastapi import FastAPI, Path, Response
+from fastapi import FastAPI, Response
+from fastapi import Path as PathParameter
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from launchplane.act import Lanes, Stopped
-from launchplane.container_host import ContainerHost, ContainerHostError
+from launchplane.container_host import ContainerHost, ContainerHostError, OnHost
 from launchplane.decide import MoveResult, Outcome, RetireResult, web_address_of
-from launchplane.instance import LaneBuild, RunningInstance
+from launchplane.instance import DataSet, LaneBuild, RunningInstance, RunningJob
+from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 
-type InstanceReader = Callable[[], list[RunningInstance]]
+type HostReader = Callable[[], OnHost]
 type RouteReader = Callable[[], dict[str, str]]
 type WebAddressChecker = Callable[[str], str | None]
 type MoveRequester = Callable[[LaneBuild], MoveResult]
-type RetireRequester = Callable[[str, str], RetireResult]
+type RetireRequester = Callable[[str, str, str | None], RetireResult]
+type Lane = tuple[str, str | None]
 
-SLUG = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
-UNREADABLE = (ContainerHostError, ProxyError, Stopped)
+SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
+UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
+PRODUCTS_FOLDER = "/var/lib/launchplane/products"
 
 
 class InstanceAnswer(RunningInstance):
@@ -43,6 +48,8 @@ class WebAddressAnswer(BaseModel):
 class RunningAnswer(BaseModel):
     read_at: datetime
     instances: list[InstanceAnswer]
+    jobs: list[RunningJob]
+    data_sets: list[DataSet]
     web_addresses: list[WebAddressAnswer]
 
 
@@ -53,6 +60,10 @@ class HostUnreadable(BaseModel):
 
 class MoveRequest(BaseModel):
     build: str
+
+
+class RetireRequest(BaseModel):
+    delete_data_set: str | None = None
 
 
 class NotFinished(BaseModel):
@@ -75,21 +86,29 @@ def instance_answers(instances: list[RunningInstance], routes: dict[str, str]) -
     ]
 
 
-def lane_owners(instances: list[RunningInstance], routes: dict[str, str]) -> dict[str, RunningInstance | None]:
-    by_container = {instance.container: instance for instance in instances}
-    routed = {web_address: by_container.get(container) for web_address, container in routes.items()}
-    marked = {web_address_of(instance.product, instance.lane): instance for instance in instances if instance.lane is not None}
-    return routed | marked
+def lanes_on_host(on_host: OnHost) -> set[Lane]:
+    parts: list[RunningInstance | RunningJob | DataSet] = [*on_host.instances, *on_host.jobs, *on_host.data_sets]
+    return {(part.product, part.lane) for part in parts}
 
 
-def web_address_answer(
-    web_address: str, owner: RunningInstance | None, sends_to: str | None, failure: str | None
-) -> WebAddressAnswer:
+def lane_owners(on_host: OnHost, routes: dict[str, str]) -> dict[str, Lane | None]:
+    by_container = {instance.container: instance for instance in on_host.instances}
+    owners: dict[str, Lane | None] = {
+        web_address: None if (instance := by_container.get(container)) is None else (instance.product, instance.lane)
+        for web_address, container in routes.items()
+    }
+    for product, lane in lanes_on_host(on_host):
+        if lane is not None:
+            owners[web_address_of(product, lane)] = (product, lane)
+    return owners
+
+
+def web_address_answer(web_address: str, owner: Lane | None, sends_to: str | None, failure: str | None) -> WebAddressAnswer:
     error = f"The proxy sends {web_address} to no instance." if sends_to is None else failure
     return WebAddressAnswer(
         web_address=web_address,
-        product=None if owner is None else owner.product,
-        lane=None if owner is None else owner.lane,
+        product=None if owner is None else owner[0],
+        lane=None if owner is None else owner[1],
         sends_to_container=sends_to,
         answers=error is None,
         error=error,
@@ -103,10 +122,8 @@ def failures_at_once(web_addresses: list[str], why_web_address_fails: WebAddress
         return dict(zip(web_addresses, pool.map(why_web_address_fails, web_addresses), strict=True))
 
 
-def web_address_answers(
-    instances: list[RunningInstance], routes: dict[str, str], why_web_address_fails: WebAddressChecker
-) -> list[WebAddressAnswer]:
-    owners = lane_owners(instances, routes)
+def web_address_answers(on_host: OnHost, routes: dict[str, str], why_web_address_fails: WebAddressChecker) -> list[WebAddressAnswer]:
+    owners = lane_owners(on_host, routes)
     failures = failures_at_once(sorted(routes), why_web_address_fails)
     return [
         web_address_answer(web_address, owners[web_address], routes.get(web_address), failures.get(web_address))
@@ -119,7 +136,7 @@ def running_page() -> str:
 
 
 def create_app(
-    read: InstanceReader,
+    read: HostReader,
     read_routes: RouteReader,
     why_web_address_fails: WebAddressChecker,
     move: MoveRequester,
@@ -136,12 +153,18 @@ def create_app(
     def running(response: Response) -> RunningAnswer | HostUnreadable:
         read_at = datetime.now(UTC)
         try:
-            instances, routes = read(), read_routes()
-            web_addresses = web_address_answers(instances, routes, why_web_address_fails)
+            on_host, routes = read(), read_routes()
+            web_addresses = web_address_answers(on_host, routes, why_web_address_fails)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=read_at, error=str(error))
-        return RunningAnswer(read_at=read_at, instances=instance_answers(instances, routes), web_addresses=web_addresses)
+        return RunningAnswer(
+            read_at=read_at,
+            instances=instance_answers(on_host.instances, routes),
+            jobs=on_host.jobs,
+            data_sets=on_host.data_sets,
+            web_addresses=web_addresses,
+        )
 
     @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
     def move_lane(
@@ -159,9 +182,11 @@ def create_app(
         return result
 
     @app.post("/lanes/{product}/{lane}/retire", responses=RETIRE_ERROR_RESPONSES)
-    def retire_lane(product: Annotated[str, SLUG], lane: Annotated[str, SLUG], response: Response) -> RetireResult | NotFinished:
+    def retire_lane(
+        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], request: RetireRequest, response: Response
+    ) -> RetireResult | NotFinished:
         try:
-            return retire(product, lane)
+            return retire(product, lane, request.delete_data_set)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return NotFinished(error=f"Retiring {lane} of {product} stopped, and is safe to ask again: {error}")
@@ -174,6 +199,7 @@ def serve() -> None:
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
     proxy = TraefikProxy(host)
-    lanes = Lanes(host, proxy)
-    app = create_app(host.read_instances, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire)
+    products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
+    lanes = Lanes(host, proxy, products.read)
+    app = create_app(host.read, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire)
     uvicorn.run(app, host=address, port=port)

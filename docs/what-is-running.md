@@ -11,12 +11,17 @@ A container marks itself with three labels, set when it is created:
 | `launchplane.product` | the product's name |
 | `launchplane.lane` | `production`, `testing`, or the preview's name |
 | `launchplane.build` | the build it runs |
+| `launchplane.part` | `web`, `job` or `database`; a container without it is `web` |
+| `launchplane.data-set` | the data set it runs against or belongs to |
+| `launchplane.instance` | on a job, the container of its instance's web part |
+
+Data set networks and volumes carry the product, lane and data set labels too (see [a lane with a database](data-sets.md)). An instance is its web part; its job and its data set's server are not listed as instances.
 
 Only containers carrying `launchplane.product` are listed. Any other container on the host is not Launchplane's and is not shown. Labels cannot change after a container is created, so an instance cannot drift from what it says it is without being replaced.
 
 ## The answer
 
-Each instance has `product`, `lane`, `build`, `container`, `state` and `receives_visitors_for`. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
+Each instance has `product`, `lane`, `build`, `container`, `state`, `data_set` and `receives_visitors_for`. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
 
 | `state` | Docker's states |
 | --- | --- |
@@ -25,9 +30,11 @@ Each instance has `product`, `lane`, `build`, `container`, `state` and `receives
 | `restarting` | `restarting` |
 | `stopped` | `created`, `exited`, `dead`, `removing` |
 
-Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
+Each job has `product`, `lane`, `build`, `container`, `state` and `instance`, the container of its instance's web part. Each data set has `product`, `lane`, `data_set`, `network_is_quiet` (`null` when its network is missing), `has_volume`, `database_container` and `database_state` (both `null` when its server is missing), each read as it is on the host.
 
-- `200` with `instances` and `web_addresses`: the host was read. An empty list means the host answered and nothing marked is on it.
+Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance, a job or a data set on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
+
+- `200` with `instances`, `jobs`, `data_sets` and `web_addresses`: the host was read. An empty list means the host answered and nothing marked is on it.
 - `503` with `error`: the host or the proxy could not be read, or an answer did not have the expected shape. The error carries the real cause. It never answers "nothing is running".
 
 Both carry `read_at`, the moment the host was asked.
@@ -47,6 +54,8 @@ Both carry `read_at`, the moment the host was asked.
                  test-bed-site-testing-ac244586b42f
     Build        nginx:1.30.6-alpine
   ```
+
+  A lane with a database also shows its data sets, and each instance its data set and its job (see [the page](data-sets.md#the-page)).
 
   A web address that does not answer shows `not answering` and the real error under it. One whose instance is running but does not answer with success says so, and does not say nothing is there. One the proxy sends nowhere says `The proxy sends … to no instance.`, and one with no instance of its lane on the host is titled `A web address with no instance on the host`. The instance the web address sends visitors to is marked `active` and listed first. Every other instance shows only its state: the page sees what the host and the proxy report, not why an instance has no visitors, such as being checked or stopping. A build named by digest is shown as its image name and the first 12 characters of the digest, such as `kennethreitz/httpbin@599fe5e50731`; any other build as it is. The full value is the code's tooltip, and `/running` always answers it in full. Long values wrap inside their box. Under each instance, a small second line gives its container's name, which tells two instances apart during a move and finds the container on the host. A route to another lane's instance names that lane and the container, and a route to a container that is not on the host says so. Instances with no lane label are listed apart.
 - When Launchplane answers `503`, or cannot be reached, the page shows the error and when it last read the host. The last reading stays below it, faded, under the line `Not current: below is what was read at <time>.`, for as long as reads keep failing; the line and the fading come and go together, so an old reading is never shown without them. Before any good read there is nothing below. It never shows an empty list for an answer it did not get. Once a read succeeds again, one line stays above the lanes with the time of the last failed read and its real error, until the person presses Dismiss, so a failure that lasts one second can still be read. Like the time of the last good read, it is kept only by the open page, not by Launchplane.

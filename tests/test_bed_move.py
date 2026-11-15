@@ -1,15 +1,25 @@
 import http.client
 import threading
-import time
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from launchplane.proxy import PROXY_NAME, route_file_of, route_text, staged_route_file_of
-from tests.bed import SCRATCH_ADDRESS, ask, kill_launchplane, move_lane, needs_test_bed, on_scratch, retire, wait_for
+from tests.bed import (
+    SCRATCH_ADDRESS,
+    RequestLoop,
+    UnexpectedAnswer,
+    ask,
+    kill_launchplane,
+    move_lane,
+    needs_test_bed,
+    on_scratch,
+    retire,
+    wait_for,
+)
+from tests.bed import request_loop as request_loop_of
 
 pytestmark = needs_test_bed
 
@@ -21,51 +31,25 @@ BUILD_B = "nginx:1.31.8-alpine"
 BUILD_C = "hashicorp/http-echo:1.0"
 ANSWER_A = "nginx/1.30.6"
 ANSWER_B = "nginx/1.31.8"
-PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
 
 
-@dataclass
-class RequestLoop:
-    answers: list[str] = field(default_factory=list[str])
-    failures: list[str] = field(default_factory=list[str])
-    running: bool = True
-
-    def request_once(self) -> None:
-        connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
-        try:
-            connection.request("GET", "/", headers={"Host": NAME})
-            response = connection.getresponse()
-            response.read()
-            if response.status == 200:
-                self.answers.append(response.getheader("Server", ""))
-            else:
-                self.failures.append(f"status {response.status}")
-        except OSError as error:
-            self.failures.append(repr(error))
-        finally:
-            connection.close()
-
-    def run(self) -> None:
-        while self.running:
-            self.request_once()
-            time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
-
-    def answers_in_order(self) -> list[str]:
-        return [answer for index, answer in enumerate(self.answers) if index == 0 or self.answers[index - 1] != answer]
+def server_answering() -> str:
+    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
+    try:
+        connection.request("GET", "/", headers={"Host": NAME})
+        response = connection.getresponse()
+        response.read()
+        if response.status != 200:
+            raise UnexpectedAnswer(f"status {response.status}")
+        return response.getheader("Server", "")
+    finally:
+        connection.close()
 
 
 @contextmanager
 def request_loop() -> Generator[RequestLoop]:
-    loop = RequestLoop()
-    thread = threading.Thread(target=loop.run)
-    thread.start()
-    time.sleep(1)
-    try:
+    with request_loop_of(server_answering) as loop:
         yield loop
-    finally:
-        time.sleep(1)
-        loop.running = False
-        thread.join()
 
 
 def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:

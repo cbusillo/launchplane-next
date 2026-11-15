@@ -39,9 +39,11 @@
 <main id="lanes"></main>
 <script>
 "use strict";
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, receives_visitors_for: ?string}} Instance */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, data_set: ?string, receives_visitors_for: ?string}} Instance */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, instance: ?string}} Job */
+/** @typedef {{product: string, lane: ?string, data_set: string, network_is_quiet: ?boolean, has_volume: boolean, database_container: ?string, database_state: ?string}} DataSet */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
-/** @typedef {{read_at: string, instances: Instance[], web_addresses: WebAddress[]}} Running */
+/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], web_addresses: WebAddress[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -100,16 +102,42 @@ function row(label, ...values) {
   return element("div", { "data-row": "" }, element("span", { "data-label": "" }, label), ...values);
 }
 
+/** @param {string} state */
+function stateTag(state) {
+  return element("span", { "data-tag": "", ...health(state === "running") }, state);
+}
+
 /**
  * @param {Instance} instance
  * @param {number} index
+ * @param {Job[]} jobs
  */
-function instanceItem(instance, index) {
-  const state = element("span", { "data-tag": "", ...health(instance.state === "running") }, instance.state);
-  const heading = row(`Instance ${index + 1}`, state);
+function instanceItem(instance, index, jobs) {
+  const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
   if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
   const container = element("small", { "data-container": "" }, instance.container);
-  return element("li", {}, heading, container, row("Build", buildCode(instance.build)));
+  const item = element("li", {}, heading, container, row("Build", buildCode(instance.build)));
+  if (instance.data_set) item.append(row("Data set", code(instance.data_set)));
+  for (const job of jobs.filter((each) => each.instance === instance.container)) item.append(row("Job", stateTag(job.state)));
+  return item;
+}
+
+/** @param {DataSet} dataSet */
+function dataSetRows(dataSet) {
+  const database = dataSet.database_state ? stateTag(dataSet.database_state) : element("span", health(false), "missing");
+  const rows = [row("Data set", code(dataSet.data_set), element("span", {}, "database"), database)];
+  const problems = [];
+  if (dataSet.network_is_quiet === null) problems.push("Its network is missing.");
+  if (dataSet.network_is_quiet === false) problems.push("Its network is not quiet: what is attached to it can reach out.");
+  if (!dataSet.has_volume) problems.push("Its volume is missing.");
+  if (problems.length) rows.push(element("small", health(false), problems.join(" ")));
+  return rows;
+}
+
+/** @param {Job} job */
+function jobWithoutInstanceItem(job) {
+  const container = element("small", { "data-container": "" }, job.container);
+  return element("li", {}, row("Job with no instance", stateTag(job.state)), container, row("Build", buildCode(job.build)));
 }
 
 /**
@@ -121,9 +149,12 @@ function visitedFirst(first, second) {
   return byVisitors || first.container.localeCompare(second.container);
 }
 
-/** @param {Instance[]} instances */
-function instanceList(instances) {
-  return element("ul", {}, ...instances.toSorted(visitedFirst).map(instanceItem));
+/**
+ * @param {Instance[]} instances
+ * @param {Job[]} jobs
+ */
+function instanceList(instances, jobs) {
+  return element("ul", {}, ...instances.toSorted(visitedFirst).map((instance, index) => instanceItem(instance, index, jobs)));
 }
 
 /**
@@ -159,25 +190,29 @@ function routeElsewhere(container, allInstances) {
 
 /**
  * @param {WebAddress} entry
- * @param {Instance[]} laneInstances
- * @param {Instance[]} allInstances
+ * @param {Running} answer
  */
-function laneSection(entry, laneInstances, allInstances) {
+function laneSection(entry, answer) {
+  const laneInstances = answer.instances.filter((instance) => isOfLane(instance, entry));
+  const laneJobs = answer.jobs.filter((job) => isOfLane(job, entry));
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A web address with no instance on the host";
-  const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, allInstances));
+  const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, answer.instances));
+  for (const dataSet of answer.data_sets.filter((each) => isOfLane(each, entry))) section.append(...dataSetRows(dataSet));
   if (entry.sends_to_container && !laneInstances.some((instance) => instance.container === entry.sends_to_container)) {
-    section.append(routeElsewhere(entry.sends_to_container, allInstances));
+    section.append(routeElsewhere(entry.sends_to_container, answer.instances));
   }
-  if (laneInstances.length) section.append(instanceList(laneInstances));
+  if (laneInstances.length) section.append(instanceList(laneInstances, laneJobs));
+  const jobsWithoutInstance = laneJobs.filter((job) => !laneInstances.some((instance) => instance.container === job.instance));
+  if (jobsWithoutInstance.length) section.append(element("ul", {}, ...jobsWithoutInstance.map(jobWithoutInstanceItem)));
   return section;
 }
 
 /**
- * @param {Instance} instance
+ * @param {{product: string, lane: ?string}} part
  * @param {WebAddress} entry
  */
-function isOfLane(instance, entry) {
-  return entry.product !== null && instance.product === entry.product && instance.lane === entry.lane;
+function isOfLane(part, entry) {
+  return entry.product !== null && part.product === entry.product && part.lane === entry.lane;
 }
 
 /** @param {Running} answer */
@@ -187,11 +222,11 @@ function showRunning(answer) {
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
   showLastFailure();
   markReadingCurrent();
-  const sections = answer.web_addresses.map((entry) =>
-    laneSection(entry, answer.instances.filter((instance) => isOfLane(instance, entry)), answer.instances)
-  );
+  const sections = answer.web_addresses.map((entry) => laneSection(entry, answer));
   const withoutLane = answer.instances.filter((instance) => instance.lane === null);
-  if (withoutLane.length) sections.push(element("section", {}, element("h2", {}, "Instances with no lane"), instanceList(withoutLane)));
+  if (withoutLane.length) {
+    sections.push(element("section", {}, element("h2", {}, "Instances with no lane"), instanceList(withoutLane, answer.jobs)));
+  }
   if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
   lanes.replaceChildren(...sections);
 }

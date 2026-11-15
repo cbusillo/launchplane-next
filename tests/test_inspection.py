@@ -74,6 +74,17 @@ def test_an_unresolved_standard_library_import_does_not_pass_as_the_canary(tmp_p
         require_canary_caught(findings)
 
 
+def test_duplicated_code_is_reported_once_per_place_and_its_grouped_report_does_not_stop_the_reading(tmp_path: Path) -> None:
+    places = [pycharm_problem(f"tests/{name}.py", 3, "DuplicatedCode", "Duplicate code: lines 3-9") for name in ("one", "two")]
+    write_pycharm_results(tmp_path, [])
+    (tmp_path / "DuplicatedCode.json").write_text(json.dumps({"problems": places}))
+    (tmp_path / "DuplicatedCode_aggregate.json").write_text(
+        json.dumps({"problems": [[{"file": place["file"], "line": 3, "start": 0, "end": 9} for place in places]]})
+    )
+
+    assert [finding.file for finding in read_findings(tmp_path)] == ["tests/one.py", "tests/two.py"]
+
+
 def test_the_planted_canary_defect_as_pycharm_reports_it_passes(tmp_path: Path) -> None:
     require_canary_caught(read_findings(write_pycharm_results(tmp_path, [PLANTED_CANARY_PROBLEM])))
 

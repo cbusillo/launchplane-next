@@ -1,5 +1,6 @@
 import json
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -7,8 +8,8 @@ import docker
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.api import InstanceReader, WebAddressChecker, create_app
-from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, instances_from_answer
+from launchplane.api import WebAddressChecker, create_app
+from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, OnHost, instances_from_answer
 from launchplane.decide import MoveResult, RetireResult
 from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 
@@ -37,7 +38,7 @@ def no_move(target: LaneBuild) -> MoveResult:
     raise AssertionError(f"Reading what is running asked for a move to {target.build}")
 
 
-def no_retire(product: str, lane: str) -> RetireResult:
+def no_retire(product: str, lane: str, _delete_data_set: str | None) -> RetireResult:
     raise AssertionError(f"Reading what is running asked to retire {lane} of {product}")
 
 
@@ -45,10 +46,13 @@ def every_web_address_answers(_web_address: str) -> str | None:
     return None
 
 
+type InstanceReader = Callable[[], list[RunningInstance]]
+
+
 def app_reading(
     read: InstanceReader, routes: dict[str, str] | None = None, why_fails: WebAddressChecker = every_web_address_answers
 ) -> TestClient:
-    return TestClient(create_app(read, lambda: routes or {}, why_fails, no_move, no_retire))
+    return TestClient(create_app(lambda: OnHost(read(), [], []), lambda: routes or {}, why_fails, no_move, no_retire))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
@@ -82,11 +86,11 @@ def test_an_answer_of_unexpected_shape_is_an_error_not_an_empty_list(answer: obj
 
 def test_a_refused_connection_raises_with_the_real_error_instead_of_listing_nothing() -> None:
     with pytest.raises(ContainerHostError, match="Connection refused"):
-        refusing_host().read_instances()
+        refusing_host().read()
 
 
 def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_cannot_be_read() -> None:
-    status, body = ask_running(refusing_host().read_instances)
+    status, body = ask_running(lambda: refusing_host().read().instances)
     assert status == 503
     assert "Connection refused" in body["error"]
     assert "instances" not in body

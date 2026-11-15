@@ -8,7 +8,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from launchplane.container_host import CommandResult, Service
+from launchplane.container_host import LANE_NETWORK, CommandResult, Service
 from launchplane.decide import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 
 PROXY_NAME = "launchplane-proxy"
@@ -27,6 +27,7 @@ PROXY = Service(
     ],
     ports={80: 80},
     volumes={"launchplane-proxy-routes": str(ROUTES_FOLDER)},
+    networks=["launchplane-proxy-outside", LANE_NETWORK],
 )
 LOADED_ROUTES_URL = "http://127.0.0.1:8080/api/rawdata"
 FROM_ROUTES_FILE = "@file"
@@ -206,8 +207,8 @@ class TraefikProxy:
         if not result.succeeded:
             raise ProxyError(f"{attempt} failed: {result.output}")
 
-    def request_instance(self, container: str) -> CommandResult:
-        url = instance_url(container) + "/"
+    def request_instance(self, container: str, health_path: str) -> CommandResult:
+        url = instance_url(container) + health_path
         return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), url])
 
     def why_web_address_fails(self, web_address: str) -> str | None:
@@ -225,17 +226,17 @@ class TraefikProxy:
         result = self.host.run_in(PROXY_NAME, command)
         return None if result.succeeded else result.output
 
-    def check_instance(self, container: str) -> None:
+    def check_instance(self, container: str, health_path: str) -> None:
         started = self.clock()
         answering_since: float | None = None
         while True:
-            result = self.request_instance(container)
+            result = self.request_instance(container, health_path)
             now = self.clock()
             if not result.succeeded:
                 answering_since = None
                 if now - started >= self.check_deadline_seconds:
                     raise CheckFailed(
-                        f"{instance_url(container)}/ did not answer the proxy with success "
+                        f"{instance_url(container)}{health_path} did not answer the proxy with success "
                         f"within {self.check_deadline_seconds:g} s: {result.output}"
                     )
             elif answering_since is None:

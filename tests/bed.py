@@ -2,10 +2,13 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -14,6 +17,8 @@ LAUNCHPLANE_URL = os.environ.get("LAUNCHPLANE_URL", "")
 SCRATCH_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_SCRATCH_SHELL", "lp-scratch"))
 SCRATCH_ADDRESS = os.environ.get("LAUNCHPLANE_SCRATCH_ADDRESS", "docker-lp-scratch.shiny")
 CONTROL_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_CONTROL_SHELL", "lp-control"))
+
+PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
 
 needs_test_bed = pytest.mark.skipif(
     not LAUNCHPLANE_URL, reason="needs the test bed: set LAUNCHPLANE_URL, e.g. http://launchplane.shiny:8700"
@@ -24,8 +29,12 @@ def on_scratch(command: str, given: str | None = None) -> str:
     return subprocess.run([*SCRATCH_SHELL, command], input=given, capture_output=True, text=True, check=True).stdout  # noqa: S603
 
 
-def on_control(command: str) -> str:
-    return subprocess.run([*CONTROL_SHELL, command], capture_output=True, text=True, check=True).stdout  # noqa: S603
+def on_control(command: str, given: str | None = None) -> str:
+    return subprocess.run([*CONTROL_SHELL, command], input=given, capture_output=True, text=True, check=True).stdout  # noqa: S603
+
+
+def on_scratch_with_bytes(command: str, given: bytes) -> str:
+    return subprocess.run([*SCRATCH_SHELL, command], input=given, capture_output=True, check=True).stdout.decode()  # noqa: S603
 
 
 def ask(path: str, body: dict[str, Any] | None = None, timeout: float = 60) -> tuple[int, dict[str, Any]]:
@@ -47,8 +56,8 @@ def move_lane(product: str, lane: str, build: str) -> tuple[int, dict[str, Any]]
     return ask(f"/lanes/{product}/{lane}/move", {"build": build})
 
 
-def retire(product: str, lane: str) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{product}/{lane}/retire", {})
+def retire(product: str, lane: str, delete_data_set: str | None = None) -> tuple[int, dict[str, Any]]:
+    return ask(f"/lanes/{product}/{lane}/retire", {"delete_data_set": delete_data_set})
 
 
 def wait_for(condition: Callable[[], bool], seconds: float) -> None:
@@ -68,3 +77,40 @@ def launchplane_answers() -> bool:
 def kill_launchplane() -> None:
     on_control("systemctl kill --signal=KILL launchplane")
     wait_for(launchplane_answers, seconds=30)
+
+
+class UnexpectedAnswer(Exception):
+    pass
+
+
+@dataclass
+class RequestLoop:
+    request_once: Callable[[], str]
+    answers: list[str] = field(default_factory=list[str])
+    failures: list[str] = field(default_factory=list[str])
+    running: bool = True
+
+    def run(self) -> None:
+        while self.running:
+            try:
+                self.answers.append(self.request_once())
+            except (OSError, UnexpectedAnswer) as error:
+                self.failures.append(repr(error))
+            time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
+
+    def answers_in_order(self) -> list[str]:
+        return [answer for index, answer in enumerate(self.answers) if index == 0 or self.answers[index - 1] != answer]
+
+
+@contextmanager
+def request_loop(request_once: Callable[[], str]) -> Generator[RequestLoop]:
+    loop = RequestLoop(request_once)
+    thread = threading.Thread(target=loop.run)
+    thread.start()
+    time.sleep(1)
+    try:
+        yield loop
+    finally:
+        time.sleep(1)
+        loop.running = False
+        thread.join()

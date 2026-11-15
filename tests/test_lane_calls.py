@@ -1,20 +1,21 @@
 from fastapi.testclient import TestClient
 
 from launchplane.api import MoveRequester, RetireRequester, create_app
+from launchplane.container_host import OnHost
 from launchplane.decide import MoveResult, Outcome, RetireResult
-from launchplane.instance import LaneBuild, RunningInstance
+from launchplane.instance import LaneBuild
 from launchplane.proxy import ProxyError
 
 
-def nothing_running() -> list[RunningInstance]:
-    return []
+def nothing_running() -> OnHost:
+    return OnHost([], [], [])
 
 
 def unreadable_proxy_on_move(target: LaneBuild) -> MoveResult:
     raise ProxyError(f"Reading the proxy's loaded routes failed while moving to {target.build}: Connection refused")
 
 
-def unreadable_proxy_on_retire(product: str, lane: str) -> RetireResult:
+def unreadable_proxy_on_retire(product: str, lane: str, _delete_data_set: str | None) -> RetireResult:
     raise ProxyError(f"Reading the proxy's loaded routes failed while retiring {lane} of {product}: Connection refused")
 
 

@@ -198,11 +198,11 @@ def test_a_route_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> 
 
 def test_an_instance_must_answer_steadily_so_one_answer_between_failures_does_not_pass() -> None:
     host = ProxyHost({}, answers=[True, False, True, True, True])
-    ticking(host, steady_seconds=2, check_deadline_seconds=100).check_instance("site-t2")
+    ticking(host, steady_seconds=2, check_deadline_seconds=100).check_instance("site-t2", "/")
     assert next(host.answers, None) is None
 
 
 def test_an_instance_that_never_answers_fails_its_check_with_the_proxys_error() -> None:
     host = ProxyHost({}, answers=[False] * 10)
     with pytest.raises(CheckFailed, match="Connection refused"):
-        ticking(host, steady_seconds=2, check_deadline_seconds=3).check_instance("site-t2")
+        ticking(host, steady_seconds=2, check_deadline_seconds=3).check_instance("site-t2", "/")
