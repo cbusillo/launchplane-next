@@ -3,7 +3,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
+from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 
 LANE_DOMAIN = "test"
 
@@ -19,9 +19,9 @@ class MoveResult(BaseModel):
     product: str
     lane: str
     build: str
-    name: str
+    web_address: str
     outcome: Outcome
-    serving: str | None
+    container_receiving_visitors: str | None
     error: str | None = None
 
 
@@ -33,10 +33,10 @@ class RetireOutcome(StrEnum):
 class RetireResult(BaseModel):
     product: str
     lane: str
-    name: str
+    web_address: str
     outcome: RetireOutcome
-    route_removed_to: str | None
-    retired_copies: list[str]
+    route_removed_to_container: str | None
+    retired_containers: list[str]
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ class RouteStatus(StrEnum):
 
 @dataclass(frozen=True)
 class LoadedRoute:
-    copy: str
+    container: str
     status: RouteStatus
 
 
@@ -64,7 +64,7 @@ class LaneRoute:
 
 @dataclass(frozen=True)
 class LaneSeen:
-    copies: tuple[RunningCopy, ...]
+    instances: tuple[RunningInstance, ...]
     route: ProxyNotRunning | LaneRoute
 
 
@@ -75,46 +75,46 @@ class StartProxy:
 
 @dataclass(frozen=True)
 class AwaitRoute:
-    name: str
-    copy: str | None
+    web_address: str
+    container: str | None
 
 
 @dataclass(frozen=True)
-class StartCopy:
-    copy: LaneCopy
-    name: str
+class StartInstance:
+    target: LaneBuild
+    container: str
 
 
 @dataclass(frozen=True)
 class Check:
-    copy: str
+    container: str
 
 
 @dataclass(frozen=True)
 class WriteRoute:
-    name: str
-    copy: str
+    web_address: str
+    container: str
 
 
 @dataclass(frozen=True)
 class RemoveRoute:
-    name: str
-    copy: str
+    web_address: str
+    container: str
 
 
 @dataclass(frozen=True)
 class Retire:
-    copy: str
+    container: str
 
 
 @dataclass(frozen=True)
-class RemoveCopy:
-    copy: str
+class RemoveInstance:
+    container: str
 
 
 @dataclass(frozen=True)
 class CheckRefused:
-    copy: str
+    container: str
     report: str
 
 
@@ -128,33 +128,57 @@ class Stop:
     reason: str
 
 
-type Action = StartProxy | AwaitRoute | StartCopy | Check | WriteRoute | RemoveRoute | Retire | RemoveCopy
+type Action = StartProxy | AwaitRoute | StartInstance | Check | WriteRoute | RemoveRoute | Retire | RemoveInstance
 type Event = Action | CheckRefused
 
 
-def lane_name(product: str, lane: str) -> str:
+def web_address_of(product: str, lane: str) -> str:
     return f"{lane}.{product}.{LANE_DOMAIN}"
 
 
 def is_loaded_as_written(route: LaneRoute) -> bool:
-    return (None if route.loaded is None else route.loaded.copy) == route.written
+    return (None if route.loaded is None else route.loaded.container) == route.written
 
 
-def disabled_route_stop(name: str, loaded: LoadedRoute) -> Stop:
+def change_made_by(event: Event) -> str | None:
+    match event:
+        case StartProxy():
+            return "started the proxy"
+        case StartInstance(container=container):
+            return f"started the instance {container}"
+        case WriteRoute(container=container):
+            return f"wrote the route to {container}"
+        case Retire(container=container):
+            return f"retired {container}"
+        case RemoveInstance(container=container):
+            return f"removed {container}"
+        case _:
+            return None
+
+
+def changes_so_far(done: tuple[Event, ...]) -> str:
+    changes = [change for change in map(change_made_by, done) if change is not None]
+    if not changes:
+        return "Nothing was changed."
+    return f"Before that, this move {', '.join(changes)}, and those changes stay."
+
+
+def disabled_route_stop(web_address: str, loaded: LoadedRoute, done: tuple[Event, ...]) -> Stop:
     return Stop(
-        f"The proxy has loaded the route of {name} to {loaded.copy} and reports it {loaded.status}, so the name serves nothing. "
-        "Nothing was changed. The proxy's log says why; retiring the lane removes the route."
+        f"The proxy has loaded the route of {web_address} to {loaded.container} and reports it {loaded.status}, "
+        f"so the web address reaches no instance. {changes_so_far(done)} "
+        "The proxy's log says why; retiring the lane removes the route."
     )
 
 
-def is_running_build(copy: RunningCopy | None, build: str) -> bool:
-    return copy is not None and copy.state == CopyState.RUNNING and copy.build == build
+def is_running_build(instance: RunningInstance | None, build: str) -> bool:
+    return instance is not None and instance.state == InstanceState.RUNNING and instance.build == build
 
 
-def candidate_for(copies: dict[str, RunningCopy], serving: str | None, build: str, done: tuple[Event, ...]) -> str | None:
-    started_here = [event.name for event in done if isinstance(event, StartCopy)]
-    own = next((name for name in reversed(started_here) if name in copies and name != serving), None)
-    return own or next((name for name in sorted(copies) if name != serving and is_running_build(copies[name], build)), None)
+def candidate_for(instances: dict[str, RunningInstance], receiving: str | None, build: str, done: tuple[Event, ...]) -> str | None:
+    started_here = [event.container for event in done if isinstance(event, StartInstance)]
+    own = next((name for name in reversed(started_here) if name in instances and name != receiving), None)
+    return own or next((name for name in sorted(instances) if name != receiving and is_running_build(instances[name], build)), None)
 
 
 def move_outcome(done: tuple[Event, ...]) -> Outcome:
@@ -165,66 +189,73 @@ def move_outcome(done: tuple[Event, ...]) -> Outcome:
     return Outcome.UNCHANGED
 
 
-def after_refusal(refused: CheckRefused, copies: dict[str, RunningCopy], answer: MoveResult) -> Action | Done[MoveResult]:
-    if refused.copy in copies:
-        return RemoveCopy(refused.copy)
+def after_refusal(refused: CheckRefused, instances: dict[str, RunningInstance], answer: MoveResult) -> Action | Done[MoveResult]:
+    if refused.container in instances:
+        return RemoveInstance(refused.container)
     return Done(answer.model_copy(update={"outcome": Outcome.CHECK_FAILED, "error": refused.report}))
 
 
-def check_then_route(name: str, candidate: RunningCopy, done: tuple[Event, ...]) -> Action:
-    if Check(candidate.name) in done and candidate.state == CopyState.RUNNING:
-        return WriteRoute(name, candidate.name)
-    return Check(candidate.name)
+def check_then_route(web_address: str, candidate: RunningInstance, done: tuple[Event, ...]) -> Action:
+    if Check(candidate.container) in done and candidate.state == InstanceState.RUNNING:
+        return WriteRoute(web_address, candidate.container)
+    return Check(candidate.container)
 
 
-def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str, done: tuple[Event, ...]) -> Action | Done[MoveResult] | Stop:
+def decide_move(
+    seen: LaneSeen, target: LaneBuild, fresh_container: str, done: tuple[Event, ...]
+) -> Action | Done[MoveResult] | Stop:
     if isinstance(seen.route, ProxyNotRunning):
         return StartProxy()
-    name = lane_name(target.product, target.lane)
+    web_address = web_address_of(target.product, target.lane)
     if not is_loaded_as_written(seen.route):
-        return AwaitRoute(name, seen.route.written)
+        return AwaitRoute(web_address, seen.route.written)
     if seen.route.loaded is not None and seen.route.loaded.status != RouteStatus.ENABLED:
-        return disabled_route_stop(name, seen.route.loaded)
-    serving = seen.route.written
-    copies = {copy.name: copy for copy in seen.copies}
+        return disabled_route_stop(web_address, seen.route.loaded, done)
+    receiving = seen.route.written
+    instances = {instance.container: instance for instance in seen.instances}
     answer = MoveResult(
-        product=target.product, lane=target.lane, build=target.build, name=name, outcome=move_outcome(done), serving=serving
+        product=target.product,
+        lane=target.lane,
+        build=target.build,
+        web_address=web_address,
+        outcome=move_outcome(done),
+        container_receiving_visitors=receiving,
     )
     refused = next((event for event in done if isinstance(event, CheckRefused)), None)
     if refused is not None:
-        return after_refusal(refused, copies, answer)
-    if is_running_build(None if serving is None else copies.get(serving), target.build):
-        others = sorted(copies.keys() - {serving})
+        return after_refusal(refused, instances, answer)
+    if is_running_build(None if receiving is None else instances.get(receiving), target.build):
+        others = sorted(instances.keys() - {receiving})
         return Retire(others[0]) if others else Done(answer)
-    candidate = candidate_for(copies, serving, target.build, done)
-    strays = sorted(copies.keys() - {serving, candidate})
+    candidate = candidate_for(instances, receiving, target.build, done)
+    strays = sorted(instances.keys() - {receiving, candidate})
     if strays:
         return Retire(strays[0])
     if candidate is None:
-        return StartCopy(target, fresh_copy_name)
-    return check_then_route(name, copies[candidate], done)
+        return StartInstance(target, fresh_container)
+    return check_then_route(web_address, instances[candidate], done)
 
 
 def decide_retire(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> Action | Done[RetireResult] | Stop:
     if isinstance(seen.route, ProxyNotRunning):
         return StartProxy()
-    name = lane_name(product, lane)
+    web_address = web_address_of(product, lane)
     if not is_loaded_as_written(seen.route):
-        return AwaitRoute(name, seen.route.written)
+        return AwaitRoute(web_address, seen.route.written)
     if seen.route.written is not None:
-        return RemoveRoute(name, seen.route.written)
-    if seen.copies:
-        return Retire(min(copy.name for copy in seen.copies))
-    route_removed_to = next((event.copy for event in done if isinstance(event, RemoveRoute)), None)
-    retired_copies = [event.copy for event in done if isinstance(event, Retire)]
-    changed = route_removed_to is not None or bool(retired_copies)
+        return RemoveRoute(web_address, seen.route.written)
+    if seen.instances:
+        return Retire(min(instance.container for instance in seen.instances))
+    route_removed_to = next((event.container for event in done if isinstance(event, RemoveRoute)), None)
+    retired = [event.container for event in done if isinstance(event, Retire)]
+    changed = route_removed_to is not None or bool(retired)
     return Done(
         RetireResult(
             product=product,
             lane=lane,
-            name=name,
+            web_address=web_address,
             outcome=RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
-            route_removed_to=route_removed_to,
-            retired_copies=retired_copies,
+            route_removed_to_container=route_removed_to,
+            retired_containers=retired,
         )
     )

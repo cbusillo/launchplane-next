@@ -4,27 +4,27 @@ from typing import Protocol
 
 from launchplane import decide
 from launchplane.decide import Action, Done, Event, LaneRoute, LaneSeen, MoveResult, ProxyNotRunning, RetireResult, Stop
+from launchplane.instance import LaneBuild, RunningInstance, new_container_name
 from launchplane.proxy import CheckFailed
-from launchplane.running_copy import LaneCopy, RunningCopy, new_copy_name
 
 MOST_STEPS = 50
 
 
-class CopyHost(Protocol):
-    def read_copies(self) -> list[RunningCopy]: ...
-    def start_copy(self, copy: LaneCopy, name: str) -> None: ...
-    def remove_copy(self, name: str) -> None: ...
-    def retire_copy(self, name: str) -> None: ...
-    def read_log_tail(self, name: str) -> str: ...
+class InstanceHost(Protocol):
+    def read_instances(self) -> list[RunningInstance]: ...
+    def start_instance(self, target: LaneBuild, container: str) -> None: ...
+    def remove_instance(self, container: str) -> None: ...
+    def retire_instance(self, container: str) -> None: ...
+    def read_log_tail(self, container: str) -> str: ...
 
 
 class Proxy(Protocol):
     def start(self) -> None: ...
-    def read_lane_route(self, name: str) -> ProxyNotRunning | LaneRoute: ...
-    def await_route(self, name: str, copy_name: str | None) -> None: ...
-    def write_route(self, name: str, copy_name: str) -> None: ...
-    def remove_route(self, name: str) -> None: ...
-    def check_copy(self, copy_name: str) -> None: ...
+    def read_lane_route(self, web_address: str) -> ProxyNotRunning | LaneRoute: ...
+    def await_route(self, web_address: str, container: str | None) -> None: ...
+    def write_route(self, web_address: str, container: str) -> None: ...
+    def remove_route(self, web_address: str) -> None: ...
+    def check_instance(self, container: str) -> None: ...
 
 
 class Stopped(Exception):
@@ -33,26 +33,30 @@ class Stopped(Exception):
 
 def failure_report(error: CheckFailed, log_tail: str) -> str:
     if not log_tail:
-        return f"{error} The copy wrote no log."
-    return f"{error}\nThe copy's last log lines:\n{log_tail}"
+        return f"{error} The instance wrote no log."
+    return f"{error}\nThe instance's last log lines:\n{log_tail}"
 
 
 class Lanes:
-    def __init__(self, host: CopyHost, proxy: Proxy, name_copy: Callable[[LaneCopy], str] = new_copy_name) -> None:
+    def __init__(self, host: InstanceHost, proxy: Proxy, name_container: Callable[[LaneBuild], str] = new_container_name) -> None:
         self.host = host
         self.proxy = proxy
-        self.name_copy = name_copy
+        self.name_container = name_container
         self.one_at_a_time = threading.Lock()
 
     def read(self, product: str, lane: str) -> LaneSeen:
-        route = self.proxy.read_lane_route(decide.lane_name(product, lane))
-        copies = tuple(copy for copy in self.host.read_copies() if (copy.product, copy.lane) == (product, lane))
-        return LaneSeen(copies=copies, route=route)
+        route = self.proxy.read_lane_route(decide.web_address_of(product, lane))
+        instances = tuple(
+            instance for instance in self.host.read_instances() if (instance.product, instance.lane) == (product, lane)
+        )
+        return LaneSeen(instances=instances, route=route)
 
-    def move(self, target: LaneCopy) -> MoveResult:
+    def move(self, target: LaneBuild) -> MoveResult:
         with self.one_at_a_time:
             return self.settle(
-                target.product, target.lane, lambda seen, done: decide.decide_move(seen, target, self.name_copy(target), done)
+                target.product,
+                target.lane,
+                lambda seen, done: decide.decide_move(seen, target, self.name_container(target), done),
             )
 
     def retire(self, product: str, lane: str) -> RetireResult:
@@ -80,25 +84,25 @@ class Lanes:
         match action:
             case decide.StartProxy():
                 self.proxy.start()
-            case decide.AwaitRoute(name=name, copy=copy_name):
-                self.proxy.await_route(name, copy_name)
-            case decide.StartCopy(copy=copy, name=copy_name):
-                self.host.start_copy(copy, copy_name)
-            case decide.Check(copy=copy_name):
-                return self.check(copy_name)
-            case decide.WriteRoute(name=name, copy=copy_name):
-                self.proxy.write_route(name, copy_name)
-            case decide.RemoveRoute(name=name):
-                self.proxy.remove_route(name)
-            case decide.Retire(copy=copy_name):
-                self.host.retire_copy(copy_name)
-            case decide.RemoveCopy(copy=copy_name):
-                self.host.remove_copy(copy_name)
+            case decide.AwaitRoute(web_address=web_address, container=container):
+                self.proxy.await_route(web_address, container)
+            case decide.StartInstance(target=target, container=container):
+                self.host.start_instance(target, container)
+            case decide.Check(container=container):
+                return self.check(container)
+            case decide.WriteRoute(web_address=web_address, container=container):
+                self.proxy.write_route(web_address, container)
+            case decide.RemoveRoute(web_address=web_address):
+                self.proxy.remove_route(web_address)
+            case decide.Retire(container=container):
+                self.host.retire_instance(container)
+            case decide.RemoveInstance(container=container):
+                self.host.remove_instance(container)
         return action
 
-    def check(self, copy_name: str) -> Event:
+    def check(self, container: str) -> Event:
         try:
-            self.proxy.check_copy(copy_name)
+            self.proxy.check_instance(container)
         except CheckFailed as error:
-            return decide.CheckRefused(copy_name, failure_report(error, self.host.read_log_tail(copy_name)))
-        return decide.Check(copy_name)
+            return decide.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
+        return decide.Check(container)

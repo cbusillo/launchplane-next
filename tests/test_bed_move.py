@@ -76,17 +76,17 @@ def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -
 def lane_copies() -> dict[str, dict[str, Any]]:
     status, body = ask("/running")
     assert status == 200, body
-    return {copy["build"]: copy for copy in body["copies"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE)}
+    return {copy["build"]: copy for copy in body["instances"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE)}
 
 
 def lane_name_answer() -> dict[str, Any]:
     status, body = ask("/running")
     assert status == 200, body
-    return next(entry for entry in body["names"] if entry["name"] == NAME)
+    return next(entry for entry in body["web_addresses"] if entry["web_address"] == NAME)
 
 
 def serving_builds() -> list[str]:
-    return [build for build, copy in lane_copies().items() if copy["serves"] == NAME]
+    return [build for build, copy in lane_copies().items() if copy["receives_visitors_for"] == NAME]
 
 
 def copy_of_build_b_is_on_scratch() -> bool:
@@ -137,11 +137,11 @@ def test_moving_to_a_new_build_switches_the_name_without_failing_a_request() -> 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_serving_copy_stopped_by_hand_shows_stopped_and_its_name_answers_nothing() -> None:
     assert lane_name_answer()["answers"] is True
-    copy_name = lane_copies()[BUILD_A]["name"]
+    copy_name = lane_copies()[BUILD_A]["container"]
     on_scratch(f"docker stop --time 1 {copy_name}")
     assert lane_copies()[BUILD_A]["state"] == "stopped"
     entry = lane_name_answer()
-    assert (entry["answers"], entry["sends_to"]) == (False, copy_name)
+    assert (entry["answers"], entry["sends_to_container"]) == (False, copy_name)
     assert "502" in entry["error"]
 
 
@@ -193,7 +193,7 @@ def test_a_move_killed_before_the_switch_is_cleaned_up_by_asking_for_the_serving
 def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_not_deleted() -> None:
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
-        write_route_without_launchplane_keeping_every_loaded_route(lane_copies()[BUILD_B]["name"])
+        write_route_without_launchplane_keeping_every_loaded_route(lane_copies()[BUILD_B]["container"])
         status, body = move(BUILD_A)
     assert (status, body["outcome"]) == (200, "switched"), body
     assert loop.failures == []
@@ -209,7 +209,7 @@ def test_two_lanes_whose_product_and_lane_join_to_the_same_text_each_keep_their_
             assert (status, body["outcome"]) == (200, "switched"), body
         status, body = ask("/running")
         assert status == 200, body
-        serving_copies = {(copy["product"], copy["lane"]): copy["serves"] for copy in body["copies"]}
+        serving_copies = {(copy["product"], copy["lane"]): copy["receives_visitors_for"] for copy in body["instances"]}
         assert {lane: serving_copies.get(lane) for lane in lanes} == {
             (product, lane): f"{lane}.{product}.test" for product, lane in lanes
         }

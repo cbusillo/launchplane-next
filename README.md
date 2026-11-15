@@ -13,10 +13,13 @@ To start, people see two pages: the Client's accept page and one status page. Th
 - **Product:** one thing a Client uses, such as a website or an Odoo system, with its own repository.
 - **Kind:** the type of a product. What a kind needs is defined once, in that kind's shared base. For Odoo that is `odoo-devkit`.
 - **Build:** what a product's own repository produces from one commit, today a container image. Launchplane never makes a build and never supplies its inputs. It checks which repository and commit a build came from.
-- **Lane:** one running copy of a product. There are three kinds.
+- **Lane:** one place a product runs. There are three kinds.
   - **Production:** what the Client's business runs on.
   - **Testing:** always up, so a Client who goes to test never finds it down. It is built from production's data, with private details removed and keys for outside services removed or replaced with testing keys.
-  - **Preview:** a short-lived copy for one pull request. It is built from testing, as a copy that shares testing's data until something changes, and is paused when not in use.
+  - **Preview:** a short-lived lane for one pull request. It is built from testing, with data cloned from testing, shared until something changes, and is paused when not in use.
+- **Web address:** what a person types to reach a lane, such as `testing.cellmechanic.com`. A lane has one. The proxy sends visits for it to one lane instance.
+- **Lane instance:** one running set of a lane: a build together with its own data. A lane normally has one. During a move it has two for a short time, the one visitors reach and the new one being prepared. Called an instance for short where the lane is clear. Making an instance's data from another's is cloning.
+- **Active:** the lane instance a web address currently sends visitors to.
 - **Live:** a product is Live when its Client uses production for real business. A Live site is the production lane of a Live product.
 - **Prelaunch:** a product whose production lane exists but whose Client does not yet run their business on it. Its production is not Live.
 - **Acceptance:** a Client's recorded yes to one exact build. It stays good until that build is live.
@@ -32,7 +35,7 @@ These protections are never removed. How they are built may change.
 **Lost data**
 
 1. A verified backup before production. No release starts without one.
-2. A failed release never reaches production. The old copy runs until the new one passes its checks, and the backup taken first can put back both the build and the data.
+2. A failed release never reaches production. The old instance runs until the new one passes its checks, and the backup taken first can put back both the build and the data.
 
 **A leaked secret**
 
@@ -50,13 +53,13 @@ Restoring a backup onto a Live site loses what was written since it was taken. I
 ## Rules
 
 1. Guard only what cannot be undone. Everything else may fail, says why, and is safe to run again.
-2. Look, don't remember. Each running copy reports which product, lane and build it is. Launchplane reads that from the host.
+2. Look, don't remember. Each running instance reports which product, lane and build it is. Launchplane reads that from the host.
 3. Every part points to a step of the finish-line test or to a named protection.
 4. One move serves every lane. A check that can stop production has already run on the same build before anyone is asked to accept.
 
 ## The move
 
-Copy, update the copy, check it, then switch. The old one is not touched until the new one has passed its checks, so not switching is how a failed release is stopped. Going back after a switch is the same move again with the earlier build, on the data as it is now. The backup is the last resort underneath.
+Start a new instance beside the old one with data cloned from it, update the new one, check it, then switch. The old one is not touched until the new one has passed its checks, so not switching is how a failed release is stopped. Going back after a switch is the same move again with the earlier build, on the data as it is now. The backup is the last resort underneath.
 
 ## What Launchplane stores
 
@@ -114,21 +117,21 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 **Chris decides**
 
 1. Who accepts during the finish-line test. The test runs with nobody touching anything, and no automated identity may release. Blocks the first release to production.
-2. What happens to writes that reach production while its copy is being updated: a pause, a catch-up, or something else, and how long an interruption is acceptable. Blocks the move for any product with a database.
-3. What the copy of production may do before the switch. It holds production's keys and scheduled jobs, and must not send mail, take payments or push to outside services twice. Blocks the same step.
+2. What happens to writes that reach production while its instance is being updated: a pause, a catch-up, or something else, and how long an interruption is acceptable. Blocks the move for any product with a database.
+3. What the instance of production may do before the switch. It holds production's keys and scheduled jobs, and must not send mail, take payments or push to outside services twice. Blocks the same step.
 4. What "verified" means for a backup, and how long backups are kept. Blocks the first production move.
 5. What scrub must remove, for each kind, and what proves it ran. Blocks any real data reaching testing.
 6. What triggers an acceptance request, what a rejection records, and what happens to a waiting request when a newer build arrives. Blocks the accept page.
 7. How a Client proves who they are, how an agent is told apart from the Director, and who may mark a product Live. Blocks the accept page and the API's first protected call.
 8. Whether a setting that can change what a Live site does, such as a database address or a payment key, needs acceptance or a backup first. Blocks settings changes on production.
-9. What "fresh" production data means before an acceptance request: a new copy each time, a maximum age, or a recheck. Blocks the testing refresh.
+9. What "fresh" production data means before an acceptance request: a new clone each time, a maximum age, or a recheck. Blocks the testing refresh.
 10. What happens to a Client's test session and to previews when testing is rebuilt. Blocks the testing refresh.
 11. How a real host is attached, and how its certificates are issued and renewed without stopping what runs on it. Restarting Docker stops its containers unless Docker is set to keep them running.
 
 **The builder measures, then Chris decides**
 
-12. How long a database copy and update take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
-13. Whether the file store is shared or copied in a move, and how the database and file store are kept consistent with each other.
+12. How long cloning a database and updating it take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
+13. Whether the file store is shared or cloned in a move, and how the database and file store are kept consistent with each other.
 14. Whether a container manager such as Dokploy is needed at all, or Docker and a reverse proxy directly are enough. Measure the first move both ways where that is cheap, and report what each needed.
 15. How much disk and memory several previews use at once, and what pausing one actually frees.
 
@@ -136,9 +139,9 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 
 16. What a product description contains and where it lives.
 17. How the four commands are called, and where they live for a kind other than Odoo.
-18. How a running copy reports which product, lane and build it is.
+18. How a running instance reports which product, lane and build it is.
 19. How a build proves which repository and commit it came from.
-20. What marks which copy is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
+20. What marks which instance is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
 21. How the status page shows a failed move separately from a lane's health, and what clears it.
 
 ## What exists today

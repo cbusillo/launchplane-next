@@ -23,7 +23,7 @@ def ask_what_is_running() -> tuple[int, dict[str, Any]]:
 def copies_by_lane() -> dict[str, dict[str, str]]:
     status, body = ask_what_is_running()
     assert status == 200, body
-    return {copy["lane"]: copy for copy in body["copies"] if copy["product"] == PRODUCT}
+    return {copy["lane"]: copy for copy in body["instances"] if copy["product"] == PRODUCT}
 
 
 def place_copy(lane: str, build: str) -> None:
@@ -72,5 +72,5 @@ def test_an_unreachable_scratch_container_is_an_error_within_seconds_not_an_empt
         seconds = time.monotonic() - started
     assert status == 503, body
     assert seconds < 8
-    assert "copies" not in body
+    assert "instances" not in body
     assert "timed out" in body["error"]

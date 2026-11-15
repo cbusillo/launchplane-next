@@ -64,14 +64,14 @@ def read_running() -> dict[str, Any]:
 
 
 def lane_seen(running: dict[str, Any]) -> LaneSeen:
-    routed = any(entry["name"] == NAME and entry["sends_to"] for entry in running["names"])
-    copies = sum(1 for copy in running["copies"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE))
+    routed = any(entry["web_address"] == NAME and entry["sends_to_container"] for entry in running["web_addresses"])
+    copies = sum(1 for copy in running["instances"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE))
     return LaneSeen(routed=routed, copies=copies)
 
 
 def other_lanes(running: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    names = [entry for entry in running["names"] if entry["name"] != NAME]
-    copies = [copy for copy in running["copies"] if (copy["product"], copy["lane"]) != (PRODUCT, LANE)]
+    names = [entry for entry in running["web_addresses"] if entry["web_address"] != NAME]
+    copies = [copy for copy in running["instances"] if (copy["product"], copy["lane"]) != (PRODUCT, LANE)]
     return names, copies
 
 
@@ -132,12 +132,12 @@ def test_a_request_in_flight_when_the_lane_is_retired_gets_its_answer() -> None:
 def test_retiring_a_retired_lane_changes_nothing_and_says_so() -> None:
     retire(PRODUCT, LANE)
     status, body = retire(PRODUCT, LANE)
-    assert (status, body["outcome"], body["route_removed_to"], body["retired_copies"]) == (200, "unchanged", None, [])
+    assert (status, body["outcome"], body["route_removed_to_container"], body["retired_containers"]) == (200, "unchanged", None, [])
 
 
 @pytest.mark.usefixtures("lane_serving_slow_build")
 def test_a_retire_killed_after_the_name_is_gone_is_finished_by_asking_again() -> None:
-    copy_name = next(copy["name"] for copy in read_running()["copies"] if copy["lane"] == LANE)
+    copy_name = next(copy["container"] for copy in read_running()["instances"] if copy["lane"] == LANE)
     with request_in_flight(seconds=10):
         retirer = in_background(retire_cut_short_by_the_kill)
         wait_for(name_is_gone_and_copy_remains, seconds=30)
@@ -145,5 +145,10 @@ def test_a_retire_killed_after_the_name_is_gone_is_finished_by_asking_again() ->
         retirer.join()
     assert name_is_gone_and_copy_remains()
     status, body = retire(PRODUCT, LANE)
-    assert (status, body["outcome"], body["route_removed_to"], body["retired_copies"]) == (200, "retired", None, [copy_name])
+    assert (status, body["outcome"], body["route_removed_to_container"], body["retired_containers"]) == (
+        200,
+        "retired",
+        None,
+        [copy_name],
+    )
     assert lane_seen(read_running()) == LaneSeen(routed=False, copies=0)
