@@ -33,7 +33,7 @@ class RecordingContainer:
         return {
             "Name": f"/{self.name}",
             "Config": {"Env": self.environment},
-            "State": {"Running": True, "StartedAt": "2026-11-15T20:00:00Z"},
+            "State": {"Running": True, "Restarting": False, "Paused": False, "StartedAt": "2026-11-15T20:00:00Z"},
         }
 
     def logs(self, tail: int) -> bytes:
@@ -137,7 +137,12 @@ class RecordingApi:
     system_times: Iterator[str] = field(default_factory=lambda: iter(()))
 
     def inspect_container(self, container: str) -> dict[str, Any]:
-        state = {"Running": self.running.get(container, True), "StartedAt": self.started_at[container]}
+        state = {
+            "Running": self.running.get(container, True),
+            "Restarting": False,
+            "Paused": False,
+            "StartedAt": self.started_at[container],
+        }
         return {"Name": f"/{container}", "Config": {"Env": []}, "State": state}
 
     def info(self) -> dict[str, Any]:

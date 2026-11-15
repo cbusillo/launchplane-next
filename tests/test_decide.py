@@ -354,6 +354,9 @@ DATA_MOVES = {
         (NEW_ON_D1,), "new", (D1,), (), AwaitJob("new-job"), (job_of(NEW_ON_D1, running_for=1.0),)
     ),
     "a job that stopped is replaced": DataCase((NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (STOPPED_NEW_JOB,)),
+    "a job read as restarting is replaced, however long Docker says it ran": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (NEW_JOB.model_copy(update={"state": InstanceState.RESTARTING}),)
+    ),
     "a job that can reach out is replaced": DataCase(
         (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (job_of(NEW_ON_D1, networks=("network-d1", "bridge")),)
     ),
@@ -445,6 +448,10 @@ LANE_PROBLEMS = {
     ),
     "two jobs": (DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB, job_of(NEW_ON_D1, container="j2"))), "2 jobs"),
     "no job": (DataCase((NEW_ON_D1,), "new", (D1,), (), None), "0 jobs"),
+    "a restarting job": (
+        DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB.model_copy(update={"state": InstanceState.RESTARTING}),)),
+        "is restarting",
+    ),
     "a job not yet past its watch": (DataCase((NEW_ON_D1,), "new", (D1,), (), None, (job_of(NEW_ON_D1, 1.0),)), "1.0 s of the 3 s"),
     "a database that does not accept connections": (
         DataCase((NEW_ON_D1,), "new", (data_set("d1", accepts=False),), (), None, (NEW_JOB,)),

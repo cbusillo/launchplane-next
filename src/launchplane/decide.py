@@ -341,7 +341,7 @@ def data_set_problems(found: DataSet, seen: LaneSeen) -> list[str]:
 
 def job_state_problems(job: RunningJob) -> list[str]:
     part = f"The job {job.container}"
-    if job.running_for_seconds is None:
+    if job.state != InstanceState.RUNNING or job.running_for_seconds is None:
         return [f"{part} is {job.state}"]
     if job.running_for_seconds < JOB_STEADY_SECONDS:
         return [f"{part} has run {job.running_for_seconds:.1f} s of the {JOB_STEADY_SECONDS:g} s it must stay up"]
@@ -509,7 +509,7 @@ def job_step(
         return StartJob(target, serving.container, use, tuple(product.job.command))
     [job] = own
     ran = job.running_for_seconds
-    if ran is None or job_attachment_problems(job, serving, seen):
+    if ran is None or job.state != InstanceState.RUNNING or job_attachment_problems(job, serving, seen):
         return Retire(job.container)
     return AwaitJob(job.container) if ran < JOB_STEADY_SECONDS else None
 

@@ -44,8 +44,9 @@ def container(name: str, part: str, networks: list[str]) -> dict[str, object]:
     }
 
 
-def job_details(name: str, running: bool = True) -> dict[str, object]:
-    return {"Name": f"/{name}", "Config": {"Env": []}, "State": {"Running": running, "StartedAt": STARTED}}
+def job_details(name: str, running: bool = True, restarting: bool = False) -> dict[str, object]:
+    state = {"Running": running, "Restarting": restarting, "Paused": False, "StartedAt": STARTED}
+    return {"Name": f"/{name}", "Config": {"Env": []}, "State": state}
 
 
 def read(
@@ -103,6 +104,12 @@ def test_a_job_is_read_with_how_long_it_has_run_by_dockers_own_clock() -> None:
     containers: list[object] = [container("a-job", "job", []), container("b-job", "job", [])]
     jobs = read(containers, described=described, system={"SystemTime": "2026-11-15T20:00:02.5Z"}).jobs
     assert {job.container: job.running_for_seconds for job in jobs} == {"a-job": pytest.approx(2.5), "b-job": None}
+
+
+def test_a_job_docker_calls_running_while_it_waits_to_restart_has_not_run_at_all() -> None:
+    described: list[object] = [job_details("a-job", restarting=True)]
+    jobs = read([container("a-job", "job", [])], described=described, system={"SystemTime": "2026-11-15T20:00:09Z"}).jobs
+    assert jobs[0].running_for_seconds is None
 
 
 def test_a_job_docker_lists_but_does_not_describe_is_an_error_not_a_job_of_unknown_age() -> None:

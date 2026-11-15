@@ -179,6 +179,8 @@ class DockerContainerState(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     running: bool = Field(alias="Running")
+    restarting: bool = Field(alias="Restarting")
+    paused: bool = Field(alias="Paused")
     started_at: AwareDatetime = Field(alias="StartedAt")
 
 
@@ -253,7 +255,7 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
 
 
 def running_for(details: DockerContainerDetails, now: datetime) -> float | None:
-    if not details.state.running:
+    if not details.state.running or details.state.restarting or details.state.paused:
         return None
     return (now - details.state.started_at).total_seconds()
 
