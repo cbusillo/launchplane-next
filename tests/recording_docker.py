@@ -1,5 +1,5 @@
 import builtins
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -26,6 +26,7 @@ class RecordingContainer:
     status: str = "running"
     ready: bool = True
     removed: bool = False
+    refuses_commands_with: Exception | None = None
     calls: builtins.list[str] = field(default_factory=builtins.list[str])
 
     @property
@@ -53,6 +54,8 @@ class RecordingContainer:
 
     def exec_run(self, command: builtins.list[str]) -> ExecResult:
         self.calls.append(" ".join(command))
+        if self.refuses_commands_with is not None:
+            raise self.refuses_commands_with
         return ExecResult(0 if self.ready else 2, b"")
 
 
@@ -135,8 +138,23 @@ class RecordingApi:
     started_at: dict[str, str] = field(default_factory=dict[str, str])
     running: dict[str, bool] = field(default_factory=dict[str, bool])
     system_times: Iterator[str] = field(default_factory=lambda: iter(()))
+    container_lists: Iterator[Sequence[object]] = field(default_factory=lambda: iter(()))
+    network_list: Sequence[object] = ()
+    gone_before_described: set[str] = field(default_factory=set[str])
+
+    def containers(self, **_options: object) -> Sequence[object]:
+        return next(self.container_lists)
+
+    def networks(self) -> Sequence[object]:
+        return self.network_list
+
+    @staticmethod
+    def volumes(**_options: object) -> dict[str, Any]:
+        return {"Volumes": []}
 
     def inspect_container(self, container: str) -> dict[str, Any]:
+        if container in self.gone_before_described:
+            raise NotFound(f"No such container: {container}")
         state = {
             "Running": self.running.get(container, True),
             "Restarting": False,

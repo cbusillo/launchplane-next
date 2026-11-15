@@ -5,6 +5,7 @@ from launchplane.container_host import OnHost
 from launchplane.decide import MoveResult, Outcome, RetireResult
 from launchplane.instance import LaneBuild
 from launchplane.proxy import ProxyError
+from tests.given_secrets import NO_SECRETS
 
 
 def nothing_running() -> OnHost:
@@ -32,7 +33,7 @@ def failed_check(target: LaneBuild) -> MoveResult:
 
 
 def client(move: MoveRequester = failed_check, retire: RetireRequester = unreadable_proxy_on_retire) -> TestClient:
-    return TestClient(create_app(nothing_running, dict, lambda _web_address: None, move, retire))
+    return TestClient(create_app(nothing_running, dict, lambda _web_address: None, move, retire, NO_SECRETS))
 
 
 def test_a_move_that_could_not_read_the_proxy_answers_503_with_the_real_error_not_success() -> None:

@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from launchplane import decide
-from launchplane.container_host import DatabaseLink, OnHost, PartStopped
+from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ProbedLane
 from launchplane.data_set import DatabaseServer, postgres_server
 from launchplane.decide import (
     Action,
@@ -21,7 +21,7 @@ from launchplane.decide import (
     RetireResult,
     Stop,
 )
-from launchplane.instance import DataSet, InstanceState, LaneBuild, new_container_name, new_data_set_name
+from launchplane.instance import DataSet, LaneBuild, new_container_name, new_data_set_name
 from launchplane.product import Database, Product
 from launchplane.proxy import CheckFailed
 
@@ -29,11 +29,10 @@ MOST_STEPS = 50
 
 
 class InstanceHost(Protocol):
-    def read(self) -> OnHost: ...
+    def read(self, probing: ProbedLane | None = None) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None: ...
     def start_job(self, target: LaneBuild, instance: str, link: DatabaseLink | None, command: list[str]) -> None: ...
     def await_job(self, container: str, steady_seconds: float) -> None: ...
-    def database_accepts_connections(self, container: str, server: DatabaseServer) -> bool: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None: ...
@@ -104,25 +103,14 @@ class Lanes:
 
     def read(self, product: str, lane: str, database: Database | None = None) -> LaneSeen:
         route = self.proxy.read_lane_route(decide.web_address_of(product, lane))
-        on_host = self.host.read()
-        data_sets = tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set))
+        on_host = self.host.read(None if database is None else ProbedLane(product, lane, postgres_server(database)))
         return LaneSeen(
             instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
             route=route,
             jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
-            data_sets=data_sets if database is None else tuple(self.probed(data_set, database) for data_set in data_sets),
+            data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
             network_quiet={network.name: network.is_quiet for network in on_host.networks},
         )
-
-    def probed(self, data_set: DataSet, database: Database) -> DataSet:
-        server = postgres_server(database)
-        databases = tuple(
-            each.model_copy(update={"accepts_connections": self.host.database_accepts_connections(each.container, server)})
-            if each.state == InstanceState.RUNNING
-            else each
-            for each in data_set.databases
-        )
-        return data_set.model_copy(update={"databases": databases})
 
     def move(self, target: LaneBuild) -> MoveResult:
         with self.one_at_a_time:

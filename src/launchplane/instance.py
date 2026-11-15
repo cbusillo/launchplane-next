@@ -38,7 +38,7 @@ class RunningJob(BaseModel):
     instance: str | None
 
 
-class DataSetNetwork(BaseModel):
+class HostNetwork(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
@@ -60,16 +60,9 @@ class DataSet(BaseModel):
     product: str
     lane: str | None
     data_set: str
-    networks: tuple[DataSetNetwork, ...]
+    networks: tuple[HostNetwork, ...]
     volumes: tuple[str, ...]
     databases: tuple[DataSetDatabase, ...]
-
-
-class HostNetwork(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    name: str
-    is_quiet: bool
 
 
 class LaneBuild(BaseModel):

@@ -3,7 +3,7 @@ from collections.abc import Callable
 import pytest
 
 from launchplane.act import MOST_STEPS, Lanes, Stopped
-from launchplane.container_host import DatabaseLink, OnHost, PartStopped
+from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ProbedLane
 from launchplane.data_set import DatabaseServer
 from launchplane.decide import (
     FreshNames,
@@ -19,7 +19,6 @@ from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
     DataSetDatabase,
-    DataSetNetwork,
     HostNetwork,
     InstanceState,
     LaneBuild,
@@ -47,7 +46,6 @@ class FakeHost:
         self.data_sets: dict[str, DataSet] = {}
         self.networks: dict[str, bool] = {LANE_NETWORK: True}
         self.ready_databases: set[str] = set()
-        self.probes: list[str] = []
         self.actions: list[str] = []
         self.most_jobs_running = 0
         self.killed_after: int | None = None
@@ -76,9 +74,16 @@ class FakeHost:
         found = self.instances[container]
         self.instances[container] = found.model_copy(update={"networks": (*found.networks, network)})
 
-    def read(self) -> OnHost:
+    def read(self, probing: ProbedLane | None = None) -> OnHost:
         networks = [HostNetwork(name=name, is_quiet=quiet) for name, quiet in self.networks.items()]
-        return OnHost(list(self.instances.values()), list(self.jobs.values()), list(self.data_sets.values()), networks)
+        data_sets = list(self.data_sets.values()) if probing is None else [self.asked(found) for found in self.data_sets.values()]
+        return OnHost(list(self.instances.values()), list(self.jobs.values()), data_sets, networks)
+
+    def asked(self, found: DataSet) -> DataSet:
+        databases = tuple(
+            each.model_copy(update={"accepts_connections": each.container in self.ready_databases}) for each in found.databases
+        )
+        return found.model_copy(update={"databases": databases})
 
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None:
         self.place(target, container, link=link)
@@ -116,7 +121,7 @@ class FakeHost:
 
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
         self.networks[f"network-{data_set}"] = True
-        self.change_data_set(product, lane, data_set, networks=(DataSetNetwork(name=f"network-{data_set}", is_quiet=True),))
+        self.change_data_set(product, lane, data_set, networks=(HostNetwork(name=f"network-{data_set}", is_quiet=True),))
         self.record(f"network {data_set}")
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
@@ -134,10 +139,6 @@ class FakeHost:
     def await_database(self, container: str, server: DatabaseServer) -> None:
         self.ready_databases.add(container)
         self.record(f"await {container} with {server.ready_command[0]}")
-
-    def database_accepts_connections(self, container: str, server: DatabaseServer) -> bool:
-        self.probes.append(f"{container} with {server.ready_command[0]}")
-        return container in self.ready_databases
 
     def delete_data_set(self, found: DataSet) -> None:
         del self.data_sets[found.data_set]

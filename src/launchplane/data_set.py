@@ -4,6 +4,7 @@ from launchplane.product import Database
 
 DATABASE_ADDRESS = "database"
 DATABASE_PORT = 5432
+CLIENT_PASSWORD_VARIABLE = "PGPASSWORD"  # noqa: S105 the name of the variable, not a password
 
 
 def variable_value(environment: list[str], variable: str) -> str | None:
@@ -20,6 +21,14 @@ class DatabaseServer:
     user: str
     database: str
 
+    @property
+    def server_secret_variables(self) -> tuple[str, ...]:
+        return (self.password_variable,)
+
+    @property
+    def client_secret_variables(self) -> tuple[str, ...]:
+        return (CLIENT_PASSWORD_VARIABLE,)
+
     def server_environment(self, password: str) -> dict[str, str]:
         return {self.password_variable: password}
 
@@ -32,7 +41,7 @@ class DatabaseServer:
             "PGPORT": str(DATABASE_PORT),
             "PGUSER": self.user,
             "PGDATABASE": self.database,
-            "PGPASSWORD": password,
+            CLIENT_PASSWORD_VARIABLE: password,
         }
 
 

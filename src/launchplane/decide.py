@@ -93,6 +93,12 @@ class DataSetUse:
 
 
 @dataclass(frozen=True)
+class DataSetProblem:
+    text: str
+    a_step_puts_right: bool = False
+
+
+@dataclass(frozen=True)
 class StartProxy:
     pass
 
@@ -315,26 +321,29 @@ def doubled_parts(found: DataSet) -> list[str]:
     return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
 
 
-def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen) -> list[str]:
+def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen) -> list[DataSetProblem]:
     part = f"The database {database.container}"
-    if database.state != InstanceState.RUNNING:
-        state = [f"{part} is {database.state}"]
+    attached = attachment_problems(part, database.networks, network_names(found), seen)
+    if database.state == InstanceState.STOPPED:
+        state = [DataSetProblem(f"{part} is {database.state}", a_step_puts_right=True)]
+    elif database.state != InstanceState.RUNNING:
+        state = [DataSetProblem(f"{part} is {database.state}")]
     elif not database.accepts_connections:
-        state = [f"{part} does not accept connections"]
+        state = [DataSetProblem(f"{part} does not accept connections", a_step_puts_right=True)]
     else:
         state = []
-    return [*state, *attachment_problems(part, database.networks, network_names(found), seen)]
+    return [*state, *map(DataSetProblem, attached)]
 
 
-def data_set_problems(found: DataSet, seen: LaneSeen) -> list[str]:
+def data_set_problems(found: DataSet, seen: LaneSeen) -> list[DataSetProblem]:
     part = f"The data set {found.data_set}"
     missing = [
         kind for kind, parts in (("network", found.networks), ("volume", found.volumes), ("database", found.databases)) if not parts
     ]
     return [
-        *[f"{part} has {doubled} where it must have one" for doubled in doubled_parts(found)],
-        *[f"{part} has no {kind}" for kind in missing],
-        *[f"{part}'s network {network.name} is not quiet" for network in found.networks if not network.is_quiet],
+        *[DataSetProblem(f"{part} has {doubled} where it must have one") for doubled in doubled_parts(found)],
+        *[DataSetProblem(f"{part} has no {kind}", a_step_puts_right=True) for kind in missing],
+        *[DataSetProblem(f"{part}'s network {network.name} is not quiet") for network in found.networks if not network.is_quiet],
         *[problem for database in found.databases for problem in database_problems(found, database, seen)],
     ]
 
@@ -368,16 +377,35 @@ def job_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> l
     return [*owner, *build, *job_state_problems(job), *job_attachment_problems(job, active, seen)]
 
 
-def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product) -> list[str]:
+def instance_receiving_visitors(seen: LaneSeen) -> RunningInstance | None:
     receiving = None if isinstance(seen.route, ProxyNotRunning) else seen.route.written
-    active = next((instance for instance in seen.instances if instance.container == receiving), None)
+    return next((instance for instance in seen.instances if instance.container == receiving), None)
+
+
+def data_set_change_problems(seen: LaneSeen, switching_to: RunningInstance) -> list[str]:
+    receiving = instance_receiving_visitors(seen)
+    if receiving is None or receiving.data_set in (None, switching_to.data_set):
+        return []
+    return [
+        f"The instance {switching_to.container} runs against the data set {switching_to.data_set}, "
+        f"not {receiving.data_set}, which the instance receiving visitors runs against"
+    ]
+
+
+def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[str]:
+    active = switching_to or instance_receiving_visitors(seen)
     if active is None:
         return ["No instance receives visitors"]
     found = data_set_of(seen, active.data_set)
+    to_receive_visitors = [
+        *instance_problems(active, target, product, seen),
+        *([problem.text for problem in data_set_problems(found, seen)] if found is not None else []),
+    ]
+    if switching_to is not None:
+        return [*to_receive_visitors, *data_set_change_problems(seen, switching_to)]
     others = sorted(instance.container for instance in seen.instances if instance.container != active.container)
     return [
-        *instance_problems(active, target, product, seen),
-        *(data_set_problems(found, seen) if found is not None else []),
+        *to_receive_visitors,
         *job_problems(seen, active, product),
         *[f"The instance {other} runs beside the active one" for other in others],
     ]
@@ -417,11 +445,11 @@ def check_then_route(
     check = Check(candidate.container, product.health_path)
     if check not in done or candidate.state != InstanceState.RUNNING:
         return check
-    problems = instance_problems(candidate, target, product, seen)
+    problems = lane_problems(seen, target, product, switching_to=candidate)
     if problems:
         return Stop(
-            f"The instance {candidate.container} passed its check and is not as it must be, so the web address was not "
-            f"switched to it: {'; '.join(problems)}. {changes_so_far(done)} Asking again replaces it."
+            f"The instance {candidate.container} passed its check and the lane is not as it must be to switch to it, so the "
+            f"web address was not switched: {'; '.join(problems)}. {changes_so_far(done)} Asking again replaces the instance."
         )
     return WriteRoute(web_address_of(target.product, target.lane), candidate.container)
 
@@ -445,39 +473,30 @@ def unfixable_data_set_stop(found: DataSet, problems: list[str], done: tuple[Eve
     )
 
 
-def database_step(
-    found: DataSet, server: DataSetDatabase, database: Database, seen: LaneSeen, done: tuple[Event, ...]
-) -> Action | Stop | None:
+def step_toward_ready(found: DataSet, target: LaneBuild, database: Database) -> Action:
+    product, lane = target.product, target.lane
+    if not found.networks:
+        return CreateDataSetNetwork(product, lane, found.data_set)
+    if not found.volumes:
+        return CreateDataSetVolume(product, lane, found.data_set)
+    if not found.databases:
+        return CreateDatabase(product, lane, found.data_set, found.networks[0].name, found.volumes[0], database)
+    server = found.databases[0]
     if server.state == InstanceState.STOPPED:
         return StartDatabase(server.container)
-    if server.state != InstanceState.RUNNING:
-        return unfixable_data_set_stop(found, [f"the database {server.container} is {server.state}"], done)
-    attached = attachment_problems(f"the database {server.container}", server.networks, network_names(found), seen)
-    if attached:
-        return unfixable_data_set_stop(found, attached, done)
-    return None if server.accepts_connections is True else AwaitDatabase(server.container, database)
+    return AwaitDatabase(server.container, database)
 
 
 def data_set_step(
     found: DataSet, target: LaneBuild, database: Database, seen: LaneSeen, done: tuple[Event, ...]
 ) -> Action | Stop | DataSetUse:
-    doubled = doubled_parts(found)
-    if doubled:
-        return unfixable_data_set_stop(found, [f"it has {' and '.join(doubled)} carrying its labels"], done)
-    product, lane = target.product, target.lane
-    if not found.networks:
-        return CreateDataSetNetwork(product, lane, found.data_set)
-    [network] = found.networks
-    if not network.is_quiet:
-        return unfixable_data_set_stop(found, [f"its network {network.name} is not quiet"], done)
-    if not found.volumes:
-        return CreateDataSetVolume(product, lane, found.data_set)
-    if not found.databases:
-        return CreateDatabase(product, lane, found.data_set, network.name, found.volumes[0], database)
-    [server] = found.databases
-    if (step := database_step(found, server, database, seen, done)) is not None:
-        return step
-    return DataSetUse(found.data_set, network.name, server.container, database)
+    problems = data_set_problems(found, seen)
+    not_a_moves_to_put_right = [problem.text for problem in problems if not problem.a_step_puts_right]
+    if not_a_moves_to_put_right:
+        return unfixable_data_set_stop(found, not_a_moves_to_put_right, done)
+    if problems:
+        return step_toward_ready(found, target, database)
+    return DataSetUse(found.data_set, found.networks[0].name, found.databases[0].container, database)
 
 
 def prepared(

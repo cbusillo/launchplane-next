@@ -1,16 +1,19 @@
+import copy
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TextIO
 
 import uvicorn
-from fastapi import FastAPI, Response
+import uvicorn.config
+from fastapi import FastAPI, Request, Response
 from fastapi import Path as PathParameter
-from fastapi.responses import HTMLResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from launchplane.act import Lanes, Stopped
@@ -19,6 +22,7 @@ from launchplane.decide import MoveResult, Outcome, RetireResult, web_address_of
 from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
+from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 
 type HostReader = Callable[[], OnHost]
 type RouteReader = Callable[[], dict[str, str]]
@@ -132,6 +136,47 @@ def web_address_answers(on_host: OnHost, routes: dict[str, str], why_web_address
     ]
 
 
+def not_answered(error: Exception, secrets: Secrets) -> Response:
+    why = cleaned(str(error), secrets.secrets_seen())
+    return JSONResponse(
+        NotFinished(
+            error="Launchplane could not read which secrets it has given out, so it made no answer: it could not have "
+            f"cleaned one of them. Nothing was changed, and asking again is safe: {why}"
+        ).model_dump(),
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+    )
+
+
+def without_length(headers: dict[str, str]) -> dict[str, str]:
+    return {name: value for name, value in headers.items() if name.lower() != "content-length"}
+
+
+def let_no_secret_leave(app: FastAPI, secrets: Secrets, path_answered_without_reading_anything: str) -> None:
+    @app.middleware("http")
+    async def clean_the_answer(request: Request, answer: Callable[[Request], Awaitable[Any]]) -> Response:
+        try:
+            await run_in_threadpool(secrets.read_secrets)
+        except UNREADABLE as error:
+            if request.url.path != path_answered_without_reading_anything:
+                return not_answered(error, secrets)
+        response = await answer(request)
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        headers = without_length(dict(response.headers))
+        return Response(cleaned_body(body, headers.get("content-type", ""), secrets.secrets_seen()), response.status_code, headers)
+
+
+def cleaned_log_config(secrets: Secrets) -> dict[str, Any]:
+    def cleaned_stream(stream: TextIO) -> CleanedStream:
+        return CleanedStream(secrets, stream)
+
+    config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    for handler in config["handlers"].values():
+        del handler["class"]
+        handler["()"] = cleaned_stream
+    config["root"] = {"handlers": ["default"], "level": "INFO"}
+    return config
+
+
 def running_page() -> str:
     return files("launchplane").joinpath("running.html").read_text()
 
@@ -142,6 +187,7 @@ def create_app(
     why_web_address_fails: WebAddressChecker,
     move: MoveRequester,
     retire: RetireRequester,
+    secrets: Secrets,
 ) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
@@ -149,6 +195,8 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def show_running() -> str:
         return page
+
+    let_no_secret_leave(app, secrets, path_answered_without_reading_anything=app.url_path_for(show_running.__name__))
 
     @app.get("/running", responses=RUNNING_ERROR_RESPONSES)
     def running(response: Response) -> RunningAnswer | HostUnreadable:
@@ -203,5 +251,5 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     lanes = Lanes(host, proxy, products.read)
-    app = create_app(host.read, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire)
-    uvicorn.run(app, host=address, port=port)
+    app = create_app(host.read, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire, host)
+    uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host))

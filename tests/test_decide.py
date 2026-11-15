@@ -44,7 +44,7 @@ from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
     DataSetDatabase,
-    DataSetNetwork,
+    HostNetwork,
     InstanceState,
     LaneBuild,
     RunningInstance,
@@ -244,7 +244,7 @@ def data_set(
         product="site",
         lane="testing",
         data_set=name,
-        networks=() if quiet is None else (DataSetNetwork(name=f"network-{name}", is_quiet=quiet),),
+        networks=() if quiet is None else (HostNetwork(name=f"network-{name}", is_quiet=quiet),),
         volumes=(f"volume-{name}",) if volume else (),
         databases=tuple(
             DataSetDatabase(
@@ -288,6 +288,10 @@ class DataCase:
     done: tuple[Event, ...]
     step: object
     jobs: tuple[RunningJob, ...] = ()
+
+
+def with_database_on(found: DataSet, *networks: str) -> DataSet:
+    return found.model_copy(update={"databases": (found.databases[0].model_copy(update={"networks": networks}),)})
 
 
 OLD_ON_D1 = on_data(OLD, "d1")
@@ -435,6 +439,35 @@ DATA_STOPS = {
         DataCase((OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (STARTED_NEW, Check("new", "/health")), None),
         "can reach out through bridge",
     ),
+    "a stopped database attached to an outside network, which is not started first": (
+        DataCase((), None, (with_database_on(data_set("d1", InstanceState.STOPPED), "network-d1", "bridge"),), (), None),
+        "can reach out through bridge",
+    ),
+    "a stopped database on a network that is not its data set's, which is not started first": (
+        DataCase((), None, (with_database_on(data_set("d1", InstanceState.STOPPED), "network-d2"),), (), None),
+        "network-d2, which it must not be",
+    ),
+    "a stopped database under a serving instance, attached to an outside network": (
+        DataCase(
+            (NEW_ON_D1,),
+            "new",
+            (with_database_on(data_set("d1", InstanceState.STOPPED), "network-d1", "bridge"),),
+            (),
+            None,
+            (NEW_JOB,),
+        ),
+        "can reach out through bridge",
+    ),
+    "an instance this call started and checked, on another data set than the one receiving visitors runs against": (
+        DataCase(
+            (OLD_ON_D1, NEW_ON_D2),
+            "old",
+            (D1, data_set("d2")),
+            (StartInstance(TARGET, "new", DataSetUse("d2", "network-d2", "database-d2", DATABASE)), Check("new", "/health")),
+            None,
+        ),
+        "runs against the data set d2, not d1",
+    ),
 }
 
 
@@ -469,7 +502,7 @@ LANE_PROBLEMS = {
         DataCase(
             (NEW_ON_D1,),
             "new",
-            (D1.model_copy(update={"databases": (D1.databases[0].model_copy(update={"networks": ("network-d1", "bridge")}),)}),),
+            (with_database_on(D1, "network-d1", "bridge"),),
             (),
             None,
             (NEW_JOB,),
@@ -487,6 +520,30 @@ LANE_PROBLEMS = {
 def test_a_lane_is_judged_not_as_it_must_be_when_it_has(case: DataCase, problem: str) -> None:
     problems = lane_problems(lane_seen_of(case), TARGET, WITH_DATA)
     assert any(problem in each for each in problems), problems
+
+
+SWITCH_PROBLEMS = {
+    "its data set's database does not accept connections": (NEW_ON_D1, data_set("d1", accepts=False), "does not accept connections"),
+    "its data set's network is not quiet": (NEW_ON_D1, data_set("d1", quiet=False), "not quiet"),
+    "its data set's database can reach out": (
+        NEW_ON_D1,
+        with_database_on(D1, "network-d1", "bridge"),
+        "can reach out through bridge",
+    ),
+    "it can reach out itself": (on_data(NEW, "d1", "bridge"), D1, "can reach out through bridge"),
+}
+
+
+@pytest.mark.parametrize(("candidate", "found", "problem"), SWITCH_PROBLEMS.values(), ids=SWITCH_PROBLEMS.keys())
+def test_the_lane_is_judged_not_fit_to_switch_to_an_instance_when(candidate: RunningInstance, found: DataSet, problem: str) -> None:
+    lane_seen = lane_seen_of(DataCase((OLD_ON_D1, candidate), "old", (found,), (), None, (job_of(OLD_ON_D1),)))
+    problems = lane_problems(lane_seen, TARGET, WITH_DATA, switching_to=candidate)
+    assert any(problem in each for each in problems), problems
+
+
+def test_before_the_switch_the_old_instance_and_its_job_are_not_problems_because_the_steps_after_it_replace_them() -> None:
+    lane_seen = lane_seen_of(DataCase((OLD_ON_D1, NEW_ON_D1), "old", (D1,), (), None, (job_of(OLD_ON_D1),)))
+    assert lane_problems(lane_seen, TARGET, WITH_DATA, switching_to=NEW_ON_D1) == []
 
 
 def test_a_lane_as_it_must_be_has_no_problems() -> None:

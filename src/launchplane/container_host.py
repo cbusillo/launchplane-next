@@ -1,17 +1,19 @@
 import io
 import os
 import tarfile
+import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import docker
 import requests
-from docker.errors import DockerException, ImageNotFound, NotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
 from docker.tls import TLSConfig
 from docker.types import EndpointConfig
@@ -22,7 +24,6 @@ from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
     DataSetDatabase,
-    DataSetNetwork,
     HostNetwork,
     InstanceState,
     LaneBuild,
@@ -38,8 +39,7 @@ BUILD_LABEL = "launchplane.build"
 PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
-PASSWORD_VARIABLE_LABEL = "launchplane.password-variable"  # noqa: S105 the name of a label, not a password
-SECRET_REMOVED = "[a secret Launchplane gave this lane, removed]"  # noqa: S105 what replaces a secret, not one
+SECRET_VARIABLES_LABEL = "launchplane.secret-variables"  # noqa: S105 the name of a label, not a secret
 MARKED = {"label": PRODUCT_LABEL}
 
 DOCKER_API_VERSION = "1.47"
@@ -51,6 +51,7 @@ LOG_TAIL_LINES = 20
 DATABASE_DEADLINE_SECONDS = 60
 JOB_DEADLINE_MARGIN_SECONDS = 15
 POLL_SECONDS = 0.5
+MOST_READS = 3
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
 type Part = Literal["web", "job", "database"]
@@ -71,6 +72,10 @@ class ContainerHostError(Exception):
 
 
 class PartStopped(Exception):
+    pass
+
+
+class TornRead(Exception):
     pass
 
 
@@ -111,6 +116,13 @@ class DatabaseLink:
 
 
 @dataclass(frozen=True)
+class ProbedLane:
+    product: str
+    lane: str
+    server: DatabaseServer
+
+
+@dataclass(frozen=True)
 class RunOptions:
     image: str
     container: str
@@ -120,6 +132,7 @@ class RunOptions:
     environment: dict[str, str] = field(default_factory=dict[str, str])
     volumes: dict[str, str] = field(default_factory=dict[str, str])
     ports: dict[int, int] = field(default_factory=dict[int, int])
+    secret_variables: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -210,7 +223,14 @@ def checked[Shape](adapter: TypeAdapter[Shape], answer: object, what: str) -> Sh
     try:
         return adapter.validate_python(answer)
     except ValidationError as error:
-        raise ContainerHostError(f"Docker's {what} did not have the expected shape, so nothing was read: {error}") from error
+        raise ContainerHostError(
+            f"Docker's {what} did not have the expected shape, so nothing was read: {shape_faults(error)}"
+        ) from error
+
+
+def shape_faults(error: ValidationError) -> str:
+    faults = error.errors(include_input=False, include_url=False, include_context=False)
+    return "; ".join(f"{'.'.join(map(str, fault['loc'])) or 'the answer'}: {fault['msg']}" for fault in faults)
 
 
 def required_label(labels: dict[str, str], label: str, what: str) -> str:
@@ -297,15 +317,15 @@ def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
     return DataSetDatabase(container=summary.name, state=state_of(summary), networks=attached_networks(summary))
 
 
-def network_part(network: DockerNetworkSummary) -> DataSetNetwork:
-    return DataSetNetwork(name=network.name, is_quiet=is_quiet(network))
+def network_from(network: DockerNetworkSummary) -> HostNetwork:
+    return HostNetwork(name=network.name, is_quiet=is_quiet(network))
 
 
 def data_sets_from(
     databases: Iterable[DockerContainerSummary], networks: Iterable[DockerNetworkSummary], volumes: Iterable[DockerVolumeSummary]
 ) -> list[DataSet]:
     by_network = grouped(
-        (data_set_key(network.labels or {}, f"the network {network.name}"), network_part(network)) for network in networks
+        (data_set_key(network.labels or {}, f"the network {network.name}"), network_from(network)) for network in networks
     )
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
     by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary)) for summary in databases)
@@ -353,7 +373,7 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
         instances=[instance_from(summary) for summary in by_part["web"]],
         jobs=jobs,
         data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
-        networks=[HostNetwork(name=network.name, is_quiet=is_quiet(network)) for network in every_network],
+        networks=[network_from(network) for network in every_network],
     )
 
 
@@ -362,11 +382,15 @@ def job_names(containers: object) -> list[str]:
     return [summary.name for summary in summaries if part_of(summary) == "job"]
 
 
-def redacted(text: str, secrets: Iterable[str]) -> str:
-    for secret in sorted(secrets, key=len, reverse=True):
-        if secret:
-            text = text.replace(secret, SECRET_REMOVED)
-    return text
+def secrets_held(labels: Mapping[str, str], details: object, what: str) -> set[str]:
+    variables = [variable for variable in labels.get(SECRET_VARIABLES_LABEL, "").split(",") if variable]
+    environment = checked(DOCKER_CONTAINER_DETAILS, details, f"description of {what}").config.environment or []
+    values = (variable_value(environment, variable) for variable in variables)
+    return {value for value in values if value}
+
+
+def is_of_a_container_that_changed(error: APIError) -> bool:
+    return isinstance(error, NotFound) or error.status_code == HTTPStatus.CONFLICT
 
 
 def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
@@ -395,11 +419,11 @@ def database_options(
     return RunOptions(
         image=server.image,
         container=database_container_of(product, lane, data_set),
-        labels=data_set_labels(product, lane, data_set)
-        | {PART_LABEL: "database", PASSWORD_VARIABLE_LABEL: server.password_variable},
+        labels=data_set_labels(product, lane, data_set) | {PART_LABEL: "database"},
         networks={network: [DATABASE_ADDRESS]},
         environment=server.server_environment(password),
         volumes={volume: server.data_path},
+        secret_variables=server.server_secret_variables,
     )
 
 
@@ -413,6 +437,7 @@ def instance_options(target: LaneBuild, container: str, link: DatabaseLink | Non
         labels=labels | {DATA_SET_LABEL: link.data_set},
         networks={LANE_NETWORK: [], link.network: []},
         environment=link.server.client_environment(password),
+        secret_variables=link.server.client_secret_variables,
     )
 
 
@@ -434,7 +459,14 @@ def job_options(target: LaneBuild, instance: str, link: DatabaseLink | None, pas
         networks={link.network: []},
         command=command,
         environment=link.server.client_environment(password),
+        secret_variables=link.server.client_secret_variables,
     )
+
+
+def labels_naming_secrets(options: RunOptions) -> dict[str, str]:
+    if not options.secret_variables:
+        return options.labels
+    return options.labels | {SECRET_VARIABLES_LABEL: ",".join(options.secret_variables)}
 
 
 def service_options(service: Service) -> RunOptions:
@@ -456,13 +488,13 @@ class ContainerHost:
         address: str,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
-        make_password: Callable[[], str] = new_password,
     ) -> None:
         self.client = client
         self.address = address
         self.sleep = sleep
         self.clock = clock
-        self.make_password = make_password
+        self.seen_secrets: frozenset[str] = frozenset()
+        self.noting_secrets = threading.Lock()
 
     @classmethod
     def from_environment(cls) -> ContainerHost:
@@ -498,13 +530,58 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    def read(self) -> OnHost:
+    def read(self, probing: ProbedLane | None = None) -> OnHost:
+        torn: TornRead | None = None
+        for _ in range(MOST_READS):
+            try:
+                return self.read_once(probing)
+            except TornRead as error:
+                torn = error
+        raise ContainerHostError(
+            f"What is on {self.address} changed during each of {MOST_READS} reads in a row, so nothing was read. "
+            f"The last time: {torn}"
+        ) from torn
+
+    def read_once(self, probing: ProbedLane | None) -> OnHost:
         with self.attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks"):
             containers, networks, volumes = self.list_marked_containers(), self.list_networks(), self.list_marked_volumes()
             jobs = job_names(containers)
-            job_details = [self.describe(job) for job in jobs]
+            job_details = [self.describe_listed(job) for job in jobs]
             system = self.system_information() if jobs else None
-        return on_host_from_answers(HostAnswers(containers, networks, volumes, job_details, system))
+        on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, job_details, system))
+        return on_host if probing is None else self.probed(on_host, probing)
+
+    def describe_listed(self, container: str) -> object:
+        try:
+            return self.describe(container)
+        except NotFound as error:
+            raise TornRead(f"{container} was listed and had gone before it was described.") from error
+
+    def probed(self, on_host: OnHost, probing: ProbedLane) -> OnHost:
+        lane = (probing.product, probing.lane)
+        data_sets = [
+            self.with_databases_asked(found, probing.server) if (found.product, found.lane) == lane else found
+            for found in on_host.data_sets
+        ]
+        return replace(on_host, data_sets=data_sets)
+
+    def with_databases_asked(self, found: DataSet, server: DatabaseServer) -> DataSet:
+        databases = tuple(
+            each.model_copy(update={"accepts_connections": self.listed_database_accepts_connections(each.container, server)})
+            if each.state == InstanceState.RUNNING
+            else each
+            for each in found.databases
+        )
+        return found.model_copy(update={"databases": databases})
+
+    def listed_database_accepts_connections(self, container: str, server: DatabaseServer) -> bool:
+        with self.attempting(f"Asking the database {container} whether it accepts connections"):
+            try:
+                return self.command_result_in(container, server.ready_command).succeeded
+            except APIError as error:
+                if is_of_a_container_that_changed(error):
+                    raise TornRead(f"The database {container} was listed as running and was not when it was asked.") from error
+                raise
 
     def job_running_for(self, container: str) -> float | None:
         with self.attempting(f"Reading how long the job {container} has run"):
@@ -512,16 +589,19 @@ class ContainerHost:
             now = checked(DOCKER_SYSTEM_TIME, self.system_information(), "system information").system_time
         return running_for(details, now)
 
-    def secrets_given_out(self) -> list[str]:
-        databases: dict[str, str | list[str] | bool] = {"label": f"{PART_LABEL}=database"}
-        found: list[str] = []
-        for database in self.client.containers.list(all=True, filters=databases):
-            variable = database.labels.get(PASSWORD_VARIABLE_LABEL)
-            environment = checked(DOCKER_CONTAINER_DETAILS, database.attrs, f"description of {database.name}").config.environment
-            value = None if variable is None else variable_value(environment or [], variable)
-            if value is not None:
-                found.append(value)
-        return found
+    def note_secrets(self, secrets: Iterable[str]) -> None:
+        with self.noting_secrets:
+            self.seen_secrets = self.seen_secrets.union(secrets)
+
+    def secrets_seen(self) -> frozenset[str]:
+        return self.seen_secrets
+
+    def read_secrets(self) -> frozenset[str]:
+        holders: dict[str, str | list[str] | bool] = {"label": SECRET_VARIABLES_LABEL}
+        with self.attempting("Reading the secrets Launchplane has given to what is"):
+            for holder in self.client.containers.list(all=True, filters=holders, ignore_removed=True):
+                self.note_secrets(secrets_held(holder.labels, holder.attrs, str(holder.name)))
+        return self.seen_secrets
 
     def find_container(self, container: str) -> Container | None:
         try:
@@ -560,7 +640,7 @@ class ContainerHost:
             options.command,
             name=options.container,
             detach=True,
-            labels=options.labels,
+            labels=labels_naming_secrets(options),
             network=next(iter(options.networks)),
             networking_config=endpoints(options.networks),
             environment=options.environment,
@@ -578,6 +658,7 @@ class ContainerHost:
                 f"The database {link.database_container} of the data set {link.data_set} has no password, "
                 "so no instance can be given one."
             )
+        self.note_secrets([password])
         return password
 
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None:
@@ -602,9 +683,6 @@ class ContainerHost:
                 raise PartStopped(f"The job {container} did not stay up {steady_seconds:g} s in a row; it keeps starting again.")
             self.sleep(POLL_SECONDS)
 
-    def database_accepts_connections(self, container: str, server: DatabaseServer) -> bool:
-        return self.run_in(container, server.ready_command).succeeded
-
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
         with self.attempting(f"Making the network of the data set {data_set}"):
             self.create_network(data_set_network_of(data_set), data_set_labels(product, lane, data_set), quiet_network_settings())
@@ -615,7 +693,9 @@ class ContainerHost:
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None:
         with self.attempting(f"Making the database of the data set {data_set}"):
-            self.run(database_options(product, lane, data_set, network, volume, server, self.make_password()))
+            password = new_password()
+            self.note_secrets([password])
+            self.run(database_options(product, lane, data_set, network, volume, server, password))
 
     def start_database(self, container: str) -> None:
         with self.attempting(f"Starting the database {container}"):
@@ -663,7 +743,7 @@ class ContainerHost:
             found = self.find_container(container)
             if found is None:
                 return ""
-            return redacted(found.logs(tail=LOG_TAIL_LINES).decode(errors="replace"), self.secrets_given_out())
+            return found.logs(tail=LOG_TAIL_LINES).decode(errors="replace")
 
     def ensure_service(self, service: Service) -> None:
         with self.attempting(f"Starting the service {service.container}"):
@@ -683,7 +763,10 @@ class ContainerHost:
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
         with self.attempting(f"Running {command[0]} in {container}"):
-            result = self.client.containers.get(container).exec_run(command)
+            return self.command_result_in(container, command)
+
+    def command_result_in(self, container: str, command: list[str]) -> CommandResult:
+        result = self.client.containers.get(container).exec_run(command)
         exit_code, output = result.exit_code, result.output
         if exit_code is None or not isinstance(output, bytes):
             raise ContainerHostError(f"Running {command[0]} in {container} on {self.address} returned before the command finished.")

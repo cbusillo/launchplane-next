@@ -2,21 +2,26 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+import requests
+from docker.errors import APIError, NotFound
 
 from launchplane.container_host import (
     LANE_NETWORK,
-    SECRET_REMOVED,
+    SECRET_VARIABLES_LABEL,
     ContainerHost,
     ContainerHostError,
     DatabaseLink,
     HostAnswers,
     OnHost,
     PartStopped,
+    ProbedLane,
     on_host_from_answers,
+    secrets_held,
 )
 from launchplane.data_set import postgres_server
-from launchplane.instance import DataSet, DataSetDatabase, DataSetNetwork, InstanceState, LaneBuild
+from launchplane.instance import DataSet, DataSetDatabase, HostNetwork, InstanceState, LaneBuild
 from launchplane.product import Database, Product, ProductError, ProductFolder
+from launchplane.proxy import PROXY
 from tests.recording_docker import RecordingDocker, as_docker_client
 
 DATA_SET_LABELS = {"launchplane.product": "shop", "launchplane.lane": "testing", "launchplane.data-set": "d1"}
@@ -70,7 +75,7 @@ def test_a_data_set_is_read_from_its_network_volume_and_database_together() -> N
             product="shop",
             lane="testing",
             data_set="d1",
-            networks=(DataSetNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
+            networks=(HostNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
             volumes=("launchplane-data-d1-database",),
             databases=(DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,)),),
         )
@@ -209,15 +214,135 @@ def test_awaiting_a_job_that_is_not_running_fails_with_why() -> None:
         watching(RecordingDocker(), ["2026-11-15T20:00:01Z"], running=False).await_job("a-job", 3)
 
 
-def test_a_log_that_prints_a_password_launchplane_gave_out_comes_back_without_it() -> None:
+def test_a_job_that_keeps_starting_again_fails_its_watch_instead_of_being_watched_without_end() -> None:
+    never_past_half_a_second = ["2026-11-15T20:00:00.5Z"] * 100
+    with pytest.raises(PartStopped, match="keeps starting again"):
+        watching(RecordingDocker(), never_past_half_a_second).await_job("a-job", 3)
+
+
+def test_everything_launchplane_starts_is_started_again_by_docker_when_it_exits() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, "shop-testing-1", LINK)
+    host.start_job(TARGET, "shop-testing-1", LINK, ["job"])
+    host.ensure_service(PROXY)
+    assert [run["restart_policy"] for run in docker.containers.runs] == [{"Name": "always"}] * 4
+
+
+def test_nothing_is_attached_to_a_lanes_network_that_exists_and_is_not_quiet() -> None:
+    docker = RecordingDocker()
+    docker.networks.made.append(network(True, {}, name=LANE_NETWORK, labels={}))
+    with pytest.raises(ContainerHostError, match="not quiet"):
+        ContainerHost(docker.as_client(), "test").start_instance(TARGET, "shop-testing-1", None)
+    assert docker.containers.runs == []
+
+
+def test_a_password_is_drawn_at_random_so_one_does_not_give_away_the_next() -> None:
+    docker = RecordingDocker()
+    for _ in range(20):
+        database_made(docker)
+    passwords = [run["environment"]["POSTGRES_PASSWORD"] for run in docker.containers.runs]
+    assert len({password[:8] for password in passwords}) == len({password[-8:] for password in passwords}) == 20
+
+
+def restarted_launchplane(docker: RecordingDocker) -> ContainerHost:
+    return ContainerHost(docker.as_client(), "test")
+
+
+@pytest.mark.parametrize("left", [DATABASE, "shop-testing-1", "shop-testing-1-job"])
+def test_a_secret_is_read_from_whatever_still_holds_it_whichever_containers_are_gone(left: str) -> None:
     docker = RecordingDocker()
     host = database_made(docker)
     password = docker.last_run()["environment"]["POSTGRES_PASSWORD"]
+    host.start_instance(TARGET, "shop-testing-1", LINK)
     host.start_job(TARGET, "shop-testing-1", LINK, ["job"])
-    docker.containers.by_name["shop-testing-1-job"].log = f"connecting with PGPASSWORD={password}\n".encode()
-    tail = host.read_log_tail("shop-testing-1-job")
-    assert password not in tail
-    assert tail == f"connecting with PGPASSWORD={SECRET_REMOVED}\n"
+    for name, holder in docker.containers.by_name.items():
+        holder.removed = name != left
+    assert restarted_launchplane(docker).read_secrets() == {password}
+
+
+def test_a_secret_this_launchplane_gave_out_stays_one_after_everything_holding_it_is_gone() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    password = docker.last_run()["environment"]["POSTGRES_PASSWORD"]
+    docker.containers.by_name[DATABASE].removed = True
+    assert (host.read_secrets(), host.secrets_seen()) == ({password}, {password})
+
+
+def test_a_password_read_to_give_to_an_instance_is_a_secret_before_the_host_is_asked_for_secrets() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    password = docker.last_run()["environment"]["POSTGRES_PASSWORD"]
+    host = restarted_launchplane(docker)
+    host.start_instance(TARGET, "shop-testing-1", LINK)
+    assert host.secrets_seen() == {password}
+
+
+def test_a_description_of_unexpected_shape_is_an_error_that_repeats_nothing_docker_answered() -> None:
+    described = {"Name": "/shop-testing-1", "Config": {"Env": ["PGPASSWORD=hunter2-hunter2"]}}
+    with pytest.raises(ContainerHostError, match="State: Field required") as refused:
+        secrets_held({SECRET_VARIABLES_LABEL: "PGPASSWORD"}, described, "shop-testing-1")
+    assert "hunter2" not in str(refused.value)
+
+
+JOB = container("a-job", "job", [])
+RUNNING_DATABASE = container(DATABASE, "database", [DATA_SET_NETWORK])
+STOPPED_DATABASE = RUNNING_DATABASE | {"State": "exited"}
+OUR_LANE = ProbedLane("shop", "testing", SERVER)
+
+
+def test_a_job_gone_between_being_listed_and_described_is_read_again_not_called_a_host_that_cannot_be_read() -> None:
+    docker = RecordingDocker()
+    docker.api.container_lists = iter([[JOB], []])
+    docker.api.gone_before_described = {"a-job"}
+    assert ContainerHost(docker.as_client(), "test").read().jobs == []
+
+
+def test_a_host_that_changes_during_three_reads_in_a_row_is_an_error_not_read_without_end() -> None:
+    docker = RecordingDocker()
+    docker.api.container_lists = iter([[JOB]] * 10)
+    docker.api.gone_before_described = {"a-job"}
+    with pytest.raises(ContainerHostError, match="changed during each of 3 reads"):
+        ContainerHost(docker.as_client(), "test").read()
+    assert len(list(docker.api.container_lists)) == 7
+
+
+def refusal(status: int) -> APIError:
+    response = requests.Response()
+    response.status_code = status
+    return APIError("the container is not running", response=response)
+
+
+NO_LONGER_AS_LISTED = {"gone": NotFound("No such container"), "not running any more": refusal(409)}
+
+
+@pytest.mark.parametrize("answer", NO_LONGER_AS_LISTED.values(), ids=NO_LONGER_AS_LISTED.keys())
+def test_a_database_listed_as_running_and_found_otherwise_when_asked_is_read_again(answer: APIError) -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    docker.containers.by_name[DATABASE].refuses_commands_with = answer
+    docker.api.container_lists = iter([[RUNNING_DATABASE], [STOPPED_DATABASE]])
+    [found] = host.read(OUR_LANE).data_sets
+    assert [(database.state, database.accepts_connections) for database in found.databases] == [(InstanceState.STOPPED, None)]
+
+
+def test_a_database_that_cannot_be_asked_for_another_reason_is_an_error_at_once_not_read_again() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    docker.containers.by_name[DATABASE].refuses_commands_with = refusal(500)
+    docker.api.container_lists = iter([[RUNNING_DATABASE]] * 3)
+    with pytest.raises(ContainerHostError, match="whether it accepts connections"):
+        host.read(OUR_LANE)
+    assert len(list(docker.api.container_lists)) == 2
+
+
+def test_only_the_databases_of_the_lane_being_moved_are_asked_whether_they_accept_connections() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    labels = DATA_SET_LABELS | {"launchplane.lane": "other", "launchplane.part": "database"}
+    docker.api.container_lists = iter([[RUNNING_DATABASE, container("other-database", "database", []) | {"Labels": labels}]])
+    databases = [database for found in host.read(OUR_LANE).data_sets for database in found.databases]
+    assert {database.container: database.accepts_connections for database in databases} == {DATABASE: True, "other-database": None}
 
 
 class Removable:
@@ -252,7 +377,7 @@ def test_deleting_a_data_set_removes_every_database_volume_and_network_read_of_i
         product="shop",
         lane="testing",
         data_set="d1",
-        networks=(DataSetNetwork(name="network-d1", is_quiet=True),),
+        networks=(HostNetwork(name="network-d1", is_quiet=True),),
         volumes=("volume-a", "volume-b"),
         databases=(DataSetDatabase(container="database-d1", state=InstanceState.RUNNING, networks=("network-d1",)),),
     )

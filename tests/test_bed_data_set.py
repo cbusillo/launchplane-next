@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from launchplane.container_host import SECRET_REMOVED
+from launchplane.secret_boundary import SECRET_REMOVED
 from tests.bed import (
     SCRATCH_ADDRESS,
     UnexpectedAnswer,
@@ -36,6 +36,7 @@ LANE = "testing"
 OTHER_LANE = "other"
 BUILD_A = "launchplane-test-ledger:a"
 BUILD_B = "launchplane-test-ledger:b"
+BUILD_TELLTALE = "launchplane-test-ledger:telltale"
 PRETEND_PRODUCT = Path(__file__).parent / "pretend_product"
 DESCRIPTION = {
     "health_path": "/health",
@@ -192,6 +193,7 @@ def version_answering() -> str:
 def pretend_product() -> Iterator[None]:
     build_pretend_product(BUILD_A, "a")
     build_pretend_product(BUILD_B, "b")
+    build_pretend_product(BUILD_TELLTALE, "telltale")
     start_listener()
     place_description(PRODUCT, DESCRIPTION)
     place_description(LEAKY_PRODUCT, LEAKY_DESCRIPTION)
@@ -379,6 +381,15 @@ def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_show
     shown = json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
     assert [password in shown for password in passwords] == [False, False]
     retire_lane_and_its_data(OTHER_LANE)
+
+
+def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_on_a: LaneView) -> None:
+    password = environment_of(database_of(lane_on_a.data_sets[0]))["POSTGRES_PASSWORD"]
+    status, body = move_lane(PRODUCT, LANE, BUILD_TELLTALE)
+    assert (status, body["outcome"]) == (422, "check failed"), body
+    assert f"my password is {SECRET_REMOVED}" in body["error"]
+    journal = on_control("journalctl --unit launchplane --no-pager --since '-10 min'")
+    assert password not in json.dumps(body) + json.dumps(read_running()) + journal
 
 
 def test_a_job_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
