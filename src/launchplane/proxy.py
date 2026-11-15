@@ -14,12 +14,12 @@ from launchplane.decide import LaneRoute, LoadedRoute, ProxyNotRunning, RouteSta
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
 ENTRY_POINT = "web"
-COPY_PORT = 80
+INSTANCE_PORT = 80
 PROXY = Service(
-    name=PROXY_NAME,
+    container=PROXY_NAME,
     image="traefik:v3.7.18",
     command=[
-        f"--entrypoints.{ENTRY_POINT}.address=:{COPY_PORT}",
+        f"--entrypoints.{ENTRY_POINT}.address=:{INSTANCE_PORT}",
         "--entrypoints.traefik.address=127.0.0.1:8080",
         "--api.insecure=true",
         f"--providers.file.directory={ROUTES_FOLDER}",
@@ -30,10 +30,10 @@ PROXY = Service(
 )
 LOADED_ROUTES_URL = "http://127.0.0.1:8080/api/rawdata"
 FROM_ROUTES_FILE = "@file"
-HOST_RULE = re.compile(r"Host\(`(?P<name>[^`]+)`\)")
-COPY_URL = re.compile(rf"http://(?P<copy>[^:/]+):{COPY_PORT}")
+HOST_RULE = re.compile(r"Host\(`(?P<web_address>[^`]+)`\)")
+INSTANCE_URL = re.compile(rf"http://(?P<container>[^:/]+):{INSTANCE_PORT}")
 # noinspection HttpUrlsUsage
-NAME_URL = f"http://127.0.0.1:{COPY_PORT}/"
+WEB_ADDRESS_URL = f"http://127.0.0.1:{INSTANCE_PORT}/"
 CHECK_REQUEST_SECONDS = 2
 POLL_SECONDS = 0.5
 
@@ -48,11 +48,11 @@ class CheckFailed(Exception):
 
 class ServiceHost(Protocol):
     def ensure_service(self, service: Service) -> None: ...
-    def is_running(self, name: str) -> bool: ...
-    def run_in(self, name: str, command: list[str]) -> CommandResult: ...
-    def read_file(self, name: str, path: PurePosixPath) -> str | None: ...
-    def place_file(self, name: str, path: PurePosixPath, content: str) -> None: ...
-    def read_log_tail(self, name: str) -> str: ...
+    def is_running(self, container: str) -> bool: ...
+    def run_in(self, container: str, command: list[str]) -> CommandResult: ...
+    def read_file(self, container: str, path: PurePosixPath) -> str | None: ...
+    def place_file(self, container: str, path: PurePosixPath, content: str) -> None: ...
+    def read_log_tail(self, container: str) -> str: ...
 
 
 class Read(BaseModel):
@@ -82,46 +82,46 @@ class LoadedRoutes(Read):
     services: dict[str, LoadedService | dict[str, object]]
 
 
-def route_file_of(name: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{name}.yml"
+def route_file_of(web_address: str) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}.yml"
 
 
-def staged_route_file_of(name: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{name}.next"
+def staged_route_file_of(web_address: str) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}.next"
 
 
 # noinspection HttpUrlsUsage
-def copy_url(copy_name: str) -> str:
-    return f"http://{copy_name}:{COPY_PORT}"
+def instance_url(container: str) -> str:
+    return f"http://{container}:{INSTANCE_PORT}"
 
 
-def route_text(name: str, copy_name: str) -> str:
-    router = {"rule": f"Host(`{name}`)", "entryPoints": [ENTRY_POINT], "service": name}
-    service = {"loadBalancer": {"servers": [{"url": copy_url(copy_name)}]}}
-    return json.dumps({"http": {"routers": {name: router}, "services": {name: service}}}, indent=2)
+def route_text(web_address: str, container: str) -> str:
+    router = {"rule": f"Host(`{web_address}`)", "entryPoints": [ENTRY_POINT], "service": web_address}
+    service = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
+    return json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: service}}}, indent=2)
 
 
-def copy_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
+def container_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
     service = services.get(router.service + FROM_ROUTES_FILE)
     if not isinstance(service, LoadedService):
         raise ProxyError(f"The proxy sends {router.rule} to {router.service}, which is not a service Launchplane wrote.")
     url = service.load_balancer.servers[0].url
-    match = COPY_URL.fullmatch(url)
+    match = INSTANCE_URL.fullmatch(url)
     if match is None:
-        raise ProxyError(f"The proxy sends {router.rule} to {url}, which is not a copy Launchplane started.")
-    return match["copy"]
+        raise ProxyError(f"The proxy sends {router.rule} to {url}, which is not an instance Launchplane started.")
+    return match["container"]
 
 
-def name_of(router: LoadedRouter) -> str:
+def web_address_in(router: LoadedRouter) -> str:
     match = HOST_RULE.fullmatch(router.rule)
     if match is None:
         raise ProxyError(f"The proxy has a route with the rule {router.rule}, which Launchplane did not write.")
-    return match["name"]
+    return match["web_address"]
 
 
-def lane_routes_by_name(routes: LoadedRoutes) -> dict[str, LoadedRoute]:
+def lane_routes_by_web_address(routes: LoadedRoutes) -> dict[str, LoadedRoute]:
     from_files = (router for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE))
-    return {name_of(router): LoadedRoute(copy_behind(router, routes.services), router.status) for router in from_files}
+    return {web_address_in(router): LoadedRoute(container_behind(router, routes.services), router.status) for router in from_files}
 
 
 def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
@@ -129,14 +129,14 @@ def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
         routes = LoadedRoutes.model_validate_json(answer)
     except ValidationError as error:
         raise ProxyError(f"The proxy's loaded routes did not have the expected shape, so nothing was changed: {error}") from error
-    return lane_routes_by_name(routes)
+    return lane_routes_by_web_address(routes)
 
 
-def written_route_from_file(text: str, name: str) -> str:
-    found = COPY_URL.search(text)
-    if found is None or text != route_text(name, found["copy"]):
-        raise ProxyError(f"The routes file {route_file_of(name)} is not the route Launchplane writes for {name}.")
-    return found["copy"]
+def written_route_from_file(text: str, web_address: str) -> str:
+    found = INSTANCE_URL.search(text)
+    if found is None or text != route_text(web_address, found["container"]):
+        raise ProxyError(f"The routes file {route_file_of(web_address)} is not the route Launchplane writes for {web_address}.")
+    return found["container"]
 
 
 @dataclass(frozen=True)
@@ -162,66 +162,81 @@ class TraefikProxy:
             raise ProxyError(f"Reading the proxy's loaded routes failed: {result.output}")
         return loaded_routes_from_answer(result.output)
 
-    def read_serving(self) -> dict[str, str]:
+    def read_enabled_routes(self) -> dict[str, str]:
         if not self.host.is_running(PROXY_NAME):
             return {}
-        return {name: route.copy for name, route in self.read_loaded().items() if route.status == RouteStatus.ENABLED}
+        return {
+            web_address: route.container for web_address, route in self.read_loaded().items() if route.status == RouteStatus.ENABLED
+        }
 
-    def read_lane_route(self, name: str) -> ProxyNotRunning | LaneRoute:
+    def read_lane_route(self, web_address: str) -> ProxyNotRunning | LaneRoute:
         if not self.host.is_running(PROXY_NAME):
             return ProxyNotRunning()
-        text = self.host.read_file(PROXY_NAME, route_file_of(name))
-        written = None if text is None else written_route_from_file(text, name)
-        return LaneRoute(loaded=self.read_loaded().get(name), written=written)
+        text = self.host.read_file(PROXY_NAME, route_file_of(web_address))
+        written = None if text is None else written_route_from_file(text, web_address)
+        return LaneRoute(loaded=self.read_loaded().get(web_address), written=written)
 
-    def await_route(self, name: str, copy_name: str | None) -> None:
+    def await_route(self, web_address: str, container: str | None) -> None:
         started = self.clock()
-        while (loaded := self.loaded_copy(name)) != copy_name:
+        while (loaded := self.loaded_container(web_address)) != container:
             if self.clock() - started >= self.load_deadline_seconds:
                 raise ProxyError(
-                    f"The proxy did not load the routes file of {name} within {self.load_deadline_seconds:g} s: "
-                    f"it is written to send {name} to {copy_name} and the proxy still sends it to {loaded}. "
+                    f"The proxy did not load the routes file of {web_address} within {self.load_deadline_seconds:g} s: "
+                    f"it is written to send {web_address} to {container} and the proxy still sends it to {loaded}. "
                     f"The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
                 )
             self.sleep(POLL_SECONDS)
 
-    def remove_route(self, name: str) -> None:
-        self.run_or_fail(["rm", "-f", str(route_file_of(name))], f"Removing the route of {name}")
+    def remove_route(self, web_address: str) -> None:
+        self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
 
-    def loaded_copy(self, name: str) -> str | None:
-        route = self.read_loaded().get(name)
-        return None if route is None else route.copy
+    def loaded_container(self, web_address: str) -> str | None:
+        route = self.read_loaded().get(web_address)
+        return None if route is None else route.container
 
-    def write_route(self, name: str, copy_name: str) -> None:
-        self.host.place_file(PROXY_NAME, staged_route_file_of(name), route_text(name, copy_name))
-        self.run_or_fail(["mv", str(staged_route_file_of(name)), str(route_file_of(name))], f"Putting the route of {name} in place")
+    def write_route(self, web_address: str, container: str) -> None:
+        self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container))
+        self.run_or_fail(
+            ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
+            f"Putting the route of {web_address} in place",
+        )
 
     def run_or_fail(self, command: list[str], attempt: str) -> None:
         result = self.host.run_in(PROXY_NAME, command)
         if not result.succeeded:
             raise ProxyError(f"{attempt} failed: {result.output}")
 
-    def request_copy(self, copy_name: str) -> CommandResult:
-        url = copy_url(copy_name) + "/"
+    def request_instance(self, container: str) -> CommandResult:
+        url = instance_url(container) + "/"
         return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), url])
 
-    def why_name_fails(self, name: str) -> str | None:
-        command = ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), "--header", f"Host: {name}", NAME_URL]
+    def why_web_address_fails(self, web_address: str) -> str | None:
+        command = [
+            "wget",
+            "-q",
+            "-O",
+            "/dev/null",
+            "-T",
+            str(CHECK_REQUEST_SECONDS),
+            "--header",
+            f"Host: {web_address}",
+            WEB_ADDRESS_URL,
+        ]
         result = self.host.run_in(PROXY_NAME, command)
         return None if result.succeeded else result.output
 
-    def check_copy(self, copy_name: str) -> None:
+    def check_instance(self, container: str) -> None:
         started = self.clock()
         answering_since: float | None = None
         while True:
-            result = self.request_copy(copy_name)
+            result = self.request_instance(container)
             now = self.clock()
             if not result.succeeded:
                 answering_since = None
                 if now - started >= self.check_deadline_seconds:
                     raise CheckFailed(
-                        f"{copy_url(copy_name)}/ did not answer the proxy with success within {self.check_deadline_seconds:g} s: "
-                        f"{result.output}"
+                        f"{instance_url(container)}/ did not answer the proxy with success "
+                        f"within {self.check_deadline_seconds:g} s: {result.output}"
                     )
             elif answering_since is None:
                 answering_since = now

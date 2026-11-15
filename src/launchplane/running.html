@@ -20,6 +20,8 @@
   small { display: block; font-size: 1em; color: var(--muted); }
   [data-health=ok] { color: var(--ok); }
   [data-health=bad] { color: var(--bad); }
+  .row { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; }
+  .label { min-width: 7rem; color: var(--muted); }
   [data-tag] { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
 </style>
 </head>
@@ -29,9 +31,9 @@
 <main id="lanes"></main>
 <script>
 "use strict";
-/** @typedef {{product: string, lane: ?string, build: ?string, name: string, state: string, serves: ?string}} Copy */
-/** @typedef {{name: string, product: ?string, lane: ?string, sends_to: ?string, answers: boolean, error: ?string}} LaneName */
-/** @typedef {{read_at: string, copies: Copy[], names: LaneName[]}} Running */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, receives_visitors_for: ?string}} Instance */
+/** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
+/** @typedef {{read_at: string, instances: Instance[], web_addresses: WebAddress[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -62,59 +64,99 @@ function clockTime(isoTime) {
   return new Date(isoTime).toLocaleTimeString();
 }
 
-/** @param {Copy} copy */
-function copyItem(copy) {
-  const state = element("span", { "data-tag": "", ...health(copy.state === "running") }, copy.state);
-  const item = element("li", {}, code(copy.name), " ", state);
-  if (copy.serves) item.append(" ", element("span", { "data-tag": "" }, "the name points here"));
-  item.append(element("div", {}, "build ", code(copy.build ?? "not marked")));
+/**
+ * @param {string} label
+ * @param {...(Node|string)} values
+ */
+function row(label, ...values) {
+  return element("div", { class: "row" }, element("span", { class: "label" }, label), ...values);
+}
+
+/** @param {Instance} instance */
+function visitors(instance) {
+  if (instance.receives_visitors_for) return "visitors are sent here";
+  if (instance.state === "running") return "being checked, no visitors yet";
+  return "no visitors";
+}
+
+/**
+ * @param {Instance} instance
+ * @param {number} index
+ */
+function instanceItem(instance, index) {
+  const state = element("span", { "data-tag": "", ...health(instance.state === "running") }, instance.state);
+  const item = element("li", {}, row(`Instance ${index + 1}`, state, element("span", {}, visitors(instance))));
+  item.append(row("Build", code(instance.build ?? "not marked")));
+  if (instance.lane === null) item.append(row("Container", code(instance.container)));
   return item;
 }
 
 /**
- * @param {LaneName} entry
- * @param {Copy[]} allCopies
+ * @param {Instance} first
+ * @param {Instance} second
  */
-function nameStatus(entry, allCopies) {
-  if (entry.answers) return element("div", health(true), "Serving: ", code(entry.name), " answers.");
-  const target = allCopies.find((copy) => copy.name === entry.sends_to);
-  if (target?.state === "running") {
-    return element("div", health(false), "The copy behind ", code(entry.name), " is running, and does not answer with success: ", entry.error);
-  }
-  return element("div", health(false), "Nothing is serving ", code(entry.name), ": ", entry.error);
+function visitedFirst(first, second) {
+  const byVisitors = Number(!first.receives_visitors_for) - Number(!second.receives_visitors_for);
+  return byVisitors || first.container.localeCompare(second.container);
+}
+
+/** @param {Instance[]} instances */
+function instanceList(instances) {
+  return element("ul", {}, ...instances.toSorted(visitedFirst).map(instanceItem));
 }
 
 /**
- * @param {string} copyName
- * @param {Copy[]} allCopies
+ * @param {WebAddress} entry
+ * @param {Instance[]} allInstances
  */
-function routeElsewhere(copyName, allCopies) {
-  const copy = allCopies.find((each) => each.name === copyName);
-  const where = copy ? `, a copy of ${copy.product} · ${copy.lane ?? "no lane"}.` : ", which is not on the host.";
-  return element("small", {}, "The proxy sends it to ", code(copyName), where);
+function whyNotAnswering(entry, allInstances) {
+  const target = allInstances.find((instance) => instance.container === entry.sends_to_container);
+  if (target?.state === "running") return `The instance it is sent to is running, and does not answer with success: ${entry.error}`;
+  return entry.error;
 }
 
 /**
- * @param {LaneName} entry
- * @param {Copy[]} laneCopies
- * @param {Copy[]} allCopies
+ * @param {WebAddress} entry
+ * @param {Instance[]} allInstances
  */
-function laneSection(entry, laneCopies, allCopies) {
-  const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A name with no copy on the host";
-  const section = element("section", {}, element("h2", {}, title), nameStatus(entry, allCopies));
-  if (entry.sends_to && !laneCopies.some((copy) => copy.name === entry.sends_to)) {
-    section.append(routeElsewhere(entry.sends_to, allCopies));
+function webAddressRows(entry, allInstances) {
+  const status = element("span", health(entry.answers), entry.answers ? "answering" : "not answering");
+  const rows = [row("Web address", code(entry.web_address), status)];
+  if (!entry.answers) rows.push(element("small", health(false), whyNotAnswering(entry, allInstances)));
+  return rows;
+}
+
+/**
+ * @param {string} container
+ * @param {Instance[]} allInstances
+ */
+function routeElsewhere(container, allInstances) {
+  const instance = allInstances.find((each) => each.container === container);
+  const where = instance ? `, an instance of ${instance.product} · ${instance.lane ?? "no lane"}.` : ", which is not on the host.";
+  return element("small", {}, "The proxy sends it to the container ", code(container), where);
+}
+
+/**
+ * @param {WebAddress} entry
+ * @param {Instance[]} laneInstances
+ * @param {Instance[]} allInstances
+ */
+function laneSection(entry, laneInstances, allInstances) {
+  const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A web address with no instance on the host";
+  const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, allInstances));
+  if (entry.sends_to_container && !laneInstances.some((instance) => instance.container === entry.sends_to_container)) {
+    section.append(routeElsewhere(entry.sends_to_container, allInstances));
   }
-  if (laneCopies.length) section.append(element("ul", {}, ...laneCopies.map(copyItem)));
+  if (laneInstances.length) section.append(instanceList(laneInstances));
   return section;
 }
 
 /**
- * @param {Copy} copy
- * @param {LaneName} entry
+ * @param {Instance} instance
+ * @param {WebAddress} entry
  */
-function isOfLane(copy, entry) {
-  return entry.product !== null && copy.product === entry.product && copy.lane === entry.lane;
+function isOfLane(instance, entry) {
+  return entry.product !== null && instance.product === entry.product && instance.lane === entry.lane;
 }
 
 /** @param {Running} answer */
@@ -122,9 +164,11 @@ function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
   reading.removeAttribute("role");
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
-  const sections = answer.names.map((entry) => laneSection(entry, answer.copies.filter((copy) => isOfLane(copy, entry)), answer.copies));
-  const withoutLane = answer.copies.filter((copy) => copy.lane === null);
-  if (withoutLane.length) sections.push(element("section", {}, element("h2", {}, "Copies with no lane"), element("ul", {}, ...withoutLane.map(copyItem))));
+  const sections = answer.web_addresses.map((entry) =>
+    laneSection(entry, answer.instances.filter((instance) => isOfLane(instance, entry)), answer.instances)
+  );
+  const withoutLane = answer.instances.filter((instance) => instance.lane === null);
+  if (withoutLane.length) sections.push(element("section", {}, element("h2", {}, "Instances with no lane"), instanceList(withoutLane)));
   if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
   lanes.replaceChildren(...sections);
 }

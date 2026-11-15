@@ -1,8 +1,8 @@
 # What is running
 
-`GET /running` answers which marked copies exist on the container host and which names the proxy sends where, read from the host at the moment of asking. Nothing is stored between calls. `GET /` is the same answer drawn for a person.
+`GET /running` answers which marked lane instances exist on the container host and which web addresses the proxy sends where, read from the host at the moment of asking. Nothing is stored between calls. `GET /` is the same answer drawn for a person.
 
-## How a running copy says what it is
+## How a running instance says what it is
 
 A container marks itself with three labels, set when it is created:
 
@@ -12,11 +12,11 @@ A container marks itself with three labels, set when it is created:
 | `launchplane.lane` | `production`, `testing`, or the preview's name |
 | `launchplane.build` | the build it runs |
 
-Only containers carrying `launchplane.product` are listed. Any other container on the host is not Launchplane's and is not shown. Labels cannot change after a container is created, so a copy cannot drift from what it says it is without being replaced.
+Only containers carrying `launchplane.product` are listed. Any other container on the host is not Launchplane's and is not shown. Labels cannot change after a container is created, so an instance cannot drift from what it says it is without being replaced.
 
 ## The answer
 
-Each copy has `product`, `lane`, `build`, `name`, `state` and `serves`. A missing lane or build label is `null`. `serves` is the name the proxy sends to this copy, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
+Each instance has `product`, `lane`, `build`, `container`, `state` and `receives_visitors_for`. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
 
 | `state` | Docker's states |
 | --- | --- |
@@ -25,9 +25,9 @@ Each copy has `product`, `lane`, `build`, `name`, `state` and `serves`. A missin
 | `restarting` | `restarting` |
 | `stopped` | `created`, `exited`, `dead`, `removing` |
 
-Each name has `name`, `product`, `lane`, `sends_to`, `answers` and `error`. The names are every name the proxy routes and every lane that has a copy on the host, so a route to a copy that is gone is shown, not dropped. `product` and `lane` come from a copy of that lane, or from the copy the route sends to, and are `null` when neither is on the host. `sends_to` is the copy the proxy's loaded route names, or `null`. `answers` is whether a request for `/` with that name, made inside the proxy, succeeded just now, the same request real traffic makes; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped copy. A name the proxy routes nowhere is not requested.
+Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
 
-- `200` with `copies` and `names`: the host was read. An empty list means the host answered and nothing marked is on it.
+- `200` with `instances` and `web_addresses`: the host was read. An empty list means the host answered and nothing marked is on it.
 - `503` with `error`: the host or the proxy could not be read, or an answer did not have the expected shape. The error carries the real cause. It never answers "nothing is running".
 
 Both carry `read_at`, the moment the host was asked.
@@ -37,17 +37,28 @@ Both carry `read_at`, the moment the host was asked.
 `GET /` is one HTML file, `src/launchplane/running.html`, with its style and script inline. It loads nothing else, needs no build step and no framework. FastAPI serves it as it is and it reads no host itself, so it opens even when the host cannot be read.
 
 - The script asks `/running` once a second, each time after the last answer arrived, so a slow host never piles up requests. It gives up on one answer after 15 s.
-- Each lane shows its name, whether the name answers and the real error if not (a name whose copy is running but does not answer with success says so, and does not say nothing is serving), and its copies with build, state and whether the name points at it. A route to another lane's copy names that lane, and a route to a copy that is not on the host says so. Copies with no lane label are listed apart.
+- Each lane reads like this:
+
+  ```
+  test-bed-site · testing
+  Web address   testing.test-bed-site.test     answering
+
+    Instance 1   running   visitors are sent here
+    Build        nginx:1.30.6-alpine
+  ```
+
+  A web address that does not answer shows `not answering` and the real error under it. One whose instance is running but does not answer with success says so, and does not say nothing is there. One the proxy sends nowhere says `The proxy sends … to no instance.`, and one with no instance of its lane on the host is titled `A web address with no instance on the host`. The instance visitors are sent to is listed first. Any other running instance of the lane shows `being checked, no visitors yet`, a stopped one `no visitors`. A route to another lane's instance names that lane and the container, and a route to a container that is not on the host says so. Instances with no lane label are listed apart, each with its container's name.
 - When Launchplane answers `503`, or cannot be reached, the page shows the error and when it last read the host, and hides the lanes. It never shows an empty list for an answer it did not get. The time of the last good read is kept only by the open page, not by Launchplane.
 - Text is built with DOM text nodes, never as HTML, so a label cannot inject markup.
 
-Measured on the test bed from the control container: listing the copies takes about 1 ms, reading the proxy's routes about 30 ms, and asking one name through the proxy about 30 ms. A whole `/running` with one lane and two dangling routes answered the Mac in 0.14 to 0.16 s, against 0.03 s before names were asked. During a move from one nginx build to another, a poll every 0.2 s saw the second copy at 0.5 s, the name pass to it at 5.8 s, and the old copy gone when the move answered, so a poll a second shows each stage.
+Measured on the test bed from the control container: listing the instances takes about 1 ms, reading the proxy's routes about 30 ms, and asking one web address through the proxy about 30 ms. A whole `/running` with one lane and two dangling routes answered the Mac in 0.14 to 0.16 s, against 0.03 s before web addresses were asked. During a move from one nginx build to another, a poll every 0.2 s saw the second instance at 0.5 s, the web address pass to it at 5.8 s, and the old instance gone when the move answered, so a poll a second shows each stage.
 
-`/running` asks every routed name at the same moment, one thread each, so names that hang cost one request's time limit of 2 s, not 2 s each. Measured with names routed to an address that never answers: 8 such names took 16.3 s when asked in turn, longer than the page's 15 s limit, and 2.1 s asked at once; 16 took 2.2 s. The Docker client keeps 10 connections; beyond that each extra request opens its own and closes it.
+`/running` asks every routed web address at the same moment, one thread each, so web addresses that hang cost one request's time limit of 2 s, not 2 s each. Measured with web addresses routed to a container address that never answers: 8 such web addresses took 16.3 s when asked in turn, longer than the page's 15 s limit, and 2.1 s asked at once; 16 took 2.2 s. The Docker client keeps 10 connections; beyond that each extra request opens its own and closes it.
 
 ### Known and not fixed
 
-- **Like `/running`, the page reads containers and routes at two moments**, so during a switch it can show the retired copy and nothing serving for one read.
+- **Like `/running`, the page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
+- **The old instance reads `being checked, no visitors yet` while it stops.** Once the web address has passed to the new instance, the old one is still running until Docker has stopped it, and the page cannot tell an instance being retired from one being prepared without keeping a record. On the test bed nginx stops within a second of its stop signal, so it shows for one read at most. Not fixed: telling them apart needs either a record of the move or a new field read from the host, and this step adds neither. Comes back when a product takes long to stop.
 - **No test loads the page or runs its script.** A blank page, polling that stops, old lanes kept after an error, or colours swapped would each pass every test. Chris watching the page is the check for now. Comes back when the page breaks without anyone noticing, or when there is a second page.
 
 ## How Launchplane reaches the host
@@ -85,4 +96,4 @@ Docker on the scratch container listens on `192.168.1.56:2376` only, through the
 
 On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: the page at `http://launchplane.shiny:8700/` and the call at `http://launchplane.shiny:8700/running`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
 
-`tests/test_bed_what_is_running.py` runs against it from a machine that can reach the test bed: `LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py`. It places containers of the product `test-bed-placed`, which no route names, on the scratch container with `lp-scratch` (or `LAUNCHPLANE_SCRATCH_SHELL`). For the unreachable case it drops the control container's traffic to port 2376 on the scratch container's firewall for one call.
+`tests/test_bed_what_is_running.py` runs against it from a machine that can reach the test bed: `LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py`. It places instances of the product `test-bed-placed`, which no route names, on the scratch container with `lp-scratch` (or `LAUNCHPLANE_SCRATCH_SHELL`). For the unreachable case it drops the control container's traffic to port 2376 on the scratch container's firewall for one call.

@@ -4,24 +4,24 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 
-class CopyState(StrEnum):
+class InstanceState(StrEnum):
     RUNNING = "running"
     PAUSED = "paused"
     RESTARTING = "restarting"
     STOPPED = "stopped"
 
 
-class RunningCopy(BaseModel):
+class RunningInstance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     product: str
     lane: str | None
     build: str | None
-    name: str
-    state: CopyState
+    container: str
+    state: InstanceState
 
 
-class LaneCopy(BaseModel):
+class LaneBuild(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     product: str
@@ -29,5 +29,5 @@ class LaneCopy(BaseModel):
     build: str
 
 
-def new_copy_name(copy: LaneCopy) -> str:
-    return f"{copy.product}-{copy.lane}-{secrets.token_hex(6)}"
+def new_container_name(target: LaneBuild) -> str:
+    return f"{target.product}-{target.lane}-{secrets.token_hex(6)}"

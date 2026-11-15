@@ -13,37 +13,37 @@ from pydantic import BaseModel
 
 from launchplane.act import Lanes, Stopped
 from launchplane.container_host import ContainerHost, ContainerHostError
-from launchplane.decide import MoveResult, Outcome, RetireResult, lane_name
+from launchplane.decide import MoveResult, Outcome, RetireResult, web_address_of
+from launchplane.instance import LaneBuild, RunningInstance
 from launchplane.proxy import ProxyError, TraefikProxy
-from launchplane.running_copy import LaneCopy, RunningCopy
 
-type CopyReader = Callable[[], list[RunningCopy]]
-type ServingReader = Callable[[], dict[str, str]]
-type NameChecker = Callable[[str], str | None]
-type MoveRequester = Callable[[LaneCopy], MoveResult]
+type InstanceReader = Callable[[], list[RunningInstance]]
+type RouteReader = Callable[[], dict[str, str]]
+type WebAddressChecker = Callable[[str], str | None]
+type MoveRequester = Callable[[LaneBuild], MoveResult]
 type RetireRequester = Callable[[str, str], RetireResult]
 
 SLUG = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
 UNREADABLE = (ContainerHostError, ProxyError, Stopped)
 
 
-class CopyAnswer(RunningCopy):
-    serves: str | None
+class InstanceAnswer(RunningInstance):
+    receives_visitors_for: str | None
 
 
-class NameAnswer(BaseModel):
-    name: str
+class WebAddressAnswer(BaseModel):
+    web_address: str
     product: str | None
     lane: str | None
-    sends_to: str | None
+    sends_to_container: str | None
     answers: bool
     error: str | None
 
 
 class RunningAnswer(BaseModel):
     read_at: datetime
-    copies: list[CopyAnswer]
-    names: list[NameAnswer]
+    instances: list[InstanceAnswer]
+    web_addresses: list[WebAddressAnswer]
 
 
 class HostUnreadable(BaseModel):
@@ -67,41 +67,51 @@ MOVE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 RETIRE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished}}
 
 
-def answers_for(copies: list[RunningCopy], serving: dict[str, str]) -> list[CopyAnswer]:
-    name_served_by = {copy_name: name for name, copy_name in serving.items()}
-    return [CopyAnswer(**copy.model_dump(), serves=name_served_by.get(copy.name)) for copy in copies]
+def instance_answers(instances: list[RunningInstance], routes: dict[str, str]) -> list[InstanceAnswer]:
+    web_address_of_container = {container: web_address for web_address, container in routes.items()}
+    return [
+        InstanceAnswer(**instance.model_dump(), receives_visitors_for=web_address_of_container.get(instance.container))
+        for instance in instances
+    ]
 
 
-def lane_owners(copies: list[RunningCopy], serving: dict[str, str]) -> dict[str, RunningCopy | None]:
-    copies_by_name = {copy.name: copy for copy in copies}
-    routed = {name: copies_by_name.get(copy_name) for name, copy_name in serving.items()}
-    marked = {lane_name(copy.product, copy.lane): copy for copy in copies if copy.lane is not None}
+def lane_owners(instances: list[RunningInstance], routes: dict[str, str]) -> dict[str, RunningInstance | None]:
+    by_container = {instance.container: instance for instance in instances}
+    routed = {web_address: by_container.get(container) for web_address, container in routes.items()}
+    marked = {web_address_of(instance.product, instance.lane): instance for instance in instances if instance.lane is not None}
     return routed | marked
 
 
-def name_answer(name: str, owner: RunningCopy | None, sends_to: str | None, failure: str | None) -> NameAnswer:
-    error = f"The proxy sends {name} to no copy." if sends_to is None else failure
-    return NameAnswer(
-        name=name,
+def web_address_answer(
+    web_address: str, owner: RunningInstance | None, sends_to: str | None, failure: str | None
+) -> WebAddressAnswer:
+    error = f"The proxy sends {web_address} to no instance." if sends_to is None else failure
+    return WebAddressAnswer(
+        web_address=web_address,
         product=None if owner is None else owner.product,
         lane=None if owner is None else owner.lane,
-        sends_to=sends_to,
+        sends_to_container=sends_to,
         answers=error is None,
         error=error,
     )
 
 
-def failures_at_once(names: list[str], why_name_fails: NameChecker) -> dict[str, str | None]:
-    if not names:
+def failures_at_once(web_addresses: list[str], why_web_address_fails: WebAddressChecker) -> dict[str, str | None]:
+    if not web_addresses:
         return {}
-    with ThreadPoolExecutor(max_workers=len(names)) as pool:
-        return dict(zip(names, pool.map(why_name_fails, names), strict=True))
+    with ThreadPoolExecutor(max_workers=len(web_addresses)) as pool:
+        return dict(zip(web_addresses, pool.map(why_web_address_fails, web_addresses), strict=True))
 
 
-def name_answers(copies: list[RunningCopy], serving: dict[str, str], why_name_fails: NameChecker) -> list[NameAnswer]:
-    owners = lane_owners(copies, serving)
-    failures = failures_at_once(sorted(serving), why_name_fails)
-    return [name_answer(name, owners[name], serving.get(name), failures.get(name)) for name in sorted(owners)]
+def web_address_answers(
+    instances: list[RunningInstance], routes: dict[str, str], why_web_address_fails: WebAddressChecker
+) -> list[WebAddressAnswer]:
+    owners = lane_owners(instances, routes)
+    failures = failures_at_once(sorted(routes), why_web_address_fails)
+    return [
+        web_address_answer(web_address, owners[web_address], routes.get(web_address), failures.get(web_address))
+        for web_address in sorted(owners)
+    ]
 
 
 def running_page() -> str:
@@ -109,7 +119,11 @@ def running_page() -> str:
 
 
 def create_app(
-    read: CopyReader, read_serving: ServingReader, why_name_fails: NameChecker, move: MoveRequester, retire: RetireRequester
+    read: InstanceReader,
+    read_routes: RouteReader,
+    why_web_address_fails: WebAddressChecker,
+    move: MoveRequester,
+    retire: RetireRequester,
 ) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
@@ -122,19 +136,19 @@ def create_app(
     def running(response: Response) -> RunningAnswer | HostUnreadable:
         read_at = datetime.now(UTC)
         try:
-            copies, serving = read(), read_serving()
-            names = name_answers(copies, serving, why_name_fails)
+            instances, routes = read(), read_routes()
+            web_addresses = web_address_answers(instances, routes, why_web_address_fails)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=read_at, error=str(error))
-        return RunningAnswer(read_at=read_at, copies=answers_for(copies, serving), names=names)
+        return RunningAnswer(read_at=read_at, instances=instance_answers(instances, routes), web_addresses=web_addresses)
 
     @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
     def move_lane(
         product: Annotated[str, SLUG], lane: Annotated[str, SLUG], request: MoveRequest, response: Response
     ) -> MoveResult | NotFinished:
         try:
-            result = move(LaneCopy(product=product, lane=lane, build=request.build))
+            result = move(LaneBuild(product=product, lane=lane, build=request.build))
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return NotFinished(
@@ -161,5 +175,5 @@ def serve() -> None:
     host = ContainerHost.from_environment()
     proxy = TraefikProxy(host)
     lanes = Lanes(host, proxy)
-    app = create_app(host.read_copies, proxy.read_serving, proxy.why_name_fails, lanes.move, lanes.retire)
+    app = create_app(host.read_instances, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire)
     uvicorn.run(app, host=address, port=port)

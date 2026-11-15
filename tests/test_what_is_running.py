@@ -7,10 +7,10 @@ import docker
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.api import CopyReader, NameChecker, create_app
-from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, copies_from_answer
+from launchplane.api import InstanceReader, WebAddressChecker, create_app
+from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, instances_from_answer
 from launchplane.decide import MoveResult, RetireResult
-from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
+from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
@@ -33,7 +33,7 @@ def refusing_host() -> ContainerHost:
     return ContainerHost(client, "tcp://127.0.0.1:1")
 
 
-def no_move(target: LaneCopy) -> MoveResult:
+def no_move(target: LaneBuild) -> MoveResult:
     raise AssertionError(f"Reading what is running asked for a move to {target.build}")
 
 
@@ -41,62 +41,68 @@ def no_retire(product: str, lane: str) -> RetireResult:
     raise AssertionError(f"Reading what is running asked to retire {lane} of {product}")
 
 
-def every_name_answers(_name: str) -> str | None:
+def every_web_address_answers(_web_address: str) -> str | None:
     return None
 
 
 def app_reading(
-    read: CopyReader, serving: dict[str, str] | None = None, why_name_fails: NameChecker = every_name_answers
+    read: InstanceReader, routes: dict[str, str] | None = None, why_fails: WebAddressChecker = every_web_address_answers
 ) -> TestClient:
-    return TestClient(create_app(read, lambda: serving or {}, why_name_fails, no_move, no_retire))
+    return TestClient(create_app(read, lambda: routes or {}, why_fails, no_move, no_retire))
 
 
-def ask_running(read: CopyReader) -> tuple[int, dict[str, Any]]:
+def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
     response = app_reading(read).get("/running")
     return response.status_code, response.json()
 
 
-def test_a_saved_docker_answer_reads_as_copies_in_launchplane_terms() -> None:
-    copies = {copy.name: copy for copy in copies_from_answer(saved_container_list())}
-    assert copies == {
-        "site-production": RunningCopy(
-            product="site", lane="production", build="b2", name="site-production", state=CopyState.RUNNING
+def test_a_saved_docker_answer_reads_as_instances_in_launchplane_terms() -> None:
+    instances = {instance.container: instance for instance in instances_from_answer(saved_container_list())}
+    assert instances == {
+        "site-production": RunningInstance(
+            product="site", lane="production", build="b2", container="site-production", state=InstanceState.RUNNING
         ),
-        "site-testing": RunningCopy(product="site", lane="testing", build="b3", name="site-testing", state=CopyState.STOPPED),
-        "site-preview-7": RunningCopy(product="site", lane="preview-7", build="b4", name="site-preview-7", state=CopyState.PAUSED),
-        "site-unmarked-lane": RunningCopy(product="site", lane=None, build=None, name="site-unmarked-lane", state=CopyState.RUNNING),
+        "site-testing": RunningInstance(
+            product="site", lane="testing", build="b3", container="site-testing", state=InstanceState.STOPPED
+        ),
+        "site-preview-7": RunningInstance(
+            product="site", lane="preview-7", build="b4", container="site-preview-7", state=InstanceState.PAUSED
+        ),
+        "site-unmarked-lane": RunningInstance(
+            product="site", lane=None, build=None, container="site-unmarked-lane", state=InstanceState.RUNNING
+        ),
     }
 
 
 @pytest.mark.parametrize("answer", UNEXPECTED_ANSWERS.values(), ids=UNEXPECTED_ANSWERS.keys())
 def test_an_answer_of_unexpected_shape_is_an_error_not_an_empty_list(answer: object) -> None:
     with pytest.raises(ContainerHostError, match="Docker"):
-        copies_from_answer(answer)
+        instances_from_answer(answer)
 
 
 def test_a_refused_connection_raises_with_the_real_error_instead_of_listing_nothing() -> None:
     with pytest.raises(ContainerHostError, match="Connection refused"):
-        refusing_host().read_copies()
+        refusing_host().read_instances()
 
 
 def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_cannot_be_read() -> None:
-    status, body = ask_running(refusing_host().read_copies)
+    status, body = ask_running(refusing_host().read_instances)
     assert status == 503
     assert "Connection refused" in body["error"]
-    assert "copies" not in body
+    assert "instances" not in body
 
 
 def test_the_running_call_reads_the_host_on_every_request() -> None:
-    answers = iter([[], copies_from_answer(saved_container_list())])
+    answers = iter([[], instances_from_answer(saved_container_list())])
     client = app_reading(lambda: next(answers))
-    assert client.get("/running").json()["copies"] == []
-    assert len(client.get("/running").json()["copies"]) == 4
+    assert client.get("/running").json()["instances"] == []
+    assert len(client.get("/running").json()["instances"]) == 4
 
 
-def test_the_running_call_names_the_copy_the_proxy_points_at_and_no_other() -> None:
-    copies = copies_from_answer(saved_container_list())
-    body = app_reading(lambda: copies, serving={"production.site.test": "site-production"}).get("/running").json()
-    assert {copy["name"]: copy["serves"] for copy in body["copies"]} == {
+def test_the_running_call_marks_the_instance_the_proxy_sends_visitors_to_and_no_other() -> None:
+    instances = instances_from_answer(saved_container_list())
+    body = app_reading(lambda: instances, routes={"production.site.test": "site-production"}).get("/running").json()
+    assert {instance["container"]: instance["receives_visitors_for"] for instance in body["instances"]} == {
         "site-production": "production.site.test",
         "site-testing": None,
         "site-preview-7": None,
@@ -104,34 +110,37 @@ def test_the_running_call_names_the_copy_the_proxy_points_at_and_no_other() -> N
     }
 
 
-def names_answer(copies: list[RunningCopy], serving: dict[str, str], why_name_fails: NameChecker) -> dict[str, dict[str, Any]]:
-    body = app_reading(lambda: copies, serving, why_name_fails).get("/running").json()
-    return {entry["name"]: entry for entry in body["names"]}
+def web_addresses_answer(
+    instances: list[RunningInstance], routes: dict[str, str], why_fails: WebAddressChecker
+) -> dict[str, dict[str, Any]]:
+    body = app_reading(lambda: instances, routes, why_fails).get("/running").json()
+    return {entry["web_address"]: entry for entry in body["web_addresses"]}
 
 
 def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_proxy() -> None:
-    def no_request(name: str) -> str | None:
-        raise AssertionError(f"Asked through the proxy for {name}, which it routes nowhere")
+    def no_request(web_address: str) -> str | None:
+        raise AssertionError(f"Asked through the proxy for {web_address}, which it routes nowhere")
 
-    copy = RunningCopy(product="site", lane="testing", build="b1", name="site-testing-1", state=CopyState.RUNNING)
-    entry = names_answer([copy], {}, no_request)["testing.site.test"]
-    assert (entry["product"], entry["lane"], entry["sends_to"], entry["answers"]) == ("site", "testing", None, False)
-    assert "no copy" in entry["error"]
-
-
-def test_a_stopped_serving_copy_leaves_its_name_not_answering_with_the_proxys_error() -> None:
-    copy = RunningCopy(product="site", lane="testing", build="b1", name="site-testing-1", state=CopyState.STOPPED)
-    entry = names_answer([copy], {"testing.site.test": copy.name}, lambda name: "502 Bad Gateway")["testing.site.test"]
-    assert (entry["sends_to"], entry["answers"], entry["error"]) == (copy.name, False, "502 Bad Gateway")
+    instance = RunningInstance(product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING)
+    entry = web_addresses_answer([instance], {}, no_request)["testing.site.test"]
+    assert (entry["product"], entry["lane"], entry["sends_to_container"], entry["answers"]) == ("site", "testing", None, False)
+    assert "no instance" in entry["error"]
 
 
-def test_a_route_to_a_copy_that_is_gone_is_shown_not_dropped() -> None:
-    entry = names_answer([], {"testing.gone.test": "gone-testing-1"}, lambda name: "502 Bad Gateway")["testing.gone.test"]
-    assert (entry["product"], entry["sends_to"], entry["answers"]) == (None, "gone-testing-1", False)
+def test_a_stopped_instance_receiving_visitors_leaves_its_web_address_not_answering_with_the_proxys_error() -> None:
+    instance = RunningInstance(product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED)
+    routes = {"testing.site.test": instance.container}
+    entry = web_addresses_answer([instance], routes, lambda _: "502 Bad Gateway")["testing.site.test"]
+    assert (entry["sends_to_container"], entry["answers"], entry["error"]) == (instance.container, False, "502 Bad Gateway")
+
+
+def test_a_route_to_an_instance_that_is_gone_is_shown_not_dropped() -> None:
+    entry = web_addresses_answer([], {"testing.gone.test": "gone-testing-1"}, lambda _: "502 Bad Gateway")["testing.gone.test"]
+    assert (entry["product"], entry["sends_to_container"], entry["answers"]) == (None, "gone-testing-1", False)
 
 
 def test_the_page_loads_without_reading_the_host_so_it_can_say_the_host_is_unreadable() -> None:
-    def unreadable() -> list[RunningCopy]:
+    def unreadable() -> list[RunningInstance]:
         raise AssertionError("Serving the page read the host")
 
     response = app_reading(unreadable).get("/")
@@ -139,13 +148,13 @@ def test_the_page_loads_without_reading_the_host_so_it_can_say_the_host_is_unrea
     assert response.headers["content-type"].startswith("text/html")
 
 
-def test_names_are_asked_at_once_so_names_that_hang_do_not_add_up() -> None:
-    serving = {f"testing.site{number}.test": f"site{number}-testing" for number in range(3)}
-    all_waiting = threading.Barrier(len(serving), timeout=5)
+def test_web_addresses_are_asked_at_once_so_ones_that_hang_do_not_add_up() -> None:
+    routes = {f"testing.site{number}.test": f"site{number}-testing" for number in range(3)}
+    all_waiting = threading.Barrier(len(routes), timeout=5)
 
-    def hang_until_every_name_is_asked(_name: str) -> str | None:
+    def hang_until_every_web_address_is_asked(_web_address: str) -> str | None:
         all_waiting.wait()
         return "download timed out"
 
-    entries = names_answer([], serving, hang_until_every_name_is_asked)
+    entries = web_addresses_answer([], routes, hang_until_every_web_address_is_asked)
     assert {entry["error"] for entry in entries.values()} == {"download timed out"}
