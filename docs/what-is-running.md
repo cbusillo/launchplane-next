@@ -4,7 +4,7 @@
 
 ## How a running instance says what it is
 
-A container marks itself with three labels, set when it is created:
+A container marks itself with labels, set when it is created:
 
 | Label | Value |
 | --- | --- |
@@ -14,6 +14,7 @@ A container marks itself with three labels, set when it is created:
 | `launchplane.part` | `web`, `job` or `database`; a container without it is `web` |
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a job, the container of its instance's web part |
+| `launchplane.secret-variables` | on a container given a secret, the environment variables that hold one, separated by commas |
 
 Data set networks and volumes carry the product, lane and data set labels too (see [a lane with a database](data-sets.md)). An instance is its web part; its job and its data set's server are not listed as instances.
 
@@ -35,9 +36,9 @@ Each job has `product`, `lane`, `build`, `container`, `state`, `networks`, `runn
 Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance, a job or a data set on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
 
 - `200` with `instances`, `jobs`, `data_sets`, `networks` (every network on the host, with `name` and `is_quiet`) and `web_addresses`: the host was read. An empty list means the host answered and nothing marked is on it.
-- `503` with `error`: the host or the proxy could not be read, or an answer did not have the expected shape. The error carries the real cause. It never answers "nothing is running".
+- `503` with `error`: the host or the proxy could not be read, an answer did not have the expected shape, or the host changed during three reads in a row (see [what is read](data-sets.md#what-is-read)). The error carries the real cause. It never answers "nothing is running".
 
-Both carry `read_at`, the moment the host was asked.
+Both carry `read_at`, the moment the host was asked. The one `503` without it is the answer made when Launchplane could not read which secrets it has given out: nothing was read for it, and it has only `error` (see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane)).
 
 ## The page
 

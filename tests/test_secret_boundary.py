@@ -209,8 +209,9 @@ def test_a_log_line_that_cannot_be_written_is_not_repeated_uncleaned_by_the_logg
     log = logging.Logger("a log of its own")
     log.addHandler(CleanedStream(GivenSecrets(), closed))
     log.error("connecting with %s", SECRET)
-    complaint = capsys.readouterr().err
-    assert ("could not be written" in complaint, SECRET in complaint) == (True, False)
+    complaint = str(capsys.readouterr().err)
+    assert "could not be written" in complaint
+    assert SECRET not in complaint
 
 
 SERVICE_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")

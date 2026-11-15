@@ -2,10 +2,12 @@ import json
 import logging
 import sys
 from collections.abc import Collection
-from typing import Protocol, TextIO, cast, override
+from typing import Protocol, TextIO, override
 
 SECRET_REMOVED = "[a secret Launchplane gave this lane, removed]"  # noqa: S105 what replaces a secret, not one
 JSON = "application/json"
+
+type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValue] | None
 
 
 class Secrets(Protocol):
@@ -20,13 +22,13 @@ def cleaned(text: str, secrets: Collection[str]) -> str:
     return text
 
 
-def cleaned_value(value: object, secrets: Collection[str]) -> object:
+def cleaned_value(value: JsonValue, secrets: Collection[str]) -> JsonValue:
     if isinstance(value, str):
         return cleaned(value, secrets)
     if isinstance(value, list):
-        return [cleaned_value(each, secrets) for each in cast("list[object]", value)]
+        return [cleaned_value(each, secrets) for each in value]
     if isinstance(value, dict):
-        return {cleaned(key, secrets): cleaned_value(each, secrets) for key, each in cast("dict[str, object]", value).items()}
+        return {cleaned(key, secrets): cleaned_value(each, secrets) for key, each in value.items()}
     return value
 
 

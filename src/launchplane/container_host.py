@@ -385,8 +385,12 @@ def job_names(containers: object) -> list[str]:
 def secrets_held(labels: Mapping[str, str], details: object, what: str) -> set[str]:
     variables = [variable for variable in labels.get(SECRET_VARIABLES_LABEL, "").split(",") if variable]
     environment = checked(DOCKER_CONTAINER_DETAILS, details, f"description of {what}").config.environment or []
-    values = (variable_value(environment, variable) for variable in variables)
-    return {value for value in values if value}
+    held: set[str] = set()
+    for variable in variables:
+        value = variable_value(environment, variable)
+        if value:
+            held.add(value)
+    return held
 
 
 def is_of_a_container_that_changed(error: APIError) -> bool:

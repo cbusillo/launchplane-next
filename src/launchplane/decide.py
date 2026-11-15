@@ -332,7 +332,7 @@ def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen)
         state = [DataSetProblem(f"{part} does not accept connections", a_step_puts_right=True)]
     else:
         state = []
-    return [*state, *map(DataSetProblem, attached)]
+    return [*state, *[DataSetProblem(problem) for problem in attached]]
 
 
 def data_set_problems(found: DataSet, seen: LaneSeen) -> list[DataSetProblem]:
