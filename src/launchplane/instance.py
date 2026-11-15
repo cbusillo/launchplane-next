@@ -3,6 +3,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+LANE_NETWORK = "launchplane-lanes"
+
 
 class InstanceState(StrEnum):
     RUNNING = "running"
@@ -19,7 +21,7 @@ class RunningInstance(BaseModel):
     build: str | None
     container: str
     state: InstanceState
-    is_quiet: bool
+    networks: tuple[str, ...]
     data_set: str | None = None
 
 
@@ -31,7 +33,8 @@ class RunningJob(BaseModel):
     build: str | None
     container: str
     state: InstanceState
-    is_quiet: bool
+    networks: tuple[str, ...]
+    running_for_seconds: float | None
     instance: str | None
 
 
@@ -47,6 +50,8 @@ class DataSetDatabase(BaseModel):
 
     container: str
     state: InstanceState
+    networks: tuple[str, ...]
+    accepts_connections: bool | None = None
 
 
 class DataSet(BaseModel):
@@ -58,6 +63,13 @@ class DataSet(BaseModel):
     networks: tuple[DataSetNetwork, ...]
     volumes: tuple[str, ...]
     databases: tuple[DataSetDatabase, ...]
+
+
+class HostNetwork(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    is_quiet: bool
 
 
 class LaneBuild(BaseModel):

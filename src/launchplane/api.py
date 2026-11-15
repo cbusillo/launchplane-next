@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from launchplane.act import Lanes, Stopped
 from launchplane.container_host import ContainerHost, ContainerHostError, OnHost
 from launchplane.decide import MoveResult, Outcome, RetireResult, web_address_of
-from launchplane.instance import DataSet, LaneBuild, RunningInstance, RunningJob
+from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 
@@ -50,6 +50,7 @@ class RunningAnswer(BaseModel):
     instances: list[InstanceAnswer]
     jobs: list[RunningJob]
     data_sets: list[DataSet]
+    networks: list[HostNetwork]
     web_addresses: list[WebAddressAnswer]
 
 
@@ -163,6 +164,7 @@ def create_app(
             instances=instance_answers(on_host.instances, routes),
             jobs=on_host.jobs,
             data_sets=on_host.data_sets,
+            networks=on_host.networks,
             web_addresses=web_addresses,
         )
 

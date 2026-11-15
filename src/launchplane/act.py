@@ -21,19 +21,19 @@ from launchplane.decide import (
     RetireResult,
     Stop,
 )
-from launchplane.instance import DataSet, LaneBuild, new_container_name, new_data_set_name
-from launchplane.product import Product
+from launchplane.instance import DataSet, InstanceState, LaneBuild, new_container_name, new_data_set_name
+from launchplane.product import Database, Product
 from launchplane.proxy import CheckFailed
 
 MOST_STEPS = 50
-JOB_STEADY_SECONDS = 3
 
 
 class InstanceHost(Protocol):
     def read(self) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None: ...
     def start_job(self, target: LaneBuild, instance: str, link: DatabaseLink | None, command: list[str]) -> None: ...
-    def check_job(self, container: str, steady_seconds: float) -> None: ...
+    def await_job(self, container: str, steady_seconds: float) -> None: ...
+    def database_accepts_connections(self, container: str, server: DatabaseServer) -> bool: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None: ...
@@ -102,42 +102,61 @@ class Lanes:
         self.name_fresh = name_fresh
         self.one_at_a_time = threading.Lock()
 
-    def read(self, product: str, lane: str) -> LaneSeen:
+    def read(self, product: str, lane: str, database: Database | None = None) -> LaneSeen:
         route = self.proxy.read_lane_route(decide.web_address_of(product, lane))
         on_host = self.host.read()
+        data_sets = tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set))
         return LaneSeen(
             instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
             route=route,
             jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
-            data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
+            data_sets=data_sets if database is None else tuple(self.probed(data_set, database) for data_set in data_sets),
+            network_quiet={network.name: network.is_quiet for network in on_host.networks},
         )
+
+    def probed(self, data_set: DataSet, database: Database) -> DataSet:
+        server = postgres_server(database)
+        databases = tuple(
+            each.model_copy(update={"accepts_connections": self.host.database_accepts_connections(each.container, server)})
+            if each.state == InstanceState.RUNNING
+            else each
+            for each in data_set.databases
+        )
+        return data_set.model_copy(update={"databases": databases})
 
     def move(self, target: LaneBuild) -> MoveResult:
         with self.one_at_a_time:
             product = self.read_product(target.product)
             return self.settle(
-                target.product,
-                target.lane,
+                lambda: self.read(target.product, target.lane, product.database),
                 lambda seen, done: decide.decide_move(seen, target, product, self.name_fresh(target), done),
+                f"{target.lane} of {target.product}",
             )
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None) -> RetireResult:
         with self.one_at_a_time:
-            return self.settle(product, lane, lambda seen, done: decide.decide_retire(seen, product, lane, delete_data_set, done))
+            return self.settle(
+                lambda: self.read(product, lane),
+                lambda seen, done: decide.decide_retire(seen, product, lane, delete_data_set, done),
+                f"{lane} of {product}",
+            )
 
     def settle[Answer](
-        self, product: str, lane: str, next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer] | Stop]
+        self,
+        read: Callable[[], LaneSeen],
+        next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer] | Stop],
+        lane_name: str,
     ) -> Answer:
         done: list[Event] = []
         while True:
-            step = next_step(self.read(product, lane), tuple(done))
+            step = next_step(read(), tuple(done))
             if isinstance(step, Done):
                 return step.answer
             if isinstance(step, Stop):
                 raise Stopped(step.reason)
             if len(done) == MOST_STEPS:
                 raise Stopped(
-                    f"{lane} of {product} was not finished after {MOST_STEPS} steps, so Launchplane stopped before {step}. "
+                    f"{lane_name} was not finished after {MOST_STEPS} steps, so Launchplane stopped before {step}. "
                     "What was done stays done, and asking again goes on from there."
                 )
             done.append(self.take(step))
@@ -146,8 +165,8 @@ class Lanes:
         match action:
             case decide.Check(container=container, health_path=health_path):
                 return self.check(container, health_path)
-            case decide.CheckJob(container=container):
-                return self.check_job(container)
+            case decide.AwaitJob(container=container):
+                return self.await_job(container)
             case decide.StartProxy() | decide.AwaitRoute() | decide.WriteRoute() | decide.RemoveRoute():
                 self.take_on_proxy(action)
             case (
@@ -208,9 +227,9 @@ class Lanes:
             return decide.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
         return decide.Check(container, health_path)
 
-    def check_job(self, container: str) -> Event:
+    def await_job(self, container: str) -> Event:
         try:
-            self.host.check_job(container, JOB_STEADY_SECONDS)
+            self.host.await_job(container, decide.JOB_STEADY_SECONDS)
         except PartStopped as error:
             return decide.JobRefused(container, failure_report(error, self.host.read_log_tail(container)))
-        return decide.CheckJob(container)
+        return decide.AwaitJob(container)

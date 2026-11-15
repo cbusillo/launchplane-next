@@ -39,11 +39,11 @@
 <main id="lanes"></main>
 <script>
 "use strict";
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, is_quiet: boolean, data_set: ?string, receives_visitors_for: ?string}} Instance */
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, is_quiet: boolean, instance: ?string}} Job */
-/** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string}[]}} DataSet */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], data_set: ?string, receives_visitors_for: ?string}} Instance */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], running_for_seconds: ?number, instance: ?string}} Job */
+/** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string, networks: string[]}[]}} DataSet */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
-/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], web_addresses: WebAddress[]}} Running */
+/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -53,6 +53,8 @@ const DIGEST = /^sha256:([0-9a-f]{12})[0-9a-f]*$/;
 const lastFailureLine = document.getElementById("last-failure");
 const lastFailureText = document.getElementById("last-failure-text");
 let lastGoodReadAt = null;
+/** @type {Set<string>} */
+let quietNetworks = new Set();
 /** @type {?{at: string, text: string}} */
 let lastFailure = null;
 
@@ -115,12 +117,17 @@ function stateTag(state) {
 function instanceItem(instance, index, jobs) {
   const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
   if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
-  if (!instance.is_quiet) heading.append(reachesOutTag());
+  if (!isQuiet(instance.networks)) heading.append(reachesOutTag());
   const container = element("small", { "data-container": "" }, instance.container);
   const item = element("li", {}, heading, container, row("Build", buildCode(instance.build)));
   if (instance.data_set) item.append(row("Data set", code(instance.data_set)));
   for (const job of jobs.filter((each) => each.instance === instance.container)) item.append(jobRow("Job", job));
   return item;
+}
+
+/** @param {string[]} networks */
+function isQuiet(networks) {
+  return networks.every((network) => quietNetworks.has(network));
 }
 
 function reachesOutTag() {
@@ -133,7 +140,7 @@ function reachesOutTag() {
  */
 function jobRow(label, job) {
   const jobRowElement = row(label, stateTag(job.state));
-  if (!job.is_quiet) jobRowElement.append(reachesOutTag());
+  if (!isQuiet(job.networks)) jobRowElement.append(reachesOutTag());
   return jobRowElement;
 }
 
@@ -246,6 +253,7 @@ function isOfLane(part, entry) {
 /** @param {Running} answer */
 function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
+  quietNetworks = new Set(answer.networks.filter((network) => network.is_quiet).map((network) => network.name));
   reading.removeAttribute("role");
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
   showLastFailure();

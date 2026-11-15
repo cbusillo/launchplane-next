@@ -5,9 +5,9 @@ import pytest
 from launchplane.decide import (
     Action,
     AwaitDatabase,
+    AwaitJob,
     AwaitRoute,
     Check,
-    CheckJob,
     CheckRefused,
     CreateDatabase,
     CreateDataSetNetwork,
@@ -38,17 +38,28 @@ from launchplane.decide import (
     WriteRoute,
     decide_move,
     decide_retire,
+    lane_problems,
 )
-from launchplane.instance import DataSet, DataSetDatabase, DataSetNetwork, InstanceState, LaneBuild, RunningInstance, RunningJob
+from launchplane.instance import (
+    LANE_NETWORK,
+    DataSet,
+    DataSetDatabase,
+    DataSetNetwork,
+    InstanceState,
+    LaneBuild,
+    RunningInstance,
+    RunningJob,
+)
 from launchplane.product import Database, Job, Product
 
 WEB_ADDRESS = "testing.site.test"
 TARGET = LaneBuild(product="site", lane="testing", build="b")
 FRESH = "site-testing-fresh"
+QUIET = {LANE_NETWORK: True, "network-d1": True, "network-d2": True, "bridge": False}
 
 
 def lane_instance(container: str, build: str, state: InstanceState = InstanceState.RUNNING) -> RunningInstance:
-    return RunningInstance(product="site", lane="testing", build=build, container=container, state=state, is_quiet=True)
+    return RunningInstance(product="site", lane="testing", build=build, container=container, state=state, networks=(LANE_NETWORK,))
 
 
 OLD = lane_instance("old", "a")
@@ -137,7 +148,7 @@ def seen(case: Case) -> LaneSeen:
         return LaneSeen(case.instances, ProxyNotRunning())
     if isinstance(loaded, str):
         loaded = LoadedRoute(loaded, RouteStatus.ENABLED)
-    return LaneSeen(case.instances, LaneRoute(loaded, written))
+    return LaneSeen(case.instances, LaneRoute(loaded, written), network_quiet=QUIET)
 
 
 def next_move_step(case: Case) -> object:
@@ -226,6 +237,7 @@ def data_set(
     quiet: bool | None = True,
     volume: bool = True,
     databases: tuple[str, ...] | None = None,
+    accepts: bool | None = True,
 ) -> DataSet:
     servers = databases if databases is not None else (() if state is None else (f"database-{name}",))
     return DataSet(
@@ -234,22 +246,36 @@ def data_set(
         data_set=name,
         networks=() if quiet is None else (DataSetNetwork(name=f"network-{name}", is_quiet=quiet),),
         volumes=(f"volume-{name}",) if volume else (),
-        databases=tuple(DataSetDatabase(container=server, state=state or InstanceState.RUNNING) for server in servers),
+        databases=tuple(
+            DataSetDatabase(
+                container=server,
+                state=state or InstanceState.RUNNING,
+                networks=(f"network-{name}",),
+                accepts_connections=accepts if state == InstanceState.RUNNING else None,
+            )
+            for server in servers
+        ),
     )
 
 
-def on_data(instance: RunningInstance, name: str) -> RunningInstance:
-    return instance.model_copy(update={"data_set": name})
+def on_data(instance: RunningInstance, name: str, *extra_networks: str) -> RunningInstance:
+    return instance.model_copy(update={"data_set": name, "networks": (LANE_NETWORK, f"network-{name}", *extra_networks)})
 
 
-def job_of(instance: RunningInstance, state: InstanceState = InstanceState.RUNNING) -> RunningJob:
+def job_of(
+    instance: RunningInstance,
+    running_for: float | None = 10.0,
+    container: str | None = None,
+    networks: tuple[str, ...] | None = None,
+) -> RunningJob:
     return RunningJob(
         product="site",
         lane="testing",
         build=instance.build,
-        container=f"{instance.container}-job",
-        state=state,
-        is_quiet=True,
+        container=container or f"{instance.container}-job",
+        state=InstanceState.RUNNING if running_for is not None else InstanceState.STOPPED,
+        networks=networks or (f"network-{instance.data_set}",),
+        running_for_seconds=running_for,
         instance=instance.container,
     )
 
@@ -267,7 +293,9 @@ class DataCase:
 OLD_ON_D1 = on_data(OLD, "d1")
 NEW_ON_D1 = on_data(NEW, "d1")
 NEW_ON_D2 = on_data(NEW, "d2")
-AWAITED_D1 = AwaitDatabase("database-d1", DATABASE)
+D1 = data_set("d1")
+RENAMED_STOPPED = data_set("d1", databases=("renamed-database",), state=InstanceState.STOPPED)
+STOPPED_NEW_JOB = job_of(NEW_ON_D1, running_for=None)
 USE_D1 = DataSetUse("d1", "network-d1", "database-d1", DATABASE)
 NEW_JOB = job_of(NEW_ON_D1)
 STARTED_NEW_JOB = StartJob(TARGET, "new", USE_D1, ("job",))
@@ -285,56 +313,68 @@ DATA_MOVES = {
     "a stopped database is started by the name it was read under, not made again": DataCase(
         (),
         None,
-        (data_set("d1", databases=("renamed-database",), state=InstanceState.STOPPED),),
+        (RENAMED_STOPPED,),
         (),
         StartDatabase("renamed-database"),
     ),
-    "a database is waited for before an instance starts on it": DataCase((), None, (data_set("d1"),), (), AWAITED_D1),
-    "an instance starts on the data set once its database answered, given the names as read": DataCase(
-        (), None, (data_set("d1"),), (AWAITED_D1,), StartInstance(TARGET, FRESH, USE_D1)
+    "a database read as not accepting connections is waited for before an instance starts on it": DataCase(
+        (), None, (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1", DATABASE)
+    ),
+    "an instance starts on the data set once its database is read accepting connections": DataCase(
+        (), None, (D1,), (), StartInstance(TARGET, FRESH, USE_D1)
     ),
     "a release uses the data set of the instance receiving visitors, even beside another": DataCase(
-        (OLD_ON_D1,), "old", (data_set("d1"), data_set("d2")), (AWAITED_D1,), StartInstance(TARGET, FRESH, USE_D1)
+        (OLD_ON_D1,), "old", (D1, data_set("d2")), (), StartInstance(TARGET, FRESH, USE_D1)
     ),
     "the new instance is checked at the product's health path": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1"),), (StartInstance(TARGET, "new", USE_D1), AWAITED_D1), Check("new", "/health")
+        (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (StartInstance(TARGET, "new", USE_D1),), Check("new", "/health")
     ),
-    "an instance left by an interrupted release waits for its database to be read again before its check": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1"),), (), AWAITED_D1
+    "an instance left by an interrupted release waits on its database as read before its check": DataCase(
+        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1", DATABASE)
+    ),
+    "a checked instance attached only to its own quiet networks is switched to": DataCase(
+        (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (Check("new", "/health"),), WriteRoute(WEB_ADDRESS, "new")
     ),
     "a running instance of the build on another data set is retired, not switched to": DataCase(
-        (OLD_ON_D1, NEW_ON_D2), "old", (data_set("d1"), data_set("d2")), (), Retire("new")
+        (OLD_ON_D1, NEW_ON_D2), "old", (D1, data_set("d2")), (), Retire("new")
     ),
-    "an instance that can reach out is retired, not switched to": DataCase(
-        (OLD_ON_D1, NEW_ON_D1.model_copy(update={"is_quiet": False})), "old", (data_set("d1"),), (), Retire("new")
+    "a left-over instance that can reach out is retired, not switched to": DataCase(
+        (OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (), Retire("new")
+    ),
+    "a serving instance attached to another data set's quiet network is replaced, not kept": DataCase(
+        (on_data(NEW, "d1", "network-d2"),), "new", (D1, data_set("d2")), (), StartInstance(TARGET, FRESH, USE_D1), (NEW_JOB,)
     ),
     "the old job stops before the new one starts": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "new", (data_set("d1"),), (AWAITED_D1,), Retire("old-job"), (job_of(OLD_ON_D1),)
+        (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), Retire("old-job"), (job_of(OLD_ON_D1),)
     ),
     "the new job starts once no other job runs, before the old instance retires": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "new", (data_set("d1"),), (AWAITED_D1,), STARTED_NEW_JOB
+        (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), STARTED_NEW_JOB
     ),
-    "a job started in this call is checked before anything answers": DataCase(
-        (NEW_ON_D1,), "new", (data_set("d1"),), (AWAITED_D1, STARTED_NEW_JOB), CheckJob("new-job"), (NEW_JOB,)
+    "a job read as running less than its watch is waited on, whoever started it": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), AwaitJob("new-job"), (job_of(NEW_ON_D1, running_for=1.0),)
     ),
-    "a job that stopped is replaced": DataCase(
-        (NEW_ON_D1,), "new", (data_set("d1"),), (AWAITED_D1,), Retire("new-job"), (job_of(NEW_ON_D1, InstanceState.STOPPED),)
+    "a job that stopped is replaced": DataCase((NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (STOPPED_NEW_JOB,)),
+    "a job that can reach out is replaced": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (job_of(NEW_ON_D1, networks=("network-d1", "bridge")),)
+    ),
+    "two jobs of the serving instance are not answered unchanged: one is retired": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (NEW_JOB, job_of(NEW_ON_D1, container="new-job-two"))
     ),
     "a job left without its instance is stopped first": DataCase(
-        (OLD_ON_D1,), "old", (data_set("d1"),), (), Retire("gone-job"), (job_of(lane_instance("gone", "a")),)
+        (OLD_ON_D1,), "old", (D1,), (), Retire("gone-job"), (job_of(on_data(lane_instance("gone", "a"), "d1")),)
     ),
     "a stopped database under a serving instance is started, not answered unchanged": DataCase(
         (NEW_ON_D1,), "new", (data_set("d1", InstanceState.STOPPED),), (), StartDatabase("database-d1"), (NEW_JOB,)
     ),
-    "a serving lane answers only after its database answered just now": DataCase(
-        (NEW_ON_D1,), "new", (data_set("d1"),), (), AWAITED_D1, (NEW_JOB,)
+    "a serving lane whose database does not accept connections is waited on, not answered": DataCase(
+        (NEW_ON_D1,), "new", (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1", DATABASE), (NEW_JOB,)
     ),
 }
 
 
 def lane_seen_of(case: DataCase) -> LaneSeen:
     loaded = None if case.receiving is None else LoadedRoute(case.receiving, RouteStatus.ENABLED)
-    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets)
+    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets, QUIET)
 
 
 def next_data_move_step(case: DataCase) -> Action | Done[MoveResult] | Stop:
@@ -346,19 +386,29 @@ def test_a_move_with_data_takes_this_step_next(case: DataCase) -> None:
     assert next_data_move_step(case) == case.step
 
 
-def test_a_job_that_stops_during_its_check_answers_job_failed_with_why_not_switched() -> None:
-    refused = JobRefused("new-job", "The job new-job stopped within 3 s of starting.")
-    done = (STARTED_NEW_JOB, AWAITED_D1, refused, WriteRoute(WEB_ADDRESS, "new"))
-    step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (data_set("d1"),), done, None, (NEW_JOB,)))
+def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:
+    step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB,)))
+    assert isinstance(step, Done)
+    assert step.answer.outcome == Outcome.UNCHANGED
+
+
+def test_a_lane_the_steps_leave_as_it_is_still_answers_success_only_if_the_judge_finds_nothing() -> None:
+    other_build = NEW_JOB.model_copy(update={"build": "a"})
+    step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (other_build,)))
+    assert isinstance(step, Stop)
+    assert "runs a, not b" in step.reason
+
+
+def test_a_job_that_stops_during_its_watch_answers_job_failed_with_why_not_switched() -> None:
+    refused = JobRefused("new-job", "The job new-job is not running.")
+    done = (STARTED_NEW_JOB, refused, WriteRoute(WEB_ADDRESS, "new"))
+    step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), done, None, (STOPPED_NEW_JOB,)))
     assert isinstance(step, Done)
     assert (step.answer.outcome, step.answer.error) == (Outcome.JOB_FAILED, refused.report)
 
 
 DATA_STOPS = {
-    "two data sets and no instance receiving visitors": (
-        DataCase((), None, (data_set("d1"), data_set("d2")), (), None),
-        "cannot tell which",
-    ),
+    "two data sets and no instance receiving visitors": (DataCase((), None, (D1, data_set("d2")), (), None), "cannot tell which"),
     "a data set whose network is not quiet": (DataCase((), None, (data_set("d1", quiet=False),), (), None), "not quiet"),
     "a left-over instance on a data set whose network is not quiet": (
         DataCase((OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1", quiet=False),), (), None),
@@ -370,14 +420,62 @@ DATA_STOPS = {
         DataCase((), None, (data_set("d1", databases=("database-a", "database-b")),), (), None),
         "2 database servers (database-a, database-b)",
     ),
+    "a new instance given an outside network during its check": (
+        DataCase((OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (STARTED_NEW, Check("new", "/health")), None),
+        "can reach out through bridge",
+    ),
 }
 
 
 @pytest.mark.parametrize(("case", "reason"), DATA_STOPS.values(), ids=DATA_STOPS.keys())
-def test_a_move_with_data_stops_with_why_instead_of_starting_an_instance(case: DataCase, reason: str) -> None:
+def test_a_move_with_data_stops_with_why_instead_of_switching_or_answering_success(case: DataCase, reason: str) -> None:
     step = next_data_move_step(case)
     assert isinstance(step, Stop)
     assert reason in step.reason
+
+
+LANE_PROBLEMS = {
+    "an active instance that can reach out": (
+        DataCase((on_data(NEW, "d1", "bridge"),), "new", (D1,), (), None, (NEW_JOB,)),
+        "bridge",
+    ),
+    "an active instance on another data set's network": (
+        DataCase((on_data(NEW, "d1", "network-d2"),), "new", (D1, data_set("d2")), (), None, (NEW_JOB,)),
+        "network-d2, which it must not be",
+    ),
+    "two jobs": (DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB, job_of(NEW_ON_D1, container="j2"))), "2 jobs"),
+    "no job": (DataCase((NEW_ON_D1,), "new", (D1,), (), None), "0 jobs"),
+    "a job not yet past its watch": (DataCase((NEW_ON_D1,), "new", (D1,), (), None, (job_of(NEW_ON_D1, 1.0),)), "1.0 s of the 3 s"),
+    "a database that does not accept connections": (
+        DataCase((NEW_ON_D1,), "new", (data_set("d1", accepts=False),), (), None, (NEW_JOB,)),
+        "does not accept connections",
+    ),
+    "a database attached to an outside network": (
+        DataCase(
+            (NEW_ON_D1,),
+            "new",
+            (D1.model_copy(update={"databases": (D1.databases[0].model_copy(update={"networks": ("network-d1", "bridge")}),)}),),
+            (),
+            None,
+            (NEW_JOB,),
+        ),
+        "can reach out through bridge",
+    ),
+    "a second instance beside the active one": (
+        DataCase((NEW_ON_D1, OLD_ON_D1), "new", (D1,), (), None, (NEW_JOB,)),
+        "runs beside the active one",
+    ),
+}
+
+
+@pytest.mark.parametrize(("case", "problem"), LANE_PROBLEMS.values(), ids=LANE_PROBLEMS.keys())
+def test_a_lane_is_judged_not_as_it_must_be_when_it_has(case: DataCase, problem: str) -> None:
+    problems = lane_problems(lane_seen_of(case), TARGET, WITH_DATA)
+    assert any(problem in each for each in problems), problems
+
+
+def test_a_lane_as_it_must_be_has_no_problems() -> None:
+    assert lane_problems(lane_seen_of(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB,))), TARGET, WITH_DATA) == []
 
 
 def test_a_retire_stops_jobs_before_instances_and_deletes_every_part_read_of_the_named_data_set() -> None:
@@ -386,7 +484,7 @@ def test_a_retire_stops_jobs_before_instances_and_deletes_every_part_read_of_the
     def step(
         instances: tuple[RunningInstance, ...], jobs: tuple[RunningJob, ...], delete: str | None
     ) -> Action | Done[RetireResult] | Stop:
-        lane_seen = LaneSeen(instances, LaneRoute(None, None), jobs, (data_set("d1"), doubled))
+        lane_seen = LaneSeen(instances, LaneRoute(None, None), jobs, (D1, doubled))
         return decide_retire(lane_seen, "site", "testing", delete, ())
 
     assert step((OLD_ON_D1,), (job_of(OLD_ON_D1),), "d1") == Retire("old-job")

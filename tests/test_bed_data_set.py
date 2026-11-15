@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from launchplane.container_host import SECRET_REMOVED
 from tests.bed import (
     SCRATCH_ADDRESS,
     UnexpectedAnswer,
@@ -41,7 +42,8 @@ DESCRIPTION = {
     "database": {"image": "postgres:18-alpine"},
     "job": {"command": ["python", "/app.py", "job"]},
 }
-DESCRIPTION_FILE = f"/var/lib/launchplane/products/{PRODUCT}.json"
+LEAKY_PRODUCT = "test-bed-leaky"
+LEAKY_DESCRIPTION = DESCRIPTION | {"job": {"command": ["sh", "-c", "echo connecting with password $PGPASSWORD; exit 1"]}}
 LISTENER = "test-bed-call-listener"
 LISTENER_PORT = 8099
 CONTROL_HOST_NAME = "launchplane.shiny"
@@ -83,10 +85,11 @@ def calls_heard() -> str:
     return on_scratch(f"docker logs {LISTENER} 2>&1")
 
 
-def place_description() -> None:
+def place_description(product: str, description: dict[str, Any]) -> None:
+    file = f"/var/lib/launchplane/products/{product}.json"
     on_control(
-        f"install -d -o launchplane /var/lib/launchplane/products && cat > {DESCRIPTION_FILE} && chmod 644 {DESCRIPTION_FILE}",
-        given=json.dumps(DESCRIPTION),
+        f"install -d -o launchplane /var/lib/launchplane/products && cat > {file} && chmod 644 {file}",
+        given=json.dumps(description),
     )
 
 
@@ -190,7 +193,8 @@ def pretend_product() -> Iterator[None]:
     build_pretend_product(BUILD_A, "a")
     build_pretend_product(BUILD_B, "b")
     start_listener()
-    place_description()
+    place_description(PRODUCT, DESCRIPTION)
+    place_description(LEAKY_PRODUCT, LEAKY_DESCRIPTION)
     yield
     for lane in (LANE, OTHER_LANE):
         retire_lane_and_its_data(lane)
@@ -375,3 +379,19 @@ def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_show
     shown = json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
     assert [password in shown for password in passwords] == [False, False]
     retire_lane_and_its_data(OTHER_LANE)
+
+
+def test_a_job_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
+    try:
+        status, body = move_lane(LEAKY_PRODUCT, LANE, BUILD_A)
+        [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
+        password = environment_of(database_of(data_set))["POSTGRES_PASSWORD"]
+        assert (status, body["outcome"]) == (422, "job failed"), body
+        assert f"connecting with password {SECRET_REMOVED}" in body["error"]
+        journal = on_control("journalctl --unit launchplane --no-pager --since '-10 min'")
+        shown = json.dumps(body) + json.dumps(read_running()) + journal
+        assert password not in shown
+    finally:
+        for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
+            retire(LEAKY_PRODUCT, LANE, found["data_set"])
+        retire(LEAKY_PRODUCT, LANE)

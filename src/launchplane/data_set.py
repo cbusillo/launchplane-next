@@ -6,6 +6,11 @@ DATABASE_ADDRESS = "database"
 DATABASE_PORT = 5432
 
 
+def variable_value(environment: list[str], variable: str) -> str | None:
+    prefix = f"{variable}="
+    return next((entry.removeprefix(prefix) for entry in environment if entry.startswith(prefix)), None)
+
+
 @dataclass(frozen=True)
 class DatabaseServer:
     image: str
@@ -19,8 +24,7 @@ class DatabaseServer:
         return {self.password_variable: password}
 
     def password_in(self, environment: list[str]) -> str | None:
-        prefix = f"{self.password_variable}="
-        return next((entry.removeprefix(prefix) for entry in environment if entry.startswith(prefix)), None)
+        return variable_value(environment, self.password_variable)
 
     def client_environment(self, password: str) -> dict[str, str]:
         return {

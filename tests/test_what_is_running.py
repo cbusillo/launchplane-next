@@ -9,9 +9,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from launchplane.api import WebAddressChecker, create_app
-from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, OnHost, on_host_from_answers
+from launchplane.container_host import (
+    DOCKER_API_VERSION,
+    ContainerHost,
+    ContainerHostError,
+    HostAnswers,
+    OnHost,
+    on_host_from_answers,
+)
 from launchplane.decide import MoveResult, RetireResult
-from launchplane.instance import InstanceState, LaneBuild, RunningInstance
+from launchplane.instance import LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
@@ -33,7 +40,7 @@ def saved_container_list() -> object:
 
 
 def instances_from_answer(answer: object) -> list[RunningInstance]:
-    return on_host_from_answers(answer, [], {"Volumes": None}).instances
+    return on_host_from_answers(HostAnswers(answer, [], {"Volumes": None})).instances
 
 
 def refusing_host() -> ContainerHost:
@@ -71,16 +78,36 @@ def test_a_saved_docker_answer_reads_as_instances_in_launchplane_terms() -> None
     instances = {instance.container: instance for instance in instances_from_answer(saved_container_list())}
     assert instances == {
         "site-production": RunningInstance(
-            product="site", lane="production", build="b2", container="site-production", state=InstanceState.RUNNING, is_quiet=False
+            product="site",
+            lane="production",
+            build="b2",
+            container="site-production",
+            state=InstanceState.RUNNING,
+            networks=("bridge",),
         ),
         "site-testing": RunningInstance(
-            product="site", lane="testing", build="b3", container="site-testing", state=InstanceState.STOPPED, is_quiet=False
+            product="site",
+            lane="testing",
+            build="b3",
+            container="site-testing",
+            state=InstanceState.STOPPED,
+            networks=("bridge",),
         ),
         "site-preview-7": RunningInstance(
-            product="site", lane="preview-7", build="b4", container="site-preview-7", state=InstanceState.PAUSED, is_quiet=False
+            product="site",
+            lane="preview-7",
+            build="b4",
+            container="site-preview-7",
+            state=InstanceState.PAUSED,
+            networks=("bridge",),
         ),
         "site-unmarked-lane": RunningInstance(
-            product="site", lane=None, build=None, container="site-unmarked-lane", state=InstanceState.RUNNING, is_quiet=False
+            product="site",
+            lane=None,
+            build=None,
+            container="site-unmarked-lane",
+            state=InstanceState.RUNNING,
+            networks=("bridge",),
         ),
     }
 
@@ -133,7 +160,7 @@ def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_prox
         raise AssertionError(f"Asked through the proxy for {web_address}, which it routes nowhere")
 
     instance = RunningInstance(
-        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING, is_quiet=True
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING, networks=(LANE_NETWORK,)
     )
     entry = web_addresses_answer([instance], {}, no_request)["testing.site.test"]
     assert (entry["product"], entry["lane"], entry["sends_to_container"], entry["answers"]) == ("site", "testing", None, False)
@@ -142,7 +169,7 @@ def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_prox
 
 def test_a_stopped_instance_receiving_visitors_leaves_its_web_address_not_answering_with_the_proxys_error() -> None:
     instance = RunningInstance(
-        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, is_quiet=True
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, networks=(LANE_NETWORK,)
     )
     routes = {"testing.site.test": instance.container}
     entry = web_addresses_answer([instance], routes, lambda _: "502 Bad Gateway")["testing.site.test"]

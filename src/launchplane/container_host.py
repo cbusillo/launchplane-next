@@ -2,9 +2,10 @@ import io
 import os
 import tarfile
 import time
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -14,13 +15,15 @@ from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
 from docker.tls import TLSConfig
 from docker.types import EndpointConfig
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from launchplane.data_set import DATABASE_ADDRESS, DatabaseServer
+from launchplane.data_set import DATABASE_ADDRESS, DatabaseServer, variable_value
 from launchplane.instance import (
+    LANE_NETWORK,
     DataSet,
     DataSetDatabase,
     DataSetNetwork,
+    HostNetwork,
     InstanceState,
     LaneBuild,
     RunningInstance,
@@ -35,16 +38,18 @@ BUILD_LABEL = "launchplane.build"
 PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
+PASSWORD_VARIABLE_LABEL = "launchplane.password-variable"  # noqa: S105 the name of a label, not a password
+SECRET_REMOVED = "[a secret Launchplane gave this lane, removed]"  # noqa: S105 what replaces a secret, not one
 MARKED = {"label": PRODUCT_LABEL}
 
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
-LANE_NETWORK = "launchplane-lanes"
 GATEWAY_MODE_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
 QUIET_GATEWAY_MODE = "isolated"
 RETIRE_GRACE_SECONDS = 30
 LOG_TAIL_LINES = 20
 DATABASE_DEADLINE_SECONDS = 60
+JOB_DEADLINE_MARGIN_SECONDS = 15
 POLL_SECONDS = 0.5
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
@@ -94,6 +99,7 @@ class OnHost:
     instances: list[RunningInstance]
     jobs: list[RunningJob]
     data_sets: list[DataSet]
+    networks: list[HostNetwork] = field(default_factory=list[HostNetwork])
 
 
 @dataclass(frozen=True)
@@ -169,13 +175,29 @@ class DockerContainerConfig(BaseModel):
     environment: list[str] | None = Field(alias="Env")
 
 
+class DockerContainerState(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    running: bool = Field(alias="Running")
+    started_at: AwareDatetime = Field(alias="StartedAt")
+
+
 class DockerContainerDetails(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
+    name: str = Field(alias="Name")
     config: DockerContainerConfig = Field(alias="Config")
+    state: DockerContainerState = Field(alias="State")
+
+
+class DockerSystemTime(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    system_time: AwareDatetime = Field(alias="SystemTime")
 
 
 DOCKER_CONTAINER_DETAILS = TypeAdapter(DockerContainerDetails)
+DOCKER_SYSTEM_TIME = TypeAdapter(DockerSystemTime)
 DOCKER_CONTAINER_LIST = TypeAdapter(list[DockerContainerSummary])
 DOCKER_NETWORK_LIST = TypeAdapter(list[DockerNetworkSummary])
 DOCKER_NETWORK = TypeAdapter(DockerNetworkSummary)
@@ -214,30 +236,39 @@ def quiet_network_settings() -> NetworkSettings:
     return NetworkSettings(internal=True, options={GATEWAY_MODE_OPTION: QUIET_GATEWAY_MODE})
 
 
-def reaches_only_quiet_networks(summary: DockerContainerSummary, quiet_networks: set[str]) -> bool:
-    return summary.network_settings.networks.keys() <= quiet_networks
+def attached_networks(summary: DockerContainerSummary) -> tuple[str, ...]:
+    return tuple(sorted(summary.network_settings.networks))
 
 
-def instance_from(summary: DockerContainerSummary, quiet_networks: set[str]) -> RunningInstance:
+def instance_from(summary: DockerContainerSummary) -> RunningInstance:
     return RunningInstance(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
         lane=summary.labels.get(LANE_LABEL),
         build=summary.labels.get(BUILD_LABEL),
         container=summary.name,
         state=state_of(summary),
-        is_quiet=reaches_only_quiet_networks(summary, quiet_networks),
+        networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
     )
 
 
-def job_from(summary: DockerContainerSummary, quiet_networks: set[str]) -> RunningJob:
+def running_for(details: DockerContainerDetails, now: datetime) -> float | None:
+    if not details.state.running:
+        return None
+    return (now - details.state.started_at).total_seconds()
+
+
+def job_from(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails], now: datetime) -> RunningJob:
+    if summary.name not in details:
+        raise ContainerHostError(f"Docker listed the job {summary.name} but did not describe it, so how long it has run is unknown.")
     return RunningJob(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
         lane=summary.labels.get(LANE_LABEL),
         build=summary.labels.get(BUILD_LABEL),
         container=summary.name,
         state=state_of(summary),
-        is_quiet=reaches_only_quiet_networks(summary, quiet_networks),
+        networks=attached_networks(summary),
+        running_for_seconds=running_for(details[summary.name], now),
         instance=summary.labels.get(INSTANCE_LABEL),
     )
 
@@ -260,6 +291,10 @@ def grouped[Part](parts: Iterable[tuple[DataSetKey, Part]]) -> dict[DataSetKey, 
     return groups
 
 
+def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
+    return DataSetDatabase(container=summary.name, state=state_of(summary), networks=attached_networks(summary))
+
+
 def network_part(network: DockerNetworkSummary) -> DataSetNetwork:
     return DataSetNetwork(name=network.name, is_quiet=is_quiet(network))
 
@@ -271,10 +306,7 @@ def data_sets_from(
         (data_set_key(network.labels or {}, f"the network {network.name}"), network_part(network)) for network in networks
     )
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
-    by_database = grouped(
-        (data_set_key(summary.labels, summary.name), DataSetDatabase(container=summary.name, state=state_of(summary)))
-        for summary in databases
-    )
+    by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary)) for summary in databases)
     return [
         DataSet(
             product=key[0],
@@ -288,20 +320,51 @@ def data_sets_from(
     ]
 
 
-def on_host_from_answers(containers: object, networks: object, volumes: object) -> OnHost:
-    summaries = checked(DOCKER_CONTAINER_LIST, containers, "container list")
-    every_network = checked(DOCKER_NETWORK_LIST, networks, "network list")
-    volume_list = checked(DOCKER_VOLUME_LIST, volumes, "volume list").volumes or []
-    quiet_networks = {network.name for network in every_network if is_quiet(network)}
+@dataclass(frozen=True)
+class HostAnswers:
+    containers: object
+    networks: object
+    volumes: object
+    job_details: list[object] = field(default_factory=list[object])
+    system: object = None
+
+
+def job_details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
+    described = [checked(DOCKER_CONTAINER_DETAILS, answer, "description of a job") for answer in answers]
+    return {details.name.removeprefix("/"): details for details in described}
+
+
+def on_host_from_answers(answers: HostAnswers) -> OnHost:
+    summaries = checked(DOCKER_CONTAINER_LIST, answers.containers, "container list")
+    every_network = checked(DOCKER_NETWORK_LIST, answers.networks, "network list")
+    volume_list = checked(DOCKER_VOLUME_LIST, answers.volumes, "volume list").volumes or []
     marked_networks = [network for network in every_network if PRODUCT_LABEL in (network.labels or {})]
     by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "job": [], "database": []}
     for summary in summaries:
         by_part[part_of(summary)].append(summary)
+    jobs: list[RunningJob] = []
+    if by_part["job"]:
+        now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
+        details = job_details_by_name(answers.job_details)
+        jobs = [job_from(summary, details, now) for summary in by_part["job"]]
     return OnHost(
-        instances=[instance_from(summary, quiet_networks) for summary in by_part["web"]],
-        jobs=[job_from(summary, quiet_networks) for summary in by_part["job"]],
+        instances=[instance_from(summary) for summary in by_part["web"]],
+        jobs=jobs,
         data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
+        networks=[HostNetwork(name=network.name, is_quiet=is_quiet(network)) for network in every_network],
     )
+
+
+def job_names(containers: object) -> list[str]:
+    summaries = checked(DOCKER_CONTAINER_LIST, containers, "container list")
+    return [summary.name for summary in summaries if part_of(summary) == "job"]
+
+
+def redacted(text: str, secrets: Iterable[str]) -> str:
+    for secret in sorted(secrets, key=len, reverse=True):
+        if secret:
+            text = text.replace(secret, SECRET_REMOVED)
+    return text
 
 
 def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
@@ -330,7 +393,8 @@ def database_options(
     return RunOptions(
         image=server.image,
         container=database_container_of(product, lane, data_set),
-        labels=data_set_labels(product, lane, data_set) | {PART_LABEL: "database"},
+        labels=data_set_labels(product, lane, data_set)
+        | {PART_LABEL: "database", PASSWORD_VARIABLE_LABEL: server.password_variable},
         networks={network: [DATABASE_ADDRESS]},
         environment=server.server_environment(password),
         volumes={volume: server.data_path},
@@ -426,10 +490,36 @@ class ContainerHost:
     def list_marked_volumes(self) -> object:
         return self.client.api.volumes(filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
+    def describe(self, container: str) -> object:
+        return self.client.api.inspect_container(container)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+    def system_information(self) -> object:
+        return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
     def read(self) -> OnHost:
         with self.attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks"):
             containers, networks, volumes = self.list_marked_containers(), self.list_networks(), self.list_marked_volumes()
-        return on_host_from_answers(containers, networks, volumes)
+            jobs = job_names(containers)
+            job_details = [self.describe(job) for job in jobs]
+            system = self.system_information() if jobs else None
+        return on_host_from_answers(HostAnswers(containers, networks, volumes, job_details, system))
+
+    def job_running_for(self, container: str) -> float | None:
+        with self.attempting(f"Reading how long the job {container} has run"):
+            details = checked(DOCKER_CONTAINER_DETAILS, self.describe(container), f"description of {container}")
+            now = checked(DOCKER_SYSTEM_TIME, self.system_information(), "system information").system_time
+        return running_for(details, now)
+
+    def secrets_given_out(self) -> list[str]:
+        databases: dict[str, str | list[str] | bool] = {"label": f"{PART_LABEL}=database"}
+        found: list[str] = []
+        for database in self.client.containers.list(all=True, filters=databases):
+            variable = database.labels.get(PASSWORD_VARIABLE_LABEL)
+            environment = checked(DOCKER_CONTAINER_DETAILS, database.attrs, f"description of {database.name}").config.environment
+            value = None if variable is None else variable_value(environment or [], variable)
+            if value is not None:
+                found.append(value)
+        return found
 
     def find_container(self, container: str) -> Container | None:
         try:
@@ -501,12 +591,17 @@ class ContainerHost:
             password = None if link is None else self.password_of(link)
             self.run(job_options(target, instance, link, password, command))
 
-    def check_job(self, container: str, steady_seconds: float) -> None:
+    def await_job(self, container: str, steady_seconds: float) -> None:
         started = self.clock()
-        while self.clock() - started < steady_seconds:
-            if not self.is_running(container):
-                raise PartStopped(f"The job {container} stopped within {steady_seconds:g} s of starting.")
+        while (ran := self.job_running_for(container)) is None or ran < steady_seconds:
+            if ran is None:
+                raise PartStopped(f"The job {container} is not running: it stopped before it had run {steady_seconds:g} s.")
+            if self.clock() - started >= steady_seconds + JOB_DEADLINE_MARGIN_SECONDS:
+                raise PartStopped(f"The job {container} did not stay up {steady_seconds:g} s in a row; it keeps starting again.")
             self.sleep(POLL_SECONDS)
+
+    def database_accepts_connections(self, container: str, server: DatabaseServer) -> bool:
+        return self.run_in(container, server.ready_command).succeeded
 
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
         with self.attempting(f"Making the network of the data set {data_set}"):
@@ -566,7 +661,7 @@ class ContainerHost:
             found = self.find_container(container)
             if found is None:
                 return ""
-            return found.logs(tail=LOG_TAIL_LINES).decode(errors="replace")
+            return redacted(found.logs(tail=LOG_TAIL_LINES).decode(errors="replace"), self.secrets_given_out())
 
     def ensure_service(self, service: Service) -> None:
         with self.attempting(f"Starting the service {service.container}"):
