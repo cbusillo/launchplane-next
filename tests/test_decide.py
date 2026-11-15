@@ -354,6 +354,14 @@ DATA_MOVES = {
         (NEW_ON_D1,), "new", (D1,), (), AwaitJob("new-job"), (job_of(NEW_ON_D1, running_for=1.0),)
     ),
     "a job that stopped is replaced": DataCase((NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (STOPPED_NEW_JOB,)),
+    "a job this call started that is read restarting is awaited, so its failure is answered, not retried forever": DataCase(
+        (NEW_ON_D1,),
+        "new",
+        (D1,),
+        (STARTED_NEW_JOB,),
+        AwaitJob("new-job"),
+        (NEW_JOB.model_copy(update={"state": InstanceState.RESTARTING, "running_for_seconds": None}),),
+    ),
     "a job read as restarting is replaced, however long Docker says it ran": DataCase(
         (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (NEW_JOB.model_copy(update={"state": InstanceState.RESTARTING}),)
     ),

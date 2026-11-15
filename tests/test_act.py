@@ -409,3 +409,18 @@ def test_a_retry_after_a_crash_between_starting_the_job_and_watching_it_watches_
     result = lanes_on(proxy).move(BUILD_A)
     assert proxy.host.actions == [f"await job {job}"]
     assert result.outcome == Outcome.UNCHANGED
+
+
+def test_a_job_that_never_runs_answers_job_failed_within_the_step_limit() -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.jobs_that_stop.add(BUILD_B.build)
+    original = proxy.host.start_job
+
+    def start_restarting(target: LaneBuild, instance: str, link: DatabaseLink | None, command: list[str]) -> None:
+        original(target, instance, link, command)
+        job = job_container_of(instance)
+        restarting = {"state": InstanceState.RESTARTING, "running_for_seconds": None}
+        proxy.host.jobs[job] = proxy.host.jobs[job].model_copy(update=restarting)
+
+    proxy.host.start_job = start_restarting
+    assert lanes_on(proxy).move(BUILD_B).outcome == Outcome.JOB_FAILED

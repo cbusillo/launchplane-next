@@ -509,8 +509,11 @@ def job_step(
         return StartJob(target, serving.container, use, tuple(product.job.command))
     [job] = own
     ran = job.running_for_seconds
-    if ran is None or job.state != InstanceState.RUNNING or job_attachment_problems(job, serving, seen):
+    started_here = StartJob(target, serving.container, use, tuple(product.job.command)) in done
+    if job_attachment_problems(job, serving, seen):
         return Retire(job.container)
+    if ran is None or job.state != InstanceState.RUNNING:
+        return AwaitJob(job.container) if started_here else Retire(job.container)
     return AwaitJob(job.container) if ran < JOB_STEADY_SECONDS else None
 
 
