@@ -74,9 +74,7 @@ function row(label, ...values) {
 
 /** @param {Instance} instance */
 function visitors(instance) {
-  if (instance.receives_visitors_for) return "visitors are sent here";
-  if (instance.state === "running") return "being checked, no visitors yet";
-  return "no visitors";
+  return instance.receives_visitors_for ? "visitors are sent here" : "no visitors are sent here";
 }
 
 /**

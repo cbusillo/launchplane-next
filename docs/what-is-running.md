@@ -47,7 +47,7 @@ Both carry `read_at`, the moment the host was asked.
     Build        nginx:1.30.6-alpine
   ```
 
-  A web address that does not answer shows `not answering` and the real error under it. One whose instance is running but does not answer with success says so, and does not say nothing is there. One the proxy sends nowhere says `The proxy sends … to no instance.`, and one with no instance of its lane on the host is titled `A web address with no instance on the host`. The instance visitors are sent to is listed first. Any other running instance of the lane shows `being checked, no visitors yet`, a stopped one `no visitors`. A route to another lane's instance names that lane and the container, and a route to a container that is not on the host says so. Instances with no lane label are listed apart, each with its container's name.
+  A web address that does not answer shows `not answering` and the real error under it. One whose instance is running but does not answer with success says so, and does not say nothing is there. One the proxy sends nowhere says `The proxy sends … to no instance.`, and one with no instance of its lane on the host is titled `A web address with no instance on the host`. The instance visitors are sent to is listed first. Every other instance of the lane shows its state and `no visitors are sent here`: the page sees only what the host and the proxy report, not whether an instance is being checked or stopping. A route to another lane's instance names that lane and the container, and a route to a container that is not on the host says so. Instances with no lane label are listed apart, each with its container's name.
 - When Launchplane answers `503`, or cannot be reached, the page shows the error and when it last read the host, and hides the lanes. It never shows an empty list for an answer it did not get. The time of the last good read is kept only by the open page, not by Launchplane.
 - Text is built with DOM text nodes, never as HTML, so a label cannot inject markup.
 
@@ -58,7 +58,6 @@ Measured on the test bed from the control container: listing the instances takes
 ### Known and not fixed
 
 - **Like `/running`, the page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
-- **The old instance reads `being checked, no visitors yet` while it stops.** Once the web address has passed to the new instance, the old one is still running until Docker has stopped it, and the page cannot tell an instance being retired from one being prepared without keeping a record. On the test bed nginx stops within a second of its stop signal, so it shows for one read at most. Not fixed: telling them apart needs either a record of the move or a new field read from the host, and this step adds neither. Comes back when a product takes long to stop.
 - **No test loads the page or runs its script.** A blank page, polling that stops, old lanes kept after an error, or colours swapped would each pass every test. Chris watching the page is the check for now. Comes back when the page breaks without anyone noticing, or when there is a second page.
 
 ## How Launchplane reaches the host
