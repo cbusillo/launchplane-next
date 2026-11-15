@@ -10,6 +10,7 @@ from launchplane.decide import (
     Event,
     LaneRoute,
     LaneSeen,
+    LoadedRoute,
     MoveResult,
     Outcome,
     ProxyNotRunning,
@@ -18,8 +19,10 @@ from launchplane.decide import (
     Retire,
     RetireOutcome,
     RetireResult,
+    RouteStatus,
     StartCopy,
     StartProxy,
+    Stop,
     WriteRoute,
     decide_move,
     decide_retire,
@@ -46,7 +49,7 @@ REFUSED = CheckRefused("new", "Connection refused")
 @dataclass(frozen=True)
 class Case:
     copies: tuple[RunningCopy, ...]
-    route: tuple[str | None, str | None]
+    route: tuple[str | LoadedRoute | None, str | None]
     done: tuple[Event, ...]
     step: object
 
@@ -93,10 +96,33 @@ MOVES = {
 }
 
 
+def seen(case: Case) -> LaneSeen:
+    loaded, written = case.route
+    if case.step == StartProxy():
+        return LaneSeen(case.copies, ProxyNotRunning())
+    if isinstance(loaded, str):
+        loaded = LoadedRoute(loaded, RouteStatus.ENABLED)
+    return LaneSeen(case.copies, LaneRoute(loaded, written))
+
+
+def next_move_step(case: Case) -> object:
+    return decide_move(seen(case), TARGET, FRESH, case.done)
+
+
+def next_retire_step(case: Case) -> object:
+    return decide_retire(seen(case), "site", "testing", case.done)
+
+
 @pytest.mark.parametrize("case", MOVES.values(), ids=MOVES.keys())
 def test_a_move_takes_this_step_next(case: Case) -> None:
-    route = ProxyNotRunning() if case.step == StartProxy() else LaneRoute(*case.route)
-    assert decide_move(LaneSeen(case.copies, route), TARGET, FRESH, case.done) == case.step
+    assert next_move_step(case) == case.step
+
+
+@pytest.mark.parametrize("status", [RouteStatus.DISABLED, RouteStatus.WARNING])
+def test_a_move_stops_and_says_so_when_the_loaded_route_is_not_enabled(status: RouteStatus) -> None:
+    step = next_move_step(Case((NEW,), (LoadedRoute("new", status), "new"), (), None))
+    assert isinstance(step, Stop)
+    assert f"reports it {status}" in step.reason
 
 
 def retired(route_removed_to: str | None, copies: list[str]) -> Done[RetireResult]:
@@ -121,15 +147,20 @@ RETIRES = {
     ),
     "a lane whose route was already gone answers no route removed": Case((), (None, None), (Retire("old"),), retired(None, ["old"])),
     "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
+    "a lane whose loaded route is disabled has it removed": Case(
+        (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), RemoveRoute(NAME, "old")
+    ),
+    "a disabled route still loaded is waited for gone before any copy stops": Case(
+        (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), None), (RemoveRoute(NAME, "old"),), AwaitRoute(NAME, None)
+    ),
 }
 
 
 @pytest.mark.parametrize("case", RETIRES.values(), ids=RETIRES.keys())
 def test_a_retire_takes_this_step_next(case: Case) -> None:
-    route = ProxyNotRunning() if case.step == StartProxy() else LaneRoute(*case.route)
-    assert decide_retire(LaneSeen(case.copies, route), "site", "testing", case.done) == case.step
+    assert next_retire_step(case) == case.step
 
 
-def test_no_step_of_any_case_routes_or_awaits_another_lanes_name() -> None:
-    steps = [case.step for case in [*MOVES.values(), *RETIRES.values()]]
+def test_no_step_decided_in_any_case_routes_or_awaits_another_lanes_name() -> None:
+    steps = [next_move_step(case) for case in MOVES.values()] + [next_retire_step(case) for case in RETIRES.values()]
     assert {step.name for step in steps if isinstance(step, WriteRoute | RemoveRoute | AwaitRoute)} == {NAME}

@@ -4,12 +4,12 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Literal, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from launchplane.container_host import CommandResult, Service
-from launchplane.decide import LaneRoute, ProxyNotRunning
+from launchplane.decide import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
@@ -62,7 +62,7 @@ class Read(BaseModel):
 class LoadedRouter(Read):
     rule: str
     service: str
-    status: Literal["enabled", "disabled", "warning"]
+    status: RouteStatus
 
 
 class LoadedServer(Read):
@@ -119,17 +119,17 @@ def name_of(router: LoadedRouter) -> str:
     return match["name"]
 
 
-def serving_copies_by_name(routes: LoadedRoutes) -> dict[str, str]:
-    serving = (router for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE) and router.status == "enabled")
-    return {name_of(router): copy_behind(router, routes.services) for router in serving}
+def lane_routes_by_name(routes: LoadedRoutes) -> dict[str, LoadedRoute]:
+    from_files = (router for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE))
+    return {name_of(router): LoadedRoute(copy_behind(router, routes.services), router.status) for router in from_files}
 
 
-def loaded_routes_from_answer(answer: str) -> dict[str, str]:
+def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
     try:
         routes = LoadedRoutes.model_validate_json(answer)
     except ValidationError as error:
         raise ProxyError(f"The proxy's loaded routes did not have the expected shape, so nothing was changed: {error}") from error
-    return serving_copies_by_name(routes)
+    return lane_routes_by_name(routes)
 
 
 def written_route_from_file(text: str, name: str) -> str:
@@ -156,7 +156,7 @@ class TraefikProxy:
                 raise ProxyError(f"The proxy did not answer within {self.load_deadline_seconds:g} s of starting: {result.output}")
             self.sleep(POLL_SECONDS)
 
-    def read_loaded(self) -> dict[str, str]:
+    def read_loaded(self) -> dict[str, LoadedRoute]:
         result = self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "-", LOADED_ROUTES_URL])
         if not result.succeeded:
             raise ProxyError(f"Reading the proxy's loaded routes failed: {result.output}")
@@ -165,7 +165,7 @@ class TraefikProxy:
     def read_serving(self) -> dict[str, str]:
         if not self.host.is_running(PROXY_NAME):
             return {}
-        return self.read_loaded()
+        return {name: route.copy for name, route in self.read_loaded().items() if route.status == RouteStatus.ENABLED}
 
     def read_lane_route(self, name: str) -> ProxyNotRunning | LaneRoute:
         if not self.host.is_running(PROXY_NAME):
@@ -176,7 +176,7 @@ class TraefikProxy:
 
     def await_route(self, name: str, copy_name: str | None) -> None:
         started = self.clock()
-        while (loaded := self.read_loaded().get(name)) != copy_name:
+        while (loaded := self.loaded_copy(name)) != copy_name:
             if self.clock() - started >= self.load_deadline_seconds:
                 raise ProxyError(
                     f"The proxy did not load the routes file of {name} within {self.load_deadline_seconds:g} s: "
@@ -187,6 +187,10 @@ class TraefikProxy:
 
     def remove_route(self, name: str) -> None:
         self.run_or_fail(["rm", "-f", str(route_file_of(name))], f"Removing the route of {name}")
+
+    def loaded_copy(self, name: str) -> str | None:
+        route = self.read_loaded().get(name)
+        return None if route is None else route.copy
 
     def write_route(self, name: str, copy_name: str) -> None:
         self.host.place_file(PROXY_NAME, staged_route_file_of(name), route_text(name, copy_name))

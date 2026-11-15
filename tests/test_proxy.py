@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 import pytest
 
 from launchplane.container_host import CommandResult, Service
-from launchplane.decide import LaneRoute, ProxyNotRunning
+from launchplane.decide import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
@@ -121,7 +121,7 @@ def test_a_proxy_that_is_not_running_is_told_apart_from_one_with_no_routes() -> 
 def test_a_route_written_and_not_yet_loaded_reads_as_both() -> None:
     host = ProxyHost({NAME: "site-t1"})
     host.files[route_file_of(NAME)] = route_text(NAME, "site-t2")
-    assert TraefikProxy(host).read_lane_route(NAME) == LaneRoute(loaded="site-t1", written="site-t2")
+    assert TraefikProxy(host).read_lane_route(NAME) == LaneRoute(LoadedRoute("site-t1", RouteStatus.ENABLED), written="site-t2")
 
 
 def test_a_route_launchplane_did_not_write_is_an_error() -> None:
@@ -148,11 +148,12 @@ def test_a_lane_file_that_is_not_exactly_the_route_launchplane_writes_is_an_erro
         TraefikProxy(host).read_lane_route(NAME)
 
 
-def test_a_route_the_proxy_has_disabled_does_not_read_as_serving() -> None:
+def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_does_not_serve() -> None:
     host = ProxyHost({NAME: "site-t1", OTHER: "site-p1"})
     loaded = json.loads(host.loaded)
     loaded["routers"][f"{NAME}@file"]["status"] = "disabled"
     host.loaded = json.dumps(loaded)
+    assert TraefikProxy(host).read_lane_route(NAME) == LaneRoute(LoadedRoute("site-t1", RouteStatus.DISABLED), "site-t1")
     assert TraefikProxy(host).read_serving() == {OTHER: "site-p1"}
 
 
@@ -175,9 +176,9 @@ def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
     host.loads_on_write = False
     proxy = ticking(host)
     proxy.remove_route(NAME)
-    assert proxy.read_loaded() == {NAME: "site-t1"}
+    assert proxy.read_serving() == {NAME: "site-t1"}
     proxy.await_route(NAME, None)
-    assert proxy.read_loaded() == {}
+    assert proxy.read_serving() == {}
 
 
 def test_a_route_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> None:

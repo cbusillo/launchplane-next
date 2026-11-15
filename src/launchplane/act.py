@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from launchplane import decide
-from launchplane.decide import Action, Done, Event, LaneRoute, LaneSeen, MoveResult, ProxyNotRunning, RetireResult
+from launchplane.decide import Action, Done, Event, LaneRoute, LaneSeen, MoveResult, ProxyNotRunning, RetireResult, Stop
 from launchplane.proxy import CheckFailed
 from launchplane.running_copy import LaneCopy, RunningCopy, new_copy_name
 
@@ -27,7 +27,7 @@ class Proxy(Protocol):
     def check_copy(self, copy_name: str) -> None: ...
 
 
-class NotSettled(Exception):
+class Stopped(Exception):
     pass
 
 
@@ -60,18 +60,21 @@ class Lanes:
             return self.settle(product, lane, lambda seen, done: decide.decide_retire(seen, product, lane, done))
 
     def settle[Answer](
-        self, product: str, lane: str, next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer]]
+        self, product: str, lane: str, next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer] | Stop]
     ) -> Answer:
         done: list[Event] = []
-        for _ in range(MOST_STEPS):
+        while True:
             step = next_step(self.read(product, lane), tuple(done))
             if isinstance(step, Done):
                 return step.answer
+            if isinstance(step, Stop):
+                raise Stopped(step.reason)
+            if len(done) == MOST_STEPS:
+                raise Stopped(
+                    f"{lane} of {product} was not finished after {MOST_STEPS} steps, so Launchplane stopped before {step}. "
+                    "What was done stays done, and asking again goes on from there."
+                )
             done.append(self.take(step))
-        raise NotSettled(
-            f"{lane} of {product} did not settle within {MOST_STEPS} steps, so Launchplane stopped. "
-            f"The last step was {done[-1]}. It is safe to ask again."
-        )
 
     def take(self, action: Action) -> Event:
         match action:

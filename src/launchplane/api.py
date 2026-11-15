@@ -11,7 +11,7 @@ from fastapi import FastAPI, Path, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from launchplane.act import Lanes, NotSettled
+from launchplane.act import Lanes, Stopped
 from launchplane.container_host import ContainerHost, ContainerHostError
 from launchplane.decide import MoveResult, Outcome, RetireResult, lane_name
 from launchplane.proxy import ProxyError, TraefikProxy
@@ -24,7 +24,7 @@ type MoveRequester = Callable[[LaneCopy], MoveResult]
 type RetireRequester = Callable[[str, str], RetireResult]
 
 SLUG = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
-UNREADABLE = (ContainerHostError, ProxyError, NotSettled)
+UNREADABLE = (ContainerHostError, ProxyError, Stopped)
 
 
 class CopyAnswer(RunningCopy):

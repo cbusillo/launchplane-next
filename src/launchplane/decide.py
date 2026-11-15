@@ -44,9 +44,21 @@ class ProxyNotRunning:
     pass
 
 
+class RouteStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    WARNING = "warning"
+
+
+@dataclass(frozen=True)
+class LoadedRoute:
+    copy: str
+    status: RouteStatus
+
+
 @dataclass(frozen=True)
 class LaneRoute:
-    loaded: str | None
+    loaded: LoadedRoute | None
     written: str | None
 
 
@@ -111,12 +123,28 @@ class Done[Answer]:
     answer: Answer
 
 
+@dataclass(frozen=True)
+class Stop:
+    reason: str
+
+
 type Action = StartProxy | AwaitRoute | StartCopy | Check | WriteRoute | RemoveRoute | Retire | RemoveCopy
 type Event = Action | CheckRefused
 
 
 def lane_name(product: str, lane: str) -> str:
     return f"{lane}.{product}.{LANE_DOMAIN}"
+
+
+def is_loaded_as_written(route: LaneRoute) -> bool:
+    return (None if route.loaded is None else route.loaded.copy) == route.written
+
+
+def disabled_route_stop(name: str, loaded: LoadedRoute) -> Stop:
+    return Stop(
+        f"The proxy has loaded the route of {name} to {loaded.copy} and reports it {loaded.status}, so the name serves nothing. "
+        "Nothing was changed. The proxy's log says why; retiring the lane removes the route."
+    )
 
 
 def is_running_build(copy: RunningCopy | None, build: str) -> bool:
@@ -149,12 +177,14 @@ def check_then_route(name: str, candidate: RunningCopy, done: tuple[Event, ...])
     return Check(candidate.name)
 
 
-def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str, done: tuple[Event, ...]) -> Action | Done[MoveResult]:
+def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str, done: tuple[Event, ...]) -> Action | Done[MoveResult] | Stop:
     if isinstance(seen.route, ProxyNotRunning):
         return StartProxy()
     name = lane_name(target.product, target.lane)
-    if seen.route.loaded != seen.route.written:
+    if not is_loaded_as_written(seen.route):
         return AwaitRoute(name, seen.route.written)
+    if seen.route.loaded is not None and seen.route.loaded.status != RouteStatus.ENABLED:
+        return disabled_route_stop(name, seen.route.loaded)
     serving = seen.route.written
     copies = {copy.name: copy for copy in seen.copies}
     answer = MoveResult(
@@ -175,11 +205,11 @@ def decide_move(seen: LaneSeen, target: LaneCopy, fresh_copy_name: str, done: tu
     return check_then_route(name, copies[candidate], done)
 
 
-def decide_retire(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> Action | Done[RetireResult]:
+def decide_retire(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> Action | Done[RetireResult] | Stop:
     if isinstance(seen.route, ProxyNotRunning):
         return StartProxy()
     name = lane_name(product, lane)
-    if seen.route.loaded != seen.route.written:
+    if not is_loaded_as_written(seen.route):
         return AwaitRoute(name, seen.route.written)
     if seen.route.written is not None:
         return RemoveRoute(name, seen.route.written)

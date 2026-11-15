@@ -2,8 +2,8 @@ from collections.abc import Callable
 
 import pytest
 
-from launchplane.act import Lanes, NotSettled
-from launchplane.decide import LaneRoute, Outcome, ProxyNotRunning, RetireOutcome
+from launchplane.act import MOST_STEPS, Lanes, Stopped
+from launchplane.decide import LaneRoute, LoadedRoute, Outcome, ProxyNotRunning, RetireOutcome, RouteStatus
 from launchplane.proxy import CheckFailed
 from launchplane.running_copy import CopyState, LaneCopy, RunningCopy
 
@@ -56,7 +56,8 @@ class FakeProxy:
     def read_lane_route(self, name: str) -> ProxyNotRunning | LaneRoute:
         if not self.running:
             return ProxyNotRunning()
-        return LaneRoute(loaded=self.loaded.get(name), written=self.written.get(name))
+        loaded = self.loaded.get(name)
+        return LaneRoute(None if loaded is None else LoadedRoute(loaded, RouteStatus.ENABLED), self.written.get(name))
 
     def await_route(self, name: str, copy_name: str | None) -> None:
         assert self.written.get(name) == copy_name, f"awaited {name} at {copy_name}, written to {self.written.get(name)}"
@@ -129,7 +130,7 @@ def test_the_first_move_starts_the_proxy_then_moves() -> None:
 
 def test_a_proxy_that_never_runs_stops_the_move_with_an_error_not_a_loop() -> None:
     proxy = FakeProxy(FakeHost(), running=False, starts=False)
-    with pytest.raises(NotSettled, match="StartProxy"):
+    with pytest.raises(Stopped, match="StartProxy"):
         Lanes(proxy.host, proxy).move(BUILD_B)
     assert proxy.host.copies == {}
 
@@ -139,3 +140,20 @@ def test_retiring_removes_the_route_before_any_copy() -> None:
     result = lanes.retire("site", "testing")
     assert proxy.host.actions == ["unroute", "retire a"]
     assert (result.outcome, result.route_removed_to, result.retired_copies) == (RetireOutcome.RETIRED, "a", ["a"])
+
+
+def test_a_retire_that_finishes_on_its_last_allowed_step_answers_retired_not_stopped() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    for number in range(MOST_STEPS - 3):
+        proxy.host.place(BUILD_A, f"b{number:02}")
+    result = lanes.retire("site", "testing")
+    assert len(proxy.host.actions) == MOST_STEPS - 1
+    assert (result.outcome, proxy.host.copies) == (RetireOutcome.RETIRED, {})
+
+
+def test_a_move_whose_loaded_route_is_disabled_stops_with_why_and_changes_nothing() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    proxy.read_lane_route = lambda name: LaneRoute(LoadedRoute("a", RouteStatus.DISABLED), "a")
+    with pytest.raises(Stopped, match="reports it disabled"):
+        lanes.move(BUILD_B)
+    assert proxy.host.actions == []

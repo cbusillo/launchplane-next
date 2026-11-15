@@ -6,18 +6,19 @@ For now a build is a container image reference, and the copy must answer HTTP on
 
 ## What it does
 
-Each call takes one step at a time. Before every step it reads the lane's copies from the container host, the lane's routes file and the route the proxy has loaded for the lane's name. From that and what this call has already done, it decides the next step without reading or changing anything more, takes it, and reads again. Nothing read before a step is used after it, so a copy that stops while Launchplane waits is seen at the next read. After a crash nothing is resumed: the next call reads again and decides again. A call that has not finished after 50 steps stops and answers `503`.
+Each call takes one step at a time. Before every step it reads the lane's copies from the container host, the lane's routes file and the route the proxy has loaded for the lane's name. From that and what this call has already done, it decides the next step without reading or changing anything more, takes it, and reads again. Nothing read before a step is used after it, so a copy that stops while Launchplane waits is seen at the next read. After a crash nothing is resumed: the next call reads again and decides again. A call that has taken 50 steps and is still not finished stops before the next step and answers `503`; what was done stays done, and asking again goes on from there. It reads once more after its 50th step, so a call whose last step finished the work answers as finished. The limit is there so a lane whose state keeps changing under Launchplane, or a proxy that never stays running, cannot hold the lock that every other lane's move waits for.
 
 The next step is the first of these that applies:
 
 1. If the proxy is not running, start it. The first move ever starts the proxy this way.
-2. If the lane's routes file and the proxy disagree, wait until the proxy has loaded the file (see below). From here the file is taken as serving.
-3. If a copy failed its check in this call, remove it, then answer `check failed` with why. The name never moved.
-4. If the name is routed to a running copy of this build, retire any other copy of the lane, one per step, then answer.
-5. Retire any copy of the lane that is neither serving nor the copy to switch to. The copy to switch to is the newest copy this call started that the name is not routed to, or else a running copy of the build that is not serving, left by an interrupted move.
-6. If there is no copy to switch to, start one. A serving copy that has stopped is not restarted: a new copy replaces it through the check and the switch like any other. Each start gets a new random name.
-7. Check the copy (see below), unless it passed in this call and is still running. A copy that passed and has since stopped is checked again, and fails.
-8. Point the name at the copy. The next read sees the file and the proxy disagree, so step 2 waits until the proxy has loaded the route, and step 4 then retires the old copy.
+2. If the lane's routes file and the proxy disagree about which copy the name goes to, wait until the proxy has loaded the file (see below). From here the file is taken as serving.
+3. If the proxy has loaded the lane's route but reports it disabled or with a warning, the name serves nothing. Stop and answer `503` with that status. Nothing is changed. Retiring the lane removes the route.
+4. If a copy failed its check in this call, remove it, then answer `check failed` with why. The name never moved.
+5. If the name is routed to a running copy of this build, retire any other copy of the lane, one per step, then answer.
+6. Retire any copy of the lane that is neither serving nor the copy to switch to. The copy to switch to is the newest copy this call started that the name is not routed to, or else a running copy of the build that is not serving, left by an interrupted move.
+7. If there is no copy to switch to, start one. A serving copy that has stopped is not restarted: a new copy replaces it through the check and the switch like any other. Each start gets a new random name.
+8. Check the copy (see below), unless it passed in this call and is still running. A copy that passed and has since stopped is checked again, and fails.
+9. Point the name at the copy. The next read sees the file and the proxy disagree, so step 2 waits until the proxy has loaded the route, and step 5 then retires the old copy.
 
 To retire a copy is to stop it gracefully and then remove it (see "The old copy"). Only a copy that has never served, such as one that failed its check, is removed at once.
 
@@ -62,7 +63,7 @@ Killed between starting the new copy and switching, then asked again, measured o
 - **Asking for the old build while its copy is still stopping answers `check failed` for a good build and removes that copy by force.** Confirmed once on the test bed, after a kill during retirement. Not fixed: asking again works, and the name never moves.
 - **`/running` reads the containers and the routes at two moments**, so during a switch it can show the retired copy and no serving copy.
 - **Copy names are 48 random bits and are not checked against names a route already points at.** A clash with a container that exists makes Docker refuse the start, and the move answers `503`. A clash with a route to a copy that no longer exists would send that name's traffic to the new copy before its check. Not fixed: a lane starts a handful of copies, so the chance is far below anything else here. Comes back if names get shorter or copies are started at a rate where a clash becomes plausible.
-- **A route the proxy reports as disabled or with a warning does not serve.** Only an enabled route counts. A move whose route is written and not enabled waits for it and answers `503` with the proxy's log.
+- **A move does not repair a route the proxy reports as disabled or with a warning.** It stops with `503` and the status, and changes nothing. Not fixed: Launchplane writes the same file each time, so a disabled route means something outside the file is wrong, and the proxy's log says what. Retiring the lane and moving it again rewrites the route. Comes back if the proxy can disable a route Launchplane wrote correctly.
 - **Untried:** HTTPS, long-lived connections, two Launchplane processes at once.
 
 ## The proxy
