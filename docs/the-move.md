@@ -28,6 +28,7 @@ To retire an instance is to stop it gracefully and then remove it (see "The old 
 | `unchanged` | 200 | It already did. Nothing changed. |
 | `cleaned up` | 200 | It already did, and instances left by an interrupted move were removed. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
+| `job failed` | 422 | Only for a product with a job: see [a lane with a database](data-sets.md#bringing-a-lane-up-and-releasing). |
 
 A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again.
 

@@ -29,9 +29,13 @@ PASSWORD = "a-password-made-at-random"  # noqa: S105 a value for the test, guard
 
 
 def network(
-    internal: bool, options: dict[str, str] | None, name: str = "launchplane-data-d1", labels: dict[str, str] = DATA_SET_LABELS
+    internal: bool, options: dict[str, str] | None, name: str = "launchplane-data-d1", labels: dict[str, str] | None = None
 ) -> dict[str, object]:
-    return {"Name": name, "Internal": internal, "Options": options, "Labels": labels}
+    return {"Name": name, "Internal": internal, "Options": options, "Labels": DATA_SET_LABELS if labels is None else labels}
+
+
+def as_docker_client(fake: object) -> docker.DockerClient:
+    return cast("docker.DockerClient", fake)
 
 
 def container(name: str, part: str, networks: list[str]) -> dict[str, object]:
@@ -169,7 +173,7 @@ def test_deleting_a_data_set_removes_every_database_volume_and_network_read_of_i
         volumes=("volume-a", "volume-b"),
         databases=(DataSetDatabase(container="database-d1", state=InstanceState.RUNNING),),
     )
-    ContainerHost(cast("docker.DockerClient", client), "test").delete_data_set(found)
+    ContainerHost(as_docker_client(client), "test").delete_data_set(found)
     assert client.removed == [
         "stop database-d1 within 30",
         "remove database-d1",
@@ -182,6 +186,7 @@ def test_deleting_a_data_set_removes_every_database_volume_and_network_read_of_i
 class RecordingNetworks:
     def __init__(self) -> None:
         self.made: list[dict[str, object]] = []
+        self.names: list[str] = []
 
     def get(self, name: str) -> None:
         raise NotFound(f"network {name} not found")
@@ -189,6 +194,7 @@ class RecordingNetworks:
     def create(
         self, name: str, driver: str, internal: bool = False, options: dict[str, str] | None = None, labels: object = None
     ) -> None:
+        self.names.append(name)
         self.made.append({"Name": name, "Driver": driver, "Internal": internal, "Options": options, "Labels": labels or {}})
 
 
@@ -200,13 +206,14 @@ class NetworkMakingClient:
 @pytest.mark.parametrize("make", ["data set", "lanes"])
 def test_every_network_an_instance_joins_is_made_quiet(make: str) -> None:
     client = NetworkMakingClient()
-    host = ContainerHost(cast("docker.DockerClient", client), "test")
+    host = ContainerHost(as_docker_client(client), "test")
     if make == "data set":
         host.create_data_set_network("shop", "testing", "d1")
     else:
         host.ensure_network(LANE_NETWORK, quiet=True)
     [made] = client.networks.made
-    quiet_networks = on_host_from_answers([container("shop-testing-1", "web", [str(made["Name"])])], [made], {"Volumes": None})
+    [name] = client.networks.names
+    quiet_networks = on_host_from_answers([container("shop-testing-1", "web", [name])], [made], {"Volumes": None})
     assert quiet_networks.instances[0].is_quiet
 
 

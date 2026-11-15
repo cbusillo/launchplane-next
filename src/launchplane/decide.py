@@ -369,13 +369,15 @@ def data_set_step(found: DataSet, target: LaneBuild, database: Database, done: t
 def prepared(
     seen: LaneSeen, data_set: str | None, fresh: str | None, target: LaneBuild, product: Product, done: tuple[Event, ...]
 ) -> Action | Stop | DataSetUse | None:
-    if product.database is None or data_set is None:
+    if data_set is None:
+        return None
+    if product.database is None:
         return None
     found = next((each for each in seen.data_sets if each.data_set == data_set), None)
     if found is not None:
         return data_set_step(found, target, product.database, done)
-    if data_set == fresh:
-        return CreateDataSetNetwork(target.product, target.lane, data_set)
+    if fresh is not None and data_set == fresh:
+        return CreateDataSetNetwork(target.product, target.lane, fresh)
     return Stop(f"The instance receiving visitors uses the data set {data_set}, which is not on the host. {changes_so_far(done)}")
 
 

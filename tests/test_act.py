@@ -78,22 +78,23 @@ class FakeHost:
             self.jobs[container] = self.jobs[container].model_copy(update={"state": InstanceState.RESTARTING})
             raise PartStopped(f"The job {container} stopped within {steady_seconds:g} s of starting.")
 
-    def change_data_set(self, data_set: str, **parts: object) -> None:
+    def change_data_set(self, product: str, lane: str, data_set: str, **parts: object) -> None:
         found = self.data_sets.get(data_set) or DataSet(
-            product="site", lane="testing", data_set=data_set, networks=(), volumes=(), databases=()
+            product=product, lane=lane, data_set=data_set, networks=(), volumes=(), databases=()
         )
         self.data_sets[data_set] = found.model_copy(update=parts)
 
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
-        self.change_data_set(data_set, networks=(DataSetNetwork(name=f"network-{data_set}", is_quiet=True),))
+        self.change_data_set(product, lane, data_set, networks=(DataSetNetwork(name=f"network-{data_set}", is_quiet=True),))
         self.record(f"network {data_set}")
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
-        self.change_data_set(data_set, volumes=(f"volume-{data_set}",))
+        self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",))
         self.record(f"volume {data_set}")
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None:
-        self.change_data_set(data_set, databases=(DataSetDatabase(container=f"database-{data_set}", state=InstanceState.RUNNING),))
+        database = DataSetDatabase(container=f"database-{data_set}", state=InstanceState.RUNNING)
+        self.change_data_set(product, lane, data_set, databases=(database,))
         self.record(f"database {data_set} on {network} and {volume} from {server.image}")
 
     def start_database(self, container: str) -> None:

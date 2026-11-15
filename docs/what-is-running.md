@@ -21,7 +21,7 @@ Only containers carrying `launchplane.product` are listed. Any other container o
 
 ## The answer
 
-Each instance has `product`, `lane`, `build`, `container`, `state`, `data_set` and `receives_visitors_for`. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
+Each instance has `product`, `lane`, `build`, `container`, `state`, `is_quiet`, `data_set` and `receives_visitors_for`. `is_quiet` is whether every network its container is attached to is quiet (see [the quiet network](data-sets.md#the-quiet-network)). A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
 
 | `state` | Docker's states |
 | --- | --- |
@@ -30,7 +30,7 @@ Each instance has `product`, `lane`, `build`, `container`, `state`, `data_set` a
 | `restarting` | `restarting` |
 | `stopped` | `created`, `exited`, `dead`, `removing` |
 
-Each job has `product`, `lane`, `build`, `container`, `state` and `instance`, the container of its instance's web part. Each data set has `product`, `lane`, `data_set`, `network_is_quiet` (`null` when its network is missing), `has_volume`, `database_container` and `database_state` (both `null` when its server is missing), each read as it is on the host.
+Each job has `product`, `lane`, `build`, `container`, `state`, `is_quiet` and `instance`, the container of its instance's web part. Each data set has `product`, `lane`, `data_set`, and the lists `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container` and `state`), each part read as it is on the host. A data set should have one of each; an empty list is a missing part and two are two.
 
 Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance, a job or a data set on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
 

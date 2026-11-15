@@ -44,7 +44,6 @@ DESCRIPTION = {
 DESCRIPTION_FILE = f"/var/lib/launchplane/products/{PRODUCT}.json"
 LISTENER = "test-bed-call-listener"
 LISTENER_PORT = 8099
-LISTENER_IMAGE = "python:3.15-alpine"
 CONTROL_HOST_NAME = "launchplane.shiny"
 OUTSIDE_ADDRESS = "1.1.1.1"
 
@@ -64,7 +63,7 @@ def call_out_url() -> str:
 
 def pretend_product_archive() -> bytes:
     archive = io.BytesIO()
-    with tarfile.open(fileobj=archive, mode="w") as tar:
+    with tarfile.open(fileobj=archive, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         for name in ("Dockerfile", "app.py"):
             tar.add(PRETEND_PRODUCT / name, arcname=name)
     return archive.getvalue()
@@ -77,9 +76,7 @@ def build_pretend_product(tag: str, version: str) -> None:
 
 def start_listener() -> None:
     on_scratch(f"docker rm --force {LISTENER} >/dev/null 2>&1 || true")
-    on_scratch(
-        f"docker run --detach --name {LISTENER} --publish {LISTENER_PORT}:8000 {LISTENER_IMAGE} python -u -m http.server 8000"
-    )
+    on_scratch(f"docker run --detach --name {LISTENER} --publish {LISTENER_PORT}:8000 {BUILD_A} python -u -m http.server 8000")
 
 
 def calls_heard() -> str:
