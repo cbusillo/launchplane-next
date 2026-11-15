@@ -8,9 +8,13 @@ Retiring a lane that holds data is not decided. Chris decides what happens to th
 
 ## What it does
 
-1. It waits until the proxy has loaded the lane's route as the routes file writes it, the same wait as the move (see [the move](the-move.md)).
-2. If the proxy sends the name to a copy, it removes that route and waits until the proxy reports the route gone. Every other name is written as the proxy has loaded it.
-3. It retires every copy of the lane, in name order: Docker sends the stop signal, waits up to 30 s, then removes the copy.
+Like the move, it reads again before every step and decides the next step from what it read and what this call has done (see [the move](the-move.md)). The next step is the first of these that applies:
+
+1. If the proxy is not running, start it.
+2. If the lane's routes file and the proxy disagree about which copy the name goes to, wait until the proxy has loaded the file, the same wait as the move. A route the proxy reports as disabled or with a warning still counts as loaded, so a lane with a disabled route is retired like any other.
+3. If the lane's routes file sends the name to a copy, delete that file. The next read sees the file and the proxy disagree, so step 2 waits until the proxy reports the route gone. No other lane's file is touched.
+4. Retire a copy of the lane, the first in name order: Docker sends the stop signal, waits up to 30 s, then removes the copy.
+5. Answer with the route removed and the copies retired in this call.
 
 The name goes first so that no new request reaches a copy that is stopping. Stopping the copies first would leave the name sending requests to a copy that refuses them.
 
@@ -29,14 +33,13 @@ The proxy and the host show what is left, so asking again finishes the job. Meas
 
 ## Measured
 
-- Retiring a lane of one idle nginx copy takes 2.47 to 2.52 s, mostly Traefik loading the route change. Asking again takes 0.10 s.
+- Retiring a lane of one idle nginx copy takes 2.06 to 2.14 s, mostly Traefik loading the route change. Asking again takes 0.07 s.
 - With a 5 s request in flight, the page's poll sees the name gone and the copy still there, then the copy gone. The request answers 200 with its whole body.
 
 ## Known and not fixed
 
-- **Retiring can erase another lane's switch that is written but not yet loaded.** Removing a route rewrites the routes file the way a move does, writing every other name as the proxy has loaded it. This is the same entry as in [the move](the-move.md#known-and-not-fixed), with the same reason it is not fixed: the name always points at one copy, and asking for that lane again repairs it. Comes back at the first step with two real lanes. One routes file per lane would remove it.
-- **A name of another lane that points at the retiring lane's copy is left pointing at nothing.** Retiring removes only the lane's own name, then removes the copy. Not fixed: Launchplane only ever points a lane's name at a copy of that lane, so this needs a route nobody wrote through Launchplane. Comes back if one name can ever be sent to another lane's copy, for example to share a copy between lanes.
-- **Changes the unit tests do not catch.** Each of these leaves every unit test passing: removing the lock that retiring shares with the move, removing the wait for the lane's written route to load before the route is read, answering a host or proxy failure with `200` instead of `503`, and undoing the page's wording for a running copy that does not answer with success. Not fixed: only watching the page catches the wording, and nothing catches the `200`. The first two need two calls at once or a crash at one moment, which the fakes do not model. Comes back when one of them breaks without a test noticing, or when the API or the page gets a test of its own.
+- **A name of another lane that points at the retiring lane's copy is left pointing at nothing.** Retiring removes only the lane's own name, then removes the copy. A lane writes only its own file and only ever points its name at a copy of that lane, but that is not enough to rule it out: move `a-b/c`, remove its container by hand and leave its route, then move `a/b-c` and get the same random suffix. The new copy of `a/b-c` takes the container name `a-b-c-<suffix>` that `c.a-b.test` still names. Not fixed: it needs a container removed by hand and the same 48 random bits drawn again, which is improbable. Comes back if names get shorter, or if one name can ever be sent to another lane's copy, for example to share a copy between lanes.
+- **Changes the unit tests do not catch.** Each of these leaves every unit test passing: removing the lock that retiring shares with the move; ignoring a failed `rm` or `mv` of a lane's routes file; accepting a copy address on any port in the proxy's loaded routes; removing the wait for the proxy to answer after starting it; and undoing the page's wording for a running copy that does not answer with success. Not fixed: the lock needs two calls at once; an ignored `rm` or `mv` leaves the file as it was, so the call takes the same step again until it stops at 50 steps with `503`, with a less direct error; a route on another port could only come from a file Launchplane did not write, and the lane's own file is checked exactly; without the startup wait, the first read of a proxy just started fails and the call answers `503`, and asking again works; only watching the page catches the wording. Comes back when one of them breaks without a test noticing, when two Launchplane calls can run at once, or when the page gets a test of its own.
 
 ## On the test bed
 

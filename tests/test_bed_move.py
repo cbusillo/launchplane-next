@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from launchplane.name_switch import PROXY_NAME, ROUTES_FILE, STAGED_ROUTES_FILE, routes_file
+from launchplane.proxy import PROXY_NAME, route_file_of, route_text, staged_route_file_of
 from tests.bed import SCRATCH_ADDRESS, ask, kill_launchplane, move_lane, needs_test_bed, on_scratch, retire, wait_for
 
 pytestmark = needs_test_bed
@@ -69,11 +69,8 @@ def request_loop() -> Generator[RequestLoop]:
 
 
 def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:
-    status, body = ask("/running")
-    assert status == 200, body
-    loaded = {entry["name"]: entry["sends_to"] for entry in body["names"] if entry["sends_to"]}
-    staged = f"docker exec -i {PROXY_NAME} sh -c 'cat > {STAGED_ROUTES_FILE} && mv {STAGED_ROUTES_FILE} {ROUTES_FILE}'"
-    on_scratch(staged, given=routes_file(loaded | {NAME: copy_name}))
+    staged, written = staged_route_file_of(NAME), route_file_of(NAME)
+    on_scratch(f"docker exec -i {PROXY_NAME} sh -c 'cat > {staged} && mv {staged} {written}'", given=route_text(NAME, copy_name))
 
 
 def lane_copies() -> dict[str, dict[str, Any]]:
