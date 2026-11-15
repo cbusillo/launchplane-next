@@ -22,12 +22,16 @@
   [data-health=bad] { color: var(--bad); }
   [data-row] { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; }
   [data-label] { min-width: 7rem; color: var(--muted); }
+  [data-container] { font-size: .8rem; margin-left: 7.75rem; overflow-wrap: anywhere; }
+  #last-failure { border-left: 3px solid var(--bad); padding-left: .5rem; margin: 0 0 1rem; }
+  #last-failure button { margin-left: .5rem; }
   [data-tag] { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
 </style>
 </head>
 <body>
 <h1>What is running</h1>
 <p id="reading">Reading the host…</p>
+<p id="last-failure" hidden><span id="last-failure-text"></span><button id="dismiss-failure" type="button">Dismiss</button></p>
 <main id="lanes"></main>
 <script>
 "use strict";
@@ -38,7 +42,11 @@ const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
 const lanes = document.getElementById("lanes");
+const lastFailureLine = document.getElementById("last-failure");
+const lastFailureText = document.getElementById("last-failure-text");
 let lastGoodReadAt = null;
+/** @type {?{at: string, text: string}} */
+let lastFailure = null;
 
 /**
  * @param {string} tag
@@ -72,21 +80,16 @@ function row(label, ...values) {
   return element("div", { "data-row": "" }, element("span", { "data-label": "" }, label), ...values);
 }
 
-/** @param {Instance} instance */
-function visitors(instance) {
-  return instance.receives_visitors_for ? "visitors are sent here" : "no visitors are sent here";
-}
-
 /**
  * @param {Instance} instance
  * @param {number} index
  */
 function instanceItem(instance, index) {
   const state = element("span", { "data-tag": "", ...health(instance.state === "running") }, instance.state);
-  const item = element("li", {}, row(`Instance ${index + 1}`, state, element("span", {}, visitors(instance))));
-  item.append(row("Build", code(instance.build ?? "not marked")));
-  if (instance.lane === null) item.append(row("Container", code(instance.container)));
-  return item;
+  const heading = row(`Instance ${index + 1}`, state);
+  if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
+  const container = element("small", { "data-container": "" }, instance.container);
+  return element("li", {}, heading, container, row("Build", code(instance.build ?? "not marked")));
 }
 
 /**
@@ -162,6 +165,7 @@ function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
   reading.removeAttribute("role");
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
+  showLastFailure();
   const sections = answer.web_addresses.map((entry) =>
     laneSection(entry, answer.instances.filter((instance) => isOfLane(instance, entry)), answer.instances)
   );
@@ -171,7 +175,19 @@ function showRunning(answer) {
   lanes.replaceChildren(...sections);
 }
 
+function showLastFailure() {
+  lastFailureLine.hidden = lastFailure === null;
+  if (lastFailure) lastFailureText.textContent = `A read failed at ${clockTime(lastFailure.at)}: ${lastFailure.text}`;
+}
+
+function dismissFailure() {
+  lastFailure = null;
+  showLastFailure();
+}
+
 function showProblem(text) {
+  lastFailure = { at: new Date().toISOString(), text };
+  lastFailureLine.hidden = true;
   const since = lastGoodReadAt
     ? `It last could at ${clockTime(lastGoodReadAt)}, ${Math.round((Date.now() - Date.parse(lastGoodReadAt)) / 1000)} s ago.`
     : "It has not read the host since this page opened.";
@@ -196,6 +212,7 @@ async function keepReading() {
   setTimeout(keepReading, READ_EVERY_MS);
 }
 
+document.getElementById("dismiss-failure").addEventListener("click", dismissFailure);
 keepReading();
 </script>
 </body>
