@@ -24,9 +24,11 @@ The web part and the job are given what they need to reach their database in lib
 
 ## The password
 
-Each data set's database is made with its own password, 32 random bytes, drawn by Launchplane at the moment it makes the database server. Launchplane stores nothing. The password lives on the host with the data set: in the database server container's environment, as `POSTGRES_PASSWORD`, which the PostgreSQL image reads when it first makes the database. When Launchplane starts a web part or a job on that data set, it reads the password from the database server container it read for that data set, and gives it to the new container as `PGPASSWORD`. A database with no password stops the start with `503` saying so, and names no password.
+A data set's password lives with its data. It is 32 random bytes, drawn by Launchplane and written once to the file `launchplane-password` at the top of the data set's own volume, readable only by its owner, before the database server first starts. The PostgreSQL image is told where the file is with `POSTGRES_PASSWORD_FILE` and reads it when it first makes the database. Launchplane stores nothing, and the database server's own environment holds only the file's place: its label `launchplane.password-file` says where.
 
-Anyone who can run `docker inspect` on the scratch container can read it, as they can read the data itself. Inside the database server's own container, connections over its local socket need no password, as the PostgreSQL image sets up; only `docker exec` reaches that socket, and the tests read the job's beats that way.
+The password is read from there every time it is needed. When Launchplane starts a web part or a job on a data set, it reads the file through the database server it read for that data set and gives the password to the new container as `PGPASSWORD`. A database server that is made, or started after being stopped, is first given a password only if its volume keeps none. So a server removed by hand is made again on the kept volume with the password the kept data already accepts, and a copy of the volume carries its password with it. A database whose data keeps no password stops the start with `503` saying so, and names no password.
+
+Anyone who can read the volume on the scratch container can read the password, as they can read the data itself, and `docker inspect` of a web part or job shows it. Inside the database server's own container, connections over its local socket need no password, as the PostgreSQL image sets up; only `docker exec` reaches that socket, and the tests read the job's beats that way.
 
 ## No secret leaves Launchplane
 
@@ -34,10 +36,14 @@ A secret is anything Launchplane has given to a container on the host that must 
 
 So everything that leaves passes through one boundary, in `src/launchplane/secret_boundary.py`, and nothing is cleaned anywhere else:
 
-- **Every answer of the API**: `/running`, a move, a retirement, each with any status, the page, and the refusals FastAPI writes itself. The boundary is around the whole application, not inside the calls, so a new call is behind it without being told. Each secret is replaced with `[a secret Launchplane gave this lane, removed]`. A JSON answer is cleaned value by value and written again, so a secret that JSON would write differently, such as one holding a quote, is still found.
+- **Every answer of the API**: `/running`, a move, a retirement, each with any status, the page, and the refusals FastAPI writes itself. The boundary is around the whole application, not inside the calls, so a new call is behind it without being told. The answer's headers pass through it as well as its body, so a redirect that repeats the address asked for is cleaned too. Each secret is replaced with `[a secret Launchplane gave this lane, removed]`. A JSON answer is cleaned name by name and value by value and written again, so a secret that JSON would write differently, such as one holding a quote, is still found.
 - **Every line of the service's log**, whichever library wrote it: uvicorn's lines, a traceback, a warning from the Docker client. Each handler cleans the whole line it is about to write, message, arguments and traceback together. A line that cannot be written is not repeated by the logging library, which would print it uncleaned.
 
-What the secrets are is read from the host, before each answer is made. Every container Launchplane gives a secret to carries the label `launchplane.secret-variables`, naming the environment variables that hold one: `POSTGRES_PASSWORD` on a database server, `PGPASSWORD` on a web part and a job. Launchplane reads those variables from every container with the label, running or stopped. A password is therefore known for as long as anything holds it: removing the database server hides nothing while a web part or job still has the password. Launchplane also keeps, in memory only, every secret it has read or given out since it started, so text read from a container stays cleaned after that container is gone. A log line is cleaned with these and does not read the host.
+What the secrets are is read from the host, before each answer is made, from whatever holds them: each data set's password from the file on its volume, through its database server, and from the environment of every web part and job, which carry the label `launchplane.secret-variables` naming the variables that hold one (`PGPASSWORD`). A password is therefore known for as long as anything holds it: removing the database server hides nothing while a web part or job still has the password, and removing those hides nothing while the data is there.
+
+Launchplane also keeps, in memory only, every secret it has read or given out since it started. Keeping the password with the data does not remove the need for that, for two reasons. A line of the log is cleaned as it is written, on the thread that serves every request, and reading the host there would stop Launchplane answering while the host is slow; so a log line is cleaned with what has been read. And a volume can only be read through a container that has it mounted: in the moment a database server has been removed by hand and nothing else holds the password, the file cannot be read, while text read earlier in the same call may still carry it.
+
+Cleaning never removes the explanation of a failure. Only the secret is replaced, and everything around it is answered as it was.
 
 When the secrets cannot be read, no answer is made: the call answers `503` saying so, with the reason, before anything is read or moved. The one exception is the page itself, a file of Launchplane's own that is made without reading anything, so it still opens and can say the host cannot be read. An answer of Docker's that does not have the expected shape is reported by where it is wrong, never by repeating what Docker answered, because that may be a container's environment.
 
@@ -53,7 +59,7 @@ Everything is tied by labels and by networks, never by container names. Identifi
 | --- | --- | --- |
 | Data set network | `launchplane-data-<data set>` | product, lane, `launchplane.data-set` |
 | Database volume | `launchplane-data-<data set>-database` | the same |
-| Database server | `<product>-<lane>-database-<data set>` | the same, `launchplane.part=database`, and `launchplane.secret-variables` |
+| Database server | `<product>-<lane>-database-<data set>` | the same, `launchplane.part=database`, and `launchplane.password-file` |
 | Web part of an instance | `<product>-<lane>-<12 hex>` | product, lane, build, `launchplane.part=web`, `launchplane.data-set`, and `launchplane.secret-variables` |
 | Job part of an instance | `<web part's container>-job` | product, lane, build, data set, `launchplane.part=job`, `launchplane.instance=<web part's container>`, and `launchplane.secret-variables` |
 
@@ -69,7 +75,7 @@ Every network an instance is attached to is made with Docker's internal mode and
 
 The proxy is the one way in. It is attached to the lanes network and to `launchplane-proxy-outside`, a plain bridge network through which its port 80 is published.
 
-Launchplane reads every network's mode, and every network each container is attached to, each time it reads the host. A web part, job or database attached to any network that is not quiet, or to any network other than its own, is not as it must be (see below) and is shown as `can reach out` when it can. Launchplane also refuses to attach anything to a `launchplane-lanes` that is not quiet.
+Launchplane reads every network's mode, and every network each container is attached to, each time it reads the host. A web part, job or database attached to any network that is not quiet, or to any network other than its own, is not as it must be (see below). Launchplane also refuses to attach anything to a `launchplane-lanes` that is not quiet.
 
 No instance is given a way out yet. When the instance of a release may reach outside services, and how it avoids sending mail or taking payments twice, is Chris's question (README, open question 3).
 
@@ -79,7 +85,7 @@ The move reads, decides one step, takes it and reads again, as in [the move](the
 
 ### What is read
 
-Before every step, the move reads the whole lane from the host: each web part and job with every network it is attached to and its state; each job with how long it has been running by Docker's own clock, or no time at all if it is not running, is restarting or is paused; every network, volume and database server carrying the lane's data set labels, two being two; each database's networks and state, and whether it accepts connections, asked with `pg_isready` at that moment; and whether each network on the host is quiet. Nothing is reduced to a yes or no before the move decides.
+Before every step, the move reads the whole lane from the host: each web part and job with every network it is attached to, everything it has mounted and its state; each job with how long it has been running by Docker's own clock, or no time at all if it is not running, is restarting or is paused; every network, volume and database server carrying the lane's data set labels, two being two; each database's networks, mounts and state, and whether it accepts connections, asked with `pg_isready` at that moment; and whether each network on the host is quiet. Nothing is reduced to a yes or no before the move decides.
 
 A read is several questions to Docker, and the host can change between them. A job that was listed and has gone before it is described, or a database listed as running that is gone, stopped, paused or restarting when it is asked, is the host changing during the read, not a host that cannot be read. The whole host is then read again, three times at most, and what is there the last time is judged. A host that changes during all three answers `503` saying so. A host that cannot be reached, or any other refusal, is an error at once. `/running` reads the same way.
 
@@ -89,14 +95,14 @@ Docker reports a container waiting out its restart back-off as `Running`. Launch
 
 One function, `lane_problems` in `src/launchplane/decide.py`, says from that reading whether the lane is as it must be for the build asked for:
 
-- the instance the web address sends visitors to runs that build, is running, carries the data set it runs against, and is attached to exactly the lanes network and its data set's network, both quiet;
-- the data set has exactly one network, one volume and one database server; the network is quiet; the server is running, accepts connections, and is attached to exactly the data set's network;
-- the lane has exactly one job, belonging to that instance, running the same build, running for at least 3 s, attached to exactly the data set's network;
+- the instance the web address sends visitors to runs that build, is running, carries the data set it runs against, is attached to exactly the lanes network and its data set's network, both quiet, and has nothing mounted;
+- the data set has exactly one network, one volume and one database server; the network is quiet; the server is running, accepts connections, is attached to exactly the data set's network, and has exactly the data set's volume mounted and nothing else, whatever its labels say;
+- the lane has exactly one job, belonging to that instance, running the same build, running for at least 3 s, attached to exactly the data set's network, with nothing mounted;
 - no other instance runs in the lane.
 
 The judge is asked before anything is started or switched, not only before success is answered:
 
-- **Before anything in a data set is made or started.** The rules for a data set mark which problems a step of the move puts right: a missing network, volume or server, a server that is stopped, a server that does not yet accept connections. Every other problem stops the move with `503` before any step is taken on that data set. A stopped server attached to an outside network is therefore refused while still stopped. The step taken is chosen only once every problem found is one a step puts right, and an instance or job is started on a data set only when the judge finds nothing wrong with it.
+- **Before anything in a data set is made or started.** The rules for a data set mark which problems a step of the move puts right: a missing network, volume or server, a server that is stopped, a server that does not yet accept connections. Every other problem stops the move with `503` before any step is taken on that data set. A stopped server attached to an outside network is therefore refused while still stopped, and so is one with another volume mounted. The step taken is chosen only once every problem found is one a step puts right, and an instance or job is started on a data set only when the judge finds nothing wrong with it.
 - **Before the web address is pointed at a new instance.** After the check, the lane is read again and the same function is asked about the lane as it will be: the rules for the instance and for the data set it runs against, and one more, that it runs against the same data set as the instance receiving visitors now. The rules for the job and for other instances are left out there, because the old instance and its job are still present until the switch has loaded, and the steps after it replace them. An instance given an outside network during its check is not switched to, nor one on another data set.
 - **Before success is answered.** A move answers `switched`, `unchanged` or `cleaned up` only when the function, asked after the move's last step, finds nothing. If it finds something the steps below cannot put right, the move answers `503` with what it found and what it changed.
 
@@ -108,12 +114,12 @@ For a product with a database, the next step is the first that applies, after th
 2. Retire every job that does not belong to the instance receiving visitors, one per step.
 3. If the instance receiving visitors is as an instance must be, settle the lane:
    1. Make its data set ready (see 7). A serving lane is not answered `unchanged` over a database that is stopped or does not accept connections.
-   2. Retire its job if it has two, if one is attached to anything but its data set's network, or if it is not running and was not started in this call. Start a job if it has none. Wait on a job that has run less than 3 s, whoever started it, so a move retried after a crash between starting the job and watching it watches it. A job that does not stay up 3 s answers `job failed` with `422` and its last log lines; by then the web address has moved, because the new job may start only once the old one has stopped.
+   2. Put the job right, by the judge's own rules for it: each rule says what a step does about it, so there is one list and not a second for choosing steps. Retire a job if the lane has two, if it belongs to another instance or runs another build, if it is attached to anything but its data set's network or has anything mounted, or if it is not running and was not started in this call. Start a job if the lane has none. Wait on a job that has run less than 3 s, whoever started it, so a move retried after a crash between starting the job and watching it watches it. A job that does not stay up 3 s answers `job failed` with `422` and its last log lines; by then the web address has moved, because the new job may start only once the old one has stopped.
    3. Retire every other instance of the lane, then ask whether the lane is as it must be.
 4. Choose the data set: the one the instance receiving visitors uses; else the lane's only data set; else a fresh one. A lane with two or more data sets and no instance receiving visitors stops with `503` and changes nothing.
 5. Retire any instance that is neither receiving visitors nor the instance to switch to. A left-over instance is switched to only if it is as an instance must be and on the chosen data set.
 6. Make the data set ready (see 7), whether or not an instance to switch to already exists.
-7. To make a data set ready, first stop with `503` if it has any problem no step puts right: two of any part carrying its labels, a network that is not quiet, a server that is restarting or paused, or a server attached to any network but its data set's. Then take the first that applies: make its network; make its volume; make its database server on that network and volume; start a stopped server by the name it was read under; wait until a server read as not accepting connections does (up to 60 s).
+7. To make a data set ready, first stop with `503` if it has any problem no step puts right: two of any part carrying its labels, a network that is not quiet, a server that is restarting or paused, a server attached to any network but its data set's, or a server with anything mounted but its data set's volume. Then take the first that applies: make its network; make its volume; make its database server on that network and volume; start a stopped server by the name it was read under; wait until a server read as not accepting connections does (up to 60 s).
 8. If there is an instance to switch to, check it at the product's health path, read again, and point the web address at it only if the judge finds the lane fit to switch to it. Otherwise start the instance on the data set.
 
 Only one instance's job runs at a time: the old instance's job stops once the web address has moved, then the new instance's job starts, then the old instance retires. Between the two jobs no job runs: measured at 0.50 and 0.55 s, from the old job's last beat to the new job's first.
@@ -139,7 +145,9 @@ The data set is deleted only once the lane has no job and no instance left: ever
 
 ## The page
 
-Each lane shows its data sets under its web address: `Data set <id>  database running`, with a red line for a missing network, volume or server, two of any of them, or a network that is not quiet. Each instance shows its data set and, when it has one, its job's state. An instance or job attached to a network that is not quiet is tagged `can reach out`. A job whose instance is gone is listed as `Job with no instance`. A lane with only a data set left still has its section, so a kept data set is never out of sight.
+The page works out no verdict of its own. `/running` answers, for every lane, what the judge finds wrong with it: the same function a move asks, about the build the lane's active instance runs, with the lane's databases asked whether they accept connections, and the rules for a data set asked of any data set the active instance does not use. The page shows each finding as a red line under the lane's web address, in the judge's words, and nothing when there is none. A lane whose product description cannot be read shows that error as its finding. During a move the findings are those of that moment, such as a second instance beside the active one or a job that has not yet stayed up 3 s, and they go when the move ends.
+
+Each lane also lists its data sets, `Data set <id>  database running`, and each instance its data set and, when it has one, its job's state. A job whose instance is gone is listed as `Job with no instance`. A lane with only a data set left still has its section, so a kept data set is never out of sight.
 
 ## On the test bed
 

@@ -108,6 +108,15 @@ def parts_of(on_host: OnHost) -> list[PartOfLane]:
     return [*on_host.instances, *on_host.jobs, *on_host.data_sets]
 
 
+def lanes_on(on_host: OnHost) -> list[tuple[str, str]]:
+    lanes: set[tuple[str, str]] = set()
+    for part in parts_of(on_host):
+        lane = part.lane
+        if lane is not None:
+            lanes.add((part.product, lane))
+    return sorted(lanes)
+
+
 def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning | LaneRoute) -> LaneSeen:
     return LaneSeen(
         instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
@@ -169,7 +178,7 @@ class Lanes:
             )
 
         on_host = self.host.read(server_of)
-        lanes = sorted({(part.product, part.lane) for part in parts_of(on_host) if part.lane is not None})
+        lanes = lanes_on(on_host)
         return Judged(on_host, [verdict_on(on_host, product, lane, routes, description_of(product)) for product, lane in lanes])
 
     def move(self, target: LaneBuild) -> MoveResult:

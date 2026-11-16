@@ -15,6 +15,7 @@ A container marks itself with labels, set when it is created:
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a job, the container of its instance's web part |
 | `launchplane.secret-variables` | on a container given a secret, the environment variables that hold one, separated by commas |
+| `launchplane.password-file` | on a database server, where on its volume the data set's password is kept |
 
 Data set networks and volumes carry the product, lane and data set labels too (see [a lane with a database](data-sets.md)). An instance is its web part; its job and its data set's server are not listed as instances.
 
@@ -22,7 +23,7 @@ Only containers carrying `launchplane.product` are listed. Any other container o
 
 ## The answer
 
-Each instance has `product`, `lane`, `build`, `container`, `state`, `networks`, `data_set` and `receives_visitors_for`. `networks` lists every network its container is attached to. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
+Each instance has `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set` and `receives_visitors_for`. `networks` lists every network its container is attached to, and `mounts` everything it has mounted, each with `source` (a volume's name, or a folder of the host) and `path`. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
 
 | `state` | Docker's states |
 | --- | --- |
@@ -31,11 +32,11 @@ Each instance has `product`, `lane`, `build`, `container`, `state`, `networks`, 
 | `restarting` | `restarting` |
 | `stopped` | `created`, `exited`, `dead`, `removing` |
 
-Each job has `product`, `lane`, `build`, `container`, `state`, `networks`, `running_for_seconds` (by Docker's clock; `null` unless it is running and not restarting or paused) and `instance`, the container of its instance's web part. Each data set has `product`, `lane`, `data_set`, and the lists `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks` and `accepts_connections`, which `/running` does not ask and leaves `null`), each part read as it is on the host. A data set should have one of each; an empty list is a missing part and two are two.
+Each job has `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `running_for_seconds` (by Docker's clock; `null` unless it is running and not restarting or paused) and `instance`, the container of its instance's web part. Each data set has `product`, `lane`, `data_set`, and the lists `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts` and `accepts_connections`, asked at that moment of a running server whose product's description names a database, and `null` otherwise), each part read as it is on the host. A data set should have one of each; an empty list is a missing part and two are two.
 
 Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance, a job or a data set on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
 
-- `200` with `instances`, `jobs`, `data_sets`, `networks` (every network on the host, with `name` and `is_quiet`) and `web_addresses`: the host was read. An empty list means the host answered and nothing marked is on it.
+- `200` with `instances`, `jobs`, `data_sets`, `networks` (every network on the host, with `name` and `is_quiet`), `web_addresses` and `lanes` (for every lane on the host, `product`, `lane` and `problems`, what the judge finds wrong with it; see [the page](data-sets.md#the-page)): the host was read. An empty list means the host answered and nothing marked is on it.
 - `503` with `error`: the host or the proxy could not be read, an answer did not have the expected shape, or the host changed during three reads in a row (see [what is read](data-sets.md#what-is-read)). The error carries the real cause. It never answers "nothing is running".
 
 Both carry `read_at`, the moment the host was asked. The one `503` without it is the answer made when Launchplane could not read which secrets it has given out: nothing was read for it, and it has only `error` (see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane)).
