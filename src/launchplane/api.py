@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from launchplane.act import Judged, Lanes, Stopped, lanes_on
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError, OnHost
-from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob, web_address_of
+from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningBackgroundService, RunningInstance, web_address_of
 from launchplane.judge import LaneVerdict
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
@@ -54,7 +54,7 @@ class WebAddressAnswer(BaseModel):
 class RunningAnswer(BaseModel):
     read_at: datetime
     instances: list[InstanceAnswer]
-    jobs: list[RunningJob]
+    background_services: list[RunningBackgroundService]
     data_sets: list[DataSet]
     networks: list[HostNetwork]
     web_addresses: list[WebAddressAnswer]
@@ -211,7 +211,7 @@ def create_app(
         return RunningAnswer(
             read_at=read_at,
             instances=instance_answers(on_host.instances, routes),
-            jobs=on_host.jobs,
+            background_services=on_host.background_services,
             data_sets=on_host.data_sets,
             networks=on_host.networks,
             web_addresses=web_addresses,
@@ -229,7 +229,7 @@ def create_app(
             return NotFinished(
                 error=f"The move of {lane} of {product} to {request.build} stopped, and is safe to ask again: {error}"
             )
-        if result.outcome in {Outcome.CHECK_FAILED, Outcome.JOB_FAILED}:
+        if result.outcome in {Outcome.CHECK_FAILED, Outcome.BACKGROUND_SERVICE_FAILED}:
             response.status_code = HTTPStatus.UNPROCESSABLE_CONTENT
         return result
 

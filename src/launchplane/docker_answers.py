@@ -10,7 +10,15 @@ import requests
 from docker.errors import DockerException
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from launchplane.instance import DataSet, DataSetDatabase, HostNetwork, InstanceState, Mount, RunningInstance, RunningJob
+from launchplane.instance import (
+    DataSet,
+    DataSetDatabase,
+    HostNetwork,
+    InstanceState,
+    Mount,
+    RunningBackgroundService,
+    RunningInstance,
+)
 
 PRODUCT_LABEL = "launchplane.product"
 LANE_LABEL = "launchplane.lane"
@@ -23,7 +31,7 @@ QUIET_GATEWAY_MODE = "isolated"
 MOST_READS = 3
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
-type Part = Literal["web", "job", "database"]
+type Part = Literal["web", "background-service", "database"]
 
 INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
     "created": InstanceState.STOPPED,
@@ -68,7 +76,7 @@ def read_whole[Read](read_once: Callable[[], Read], address: str) -> Read:
 @dataclass(frozen=True)
 class OnHost:
     instances: list[RunningInstance]
-    jobs: list[RunningJob]
+    background_services: list[RunningBackgroundService]
     data_sets: list[DataSet]
     networks: list[HostNetwork] = field(default_factory=list[HostNetwork])
 
@@ -182,7 +190,7 @@ def required_label(labels: dict[str, str], label: str, what: str) -> str:
 
 def part_of(summary: DockerContainerSummary) -> Part:
     part = summary.labels.get(PART_LABEL, "web")
-    if part not in ("web", "job", "database"):
+    if part not in ("web", "background-service", "database"):
         raise ContainerHostError(f"The container {summary.name} is marked as the part {part}, which Launchplane does not know.")
     return part
 
@@ -223,10 +231,14 @@ def running_for(details: DockerContainerDetails, now: datetime) -> float | None:
     return (now - details.state.started_at).total_seconds()
 
 
-def job_from(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails], now: datetime) -> RunningJob:
+def background_service_from(
+    summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails], now: datetime
+) -> RunningBackgroundService:
     if summary.name not in details:
-        raise ContainerHostError(f"Docker listed the job {summary.name} but did not describe it, so how long it has run is unknown.")
-    return RunningJob(
+        raise ContainerHostError(
+            f"Docker listed the background service {summary.name} but did not describe it, so how long it has run is unknown."
+        )
+    return RunningBackgroundService(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
         lane=summary.labels.get(LANE_LABEL),
         build=summary.labels.get(BUILD_LABEL),
@@ -299,12 +311,12 @@ class HostAnswers:
     containers: object
     networks: object
     volumes: object
-    job_details: list[object] = field(default_factory=list[object])
+    background_service_details: list[object] = field(default_factory=list[object])
     system: object = None
 
 
-def job_details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
-    described = [checked(DOCKER_CONTAINER_DETAILS, answer, "description of a job") for answer in answers]
+def background_service_details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
+    described = [checked(DOCKER_CONTAINER_DETAILS, answer, "description of a background service") for answer in answers]
     return {details.name.removeprefix("/"): details for details in described}
 
 
@@ -313,25 +325,25 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
     every_network = checked(DOCKER_NETWORK_LIST, answers.networks, "network list")
     volume_list = checked(DOCKER_VOLUME_LIST, answers.volumes, "volume list").volumes or []
     marked_networks = [network for network in every_network if PRODUCT_LABEL in (network.labels or {})]
-    by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "job": [], "database": []}
+    by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "background-service": [], "database": []}
     for summary in summaries:
         by_part[part_of(summary)].append(summary)
-    jobs: list[RunningJob] = []
-    if by_part["job"]:
+    background_services: list[RunningBackgroundService] = []
+    if by_part["background-service"]:
         now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
-        details = job_details_by_name(answers.job_details)
-        jobs = [job_from(summary, details, now) for summary in by_part["job"]]
+        details = background_service_details_by_name(answers.background_service_details)
+        background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
     return OnHost(
         instances=[instance_from(summary) for summary in by_part["web"]],
-        jobs=jobs,
+        background_services=background_services,
         data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
         networks=[network_from(network) for network in every_network],
     )
 
 
-def job_names(containers: object) -> list[str]:
+def background_service_names(containers: object) -> list[str]:
     summaries = checked(DOCKER_CONTAINER_LIST, containers, "container list")
-    return [summary.name for summary in summaries if part_of(summary) == "job"]
+    return [summary.name for summary in summaries if part_of(summary) == "background-service"]
 
 
 def tar_of(file_name: str, content: bytes, mode: int = 0o644) -> bytes:

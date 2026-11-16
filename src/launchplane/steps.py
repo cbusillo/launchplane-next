@@ -11,7 +11,7 @@ class Outcome(StrEnum):
     UNCHANGED = "unchanged"
     CLEANED_UP = "cleaned up"
     CHECK_FAILED = "check failed"
-    JOB_FAILED = "job failed"
+    BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
 class MoveResult(BaseModel):
@@ -27,6 +27,7 @@ class MoveResult(BaseModel):
 
 class RetireOutcome(StrEnum):
     RETIRED = "retired"
+    DELETED = "deleted"
     UNCHANGED = "unchanged"
 
 
@@ -112,7 +113,7 @@ class WriteRoute:
 
 
 @dataclass(frozen=True)
-class StartJob:
+class StartBackgroundService:
     target: LaneBuild
     instance: str
     use: DataSetUse | None
@@ -120,7 +121,7 @@ class StartJob:
 
 
 @dataclass(frozen=True)
-class AwaitJob:
+class AwaitBackgroundService:
     container: str
 
 
@@ -152,7 +153,7 @@ class CheckRefused:
 
 
 @dataclass(frozen=True)
-class JobRefused:
+class BackgroundServiceRefused:
     container: str
     report: str
 
@@ -179,10 +180,10 @@ type Action = (
     | AwaitDatabase
     | DeleteDataSet
     | StartInstance
-    | StartJob
+    | StartBackgroundService
     | Retire
     | RemoveInstance
     | Check
-    | AwaitJob
+    | AwaitBackgroundService
 )
-type Event = Action | CheckRefused | JobRefused
+type Event = Action | CheckRefused | BackgroundServiceRefused

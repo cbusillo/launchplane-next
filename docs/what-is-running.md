@@ -11,10 +11,10 @@ Only containers carrying `launchplane.product` are Launchplane's. Any other cont
 | `launchplane.product` | the product's name |
 | `launchplane.lane` | `production`, `testing`, or the preview's name |
 | `launchplane.build` | the build it runs |
-| `launchplane.part` | `web`, `job` or `database`; a container without it is `web` |
+| `launchplane.part` | `web`, `background-service` or `database`; a container without it is `web` |
 | `launchplane.data-set` | the data set it runs against or belongs to |
-| `launchplane.instance` | on a job, the container of its instance's web part |
-| `launchplane.secret-variables` | on a web part or job given a secret, the environment variables that hold one, separated by commas |
+| `launchplane.instance` | on a background service, the container of its instance's web part |
+| `launchplane.secret-variables` | on a web part or background service given a secret, the environment variables that hold one, separated by commas |
 | `launchplane.password-file` | on a database server, where on its volume the data set's password is kept |
 
 Data set networks and volumes carry the product, lane and data set labels too.
@@ -26,7 +26,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | Field | Each entry has |
 | --- | --- |
 | `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
-| `jobs` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
+| `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
 | `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`). An empty list is a missing part and two are two. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `error`. |
@@ -46,15 +46,17 @@ Data set networks and volumes carry the product, lane and data set labels too.
 `GET /` is one HTML file with its style and script inline. It loads nothing else and reads no host itself, so it opens even when the host cannot be read.
 
 - It asks `/running` once a second, each time after the last answer arrived, and gives up on one answer after 15 s.
-- Each lane shows its web address and whether it answers, the verdict on the lane, its data sets, and its instances with the active one first. Under each instance is its container's name.
+- Each lane's card starts with a row for its web address and whether it answers, and a row for its background service with its state and build. A lane with no background service has no such row. Two background services, or one that belongs to no instance of the lane, show as a fault on that row.
+- Below come the verdict on the lane, its instances with the active one first, each with its state, build and container name, and its data sets.
 - A build named by digest is shown as its image name and the first 12 characters of the digest. The full value is the tooltip.
-- A route to another lane's instance names that lane and the container, and a route to a container that is not on the host says so. Instances with no lane label are listed apart.
 - When Launchplane answers `503` or cannot be reached, the page shows the error. The last reading stays below it, faded, under `Not current: below is what was read at <time>.` Once a read succeeds again, one line with the last failure stays until dismissed.
 
 ## Known and not fixed
 
 - **A refusal from Docker inside the read of the secrets that comes from the Docker client's own follow-up question is not read again.** It answers `503`, and asking again works.
 - **The page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
+- **A marked container with no lane label and no route makes the page say nothing marked for Launchplane is on the host.** `/running` lists it.
+- **The page does not show an instance with no lane label, or where a route to another lane's instance goes.** `/running` answers both.
 - **No test loads the page or runs its script.** Chris watching the page is the check. Comes back when the page breaks without anyone noticing, or when there is a second page.
 
 ## Measured

@@ -14,7 +14,7 @@ class Database(BaseModel):
     image: str
 
 
-class Job(BaseModel):
+class BackgroundService(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     command: list[str] = Field(min_length=1)
@@ -25,7 +25,7 @@ class Product(BaseModel):
 
     health_path: str = Field(default="/", pattern=r"^/[^\s]*$")
     database: Database | None = None
-    job: Job | None = None
+    background_service: BackgroundService | None = None
 
 
 @dataclass(frozen=True)

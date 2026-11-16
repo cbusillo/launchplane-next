@@ -14,16 +14,17 @@
   #reading { color: var(--muted); margin: 0 0 1rem; }
   #reading[role=alert] { color: inherit; border: 2px solid var(--bad); border-radius: .5rem; padding: .75rem; }
   section { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; margin-bottom: 1rem; }
-  ul { list-style: none; padding: 0; margin: .5rem 0 0; }
-  li { border-top: 1px solid var(--line); padding: .5rem 0 0; margin-top: .5rem; }
   code { font-size: .9em; overflow-wrap: anywhere; }
   small { display: block; font-size: 1em; color: var(--muted); }
   [data-health=ok] { color: var(--ok); }
   [data-health=bad] { color: var(--bad); }
   [data-row] { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; }
   [data-row] > * { min-width: 0; }
-  [data-label] { min-width: 7rem; color: var(--muted); }
-  [data-container] { font-size: .8rem; padding-left: 7.75rem; }
+  [data-label] { min-width: 10rem; color: var(--muted); }
+  [data-build] { margin-left: auto; }
+  [data-parts] { border-top: 1px solid var(--line); margin-top: .5rem; padding: .5rem 0 0 1rem; }
+  [data-parts] > [data-row] + [data-row], [data-parts] > small + [data-row] { margin-top: .5rem; }
+  [data-container] { font-size: .8rem; padding-left: 10.75rem; }
   #not-current { font-weight: 600; margin: 0 0 .5rem; }
   main[data-not-current] { opacity: .55; }
   #last-failure { border-left: 3px solid var(--bad); padding-left: .5rem; margin: 0 0 1rem; }
@@ -40,11 +41,11 @@
 <script>
 "use strict";
 /** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], data_set: ?string, receives_visitors_for: ?string}} Instance */
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], running_for_seconds: ?number, instance: ?string}} Job */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], running_for_seconds: ?number, instance: ?string}} BackgroundService */
 /** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string, networks: string[]}[]}} DataSet */
 /** @typedef {{product: string, lane: string, problems: string[], release_under_way: string[], left_unfinished: string[], a_move_is_at_work: boolean}} Lane */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
-/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[], lanes: Lane[]}} Running */
+/** @typedef {{read_at: string, instances: Instance[], background_services: BackgroundService[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[], lanes: Lane[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -54,7 +55,6 @@ const DIGEST = /^sha256:([0-9a-f]{12})[0-9a-f]*$/;
 const lastFailureLine = document.getElementById("last-failure");
 const lastFailureText = document.getElementById("last-failure-text");
 let lastGoodReadAt = null;
-/** @type {Set<string>} */
 /** @type {?{at: string, text: string}} */
 let lastFailure = null;
 
@@ -109,27 +109,43 @@ function stateTag(state) {
   return element("span", { "data-tag": "" }, state);
 }
 
-/**
- * @param {Instance} instance
- * @param {number} index
- * @param {Job[]} jobs
- */
-function instanceItem(instance, index, jobs) {
-  const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
-  if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
-  const container = element("small", { "data-container": "" }, instance.container);
-  const item = element("li", {}, heading, container, row("Build", buildCode(instance.build)));
-  if (instance.data_set) item.append(row("Data set", code(instance.data_set)));
-  for (const job of jobs.filter((each) => each.instance === instance.container)) item.append(jobRow("Job", job));
-  return item;
+/** @param {?string} build */
+function buildTag(build) {
+  return element("span", { "data-build": "" }, "build ", buildCode(build));
 }
 
 /**
- * @param {string} label
- * @param {Job} job
+ * @param {Instance} instance
+ * @param {number} index
  */
-function jobRow(label, job) {
-  return row(label, stateTag(job.state));
+function instanceRows(instance, index) {
+  const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
+  if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
+  heading.append(buildTag(instance.build));
+  return [heading, element("small", { "data-container": "" }, instance.container)];
+}
+
+/**
+ * @param {BackgroundService[]} running
+ * @param {Instance[]} laneInstances
+ */
+function backgroundServiceFault(running, laneInstances) {
+  if (running.length > 1) return `${running.length} are on the host, and only one of a lane may run.`;
+  if (!laneInstances.some((instance) => instance.container === running[0].instance)) return "It belongs to no instance of this lane.";
+  return null;
+}
+
+/**
+ * @param {BackgroundService[]} running
+ * @param {Instance[]} laneInstances
+ */
+function backgroundServiceRows(running, laneInstances) {
+  if (!running.length) return [];
+  const fault = backgroundServiceFault(running, laneInstances);
+  const parts = running.flatMap((each) => [stateTag(each.state), buildTag(each.build)]);
+  const rows = [row("Background service", ...parts)];
+  if (fault) rows.push(element("small", health(false), fault));
+  return rows;
 }
 
 /** @param {DataSet} dataSet */
@@ -158,12 +174,6 @@ function verdictRows(verdict) {
   ];
 }
 
-/** @param {Job} job */
-function jobWithoutInstanceItem(job) {
-  const container = element("small", { "data-container": "" }, job.container);
-  return element("li", {}, jobRow("Job with no instance", job), container, row("Build", buildCode(job.build)));
-}
-
 /**
  * @param {Instance} first
  * @param {Instance} second
@@ -171,14 +181,6 @@ function jobWithoutInstanceItem(job) {
 function visitedFirst(first, second) {
   const byVisitors = Number(!first.receives_visitors_for) - Number(!second.receives_visitors_for);
   return byVisitors || first.container.localeCompare(second.container);
-}
-
-/**
- * @param {Instance[]} instances
- * @param {Job[]} jobs
- */
-function instanceList(instances, jobs) {
-  return element("ul", {}, ...instances.toSorted(visitedFirst).map((instance, index) => instanceItem(instance, index, jobs)));
 }
 
 /**
@@ -203,33 +205,22 @@ function webAddressRows(entry, allInstances) {
 }
 
 /**
- * @param {string} container
- * @param {Instance[]} allInstances
- */
-function routeElsewhere(container, allInstances) {
-  const instance = allInstances.find((each) => each.container === container);
-  const where = instance ? `, an instance of ${instance.product} · ${instance.lane ?? "no lane"}.` : ", which is not on the host.";
-  return element("small", {}, "The proxy sends it to the container ", code(container), where);
-}
-
-/**
  * @param {WebAddress} entry
  * @param {Running} answer
  */
 function laneSection(entry, answer) {
   const laneInstances = answer.instances.filter((instance) => isOfLane(instance, entry));
-  const laneJobs = answer.jobs.filter((job) => isOfLane(job, entry));
+  const running = answer.background_services.filter((each) => isOfLane(each, entry));
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A web address with no instance on the host";
   const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, answer.instances));
+  section.append(...backgroundServiceRows(running, laneInstances));
   const verdict = answer.lanes.find((lane) => isOfLane(lane, entry));
   if (verdict) section.append(...verdictRows(verdict));
-  for (const dataSet of answer.data_sets.filter((each) => isOfLane(each, entry))) section.append(dataSetRow(dataSet));
-  if (entry.sends_to_container && !laneInstances.some((instance) => instance.container === entry.sends_to_container)) {
-    section.append(routeElsewhere(entry.sends_to_container, answer.instances));
-  }
-  if (laneInstances.length) section.append(instanceList(laneInstances, laneJobs));
-  const jobsWithoutInstance = laneJobs.filter((job) => !laneInstances.some((instance) => instance.container === job.instance));
-  if (jobsWithoutInstance.length) section.append(element("ul", {}, ...jobsWithoutInstance.map(jobWithoutInstanceItem)));
+  const parts = [
+    ...laneInstances.toSorted(visitedFirst).flatMap(instanceRows),
+    ...answer.data_sets.filter((each) => isOfLane(each, entry)).map(dataSetRow),
+  ];
+  if (parts.length) section.append(element("div", { "data-parts": "" }, ...parts));
   return section;
 }
 
@@ -249,10 +240,6 @@ function showRunning(answer) {
   showLastFailure();
   markReadingCurrent();
   const sections = answer.web_addresses.map((entry) => laneSection(entry, answer));
-  const withoutLane = answer.instances.filter((instance) => instance.lane === null);
-  if (withoutLane.length) {
-    sections.push(element("section", {}, element("h2", {}, "Instances with no lane"), instanceList(withoutLane, answer.jobs)));
-  }
   if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
   lanes.replaceChildren(...sections);
 }

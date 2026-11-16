@@ -20,6 +20,7 @@ To start, people see two pages: the Client's accept page and one status page. Th
 - **Web address:** what a person types to reach a lane, such as `testing.cellmechanic.com`. A lane has one. The proxy sends visits for it to one lane instance.
 - **Data set:** a lane's database server, its data and its files. A lane instance runs against one data set. A release that changes the data's structure makes a new data set by cloning. A release that does not keeps the same one.
 - **Lane instance:** a build running against one data set. A lane normally has one. During a release it has two for a short time. Called an instance for short where the lane is clear.
+- **Web part and background service:** a lane instance has a web part, which answers visitors at the lane's web address, and may have a background service, which does the work that runs by itself, such as scheduled tasks and outgoing mail. Only one background service of a lane runs at a time. Always written in full, never as "service" alone.
 - **Active:** the lane instance a web address currently sends visitors to.
 - **Live:** a product is Live when its Client uses production for real business. A Live site is the production lane of a Live product.
 - **Prelaunch:** a product whose production lane exists but whose Client does not yet run their business on it. Its production is not Live.
@@ -76,7 +77,12 @@ The record of what Launchplane did is history. It never answers what is running.
 
 ## What Launchplane asks of a product
 
-Four commands, defined once per kind: check health, back up, restore and scrub, update.
+Four commands, defined once per kind:
+
+- Two checks: a quiet check, which passes with no way out, and an active check, which passes once the instance has its way out. Both only look and never cause an effect outside. A product with nothing outside it may answer the same for both.
+- Back up.
+- Restore and scrub.
+- Update.
 
 ## Who uses it
 
@@ -128,22 +134,23 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 9. What "fresh" production data means before an acceptance request: a new clone each time, a maximum age, or a recheck. Blocks the testing refresh.
 10. What happens to a Client's test session and to previews when testing is rebuilt. Blocks the testing refresh.
 11. How a real host is attached, and how its certificates are issued and renewed without stopping what runs on it. Restarting Docker stops its containers unless Docker is set to keep them running.
+12. How a product that cannot run two instances at once is released. Discord Blue holds one Discord connection and one shared state folder. Its new instance may start, but must not connect or write state until the old one has stopped, and then catches up what arrived in the gap. Its health can only be checked once it has connected, so it is checked after the old one stops, and a failed check puts the old one back. That gap is normal and does not turn the status page red. Blocks the release of Discord Blue, or any product like it.
 
 **The builder measures, then Chris decides**
 
-12. How long cloning a database and updating it take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
-13. Whether the file store is shared or cloned in a move, and how the database and file store are kept consistent with each other.
-14. Whether a container manager such as Dokploy is needed at all, or Docker and a reverse proxy directly are enough. Measure the first move both ways where that is cheap, and report what each needed.
-15. How much disk and memory several previews use at once, and what pausing one actually frees.
+13. How long cloning a database and updating it take at real size, and whether PostgreSQL 18 can clone a database without copying it on this file system.
+14. Whether the file store is shared or cloned in a move, and how the database and file store are kept consistent with each other.
+15. Whether a container manager such as Dokploy is needed at all, or Docker and a reverse proxy directly are enough. Measure the first move both ways where that is cheap, and report what each needed.
+16. How much disk and memory several previews use at once, and what pausing one actually frees.
 
 **The builder proposes in the step that needs it**
 
-16. What a product description contains and where it lives.
-17. How the four commands are called, and where they live for a kind other than Odoo.
-18. How a running instance reports which product, lane and build it is.
-19. How a build proves which repository and commit it came from.
-20. What marks which instance is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
-21. How the status page shows a failed move separately from a lane's health, and what clears it.
+17. What a product description contains and where it lives.
+18. How the four commands are called, and where they live for a kind other than Odoo.
+19. How a running instance reports which product, lane and build it is.
+20. How a build proves which repository and commit it came from.
+21. What marks which instance is serving after a crash during the switch, and what Launchplane must record to finish or abandon a half-done move.
+22. How the status page shows a failed move separately from a lane's health, and what clears it.
 
 ## What exists today
 

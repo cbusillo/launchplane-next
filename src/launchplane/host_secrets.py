@@ -88,7 +88,14 @@ class HostSecrets:
             chunks, _ = database.get_archive(path)
         except NotFound:
             return None
-        password = only_file_in(b"".join(chunks)).decode()
+        try:
+            password = only_file_in(b"".join(chunks)).decode()
+        except UnicodeDecodeError as error:
+            raise ContainerHostError(
+                f"The password file {path} of the data set {database.labels.get(DATA_SET_LABEL)} is not text, so the password "
+                f"kept in the database {database.name} could not be read: {error}. "
+                "Put the password back in that file by hand."
+            ) from error
         self.note([password])
         return password or None
 

@@ -41,10 +41,12 @@ PRETEND_PRODUCT = Path(__file__).parent / "pretend_product"
 DESCRIPTION = {
     "health_path": "/health",
     "database": {"image": "postgres:18-alpine"},
-    "job": {"command": ["python", "/app.py", "job"]},
+    "background_service": {"command": ["python", "/app.py", "background-service"]},
 }
 LEAKY_PRODUCT = "test-bed-leaky"
-LEAKY_DESCRIPTION = DESCRIPTION | {"job": {"command": ["sh", "-c", "echo connecting with password $PGPASSWORD; exit 1"]}}
+LEAKY_DESCRIPTION = DESCRIPTION | {
+    "background_service": {"command": ["sh", "-c", "echo connecting with password $PGPASSWORD; exit 1"]}
+}
 LISTENER = "test-bed-call-listener"
 LISTENER_PORT = 8099
 CONTROL_HOST_NAME = "launchplane.shiny"
@@ -103,7 +105,7 @@ def read_running() -> dict[str, Any]:
 @dataclass(frozen=True)
 class LaneView:
     instances: list[dict[str, Any]]
-    jobs: list[dict[str, Any]]
+    background_services: list[dict[str, Any]]
     data_sets: list[dict[str, Any]]
 
     def receiving(self) -> dict[str, Any]:
@@ -117,7 +119,7 @@ def lane_view(lane: str = LANE) -> LaneView:
     def of_lane(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [part for part in parts if (part["product"], part["lane"]) == (PRODUCT, lane)]
 
-    return LaneView(of_lane(running["instances"]), of_lane(running["jobs"]), of_lane(running["data_sets"]))
+    return LaneView(of_lane(running["instances"]), of_lane(running["background_services"]), of_lane(running["data_sets"]))
 
 
 def retire_lane_and_its_data(lane: str) -> None:
@@ -231,7 +233,7 @@ def test_a_lane_brought_up_with_a_fresh_data_set_shows_it_and_keeps_rows() -> No
     assert [(network["is_quiet"], len(data_set["volumes"])) for network in data_set["networks"]] == [(True, 1)]
     assert [database["state"] for database in data_set["databases"]] == ["running"]
     assert view.receiving()["data_set"] == data_set["data_set"]
-    assert [(job["instance"], job["state"]) for job in view.jobs] == [(view.receiving()["container"], "running")]
+    assert [(each["instance"], each["state"]) for each in view.background_services] == [(view.receiving()["container"], "running")]
     write_row("first")
     write_row("second")
     assert rows_read() == ["first", "second"]
@@ -290,7 +292,7 @@ def test_data_left_without_its_password_is_reported_by_name_and_given_no_new_pas
     assert (remade["state"], "launchplane-password" in kept and "Could not find" not in kept) == ("stopped", False)
 
 
-def test_during_a_release_the_job_never_runs_twice_at_once(lane_on_a: LaneView) -> None:
+def test_during_a_release_the_background_service_never_runs_twice_at_once(lane_on_a: LaneView) -> None:
     move(BUILD_B)
     time.sleep(2)
     runs = beats(database_of(lane_on_a.data_sets[0]))
@@ -299,7 +301,7 @@ def test_during_a_release_the_job_never_runs_twice_at_once(lane_on_a: LaneView) 
 
 def test_a_quiet_instance_reaches_nothing_outside_until_given_a_way_out(lane_on_a: LaneView) -> None:
     instance = lane_on_a.receiving()["container"]
-    [job] = lane_on_a.jobs
+    [background_service] = lane_on_a.background_services
     attempts = {
         "the internet": (OUTSIDE_ADDRESS, 80),
         "the local network": (socket.gethostbyname(CONTROL_HOST_NAME), 8700),
@@ -310,7 +312,7 @@ def test_a_quiet_instance_reaches_nothing_outside_until_given_a_way_out(lane_on_
     assert {what: reaches(LISTENER, *where) for what, where in attempts.items()} == dict.fromkeys(attempts, True)
     time.sleep(3)
     assert "run=" not in calls_heard()
-    on_scratch(f"docker network connect bridge {job['container']}")
+    on_scratch(f"docker network connect bridge {background_service['container']}")
     wait_for(lambda: "run=" in calls_heard(), seconds=15)
 
 
@@ -334,12 +336,12 @@ def test_retiring_a_lane_keeps_its_data_set_until_it_is_named() -> None:
     [data_set] = lane_view().data_sets
     status, body = retire(PRODUCT, LANE)
     assert (status, body["deleted_data_set"], body["kept_data_sets"]) == (200, None, [data_set["data_set"]])
-    assert (lane_view().instances, lane_view().jobs) == ([], [])
+    assert (lane_view().instances, lane_view().background_services) == ([], [])
     move(BUILD_B)
     assert rows_read() == ["kept"]
     retire(PRODUCT, LANE)
     status, body = retire(PRODUCT, LANE, data_set["data_set"])
-    assert (status, body["deleted_data_set"], body["kept_data_sets"]) == (200, data_set["data_set"], [])
+    assert (status, body["outcome"], body["deleted_data_set"], body["kept_data_sets"]) == (200, "deleted", data_set["data_set"], [])
     assert lane_view().data_sets == []
     assert data_set["data_set"] not in on_scratch("docker network ls --format '{{.Name}}'; docker volume ls --format '{{.Name}}'")
 
@@ -357,8 +359,8 @@ def kill_once(build: str, seen: Callable[[LaneView], bool]) -> None:
     mover.join()
 
 
-def has_job_of(build: str) -> Callable[[LaneView], bool]:
-    return lambda view: any(job["build"] == build for job in view.jobs)
+def has_background_service_of(build: str) -> Callable[[LaneView], bool]:
+    return lambda view: any(each["build"] == build for each in view.background_services)
 
 
 def receives_visitors(build: str) -> Callable[[LaneView], bool]:
@@ -376,15 +378,15 @@ BRING_UP_POINTS: dict[str, Callable[[LaneView], bool]] = {
 RELEASE_POINTS: dict[str, Callable[[LaneView], bool]] = {
     "the new instance exists": lambda view: any(instance["build"] == BUILD_B for instance in view.instances),
     "the new instance receives visitors": receives_visitors(BUILD_B),
-    "the old job is gone": lambda view: not has_job_of(BUILD_A)(view),
-    "the new job exists": has_job_of(BUILD_B),
+    "the old background service is gone": lambda view: not has_background_service_of(BUILD_A)(view),
+    "the new background service exists": has_background_service_of(BUILD_B),
 }
 
 
 def assert_lane_finished_on(build: str) -> LaneView:
     view = lane_view()
     assert [(instance["build"], instance["state"]) for instance in view.instances] == [(build, "running")]
-    assert [(job["instance"], job["state"]) for job in view.jobs] == [(view.receiving()["container"], "running")]
+    assert [(each["instance"], each["state"]) for each in view.background_services] == [(view.receiving()["container"], "running")]
     assert len(view.data_sets) == 1
     return view
 
@@ -418,10 +420,10 @@ def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_show
     other = lane_view(OTHER_LANE)
     passwords = [password_kept_with(view.data_sets[0]) for view in (lane_on_a, other)]
     instance = lane_on_a.receiving()["container"]
-    [job] = lane_on_a.jobs
+    [background_service] = lane_on_a.background_services
     assert passwords[0] != passwords[1]
     assert "PASSWORD=" not in on_scratch(f"docker inspect --format '{{{{.Config.Env}}}}' {database_of(lane_on_a.data_sets[0])}")
-    assert environment_of(instance)["PGPASSWORD"] == environment_of(job["container"])["PGPASSWORD"] == passwords[0]
+    assert environment_of(instance)["PGPASSWORD"] == environment_of(background_service["container"])["PGPASSWORD"] == passwords[0]
     assert not in_container(instance, "env PGPASSWORD=wrong python -c 'import psycopg; psycopg.connect(\"connect_timeout=3\")'")[0]
     shown = json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
     assert [password in shown for password in passwords] == [False, False]
@@ -476,12 +478,12 @@ def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_
     assert password not in json.dumps(body) + json.dumps(read_running()) + journal
 
 
-def test_a_job_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
+def test_a_background_service_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
     try:
         status, body = move_lane(LEAKY_PRODUCT, LANE, BUILD_A)
         [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
         password = password_kept_with(data_set)
-        assert (status, body["outcome"]) == (422, "job failed"), body
+        assert (status, body["outcome"]) == (422, "background service failed"), body
         assert f"connecting with password {SECRET_REMOVED}" in body["error"]
         journal = on_control("journalctl --unit launchplane --no-pager --since '-10 min'")
         shown = json.dumps(body) + json.dumps(read_running()) + journal

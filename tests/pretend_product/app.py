@@ -113,7 +113,7 @@ def call_out_forever(run: str) -> None:
         time.sleep(CALL_OUT_SECONDS)
 
 
-def run_job() -> None:
+def run_background_service() -> None:
     signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     create_tables_once_the_database_answers()
     run = uuid.uuid4().hex
@@ -139,12 +139,12 @@ def main(arguments: list[str]) -> None:
     match arguments:
         case ["web"]:
             serve_web()
-        case ["job"]:
-            run_job()
+        case ["background-service"]:
+            run_background_service()
         case ["reach", host, port]:
             reach(host, port)
         case _:
-            sys.exit("usage: app.py web | job | reach <host> <port>")
+            sys.exit("usage: app.py web | background-service | reach <host> <port>")
 
 
 if __name__ == "__main__":
