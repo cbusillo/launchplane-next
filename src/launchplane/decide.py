@@ -422,7 +422,10 @@ def data_set_problems(found: DataSet, seen: LaneSeen, described_as: Database | N
 def job_state_problems(job: RunningJob) -> list[JobProblem]:
     part = f"The job {job.container}"
     if job.state != InstanceState.RUNNING or job.running_for_seconds is None:
-        return [JobProblem(f"{part} is {job.state}", JobFix.REPLACE_UNLESS_JUST_STARTED, job.container)]
+        made_or_stopping = job.state == InstanceState.STOPPED
+        return [
+            JobProblem(f"{part} is {job.state}", JobFix.REPLACE_UNLESS_JUST_STARTED, job.container, of_a_release=made_or_stopping)
+        ]
     if job.running_for_seconds < JOB_STEADY_SECONDS:
         text = f"{part} has run {job.running_for_seconds:.1f} s of the {JOB_STEADY_SECONDS:g} s it must stay up"
         return [JobProblem(text, JobFix.WATCH, job.container, of_a_release=True)]

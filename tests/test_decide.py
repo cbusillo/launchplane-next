@@ -640,6 +640,10 @@ STATES_OF_A_RELEASE = {
         DataCase((JUST_MADE,), "new", (D1,), (), None, (job_of(NEW_ON_D1, 1.0),)),
         ["The job new-job has run 1.0 s of the 3 s it must stay up"],
     ),
+    "the new job made and not yet started, or the old one stopped and not yet removed": (
+        DataCase((JUST_MADE,), "new", (D1,), (), None, (job_of(NEW_ON_D1, running_for=None),)),
+        ["The job new-job is stopped"],
+    ),
     "a lane being brought up, its database not yet accepting connections": (
         DataCase((JUST_MADE,), None, (data_set("d1", accepts=False),), (), None),
         ["No instance receives visitors", "The database database-d1 does not accept connections"],
