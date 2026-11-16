@@ -3,7 +3,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from launchplane.container_host import CommandResult, Service
+from launchplane.container_host import CommandResult, HelperContainer
 from launchplane.instance import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
@@ -46,8 +46,8 @@ class ProxyHost:
     def load(self) -> None:
         self.loaded = loaded_from(self.files)
 
-    def ensure_service(self, service: Service) -> None:
-        self.running = service.container == PROXY_NAME
+    def ensure_helper(self, helper: HelperContainer) -> None:
+        self.running = helper.container == PROXY_NAME
 
     def is_running(self, container: str) -> bool:
         return container == PROXY_NAME and self.running

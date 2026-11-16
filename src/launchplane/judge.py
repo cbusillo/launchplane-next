@@ -14,12 +14,12 @@ from launchplane.instance import (
     LaneSeen,
     Mount,
     ProxyNotRunning,
+    RunningBackgroundService,
     RunningInstance,
-    RunningJob,
 )
 from launchplane.product import Product
 
-JOB_STEADY_SECONDS = 3.0
+BACKGROUND_SERVICE_STEADY_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -28,18 +28,18 @@ class DataSetProblem:
     fixable: bool = False
 
 
-class JobFix(StrEnum):
+class Fix(StrEnum):
     START = "start one"
-    REPLACE = "retire it, and start one if the product has a job"
+    REPLACE = "retire it, and start one if the product has a background service"
     REPLACE_OR_WATCH = "retire it, unless this move started it and is about to watch it"
     WATCH = "watch it until it has stayed up"
 
 
 @dataclass(frozen=True)
-class JobProblem:
+class BackgroundServiceProblem:
     text: str
-    fix: JobFix
-    job: str | None = None
+    fix: Fix
+    container: str | None = None
     of_a_release: bool = False
 
 
@@ -169,53 +169,65 @@ def data_set_problems(found: DataSet, seen: LaneSeen, has_database: bool) -> lis
     ]
 
 
-def job_state_problems(job: RunningJob) -> list[JobProblem]:
-    part = f"The job {job.container}"
-    if job.state != InstanceState.RUNNING or job.running_for_seconds is None:
-        stopped = job.state == InstanceState.STOPPED
-        return [JobProblem(f"{part} is {job.state}", JobFix.REPLACE_OR_WATCH, job.container, of_a_release=stopped)]
-    if job.running_for_seconds < JOB_STEADY_SECONDS:
-        text = f"{part} has run {job.running_for_seconds:.1f} s of the {JOB_STEADY_SECONDS:g} s it must stay up"
-        return [JobProblem(text, JobFix.WATCH, job.container, of_a_release=True)]
+def background_service_state_problems(running: RunningBackgroundService) -> list[BackgroundServiceProblem]:
+    part = f"The background service {running.container}"
+    if running.state != InstanceState.RUNNING or running.running_for_seconds is None:
+        stopped = running.state == InstanceState.STOPPED
+        return [
+            BackgroundServiceProblem(f"{part} is {running.state}", Fix.REPLACE_OR_WATCH, running.container, of_a_release=stopped)
+        ]
+    if running.running_for_seconds < BACKGROUND_SERVICE_STEADY_SECONDS:
+        text = f"{part} has run {running.running_for_seconds:.1f} s of the {BACKGROUND_SERVICE_STEADY_SECONDS:g} s it must stay up"
+        return [BackgroundServiceProblem(text, Fix.WATCH, running.container, of_a_release=True)]
     return []
 
 
-def job_connection_problems(job: RunningJob, active: RunningInstance, seen: LaneSeen) -> list[str]:
-    part = f"The job {job.container}"
+def background_service_connection_problems(running: RunningBackgroundService, active: RunningInstance, seen: LaneSeen) -> list[str]:
+    part = f"The background service {running.container}"
     found = data_set_of(seen, active.data_set)
     expected = network_names(found) if found is not None else {LANE_NETWORK}
     labelled = (
         []
-        if job.data_set == active.data_set
-        else [f"{part} says it runs against the data set {job.data_set}, not {active.data_set}"]
+        if running.data_set == active.data_set
+        else [f"{part} says it runs against the data set {running.data_set}, not {active.data_set}"]
     )
-    return [*labelled, *attachment_problems(part, job.networks, expected, seen), *mount_problems(part, job.mounts, ())]
+    return [*labelled, *attachment_problems(part, running.networks, expected, seen), *mount_problems(part, running.mounts, ())]
 
 
-def one_job_problems(job: RunningJob, active: RunningInstance, seen: LaneSeen) -> list[JobProblem]:
-    part = f"The job {job.container}"
-    connected = [JobProblem(text, JobFix.REPLACE, job.container) for text in job_connection_problems(job, active, seen)]
-    if job.instance != active.container:
-        beside = any(instance.container == job.instance for instance in seen.instances)
-        text = f"{part} belongs to {job.instance}, not {active.container}"
-        return [JobProblem(text, JobFix.REPLACE, job.container, of_a_release=beside), *connected]
+def one_background_service_problems(
+    running: RunningBackgroundService, active: RunningInstance, seen: LaneSeen
+) -> list[BackgroundServiceProblem]:
+    part = f"The background service {running.container}"
+    connected = [
+        BackgroundServiceProblem(text, Fix.REPLACE, running.container)
+        for text in background_service_connection_problems(running, active, seen)
+    ]
+    if running.instance != active.container:
+        beside = any(instance.container == running.instance for instance in seen.instances)
+        text = f"{part} belongs to {running.instance}, not {active.container}"
+        return [BackgroundServiceProblem(text, Fix.REPLACE, running.container, of_a_release=beside), *connected]
     build = (
         []
-        if job.build == active.build
-        else [JobProblem(f"{part} runs {job.build}, not {active.build}", JobFix.REPLACE, job.container)]
+        if running.build == active.build
+        else [BackgroundServiceProblem(f"{part} runs {running.build}, not {active.build}", Fix.REPLACE, running.container)]
     )
-    return [*build, *connected, *job_state_problems(job)]
+    return [*build, *connected, *background_service_state_problems(running)]
 
 
-def job_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> list[JobProblem]:
-    jobs = sorted(seen.jobs, key=lambda job: job.container)
-    if product.job is None:
-        return [JobProblem(f"The job {job.container} runs; the product has no job", JobFix.REPLACE, job.container) for job in jobs]
-    if len(jobs) == 1:
-        return one_job_problems(jobs[0], active, seen)
-    names = ", ".join(job.container for job in jobs) or "none"
-    text = f"The lane has {len(jobs)} jobs ({names}) where it must have one, belonging to {active.container}"
-    return [JobProblem(text, JobFix.REPLACE, jobs[0].container) if jobs else JobProblem(text, JobFix.START, of_a_release=True)]
+def background_service_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> list[BackgroundServiceProblem]:
+    containers = sorted(running.container for running in seen.background_services)
+    if product.background_service is None:
+        return [
+            BackgroundServiceProblem(f"The background service {container} runs; the product has none", Fix.REPLACE, container)
+            for container in containers
+        ]
+    if len(containers) == 1:
+        return one_background_service_problems(seen.background_services[0], active, seen)
+    names = ", ".join(containers) or "none"
+    text = f"The lane has {len(containers)} background services ({names}) where it must have one, belonging to {active.container}"
+    if not containers:
+        return [BackgroundServiceProblem(text, Fix.START, of_a_release=True)]
+    return [BackgroundServiceProblem(text, Fix.REPLACE, containers[0])]
 
 
 def active_instance(seen: LaneSeen) -> RunningInstance | None:
@@ -252,7 +264,7 @@ def lane_findings(seen: LaneSeen, target: LaneBuild, product: Product, switching
     others = sorted(instance.container for instance in seen.instances if instance.container != active.container)
     return [
         *to_receive_visitors,
-        *[Finding(problem.text, problem.of_a_release) for problem in job_problems(seen, active, product)],
+        *[Finding(problem.text, problem.of_a_release) for problem in background_service_problems(seen, active, product)],
         *[Finding(f"The instance {other} runs beside the active one", of_a_release=True) for other in others],
     ]
 
@@ -276,11 +288,13 @@ def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
 
 
 def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
-    jobs_with_owner = [(job, owner) for job in seen.jobs for owner in seen.instances if owner.container == job.instance]
+    with_owner = [
+        (running, owner) for running in seen.background_services for owner in seen.instances if owner.container == running.instance
+    ]
     databases = [(found, database) for found in seen.data_sets for database in found.databases]
     return [
         *[fault for instance in seen.instances for fault in instance_connection_problems(instance, seen)],
-        *[fault for job, owner in jobs_with_owner for fault in job_connection_problems(job, owner, seen)],
+        *[fault for running, owner in with_owner for fault in background_service_connection_problems(running, owner, seen)],
         *[
             fault
             for found, each in databases

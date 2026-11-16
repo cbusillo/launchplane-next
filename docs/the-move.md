@@ -2,7 +2,7 @@
 
 `POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The lane answers at the web address `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
-For now a build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a job or a health path of its own says so in its description: see [a lane with a database](data-sets.md). Each instance gets a new container name, `{product}-{lane}-` and 12 random hex digits. Which product, lane and build an instance is comes from its labels, never from its name.
+For now a build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a background service or a health path of its own says so in its description: see [a lane with a database](data-sets.md). Each instance gets a new container name, `{product}-{lane}-` and 12 random hex digits. Which product, lane and build an instance is comes from its labels, never from its name.
 
 ## What it does
 
@@ -26,7 +26,7 @@ The next step is the first of these that applies:
 | `unchanged` | 200 | It already did. Nothing changed. |
 | `cleaned up` | 200 | It already did, and what an interrupted move left was removed. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
-| `job failed` | 422 | Only for a product with a job: see [a move with data](data-sets.md#a-move-with-data). |
+| `background service failed` | 422 | Only for a product with a background service: see [a move with data](data-sets.md#a-move-with-data). |
 
 A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again. One move or retirement runs at a time in a Launchplane process; a second call waits.
 

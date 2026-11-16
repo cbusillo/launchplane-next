@@ -93,7 +93,9 @@ ANSWERS = {
     "a host that could not be read": Asked("GET", "/running", 503, read=unreadable_host),
     "a move that switched": Asked("POST", MOVE, 200, {"build": "site:b"}, move=move_answering(Outcome.SWITCHED)),
     "a move whose check failed": Asked("POST", MOVE, 422, {"build": "site:b"}, move=move_answering(Outcome.CHECK_FAILED)),
-    "a move whose job failed": Asked("POST", MOVE, 422, {"build": "site:b"}, move=move_answering(Outcome.JOB_FAILED)),
+    "a move whose background service failed": Asked(
+        "POST", MOVE, 422, {"build": "site:b"}, move=move_answering(Outcome.BACKGROUND_SERVICE_FAILED)
+    ),
     "a move that stopped": Asked("POST", MOVE, 503, {"build": "site:b"}),
     "a retirement": Asked("POST", RETIRE, 200, {}, retire=retire_answering),
     "a retirement that stopped": Asked("POST", RETIRE, 503, {}),

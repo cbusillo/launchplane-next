@@ -36,7 +36,7 @@ class RunningInstance(BaseModel):
     mounts: tuple[Mount, ...] = ()
 
 
-class RunningJob(BaseModel):
+class RunningBackgroundService(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     product: str
@@ -121,7 +121,7 @@ class LaneRoute:
 class LaneSeen:
     instances: tuple[RunningInstance, ...]
     route: ProxyNotRunning | LaneRoute
-    jobs: tuple[RunningJob, ...] = ()
+    background_services: tuple[RunningBackgroundService, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
 
@@ -142,5 +142,5 @@ def new_password() -> str:
     return secrets.token_urlsafe(32)
 
 
-def job_container_of(instance_container: str) -> str:
-    return f"{instance_container}-job"
+def background_service_container_of(instance_container: str) -> str:
+    return f"{instance_container}-background-service"

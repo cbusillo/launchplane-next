@@ -8,14 +8,14 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from launchplane.container_host import CommandResult, Service
+from launchplane.container_host import CommandResult, HelperContainer
 from launchplane.instance import LANE_NETWORK, LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
 ENTRY_POINT = "web"
 INSTANCE_PORT = 80
-PROXY = Service(
+PROXY = HelperContainer(
     container=PROXY_NAME,
     image="traefik:v3.7.18",
     command=[
@@ -47,8 +47,8 @@ class CheckFailed(Exception):
     pass
 
 
-class ServiceHost(Protocol):
-    def ensure_service(self, service: Service) -> None: ...
+class HelperHost(Protocol):
+    def ensure_helper(self, helper: HelperContainer) -> None: ...
     def is_running(self, container: str) -> bool: ...
     def run_in(self, container: str, command: list[str]) -> CommandResult: ...
     def read_file(self, container: str, path: PurePosixPath) -> str | None: ...
@@ -74,13 +74,13 @@ class LoadedBalancer(Read):
     servers: list[LoadedServer] = Field(min_length=1, max_length=1)
 
 
-class LoadedService(Read):
+class TraefikService(Read):
     load_balancer: LoadedBalancer = Field(alias="loadBalancer")
 
 
 class LoadedRoutes(Read):
     routers: dict[str, LoadedRouter]
-    services: dict[str, LoadedService | dict[str, object]]
+    services: dict[str, TraefikService | dict[str, object]]
 
 
 def route_file_of(web_address: str) -> PurePosixPath:
@@ -98,15 +98,15 @@ def instance_url(container: str) -> str:
 
 def route_text(web_address: str, container: str) -> str:
     router = {"rule": f"Host(`{web_address}`)", "entryPoints": [ENTRY_POINT], "service": web_address}
-    service = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
-    return json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: service}}}, indent=2)
+    target = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
+    return json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
 
 
 def container_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
-    service = services.get(router.service + FROM_ROUTES_FILE)
-    if not isinstance(service, LoadedService):
-        raise ProxyError(f"The proxy sends {router.rule} to {router.service}, which is not a service Launchplane wrote.")
-    url = service.load_balancer.servers[0].url
+    target = services.get(router.service + FROM_ROUTES_FILE)
+    if not isinstance(target, TraefikService):
+        raise ProxyError(f"The proxy sends {router.rule} to {router.service}, which is not a Traefik service Launchplane wrote.")
+    url = target.load_balancer.servers[0].url
     match = INSTANCE_URL.fullmatch(url)
     if match is None:
         raise ProxyError(f"The proxy sends {router.rule} to {url}, which is not an instance Launchplane started.")
@@ -142,7 +142,7 @@ def written_route_from_file(text: str, web_address: str) -> str:
 
 @dataclass(frozen=True)
 class TraefikProxy:
-    host: ServiceHost
+    host: HelperHost
     steady_seconds: float = 3
     check_deadline_seconds: float = 20
     load_deadline_seconds: float = 10
@@ -150,7 +150,7 @@ class TraefikProxy:
     clock: Callable[[], float] = time.monotonic
 
     def start(self) -> None:
-        self.host.ensure_service(PROXY)
+        self.host.ensure_helper(PROXY)
         started = self.clock()
         while not (result := self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", LOADED_ROUTES_URL])).succeeded:
             if self.clock() - started >= self.load_deadline_seconds:

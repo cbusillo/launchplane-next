@@ -20,7 +20,7 @@ from launchplane.instance import (
     new_data_set_name,
     web_address_of,
 )
-from launchplane.judge import JOB_STEADY_SECONDS, LaneVerdict, lane_verdict
+from launchplane.judge import BACKGROUND_SERVICE_STEADY_SECONDS, LaneVerdict, lane_verdict
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed
 from launchplane.steps import Action, Done, Event, FreshNames, MoveResult, RetireResult, Stop
@@ -31,8 +31,8 @@ MOST_STEPS = 50
 class InstanceHost(Protocol):
     def read(self, has_database: HasDatabase | None = None) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None: ...
-    def start_job(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
-    def await_job(self, container: str, steady_seconds: float) -> None: ...
+    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
+    def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
@@ -88,7 +88,7 @@ def is_of_lane(product: str, lane: str, part: PartOfLane) -> bool:
 
 
 def parts_of(on_host: OnHost) -> list[PartOfLane]:
-    return [*on_host.instances, *on_host.jobs, *on_host.data_sets]
+    return [*on_host.instances, *on_host.background_services, *on_host.data_sets]
 
 
 def lanes_on(on_host: OnHost) -> list[tuple[str, str]]:
@@ -104,7 +104,7 @@ def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning |
     return LaneSeen(
         instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
         route=route,
-        jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
+        background_services=tuple(running for running in on_host.background_services if is_of_lane(product, lane, running)),
         data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
         network_quiet={network.name: network.is_quiet for network in on_host.networks},
     )
@@ -137,7 +137,9 @@ TAKE: dict[type, Take] = {
     steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),
     steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
     steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use),
-    steps.StartJob: lambda host, _proxy, step: host.start_job(step.target, step.instance, step.use, list(step.command)),
+    steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
+        step.target, step.instance, step.use, list(step.command)
+    ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
 }
@@ -238,8 +240,8 @@ class Lanes:
     def take(self, action: Action) -> Event:
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path)
-        if isinstance(action, steps.AwaitJob):
-            return self.await_job(action.container)
+        if isinstance(action, steps.AwaitBackgroundService):
+            return self.await_background_service(action.container)
         TAKE[type(action)](self.host, self.proxy, action)
         return action
 
@@ -250,9 +252,9 @@ class Lanes:
             return steps.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
         return steps.Check(container, health_path)
 
-    def await_job(self, container: str) -> Event:
+    def await_background_service(self, container: str) -> Event:
         try:
-            self.host.await_job(container, JOB_STEADY_SECONDS)
+            self.host.await_background_service(container, BACKGROUND_SERVICE_STEADY_SECONDS)
         except PartStopped as error:
-            return steps.JobRefused(container, failure_report(error, self.host.read_log_tail(container)))
-        return steps.AwaitJob(container)
+            return steps.BackgroundServiceRefused(container, failure_report(error, self.host.read_log_tail(container)))
+        return steps.AwaitBackgroundService(container)

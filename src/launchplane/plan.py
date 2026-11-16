@@ -11,13 +11,21 @@ from launchplane.instance import (
     RunningInstance,
     web_address_of,
 )
-from launchplane.judge import JobFix, data_set_of, data_set_problems, instance_problems, job_problems, lane_problems
+from launchplane.judge import (
+    Fix,
+    background_service_problems,
+    data_set_of,
+    data_set_problems,
+    instance_problems,
+    lane_problems,
+)
 from launchplane.product import Product
 from launchplane.steps import (
     Action,
+    AwaitBackgroundService,
     AwaitDatabase,
-    AwaitJob,
     AwaitRoute,
+    BackgroundServiceRefused,
     Check,
     CheckRefused,
     CreateDatabase,
@@ -27,7 +35,6 @@ from launchplane.steps import (
     Done,
     Event,
     FreshNames,
-    JobRefused,
     MoveResult,
     Outcome,
     RemoveInstance,
@@ -35,9 +42,9 @@ from launchplane.steps import (
     Retire,
     RetireOutcome,
     RetireResult,
+    StartBackgroundService,
     StartDatabase,
     StartInstance,
-    StartJob,
     StartProxy,
     Stop,
     WriteRoute,
@@ -60,8 +67,8 @@ def change_made_by(event: Event) -> str | None:
             return f"started the instance {container}"
         case WriteRoute(container=container):
             return f"wrote the route to {container}"
-        case StartJob(instance=instance):
-            return f"started the job of {instance}"
+        case StartBackgroundService(instance=instance):
+            return f"started the background service of {instance}"
         case Retire(container=container):
             return f"retired {container}"
         case RemoveInstance(container=container):
@@ -102,7 +109,7 @@ def candidate_for(
 def move_outcome(done: tuple[Event, ...]) -> Outcome:
     if any(isinstance(event, WriteRoute) for event in done):
         return Outcome.SWITCHED
-    if any(isinstance(event, Retire | StartJob | StartDatabase) for event in done):
+    if any(isinstance(event, Retire | StartBackgroundService | StartDatabase) for event in done):
         return Outcome.CLEANED_UP
     return Outcome.UNCHANGED
 
@@ -179,20 +186,20 @@ def prepared(
     return DataSetUse(found.data_set, found.networks[0].name, found.databases[0].container)
 
 
-def job_step(
+def background_service_step(
     seen: LaneSeen, serving: RunningInstance, target: LaneBuild, product: Product, use: DataSetUse | None, done: tuple[Event, ...]
 ) -> Action | None:
-    problems = job_problems(seen, serving, product)
-    if not problems or any(isinstance(event, JobRefused) for event in done):
+    problems = background_service_problems(seen, serving, product)
+    if not problems or any(isinstance(event, BackgroundServiceRefused) for event in done):
         return None
-    command = () if product.job is None else tuple(product.job.command)
-    start = StartJob(target, serving.container, use, command)
+    command = () if product.background_service is None else tuple(product.background_service.command)
+    start = StartBackgroundService(target, serving.container, use, command)
     first = problems[0]
-    if first.job is None:
+    if first.container is None:
         return start
-    if first.fix == JobFix.WATCH or (first.fix == JobFix.REPLACE_OR_WATCH and start in done):
-        return AwaitJob(first.job)
-    return Retire(first.job)
+    if first.fix == Fix.WATCH or (first.fix == Fix.REPLACE_OR_WATCH and start in done):
+        return AwaitBackgroundService(first.container)
+    return Retire(first.container)
 
 
 def settle_serving(
@@ -201,14 +208,14 @@ def settle_serving(
     use = prepared(seen, serving.data_set, None, target, product, done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    if (step := job_step(seen, serving, target, product, use, done)) is not None:
+    if (step := background_service_step(seen, serving, target, product, use, done)) is not None:
         return step
     old = sorted(instance.container for instance in seen.instances if instance.container != serving.container)
     if old:
         return Retire(old[0])
-    refused = next((event for event in done if isinstance(event, JobRefused)), None)
+    refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
     if refused is not None:
-        return Done(answer.model_copy(update={"outcome": Outcome.JOB_FAILED, "error": refused.report}))
+        return Done(answer.model_copy(update={"outcome": Outcome.BACKGROUND_SERVICE_FAILED, "error": refused.report}))
     problems = lane_problems(seen, target, product)
     if problems:
         return Stop(
@@ -241,10 +248,10 @@ def decide_move(
     refused = next((event for event in done if isinstance(event, CheckRefused)), None)
     if refused is not None:
         return after_refusal(refused, instances, answer)
-    # Only one instance's job runs at a time, so a job of any other instance stops before anything else.
-    jobs_of_others = sorted(job.container for job in seen.jobs if job.instance != seen.route.written)
-    if jobs_of_others:
-        return Retire(jobs_of_others[0])
+    # Only one background service of a lane runs at a time, so one of any other instance stops before anything else.
+    of_other_instances = sorted(running.container for running in seen.background_services if running.instance != seen.route.written)
+    if of_other_instances:
+        return Retire(of_other_instances[0])
     if receiving is not None and not instance_problems(receiving, target, product, seen):
         return settle_serving(seen, receiving, target, product, answer, done)
     return replace_receiving(seen, receiving, target, product, fresh, done)
@@ -275,6 +282,12 @@ def replace_receiving(
     return StartInstance(target, fresh.container, use)
 
 
+def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
+    if deleted is not None:
+        return RetireOutcome.DELETED
+    return RetireOutcome.RETIRED if retired else RetireOutcome.UNCHANGED
+
+
 def decide_retire(
     seen: LaneSeen, product: str, lane: str, delete_data_set: str | None, done: tuple[Event, ...]
 ) -> Action | Done[RetireResult] | Stop:
@@ -285,8 +298,8 @@ def decide_retire(
         return AwaitRoute(web_address, seen.route.written)
     if seen.route.written is not None:
         return RemoveRoute(web_address, seen.route.written)
-    if seen.jobs:
-        return Retire(min(job.container for job in seen.jobs))
+    if seen.background_services:
+        return Retire(min(running.container for running in seen.background_services))
     if seen.instances:
         return Retire(min(instance.container for instance in seen.instances))
     named = next((found for found in seen.data_sets if found.data_set == delete_data_set), None)
@@ -295,13 +308,12 @@ def decide_retire(
     route_removed_to = next((event.container for event in done if isinstance(event, RemoveRoute)), None)
     retired = [event.container for event in done if isinstance(event, Retire)]
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = route_removed_to is not None or bool(retired) or deleted is not None
     return Done(
         RetireResult(
             product=product,
             lane=lane,
             web_address=web_address,
-            outcome=RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
+            outcome=retire_outcome(route_removed_to is not None or bool(retired), deleted),
             route_removed_to_container=route_removed_to,
             retired_containers=retired,
             deleted_data_set=deleted,
