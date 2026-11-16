@@ -43,7 +43,7 @@
 /** @typedef {"good"|"wrong"|"on purpose"} Tone */
 /** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, receives_visitors_for: ?string}} Instance */
 /** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, instance: ?string}} BackgroundService */
-/** @typedef {{product: string, lane: ?string, data_set: string, databases: {container: string, state: string}[]}} DataSet */
+/** @typedef {{product: string, lane: ?string, data_set: string, databases: {container: string, state: string, image: ?string}[]}} DataSet */
 /** @typedef {{product: string, lane: string, problems: string[], release_under_way: string[], left_unfinished: string[], a_move_is_at_work: boolean, in_maintenance: boolean, in_maintenance_since: ?string, parts: Object<string, Tone>}} Lane */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, shows_back_soon_page: boolean, error: ?string}} WebAddress */
 /** @typedef {{read_at: string, instances: Instance[], background_services: BackgroundService[], data_sets: DataSet[], web_addresses: WebAddress[], lanes: Lane[]}} Running */
@@ -126,16 +126,8 @@ function note(text) {
  * @param {{container: string, state: string}} part
  * @param {?Lane} verdict
  */
-function toneOf(part, verdict) {
-  return verdict?.parts[part.container] ?? (part.state === "running" ? "good" : "wrong");
-}
-
-/**
- * @param {{container: string, state: string}} part
- * @param {?Lane} verdict
- */
 function statePill(part, verdict) {
-  return pill(part.state, toneOf(part, verdict));
+  return pill(part.state, verdict?.parts[part.container] ?? "wrong");
 }
 
 /**
@@ -162,9 +154,11 @@ function backgroundServiceRows(running, verdict) {
  * @param {?Lane} verdict
  */
 function dataSetRows(dataSet, verdict) {
-  const id = () => note(`data set ${dataSet.data_set}`);
-  if (!dataSet.databases.length) return [row("Data set", ["no database server"], []), id()];
-  return dataSet.databases.flatMap((database) => [row("Data set", [code(database.container)], [statePill(database, verdict)]), id()]);
+  if (!dataSet.databases.length) return [row("Data set", [code(dataSet.data_set), " has no database server"], [])];
+  return dataSet.databases.flatMap((database) => [
+    row("Data set", ["image ", buildCode(database.image)], [statePill(database, verdict)]),
+    note(database.container),
+  ]);
 }
 
 /**

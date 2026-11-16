@@ -24,6 +24,7 @@ from launchplane.instance import (
     DataSet,
     HostNetwork,
     LaneBuild,
+    ProxySeen,
     RunningBackgroundService,
     RunningInstance,
     web_address_of,
@@ -34,8 +35,7 @@ from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 
-type HostReader = Callable[[dict[str, str]], Judged]
-type RouteReader = Callable[[], dict[str, str]]
+type HostReader = Callable[[], Judged]
 type WebAddressChecker = Callable[[str], str | None]
 type MoveRequester = Callable[[LaneBuild], MoveResult]
 type RetireRequester = Callable[[str, str, str | None], RetireResult]
@@ -127,15 +127,19 @@ def lane_owners(on_host: OnHost, routes: dict[str, str]) -> dict[str, Lane | Non
     return owners
 
 
-def web_address_answer(web_address: str, owner: Lane | None, sends_to: str | None, failure: str | None) -> WebAddressAnswer:
-    error = f"The proxy sends {web_address} to no instance." if sends_to is None else failure
+def web_address_answer(web_address: str, owner: Lane | None, proxy: ProxySeen, failure: str | None) -> WebAddressAnswer:
+    sends_to = proxy.sends_visitors_to().get(web_address)
+    if not proxy.runs:
+        error = f"The proxy is not running, so {web_address} answers nothing."
+    else:
+        error = f"The proxy sends {web_address} to no instance." if sends_to is None else failure
     return WebAddressAnswer(
         web_address=web_address,
         product=None if owner is None else owner[0],
         lane=None if owner is None else owner[1],
         sends_to_container=sends_to,
         answers=error is None and sends_to != BACK_SOON,
-        shows_back_soon_page=error is None and sends_to == BACK_SOON,
+        shows_back_soon_page=sends_to == BACK_SOON and proxy.back_soon_runs,
         error=error,
     )
 
@@ -147,15 +151,13 @@ def failures_at_once(web_addresses: list[str], why_web_address_fails: WebAddress
         return dict(zip(web_addresses, pool.map(why_web_address_fails, web_addresses), strict=True))
 
 
-def web_address_answers(
-    on_host: OnHost, routes: dict[str, str], why_web_address_fails: WebAddressChecker, why_back_soon_fails: WebAddressChecker
-) -> list[WebAddressAnswer]:
-    owners = lane_owners(on_host, routes)
-    in_maintenance = sorted(web_address for web_address, container in routes.items() if container == BACK_SOON)
-    failures = failures_at_once(sorted(routes.keys() - set(in_maintenance)), why_web_address_fails)
-    failures |= failures_at_once(in_maintenance, why_back_soon_fails)
+def web_address_answers(judged: Judged, why_web_address_fails: WebAddressChecker) -> list[WebAddressAnswer]:
+    routes = judged.proxy.sends_visitors_to()
+    owners = lane_owners(judged.on_host, routes)
+    to_a_product = sorted(web_address for web_address, container in routes.items() if container != BACK_SOON)
+    failures = failures_at_once(to_a_product, why_web_address_fails)
     return [
-        web_address_answer(web_address, owners[web_address], routes.get(web_address), failures.get(web_address))
+        web_address_answer(web_address, owners[web_address], judged.proxy, failures.get(web_address))
         for web_address in sorted(owners)
     ]
 
@@ -236,14 +238,12 @@ def add_maintenance_calls(app: FastAPI, begin: MaintenanceRequester, end: Mainte
 
 def create_app(
     read: HostReader,
-    read_routes: RouteReader,
     why_web_address_fails: WebAddressChecker,
     move: MoveRequester,
     retire: RetireRequester,
     secrets: Secrets,
     begin_maintenance: MaintenanceRequester,
     end_maintenance: MaintenanceRequester,
-    why_back_soon_fails: WebAddressChecker,
 ) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
@@ -258,16 +258,15 @@ def create_app(
     def running(response: Response) -> RunningAnswer | HostUnreadable:
         read_at = datetime.now(UTC)
         try:
-            routes = read_routes()
-            judged = read(routes)
+            judged = read()
             on_host = judged.on_host
-            web_addresses = web_address_answers(on_host, routes, why_web_address_fails, why_back_soon_fails)
+            web_addresses = web_address_answers(judged, why_web_address_fails)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=read_at, error=str(error))
         return RunningAnswer(
             read_at=read_at,
-            instances=instance_answers(on_host.instances, routes),
+            instances=instance_answers(on_host.instances, judged.proxy.sends_visitors_to()),
             background_services=on_host.background_services,
             data_sets=on_host.data_sets,
             networks=on_host.networks,
@@ -313,13 +312,11 @@ def serve() -> None:
     lanes = Lanes(host, proxy, products.read)
     app = create_app(
         lanes.read_judged,
-        proxy.read_enabled_routes,
         proxy.why_web_address_fails,
         lanes.move,
         lanes.retire,
         host.secrets,
         lanes.begin_maintenance,
         lanes.end_maintenance,
-        proxy.why_back_soon_fails,
     )
     uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host.secrets))

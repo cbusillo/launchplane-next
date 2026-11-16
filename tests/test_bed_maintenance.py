@@ -1,5 +1,4 @@
 import http.client
-import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
@@ -7,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from tests.bed import SCRATCH_ADDRESS, ask, kill_launchplane, move_lane, needs_test_bed, on_scratch, retire, wait_for
+from tests.bed import SCRATCH_ADDRESS, ask, kill_once, move_lane, needs_test_bed, on_scratch, retire, wait_for
 from tests.test_bed_data_set import (
     BUILD_A,
     BUILD_B,
@@ -198,19 +197,6 @@ def test_a_part_that_crashes_is_started_again_by_docker(ledger: LaneView) -> Non
     on_scratch(f"kill -KILL $(docker inspect --format '{{{{.State.Pid}}}}' {web})")
     wait_for(lambda: visit(web_address_of(LANE), "GET", "/")[0] == 200, seconds=30)
     assert on_scratch(f"docker inspect --format '{{{{.RestartCount}}}}' {web}").strip() == "1"
-
-
-def cut_short_by_the_kill(call: Callable[[], object]) -> None:
-    with suppress(OSError):
-        call()
-
-
-def kill_once(call: Callable[[], object], seen: Callable[[], bool]) -> None:
-    caller = threading.Thread(target=cut_short_by_the_kill, args=(call,))
-    caller.start()
-    wait_for(seen, seconds=60)
-    kill_launchplane()
-    caller.join()
 
 
 def stopped(parts: list[dict[str, Any]]) -> bool:

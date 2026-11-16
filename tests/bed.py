@@ -79,6 +79,28 @@ def kill_launchplane() -> None:
     wait_for(launchplane_answers, seconds=30)
 
 
+def kill_once(call: Callable[[], object], seen: Callable[[], bool]) -> None:
+    cut_short: list[OSError] = []
+
+    def call_until_the_kill() -> None:
+        try:
+            call()
+        except OSError as error:
+            cut_short.append(error)
+
+    def point_is_seen() -> bool:
+        if seen():
+            return True
+        assert caller.is_alive(), f"the call ended before its point was seen: {cut_short or 'it was answered'}"
+        return False
+
+    caller = threading.Thread(target=call_until_the_kill)
+    caller.start()
+    wait_for(point_is_seen, seconds=90)
+    kill_launchplane()
+    caller.join()
+
+
 class UnexpectedAnswer(Exception):
     pass
 

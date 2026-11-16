@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from launchplane.data_set import DATA_PATH
 from launchplane.instance import (
+    BACK_SOON,
     LANE_NETWORK,
     DataSet,
     DataSetDatabase,
@@ -16,12 +17,10 @@ from launchplane.instance import (
     LaneBuild,
     LaneSeen,
     Mount,
-    ProxyNotRunning,
     RunningBackgroundService,
     RunningInstance,
-    shows_back_soon,
 )
-from launchplane.product import Product
+from launchplane.product import Product, ProductError
 
 BACKGROUND_SERVICE_STEADY_SECONDS = 3.0
 
@@ -251,8 +250,7 @@ def background_service_problems(seen: LaneSeen, active: RunningInstance, product
 
 
 def active_instance(seen: LaneSeen) -> RunningInstance | None:
-    receiving = None if isinstance(seen.route, ProxyNotRunning) else seen.route.written
-    return next((instance for instance in seen.instances if instance.container == receiving), None)
+    return next((instance for instance in seen.instances if instance.container == seen.route.sends_visitors_to), None)
 
 
 def data_set_change_problems(seen: LaneSeen, switching_to: RunningInstance) -> list[str]:
@@ -360,40 +358,61 @@ def killed_databases(seen: LaneSeen) -> list[str]:
     ]
 
 
+def back_soon_faults(seen: LaneSeen) -> list[str]:
+    if seen.route.back_soon_runs:
+        return []
+    return [f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"]
+
+
+def findings_in_maintenance(seen: LaneSeen, product: Product) -> list[Finding]:
+    return [Finding(text) for text in [*[each.text for each in still_up(seen)], *never_acceptable(seen, product)]]
+
+
+# What is wrong whatever a call is doing, so it is never shown as a call under way.
+def never_acceptable(seen: LaneSeen, product: Product) -> list[str]:
+    if not seen.route.in_maintenance:
+        return connection_faults(seen, product)
+    return [*killed_databases(seen), *back_soon_faults(seen), *connection_faults(seen, product)]
+
+
+def findings_as_read(seen: LaneSeen, product: Product) -> list[Finding]:
+    return findings_in_maintenance(seen, product) if seen.route.in_maintenance else findings_at_rest(seen, product)
+
+
 def part_standings(seen: LaneSeen, *, a_move_is_at_work: bool) -> dict[str, Standing]:
-    in_maintenance = shows_back_soon(seen.route)
-    meant = InstanceState.STOPPED if in_maintenance else InstanceState.RUNNING
-    as_meant = Standing.ON_PURPOSE if in_maintenance else Standing.GOOD
+    meant = InstanceState.STOPPED if seen.route.in_maintenance else InstanceState.RUNNING
+    as_meant = Standing.ON_PURPOSE if seen.route.in_maintenance else Standing.GOOD
     otherwise = Standing.ON_PURPOSE if a_move_is_at_work else Standing.WRONG
     parts = [*seen.instances, *seen.background_services, *databases_of(seen)]
     return {part.container: as_meant if part.state == meant else otherwise for part in parts}
 
 
-def maintenance_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
-    up = [each.text for each in still_up(seen)]
-    wrong = [*killed_databases(seen), *connection_faults(seen, product)]
+def sorted_findings(
+    seen: LaneSeen, product: Product | ProductError, a_move_is_at_work: bool
+) -> tuple[list[str], list[str], list[str]]:
+    if isinstance(product, ProductError):
+        return [str(product)], [], []
+    findings = findings_as_read(seen, product)
+    if a_move_is_at_work:
+        wrong = never_acceptable(seen, product)
+        return wrong, [finding.text for finding in findings if finding.text not in wrong], []
+    return (
+        [finding.text for finding in findings if not finding.of_a_release],
+        [],
+        [finding.text for finding in findings if finding.of_a_release],
+    )
+
+
+def lane_verdict(seen: LaneSeen, product: Product | ProductError, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
+    wrong, under_way, unfinished = sorted_findings(seen, product, a_move_is_at_work)
     return LaneVerdict(
         product=name,
         lane=lane,
         a_move_is_at_work=a_move_is_at_work,
-        problems=wrong if a_move_is_at_work else [*up, *wrong],
-        release_under_way=up if a_move_is_at_work else [],
-        in_maintenance=True,
+        problems=wrong,
+        release_under_way=under_way,
+        left_unfinished=unfinished,
+        in_maintenance=seen.route.in_maintenance,
+        in_maintenance_since=seen.route.back_soon_since,
+        parts=part_standings(seen, a_move_is_at_work=a_move_is_at_work),
     )
-
-
-def verdict_at_rest_or_moving(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
-    findings = findings_at_rest(seen, product)
-    if a_move_is_at_work:
-        wrong = connection_faults(seen, product)
-        under_way = [finding.text for finding in findings if finding.text not in wrong]
-        return LaneVerdict(product=name, lane=lane, a_move_is_at_work=True, problems=wrong, release_under_way=under_way)
-    wrong = [finding.text for finding in findings if not finding.of_a_release]
-    unfinished = [finding.text for finding in findings if finding.of_a_release]
-    return LaneVerdict(product=name, lane=lane, a_move_is_at_work=False, problems=wrong, left_unfinished=unfinished)
-
-
-def lane_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
-    judge = maintenance_verdict if shows_back_soon(seen.route) else verdict_at_rest_or_moving
-    verdict = judge(seen, product, name, lane, a_move_is_at_work=a_move_is_at_work)
-    return verdict.model_copy(update={"parts": part_standings(seen, a_move_is_at_work=a_move_is_at_work)})

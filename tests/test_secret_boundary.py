@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from launchplane.act import Judged, Stopped
 from launchplane.api import cleaned_log_config, create_app
 from launchplane.docker_answers import ContainerHostError, OnHost
-from launchplane.instance import InstanceState, LaneBuild, RunningInstance
+from launchplane.instance import InstanceState, LaneBuild, LoadedRoute, ProxySeen, RouteStatus, RunningInstance
 from launchplane.judge import LaneVerdict
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
@@ -20,7 +20,7 @@ from tests.given_secrets import GivenSecrets
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
 LEAK = f"wget: server returned error: HTTP/1.1 503 password={SECRET}"
-ROUTES = {"testing.site.test": "site-testing-1"}
+PROXY = ProxySeen(runs=True, back_soon_runs=True, loaded={"testing.site.test": LoadedRoute("site-testing-1", RouteStatus.ENABLED)})
 
 
 def leaking_instance() -> RunningInstance:
@@ -33,6 +33,7 @@ def running_with_leaks() -> Judged:
     problems = [f"The instance site-testing-1 has {SECRET} mounted, which it must not have"]
     return Judged(
         OnHost([leaking_instance()], [], []),
+        PROXY,
         [LaneVerdict(product="site", lane="testing", a_move_is_at_work=False, problems=problems)],
     )
 
@@ -127,15 +128,13 @@ ANSWERS = {
 
 def answer_to(asked: Asked, secrets: Secrets) -> tuple[int, str]:
     app = create_app(
-        lambda _routes: asked.read(),
-        lambda: ROUTES,
+        asked.read,
         lambda _web_address: LEAK,
         asked.move,
         asked.retire,
         secrets,
         asked.maintenance,
         asked.maintenance,
-        lambda _web_address: LEAK,
     )
     response = TestClient(app, follow_redirects=False).request(asked.method, asked.path, json=asked.body)
     headers = "".join(f"{name}: {value}\n" for name, value in response.headers.items())
@@ -208,20 +207,18 @@ def test_the_secrets_are_read_before_the_answer_is_made() -> None:
     secrets = GivenSecrets(on_host=frozenset({SECRET}))
     seen_when_the_host_was_read: list[frozenset[str]] = []
 
-    def read(_routes: dict[str, str]) -> Judged:
+    def read() -> Judged:
         seen_when_the_host_was_read.append(secrets.secrets_seen())
         raise RuntimeError(f"not an error Launchplane expects: {SECRET}")
 
     app = create_app(
         read,
-        lambda: ROUTES,
         lambda _web_address: LEAK,
         move_stopped,
         retire_stopped,
         secrets,
         maintenance_stopped,
         maintenance_stopped,
-        lambda _web_address: LEAK,
     )
     assert TestClient(app, raise_server_exceptions=False).get("/running").status_code == 500
     assert seen_when_the_host_was_read == [{SECRET}]

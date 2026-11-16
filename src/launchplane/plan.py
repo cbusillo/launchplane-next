@@ -6,10 +6,8 @@ from launchplane.instance import (
     LaneRoute,
     LaneSeen,
     LoadedRoute,
-    ProxyNotRunning,
     RouteStatus,
     RunningInstance,
-    shows_back_soon,
     web_address_of,
 )
 from launchplane.judge import (
@@ -258,10 +256,10 @@ def settle_serving(
 def decide_move(
     seen: LaneSeen, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
 ) -> Action | Done[MoveResult] | Stop:
-    if isinstance(seen.route, ProxyNotRunning):
+    if not seen.route.proxy_runs:
         return StartProxy()
     web_address = web_address_of(target.product, target.lane)
-    if shows_back_soon(seen.route):
+    if seen.route.in_maintenance:
         return Stop(
             f"{target.lane} of {target.product} is in maintenance: {web_address} shows the back soon page. End maintenance "
             f"first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was changed."
@@ -327,7 +325,7 @@ def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
 def decide_retire(
     seen: LaneSeen, product: str, lane: str, delete_data_set: str | None, done: tuple[Event, ...]
 ) -> Action | Done[RetireResult] | Stop:
-    if isinstance(seen.route, ProxyNotRunning):
+    if not seen.route.proxy_runs:
         return StartProxy()
     web_address = web_address_of(product, lane)
     if not is_loaded_as_written(seen.route):

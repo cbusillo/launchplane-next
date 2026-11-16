@@ -1,16 +1,14 @@
 from launchplane.instance import (
-    BACK_SOON,
     DataSetUse,
     InstanceState,
     LaneBuild,
     LaneRoute,
     LaneSeen,
-    ProxyNotRunning,
     RouteStatus,
     RunningInstance,
     web_address_of,
 )
-from launchplane.judge import Fix, StillUp, background_service_problems, findings_at_rest, killed_databases, still_up
+from launchplane.judge import Fix, StillUp, background_service_problems, findings_as_read, killed_databases, still_up
 from launchplane.plan import (
     changes_so_far,
     check_or_problems,
@@ -62,15 +60,37 @@ def has_nothing(seen: LaneSeen) -> bool:
     return not (seen.instances or seen.background_services or seen.data_sets)
 
 
-def decide_begin(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> Step:
+def answer_for(product: str, lane: str, route: LaneRoute, outcome: MaintenanceOutcome) -> MaintenanceResult:
+    return MaintenanceResult(
+        product=product,
+        lane=lane,
+        web_address=web_address_of(product, lane),
+        outcome=outcome,
+        in_maintenance=route.in_maintenance,
+        since=route.back_soon_since,
+    )
+
+
+def not_as_it_must_be(seen: LaneSeen, description: Product, done: tuple[Event, ...]) -> Stop | None:
+    problems = [finding.text for finding in findings_as_read(seen, description)]
+    if not problems:
+        return None
+    state = "is in maintenance" if seen.route.in_maintenance else "is out of maintenance"
+    return Stop(
+        f"The lane {state} and is not as it must be, so the call does not answer success: {'; '.join(problems)}. "
+        f"{changes_so_far(done)}"
+    )
+
+
+def decide_begin(seen: LaneSeen, product: str, lane: str, description: Product, done: tuple[Event, ...]) -> Step:
     route = seen.route
-    if isinstance(route, ProxyNotRunning):
+    if not route.proxy_runs:
         return StartProxy()
     web_address = web_address_of(product, lane)
     step = route_step(route, web_address, done)
     if step is not None:
         return step
-    if route.written != BACK_SOON:
+    if not route.in_maintenance:
         if route.written is None and has_nothing(seen):
             return Stop(
                 f"{lane} of {product} has no route, no instance, no background service and no data set on the host, "
@@ -80,18 +100,11 @@ def decide_begin(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...
     up = still_up(seen)
     if up:
         return stop_of(up[0])
-    answer = MaintenanceResult(
-        product=product,
-        lane=lane,
-        web_address=web_address,
-        outcome=MaintenanceOutcome.IN_MAINTENANCE,
-        in_maintenance=True,
-        since=route.back_soon_since,
-    )
     killed = killed_databases(seen)
     if killed:
-        return Done(answer.model_copy(update={"outcome": MaintenanceOutcome.DATABASE_KILLED, "error": "; ".join(killed)}))
-    return Done(answer)
+        answer = answer_for(product, lane, route, MaintenanceOutcome.DATABASE_KILLED)
+        return Done(answer.model_copy(update={"error": "; ".join(killed)}))
+    return not_as_it_must_be(seen, description, done) or Done(answer_for(product, lane, route, MaintenanceOutcome.IN_MAINTENANCE))
 
 
 def the_instance(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> tuple[RunningInstance, LaneBuild] | Stop:
@@ -183,36 +196,14 @@ def bring_back(
     return background_service_step(seen, instance, description, done) or WriteRoute(answer.web_address, instance.container)
 
 
-def finish(seen: LaneSeen, description: Product, answer: MaintenanceResult, done: tuple[Event, ...]) -> Step:
-    answer = answer.model_copy(update={"in_maintenance": False, "since": None})
-    if not any(isinstance(event, WriteRoute) for event in done):
-        return Done(answer.model_copy(update={"outcome": MaintenanceOutcome.NOT_IN_MAINTENANCE}))
-    problems = [finding.text for finding in findings_at_rest(seen, description)]
-    if problems:
-        return Stop(
-            f"Maintenance ended: {answer.web_address} no longer shows the back soon page. The lane is not as it must be, "
-            f"so the call does not answer success: {'; '.join(problems)}. {changes_so_far(done)} "
-            "Moving the lane to its build puts it right."
-        )
-    return Done(answer)
-
-
 def decide_end(seen: LaneSeen, product: str, lane: str, description: Product, done: tuple[Event, ...]) -> Step:
     route = seen.route
-    if isinstance(route, ProxyNotRunning):
+    if not route.proxy_runs:
         return StartProxy()
-    web_address = web_address_of(product, lane)
-    step = route_step(route, web_address, done)
+    step = route_step(route, web_address_of(product, lane), done)
     if step is not None:
         return step
-    answer = MaintenanceResult(
-        product=product,
-        lane=lane,
-        web_address=web_address,
-        outcome=MaintenanceOutcome.ENDED,
-        in_maintenance=True,
-        since=route.back_soon_since,
-    )
-    if route.written == BACK_SOON:
+    answer = answer_for(product, lane, route, MaintenanceOutcome.ENDED)
+    if route.in_maintenance:
         return bring_back(seen, product, lane, description, answer, done)
-    return finish(seen, description, answer, done)
+    return not_as_it_must_be(seen, description, done) or Done(answer)

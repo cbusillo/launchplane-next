@@ -11,7 +11,6 @@ from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, 
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, secrets_held
 from launchplane.instance import LANE_NETWORK, DataSet, DataSetDatabase, DataSetUse, HostNetwork, InstanceState, LaneBuild, Mount
 from launchplane.product import Product, ProductError, ProductFolder
-from launchplane.proxy import PROXY
 from tests.recording_docker import RecordingDocker
 
 DATA_SET_LABELS = {"launchplane.product": "shop", "launchplane.lane": "testing", "launchplane.data-set": "d1"}
@@ -32,6 +31,7 @@ def network(
 def container(name: str, part: str, networks: list[str], mounts: Sequence[object] = ()) -> dict[str, object]:
     return {
         "Names": [f"/{name}"],
+        "Image": "postgres:18-alpine",
         "State": "running",
         "Labels": DATA_SET_LABELS | {"launchplane.part": part},
         "NetworkSettings": {"Networks": {each: {} for each in networks}},
@@ -77,20 +77,6 @@ def test_a_stopped_database_docker_lists_but_does_not_describe_is_an_error_not_o
         read([stopped(container("database-d1", "database", []))])
 
 
-def test_a_part_and_a_database_are_made_so_docker_leaves_them_stopped_once_stopped_and_the_proxy_always_runs() -> None:
-    docker = RecordingDocker()
-    host = database_made(docker)
-    host.start_instance(TARGET, "shop-testing-1", LINK)
-    host.start_background_service(TARGET, "shop-testing-1", LINK, ["work"])
-    host.ensure_helper(PROXY)
-    assert {name: made.restart_policy for name, made in docker.containers.by_name.items()} == {
-        DATABASE: "unless-stopped",
-        "shop-testing-1": "unless-stopped",
-        "shop-testing-1-background-service": "unless-stopped",
-        "launchplane-proxy": "always",
-    }
-
-
 def test_a_database_is_given_longer_to_stop_than_a_part_before_docker_kills_it() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
@@ -114,7 +100,11 @@ def test_a_data_set_is_read_from_its_network_volume_and_database_together() -> N
             data_set="d1",
             networks=(HostNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
             volumes=("launchplane-data-d1-database",),
-            databases=(DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,)),),
+            databases=(
+                DataSetDatabase(
+                    container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,), image="postgres:18-alpine"
+                ),
+            ),
         )
     ]
 

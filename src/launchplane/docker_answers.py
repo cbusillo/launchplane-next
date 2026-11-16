@@ -100,6 +100,7 @@ class DockerContainerSummary(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     names: list[str] = Field(alias="Names", min_length=1)
+    image: str = Field(alias="Image")
     state: DockerState = Field(alias="State")
     labels: dict[str, str] = Field(alias="Labels")
     network_settings: DockerAttachedNetworks = Field(alias="NetworkSettings")
@@ -284,6 +285,7 @@ def database_part(summary: DockerContainerSummary, details: Mapping[str, DockerC
         networks=attached_networks(summary),
         mounts=mounts_of(summary),
         exit_code=described(summary, details, "database").state.exit_code if state == InstanceState.STOPPED else None,
+        image=summary.image,
     )
 
 
@@ -366,14 +368,18 @@ def tar_of(file_name: str, content: bytes, mode: int = 0o644) -> bytes:
     return archive.getvalue()
 
 
-def dated_file_in(archive: bytes) -> tuple[bytes, datetime]:
+def files_in(archive: bytes) -> dict[str, tuple[bytes, datetime]]:
+    found: dict[str, tuple[bytes, datetime]] = {}
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        member = tar.next()
-        content = None if member is None else tar.extractfile(member)
-        if member is None or content is None:
-            raise ContainerHostError("Docker answered a file read with an archive that holds no file.")
-        return content.read(), datetime.fromtimestamp(member.mtime, UTC)
+        for member in tar:
+            content = tar.extractfile(member)
+            if content is not None:
+                found[member.name.rsplit("/", 1)[-1]] = (content.read(), datetime.fromtimestamp(member.mtime, UTC))
+    return found
 
 
 def only_file_in(archive: bytes) -> bytes:
-    return dated_file_in(archive)[0]
+    found = files_in(archive)
+    if len(found) != 1:
+        raise ContainerHostError(f"Docker answered a file read with an archive that holds {len(found)} files, not one.")
+    return next(iter(found.values()))[0]

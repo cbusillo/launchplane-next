@@ -11,9 +11,9 @@ Neither takes a body. Each reads the host and the proxy again before every step,
 
 ## The mark
 
-A lane is in maintenance when its own routes file sends its web address to the back soon page. Nothing else is stored. `since` in an answer and on the page is the time that file was written, by the control container's clock.
+A lane is in maintenance when its own routes file sends its web address to the back soon page. Nothing else is stored. The file is read from the proxy's container whether or not the proxy runs, so a lane in maintenance reads as in maintenance while the proxy is down. `since` in an answer and on the page is the time that file was written, by the control container's clock.
 
-While the routes file or the proxy's loaded route points at the back soon page:
+While the routes file points at the back soon page:
 
 - `move` answers `503` and says to end maintenance first. It starts, replaces and repairs nothing.
 - `retire` works as on any lane: it removes the route, then the stopped background service and web part, and keeps the data set.
@@ -32,11 +32,13 @@ While the routes file or the proxy's loaded route points at the back soon page:
 
 Containers are stopped and never removed, and no data is touched. A lane with no data set or no background service goes in with the parts it has. A lane with nothing on the host, no route included, is refused with `503`.
 
+It stops with `503` when everything is stopped and the lane is still not as it must be: the back soon page's container is not running, or a part is attached or mounted where it must not be.
+
 Docker sends each container its image's stop signal and kills it after 30 s, or after 60 s for a database server. For PostgreSQL the signal is a fast shutdown, which ends with a checkpoint.
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
-| `in maintenance` | 200 | The proxy has loaded the route to the back soon page and every part of the lane was read as stopped, each database server with exit code 0. A second call changes nothing and answers the same. |
+| `in maintenance` | 200 | The proxy has loaded the route to the back soon page, every part of the lane was read as stopped, each database server with exit code 0, and the judge that draws the status page found nothing wrong with the lane. A second call changes nothing and answers the same. |
 | `database killed` | 422 | Everything is stopped, and a database server exited with another code than 0: Docker killed it, or it had crashed. `error` names it. Asking again answers the same until maintenance is ended and begun again. |
 
 ## Out of maintenance
@@ -55,8 +57,8 @@ The web address changes first going in and last coming out, so a call killed any
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
-| `ended` | 200 | This call switched the web address back to the web part, and the lane was then read as it must be. |
-| `not in maintenance` | 200 | The web address did not show the back soon page. Nothing changed, whatever state the lane is in. |
+| `ended` | 200 | This call switched the web address back to the web part, and the judge that draws the status page then found nothing wrong or unfinished in the lane. |
+| `not in maintenance` | 200 | The lane's routes file did not point at the back soon page. The call read nothing else and changed nothing, whatever state the lane is in. |
 | `web part failed` | 422 | Docker refused to start the web part, or it failed its check. |
 | `background service failed` | 422 | Docker refused to start the background service, or it did not stay up 3 s. |
 
@@ -95,8 +97,9 @@ Every web part, background service and database server is made with Docker's res
 - **A request the web part already holds when it is stopped** gets its answer only if the product finishes it within 30 s of the stop signal.
 - **A container made before restart policies changed has the policy `always`**, and Docker starts it again after a restart even in maintenance. Nothing is converted. A move makes a web part and a background service again; a database server keeps its policy until it is removed and made again.
 - **A database server that does not accept connections within 60 s while maintenance ends** stops the call with `503` and is left running behind the back soon page. Beginning maintenance again stops it.
-- **A back soon page container that is gone while a lane is in maintenance is not started by beginning that lane's maintenance again.** The web address then answers the proxy's own error, and the page shows it as a fault. Docker brings the container back after a crash or a restart. Comes back if anything ever removes it.
-- **A call ending maintenance that is killed after it wrote the route back** has finished its work. Asked again it waits for the proxy and answers `not in maintenance`, not `ended`.
+- **A back soon page container that is gone while a lane is in maintenance is not started by beginning that lane's maintenance again.** That call answers `503` and says the container is not running, the web address answers the proxy's own error, and the page shows it as wrong. Docker brings the container back after a crash or a restart. Comes back if anything ever removes it.
+- **A call ending maintenance that is killed after it wrote the route back** has finished its work. Asked again it answers `not in maintenance`, not `ended`, without waiting for the proxy to load the file.
+- **A proxy container removed by hand takes the routes files out of reach** until a call starts the proxy again on the same volume. Until then no lane reads as in maintenance.
 - **The test-bed kill tests cannot say at which action the kill landed.** They show that the same call asked again reaches the same end. The unit tests cover each action.
 - **Untried:** a paused part, and a lane whose route the proxy reports as disabled.
 
@@ -113,7 +116,7 @@ On the test bed, November 16, with the pretend ledger product (a web part, a bac
 - PostgreSQL stopped with exit code 0 each time.
 - A web part killed with `SIGKILL` on the host was started again by Docker.
 - Killed at three points going in and three coming out, then asked again: each reached the same end with its rows.
-- busybox `wget` in the proxy's image shows only the status line of a `503`, not its headers, so Launchplane judges the back soon page by whether its container runs. The test-bed tests read the headers from outside.
+- busybox `wget` in the proxy's image shows only the status line of a `503`, not its headers, so the back soon page is judged by whether its container runs. The test-bed tests read the headers from outside.
 
 ## On the test bed
 

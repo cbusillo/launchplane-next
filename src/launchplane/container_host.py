@@ -41,7 +41,7 @@ from launchplane.docker_answers import (
     TornRead,
     attempting,
     checked,
-    dated_file_in,
+    files_in,
     is_quiet,
     names_of,
     on_host_from_answers,
@@ -427,15 +427,18 @@ class ContainerHost:
             raise ContainerHostError(f"Running {command[0]} in {container} on {self.address} returned before the command finished.")
         return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())
 
-    def read_file(self, container: str, path: PurePosixPath) -> FileRead | None:
-        with attempting(f"Reading {path} in {container}", self.address):
-            found = self.client.containers.get(container)
+    def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]:
+        with attempting(f"Reading {folder} in {container}", self.address):
+            found = self.find_container(container)
+            if found is None:
+                return {}
             try:
-                chunks, _ = found.get_archive(str(path))
+                chunks, _ = found.get_archive(str(folder))
             except NotFound:
-                return None
-            content, changed_at = dated_file_in(b"".join(chunks))
-            return FileRead(content.decode(), changed_at)
+                return {}
+            return {
+                name: FileRead(content.decode(), changed_at) for name, (content, changed_at) in files_in(b"".join(chunks)).items()
+            }
 
     def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
         with attempting(f"Placing {path} in {container}", self.address):

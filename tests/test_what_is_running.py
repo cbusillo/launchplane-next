@@ -12,7 +12,16 @@ from launchplane.act import Judged
 from launchplane.api import WebAddressChecker, create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
 from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
-from launchplane.instance import BACK_SOON, LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
+from launchplane.instance import (
+    BACK_SOON,
+    LANE_NETWORK,
+    InstanceState,
+    LaneBuild,
+    LoadedRoute,
+    ProxySeen,
+    RouteStatus,
+    RunningInstance,
+)
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from tests.given_secrets import NO_SECRETS
 
@@ -23,13 +32,15 @@ NO_NETWORKS: dict[str, object] = {"NetworkSettings": {"Networks": {}}, "Mounts":
 SITE = {"launchplane.product": "site"}
 UNEXPECTED_ANSWERS: dict[str, object] = {
     "an object instead of a list": {"message": "page not found"},
-    "a container without a state": [{"Names": ["/site"], "Labels": SITE} | NO_NETWORKS],
-    "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": SITE} | NO_NETWORKS],
-    "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}} | NO_NETWORKS],
-    "a container without a name": [{"Names": [], "State": "running", "Labels": SITE} | NO_NETWORKS],
-    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE, "Mounts": []}],
+    "a container without a state": [{"Names": ["/site"], "Image": "site:1", "Labels": SITE} | NO_NETWORKS],
+    "a state Docker never had": [{"Names": ["/site"], "Image": "site:1", "State": "hibernating", "Labels": SITE} | NO_NETWORKS],
+    "a container the filter should not have let through": [
+        {"Names": ["/site"], "Image": "site:1", "State": "running", "Labels": {}} | NO_NETWORKS
+    ],
+    "a container without a name": [{"Names": [], "Image": "site:1", "State": "running", "Labels": SITE} | NO_NETWORKS],
+    "a container without its networks": [{"Names": ["/site"], "Image": "site:1", "State": "running", "Labels": SITE, "Mounts": []}],
     "a container without its mounts": [
-        {"Names": ["/site"], "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}}
+        {"Names": ["/site"], "Image": "site:1", "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}}
     ],
 }
 
@@ -66,28 +77,21 @@ def every_web_address_answers(_web_address: str) -> str | None:
 type InstanceReader = Callable[[], list[RunningInstance]]
 
 
+def proxy_sending(routes: dict[str, str] | None, *, runs: bool = True, back_soon_runs: bool = True) -> ProxySeen:
+    loaded = {web_address: LoadedRoute(container, RouteStatus.ENABLED) for web_address, container in (routes or {}).items()}
+    return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, loaded=loaded if runs else {})
+
+
 def app_reading(
     read: InstanceReader,
     routes: dict[str, str] | None = None,
     why_fails: WebAddressChecker = every_web_address_answers,
-    why_back_soon_fails: WebAddressChecker = every_web_address_answers,
+    proxy: ProxySeen | None = None,
 ) -> TestClient:
-    def read_judged(_routes: dict[str, str]) -> Judged:
-        return Judged(OnHost(read(), [], []), [])
+    def read_judged() -> Judged:
+        return Judged(OnHost(read(), [], []), proxy or proxy_sending(routes), [])
 
-    return TestClient(
-        create_app(
-            read_judged,
-            lambda: routes or {},
-            why_fails,
-            no_move,
-            no_retire,
-            NO_SECRETS,
-            no_maintenance,
-            no_maintenance,
-            why_back_soon_fails,
-        )
-    )
+    return TestClient(create_app(read_judged, why_fails, no_move, no_retire, NO_SECRETS, no_maintenance, no_maintenance))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
@@ -246,8 +250,11 @@ def test_a_web_address_in_maintenance_says_it_shows_the_back_soon_page_and_is_no
     assert [instance["receives_visitors_for"] for instance in body["instances"]] == [None]
 
 
-def test_a_web_address_switched_to_a_back_soon_page_that_is_down_does_not_say_it_shows_it() -> None:
-    routes = {"testing.site.test": BACK_SOON}
-    client = app_reading(lambda: [stopped_instance()], routes, why_back_soon_fails=lambda _: "its container is not running")
+def test_with_the_proxy_down_every_web_address_says_so_and_none_is_asked() -> None:
+    def no_request(web_address: str) -> str | None:
+        raise AssertionError(f"Asked {web_address} through a proxy that is not running")
+
+    client = app_reading(lambda: [stopped_instance()], why_fails=no_request, proxy=proxy_sending(None, runs=False))
     [entry] = client.get("/running").json()["web_addresses"]
-    assert (entry["shows_back_soon_page"], entry["answers"], entry["error"]) == (False, False, "its container is not running")
+    assert (entry["sends_to_container"], entry["answers"]) == (None, False)
+    assert "The proxy is not running" in entry["error"]

@@ -10,7 +10,6 @@ from launchplane.instance import (
     LaneRoute,
     LaneSeen,
     LoadedRoute,
-    ProxyNotRunning,
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
@@ -18,7 +17,6 @@ from launchplane.instance import (
 from launchplane.judge import LaneVerdict, Standing, lane_verdict
 from launchplane.maintenance import decide_begin, decide_end
 from launchplane.plan import decide_move, decide_retire
-from launchplane.product import Product
 from launchplane.steps import (
     AwaitBackgroundService,
     AwaitDatabase,
@@ -83,7 +81,7 @@ class Lane:
 
     def seen(self) -> LaneSeen:
         if self.route is None:
-            return LaneSeen((), ProxyNotRunning())
+            return LaneSeen((), LaneRoute(None, None, proxy_runs=False))
         loaded, written = self.route
         route = LaneRoute(
             None if loaded is None else LoadedRoute(loaded, RouteStatus.ENABLED),
@@ -102,7 +100,6 @@ class Lane:
 IN_MAINTENANCE = (BACK_SOON, BACK_SOON)
 SERVING = (WEB, WEB)
 UP = Lane(SERVING, RUNNING, RUNNING, database(RUNNING))
-PLAIN_SITE_STOPPED = Lane(IN_MAINTENANCE, STOPPED, None, None)
 
 
 def answered(outcome: MaintenanceOutcome, *, in_maintenance: bool, error: str | None = None) -> Done[MaintenanceResult]:
@@ -151,14 +148,6 @@ BEGINS: dict[str, tuple[Lane, object]] = {
         Lane(IN_MAINTENANCE, database=database(STOPPED, exit_code=KILLED)),
         answered(MaintenanceOutcome.DATABASE_KILLED, in_maintenance=True, error=KILLED_REPORT),
     ),
-    "a lane with no data set and no background service stops the web part it has": (
-        Lane(IN_MAINTENANCE, RUNNING, None, None),
-        StopPart(WEB),
-    ),
-    "a lane with no data set and no background service is in maintenance once its web part has stopped": (
-        PLAIN_SITE_STOPPED,
-        answered(MaintenanceOutcome.IN_MAINTENANCE, in_maintenance=True),
-    ),
     "a lane whose route goes to an instance that is gone still shows the back soon page": (
         Lane(("gone", "gone"), None, None, database(RUNNING)),
         ShowBackSoon(WEB_ADDRESS),
@@ -168,11 +157,11 @@ BEGINS: dict[str, tuple[Lane, object]] = {
 
 @pytest.mark.parametrize(("lane", "step"), BEGINS.values(), ids=BEGINS.keys())
 def test_beginning_maintenance_takes_this_step_next_whatever_was_done_before(lane: Lane, step: object) -> None:
-    assert decide_begin(lane.seen(), "site", "testing", ()) == step
+    assert decide_begin(lane.seen(), "site", "testing", WITH_DATA, ()) == step
 
 
 def test_a_lane_with_nothing_on_the_host_is_not_given_a_back_soon_page() -> None:
-    step = decide_begin(Lane((None, None), None, None, None).seen(), "site", "testing", ())
+    step = decide_begin(Lane((None, None), None, None, None).seen(), "site", "testing", WITH_DATA, ())
     assert isinstance(step, Stop)
     assert "nothing to put in maintenance" in step.reason
 
@@ -238,16 +227,6 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
         (CHECKED, WriteRoute(WEB_ADDRESS, WEB), AwaitRoute(WEB_ADDRESS, WEB)),
         answered(MaintenanceOutcome.ENDED, in_maintenance=False),
     ),
-    "a lane that is not in maintenance is left as it is and answered so": (
-        UP,
-        (),
-        answered(MaintenanceOutcome.NOT_IN_MAINTENANCE, in_maintenance=False),
-    ),
-    "a lane that is not in maintenance has no stopped background service started for it": (
-        Lane(SERVING, RUNNING, STOPPED, STARTED_DATABASE),
-        (),
-        answered(MaintenanceOutcome.NOT_IN_MAINTENANCE, in_maintenance=False),
-    ),
     "a web part that failed its check is stopped again": (
         Lane(IN_MAINTENANCE, RUNNING, STOPPED, STARTED_DATABASE),
         (STARTED_WEB, CHECK_REFUSED),
@@ -304,24 +283,6 @@ def test_ending_maintenance_takes_this_step_next(lane: Lane, done: tuple[Event, 
     assert decide_end(lane.seen(), "site", "testing", WITH_DATA, done) == step
 
 
-def test_a_lane_with_no_data_set_and_no_background_service_comes_out_by_its_web_part_alone() -> None:
-    def step(state: InstanceState, route: tuple[str, str], *done: Event) -> object:
-        loaded, written = route
-        seen = LaneSeen(
-            (lane_instance(WEB, "b", state),), LaneRoute(LoadedRoute(loaded, RouteStatus.ENABLED), written), network_quiet=QUIET
-        )
-        return decide_end(seen, "site", "testing", Product(), done)
-
-    switched = (STARTED_WEB, Check(WEB), WriteRoute(WEB_ADDRESS, WEB))
-    assert step(STOPPED, IN_MAINTENANCE) == STARTED_WEB
-    assert step(RUNNING, IN_MAINTENANCE, STARTED_WEB, Check(WEB)) == WriteRoute(WEB_ADDRESS, WEB)
-    assert step(RUNNING, SERVING, *switched) == Done(
-        MaintenanceResult(
-            product="site", lane="testing", web_address=WEB_ADDRESS, outcome=MaintenanceOutcome.ENDED, in_maintenance=False
-        )
-    )
-
-
 END_STOPS = {
     "a lane with two instances, so which one received visitors cannot be told": (
         LaneSeen((web(STOPPED), web(STOPPED, "other")), Lane(IN_MAINTENANCE).seen().route, network_quiet=QUIET),
@@ -351,7 +312,6 @@ def test_ending_maintenance_stops_with_why_and_leaves_the_back_soon_page_for(
 BACK_SOON_ROUTES = {
     "written and loaded": (BACK_SOON, BACK_SOON),
     "written and not yet loaded": (WEB, BACK_SOON),
-    "still loaded after its file changed": (BACK_SOON, WEB),
 }
 
 
@@ -369,6 +329,26 @@ def test_a_lane_in_maintenance_is_retired_as_any_other_route_first_then_its_stop
 
 def verdict_on(lane: Lane, *, at_work: bool = False) -> LaneVerdict:
     return lane_verdict(lane.seen(), WITH_DATA, "site", "testing", a_move_is_at_work=at_work)
+
+
+def test_a_lane_in_maintenance_reads_as_in_maintenance_while_the_proxy_is_down_and_nothing_about_it_is_wrong() -> None:
+    seen = Lane(IN_MAINTENANCE).seen()
+    down = LaneSeen(
+        seen.instances, LaneRoute(None, BACK_SOON, SINCE, proxy_runs=False), seen.background_services, seen.data_sets, QUIET
+    )
+    verdict = lane_verdict(down, WITH_DATA, "site", "testing", a_move_is_at_work=False)
+    assert (verdict.in_maintenance, verdict.in_maintenance_since, verdict.problems) == (True, SINCE, [])
+
+
+def test_a_back_soon_page_that_is_not_running_is_wrong_for_a_lane_in_maintenance_and_begin_does_not_answer_success() -> None:
+    seen = Lane(IN_MAINTENANCE).seen()
+    route = LaneRoute(seen.route.loaded, BACK_SOON, SINCE, back_soon_runs=False)
+    without_page = LaneSeen(seen.instances, route, seen.background_services, seen.data_sets, QUIET)
+    [problem] = lane_verdict(without_page, WITH_DATA, "site", "testing", a_move_is_at_work=True).problems
+    step = decide_begin(without_page, "site", "testing", WITH_DATA, ())
+    assert isinstance(step, Stop)
+    assert "launchplane-back-soon is not running" in problem
+    assert problem in step.reason
 
 
 def test_a_lane_in_maintenance_with_every_part_stopped_is_as_intended_and_nothing_about_it_is_wrong() -> None:

@@ -3,10 +3,8 @@ import io
 import json
 import socket
 import tarfile
-import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +16,6 @@ from tests.bed import (
     SCRATCH_ADDRESS,
     UnexpectedAnswer,
     ask,
-    kill_launchplane,
     move_lane,
     needs_test_bed,
     on_control,
@@ -28,6 +25,7 @@ from tests.bed import (
     retire,
     wait_for,
 )
+from tests.bed import kill_once as kill_the_call_once
 
 pytestmark = needs_test_bed
 
@@ -346,17 +344,8 @@ def test_retiring_a_lane_keeps_its_data_set_until_it_is_named() -> None:
     assert data_set["data_set"] not in on_scratch("docker network ls --format '{{.Name}}'; docker volume ls --format '{{.Name}}'")
 
 
-def move_cut_short_by_the_kill(build: str) -> None:
-    with suppress(OSError):
-        move_lane(PRODUCT, LANE, build)
-
-
 def kill_once(build: str, seen: Callable[[LaneView], bool]) -> None:
-    mover = threading.Thread(target=move_cut_short_by_the_kill, args=(build,))
-    mover.start()
-    wait_for(lambda: seen(lane_view()), seconds=90)
-    kill_launchplane()
-    mover.join()
+    kill_the_call_once(lambda: move_lane(PRODUCT, LANE, build), lambda: seen(lane_view()))
 
 
 def has_background_service_of(build: str) -> Callable[[LaneView], bool]:

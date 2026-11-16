@@ -3,7 +3,6 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from importlib.resources import files
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -11,7 +10,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from launchplane.container_host import CommandResult, FileRead, HelperContainer
-from launchplane.instance import BACK_SOON, LANE_NETWORK, LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
+from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute
 
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
@@ -72,7 +71,7 @@ class HelperHost(Protocol):
     def ensure_helper(self, helper: HelperContainer) -> None: ...
     def is_running(self, container: str) -> bool: ...
     def run_in(self, container: str, command: list[str]) -> CommandResult: ...
-    def read_file(self, container: str, path: PurePosixPath) -> FileRead | None: ...
+    def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]: ...
     def place_file(self, container: str, path: PurePosixPath, content: str) -> None: ...
     def read_log_tail(self, container: str) -> str: ...
 
@@ -104,8 +103,11 @@ class LoadedRoutes(Read):
     services: dict[str, TraefikService | dict[str, object]]
 
 
+ROUTE_FILE_SUFFIX = ".yml"
+
+
 def route_file_of(web_address: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}.yml"
+    return ROUTES_FOLDER / f"{web_address}{ROUTE_FILE_SUFFIX}"
 
 
 def staged_route_file_of(web_address: str) -> PurePosixPath:
@@ -184,38 +186,29 @@ class TraefikProxy:
             raise ProxyError(f"Reading the proxy's loaded routes failed: {result.output}")
         return loaded_routes_from_answer(result.output)
 
-    def read_enabled_routes(self) -> dict[str, str]:
-        if not self.host.is_running(PROXY_NAME):
-            return {}
+    def read_written(self) -> dict[str, WrittenRoute]:
+        files = self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
         return {
-            web_address: route.container for web_address, route in self.read_loaded().items() if route.status == RouteStatus.ENABLED
+            name.removesuffix(ROUTE_FILE_SUFFIX): WrittenRoute(
+                written_route_from_file(file.text, name.removesuffix(ROUTE_FILE_SUFFIX)), file.changed_at
+            )
+            for name, file in files.items()
+            if name.endswith(ROUTE_FILE_SUFFIX)
         }
 
-    def read_lane_route(self, web_address: str) -> ProxyNotRunning | LaneRoute:
-        if not self.host.is_running(PROXY_NAME):
-            return ProxyNotRunning()
-        file = self.host.read_file(PROXY_NAME, route_file_of(web_address))
-        written = None if file is None else written_route_from_file(file.text, web_address)
-        since = file.changed_at if file is not None and written == BACK_SOON else None
-        return LaneRoute(loaded=self.read_loaded().get(web_address), written=written, back_soon_since=since)
-
-    def back_soon_since(self, web_address: str) -> datetime | None:
-        file = self.host.read_file(PROXY_NAME, route_file_of(web_address))
-        if file is None or written_route_from_file(file.text, web_address) != BACK_SOON:
-            return None
-        return file.changed_at
+    # The route files are read from the proxy's container whether or not it runs; what it has loaded only while it runs.
+    def read(self) -> ProxySeen:
+        runs = self.host.is_running(PROXY_NAME)
+        return ProxySeen(
+            runs=runs,
+            back_soon_runs=self.host.is_running(BACK_SOON),
+            written=self.read_written(),
+            loaded=self.read_loaded() if runs else {},
+        )
 
     def show_back_soon(self, web_address: str) -> None:
         self.host.ensure_helper(BACK_SOON_PAGE)
         self.write_route(web_address, BACK_SOON)
-
-    def why_back_soon_fails(self, web_address: str) -> str | None:
-        if self.host.is_running(BACK_SOON):
-            return None
-        return (
-            f"{web_address} is switched to the back soon page, and its container {BACK_SOON} is not running, "
-            "so visitors get the proxy's own error."
-        )
 
     def await_route(self, web_address: str, container: str | None) -> None:
         started = self.clock()
