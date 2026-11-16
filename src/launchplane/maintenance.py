@@ -125,7 +125,8 @@ def stop_again(seen: LaneSeen, refused: Refusal, answer: MaintenanceResult, done
     up = still_up(seen)
     if up:
         return stop_of(up[0])
-    log = next((event for event in done if isinstance(event, LogRead) and event.container == refused.container), None)
+    logs = [event for event in done if isinstance(event, LogRead)]
+    log = next((each for each in logs if each.container == refused.container), None)
     if log is None:
         return ReadLog(refused.container)
     of_the_web_part = any(instance.container == refused.container for instance in seen.instances)
