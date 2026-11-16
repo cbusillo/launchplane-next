@@ -155,15 +155,17 @@ def step_toward_ready(found: DataSet, target: LaneBuild, image: str) -> Action:
 def prepared(
     seen: LaneSeen, data_set: str | None, fresh: str | None, target: LaneBuild, product: Product, done: tuple[Event, ...]
 ) -> Action | Stop | DataSetUse | None:
-    if data_set is None or product.database is None:
+    if data_set is None:
+        return None
+    if product.database is None:
         return None
     found = data_set_of(seen, data_set)
-    if found is None and data_set == fresh:
-        return CreateDataSetNetwork(target.product, target.lane, data_set)
-    if found is None:
+    if found is None and data_set != fresh:
         return Stop(
             f"The instance receiving visitors uses the data set {data_set}, which is not on the host. {changes_so_far(done)}"
         )
+    if found is None:
+        return CreateDataSetNetwork(target.product, target.lane, data_set)
     problems = data_set_problems(found, seen, has_database=True)
     unfixable = [problem.text for problem in problems if not problem.fixable]
     # Nothing in a data set is made or started while it has a problem no step puts right.
