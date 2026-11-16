@@ -22,6 +22,7 @@ To start, people see two pages: the Client's accept page and one status page. Th
 - **Lane instance:** a build running against one data set. A lane normally has one. During a release it has two for a short time. Called an instance for short where the lane is clear.
 - **Web part and background service:** a lane instance has a web part, which answers visitors at the lane's web address, and may have a background service, which does the work that runs by itself, such as scheduled tasks and outgoing mail. Only one background service of a lane runs at a time. Always written in full, never as "service" alone.
 - **Active:** the lane instance a web address currently sends visitors to.
+- **Maintenance:** a lane is in maintenance when its web address shows the back soon page and nothing can write to its data set. A release that changes data puts the lane in maintenance before the data is cloned, and takes it out when the release switches or is given up.
 - **Live:** a product is Live when its Client uses production for real business. A Live site is the production lane of a Live product.
 - **Prelaunch:** a product whose production lane exists but whose Client does not yet run their business on it. Its production is not Live.
 - **Acceptance:** a Client's recorded yes to one exact build. It stays good until that build is live.
@@ -124,7 +125,7 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 **Chris decides**
 
 1. Who accepts during the finish-line test. The test runs with nobody touching anything, and no automated identity may release. Blocks the first release to production.
-2. What happens to writes that reach production while its instance is being updated: a pause, a catch-up, or something else, and how long an interruption is acceptable. Blocks the move for any product with a database.
+2. How long an interruption is acceptable while production's data is being updated. For that time the lane is in maintenance. Blocks the move for any product with a database.
 3. What the instance of production may do before the switch. It holds production's keys and scheduled jobs, and must not send mail, take payments or push to outside services twice. Blocks the same step.
 4. What "verified" means for a backup, and how long backups are kept. Blocks the first production move.
 5. What scrub must remove, for each kind, and what proves it ran. Blocks any real data reaching testing.

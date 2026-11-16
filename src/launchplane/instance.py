@@ -1,12 +1,14 @@
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
 LANE_NETWORK = "launchplane-lanes"
 LANE_DOMAIN = "test"
+BACK_SOON = "launchplane-back-soon"
 
 
 class InstanceState(StrEnum):
@@ -66,6 +68,8 @@ class DataSetDatabase(BaseModel):
     networks: tuple[str, ...]
     accepts_connections: bool | None = None
     mounts: tuple[Mount, ...] = ()
+    exit_code: int | None = None
+    image: str | None = None
 
 
 class DataSet(BaseModel):
@@ -94,11 +98,6 @@ class DataSetUse:
     database_container: str
 
 
-@dataclass(frozen=True)
-class ProxyNotRunning:
-    pass
-
-
 class RouteStatus(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"
@@ -112,15 +111,57 @@ class LoadedRoute:
 
 
 @dataclass(frozen=True)
+class WrittenRoute:
+    container: str
+    written_at: datetime
+
+
+@dataclass(frozen=True)
 class LaneRoute:
     loaded: LoadedRoute | None
     written: str | None
+    back_soon_since: datetime | None = None
+    proxy_runs: bool = True
+    back_soon_runs: bool = True
+
+    # The mark is the lane's own route file, so it reads the same while the proxy is down.
+    @property
+    def in_maintenance(self) -> bool:
+        return self.written == BACK_SOON
+
+    # What visitors get is what the running proxy has loaded, never what the file says.
+    @property
+    def sends_visitors_to(self) -> str | None:
+        if not self.proxy_runs or self.loaded is None or self.loaded.status != RouteStatus.ENABLED:
+            return None
+        return self.loaded.container
+
+
+@dataclass(frozen=True)
+class ProxySeen:
+    runs: bool
+    back_soon_runs: bool
+    written: Mapping[str, WrittenRoute] = field(default_factory=dict[str, WrittenRoute])
+    loaded: Mapping[str, LoadedRoute] = field(default_factory=dict[str, LoadedRoute])
+
+    def route_of(self, web_address: str) -> LaneRoute:
+        written = self.written.get(web_address)
+        return LaneRoute(
+            loaded=self.loaded.get(web_address),
+            written=None if written is None else written.container,
+            back_soon_since=written.written_at if written is not None and written.container == BACK_SOON else None,
+            proxy_runs=self.runs,
+            back_soon_runs=self.back_soon_runs,
+        )
+
+    def sends_visitors_to(self) -> dict[str, str]:
+        return {web_address: route.container for web_address, route in self.loaded.items() if route.status == RouteStatus.ENABLED}
 
 
 @dataclass(frozen=True)
 class LaneSeen:
     instances: tuple[RunningInstance, ...]
-    route: ProxyNotRunning | LaneRoute
+    route: LaneRoute
     background_services: tuple[RunningBackgroundService, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])

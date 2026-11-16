@@ -14,7 +14,6 @@ from launchplane.instance import (
     LaneSeen,
     LoadedRoute,
     Mount,
-    ProxyNotRunning,
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
@@ -145,7 +144,7 @@ MOVES = {
 def seen(case: Case) -> LaneSeen:
     loaded, written = case.route
     if case.step == StartProxy():
-        return LaneSeen(case.instances, ProxyNotRunning())
+        return LaneSeen(case.instances, LaneRoute(None, None, proxy_runs=False))
     if isinstance(loaded, str):
         loaded = LoadedRoute(loaded, RouteStatus.ENABLED)
     return LaneSeen(case.instances, LaneRoute(loaded, written), network_quiet=QUIET)

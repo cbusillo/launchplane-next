@@ -1,21 +1,19 @@
 import threading
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from launchplane import plan, steps
+from launchplane import maintenance, plan, steps
 from launchplane.container_host import HasDatabase, PartStopped
-from launchplane.docker_answers import OnHost
+from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import (
     DataSet,
     DataSetUse,
     LaneBuild,
     LaneRoute,
     LaneSeen,
-    LoadedRoute,
-    ProxyNotRunning,
-    RouteStatus,
+    ProxySeen,
     new_container_name,
     new_data_set_name,
     web_address_of,
@@ -23,7 +21,7 @@ from launchplane.instance import (
 from launchplane.judge import BACKGROUND_SERVICE_STEADY_SECONDS, LaneVerdict, lane_verdict
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed
-from launchplane.steps import Action, Done, Event, FreshNames, MoveResult, RetireResult, Stop
+from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
 
 MOST_STEPS = 50
 
@@ -38,6 +36,9 @@ class InstanceHost(Protocol):
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
+    def start_part(self, container: str) -> None: ...
+    def stop_part(self, container: str) -> None: ...
+    def stop_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
     def remove_instance(self, container: str) -> None: ...
     def retire_instance(self, container: str) -> None: ...
@@ -46,11 +47,12 @@ class InstanceHost(Protocol):
 
 class Proxy(Protocol):
     def start(self) -> None: ...
-    def read_lane_route(self, web_address: str) -> ProxyNotRunning | LaneRoute: ...
+    def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None) -> None: ...
     def write_route(self, web_address: str, container: str) -> None: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
+    def show_back_soon(self, web_address: str) -> None: ...
 
 
 type ProductReader = Callable[[str], Product]
@@ -63,13 +65,8 @@ class Stopped(Exception):
 @dataclass(frozen=True)
 class Judged:
     on_host: OnHost
+    proxy: ProxySeen
     lanes: list[LaneVerdict]
-
-
-def failure_report(error: CheckFailed | PartStopped, log_tail: str) -> str:
-    if not log_tail:
-        return f"{error} It wrote no log."
-    return f"{error}\nIts last log lines:\n{log_tail}"
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -100,7 +97,7 @@ def lanes_on(on_host: OnHost) -> list[tuple[str, str]]:
     return sorted(lanes)
 
 
-def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning | LaneRoute) -> LaneSeen:
+def lane_seen(on_host: OnHost, product: str, lane: str, route: LaneRoute) -> LaneSeen:
     return LaneSeen(
         instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
         route=route,
@@ -108,17 +105,6 @@ def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning |
         data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
         network_quiet={network.name: network.is_quiet for network in on_host.networks},
     )
-
-
-def verdict_on(
-    on_host: OnHost, product: str, lane: str, routes: Mapping[str, str], description: Product | ProductError, a_move_is_at_work: bool
-) -> LaneVerdict:
-    if isinstance(description, ProductError):
-        return LaneVerdict(product=product, lane=lane, a_move_is_at_work=a_move_is_at_work, problems=[str(description)])
-    receiving = routes.get(web_address_of(product, lane))
-    route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
-    seen = lane_seen(on_host, product, lane, route)
-    return lane_verdict(seen, description, product, lane, a_move_is_at_work=a_move_is_at_work)
 
 
 type Take = Callable[[InstanceHost, Proxy, Any], None]
@@ -142,6 +128,9 @@ TAKE: dict[type, Take] = {
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
+    steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
+    steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
+    steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
 }
 
 
@@ -170,10 +159,10 @@ class Lanes:
                 self.lane_being_moved = None
 
     def read(self, product: str, lane: str, *, has_database: bool = False) -> LaneSeen:
-        route = self.proxy.read_lane_route(web_address_of(product, lane))
+        route = self.proxy.read().route_of(web_address_of(product, lane))
         return lane_seen(self.host.read(lambda asked: has_database and asked == product), product, lane, route)
 
-    def read_judged(self, routes: Mapping[str, str]) -> Judged:
+    def read_judged(self) -> Judged:
         descriptions: dict[str, Product | ProductError] = {}
 
         def description_of(product: str) -> Product | ProductError:
@@ -190,12 +179,20 @@ class Lanes:
 
         # A move that starts or ends while the host is read is at work on what was read.
         moving = {self.lane_being_moved}
+        proxy = self.proxy.read()
         on_host = self.host.read(has_database)
         moving.add(self.lane_being_moved)
         return Judged(
             on_host,
+            proxy,
             [
-                verdict_on(on_host, product, lane, routes, description_of(product), (product, lane) in moving)
+                lane_verdict(
+                    lane_seen(on_host, product, lane, proxy.route_of(web_address_of(product, lane))),
+                    description_of(product),
+                    product,
+                    lane,
+                    a_move_is_at_work=(product, lane) in moving,
+                )
                 for product, lane in lanes_on(on_host)
             ],
         )
@@ -217,11 +214,38 @@ class Lanes:
                 f"{lane} of {product}",
             )
 
+    def begin_maintenance(self, product: str, lane: str) -> MaintenanceResult:
+        with self.at_work_on(product, lane):
+            description = self.read_product(product)
+            return self.settle(
+                lambda: self.read(product, lane),
+                lambda seen, done: maintenance.decide_begin(seen, product, lane, description, done),
+                f"{lane} of {product}",
+            )
+
+    def end_maintenance(self, product: str, lane: str) -> MaintenanceResult:
+        with self.at_work_on(product, lane):
+            # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
+            web_address = web_address_of(product, lane)
+            route = self.proxy.read().route_of(web_address)
+            if not route.in_maintenance:
+                if route.proxy_runs and not plan.is_loaded_as_written(route):
+                    self.proxy.await_route(web_address, route.written)
+                return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
+            description = self.read_product(product)
+            return self.settle(
+                lambda: self.read(product, lane, has_database=description.database is not None),
+                lambda seen, done: maintenance.decide_end(seen, product, lane, description, done),
+                f"{lane} of {product}",
+                self.take_behind_back_soon,
+            )
+
     def settle[Answer](
         self,
         read: Callable[[], LaneSeen],
         next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer] | Stop],
         lane_name: str,
+        take: Callable[[Action], Event] | None = None,
     ) -> Answer:
         done: list[Event] = []
         while True:
@@ -235,26 +259,54 @@ class Lanes:
                     f"{lane_name} was not finished after {MOST_STEPS} steps, so Launchplane stopped before {step}. "
                     "What was done stays done, and asking again goes on from there."
                 )
-            done.append(self.take(step))
+            done.append((take or self.take)(step))
 
     def take(self, action: Action) -> Event:
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path)
         if isinstance(action, steps.AwaitBackgroundService):
             return self.await_background_service(action.container)
+        if isinstance(action, steps.StartStopped):
+            return self.start_stopped(action)
         TAKE[type(action)](self.host, self.proxy, action)
         return action
 
-    def check(self, container: str, health_path: str) -> Event:
+    def start_stopped(self, action: steps.StartStopped) -> Event:
+        try:
+            self.host.start_part(action.container)
+        except ContainerHostError as error:
+            return steps.StartRefused(action.container, str(error))
+        return action
+
+    # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
+    def take_behind_back_soon(self, action: Action) -> Event:
+        if isinstance(action, steps.Check):
+            return self.check(action.container, action.health_path, with_log=False)
+        if isinstance(action, steps.AwaitBackgroundService):
+            return self.await_background_service(action.container, with_log=False)
+        if isinstance(action, steps.ReadLog):
+            return self.read_log(action.container)
+        return self.take(action)
+
+    def read_log(self, container: str) -> Event:
+        try:
+            return steps.LogRead(container, self.host.read_log_tail(container))
+        except ContainerHostError as error:
+            return steps.LogRead(container, "", unreadable=str(error))
+
+    def refusal(self, error: CheckFailed | PartStopped, container: str, *, with_log: bool) -> str:
+        return plan.failure_report(str(error), self.host.read_log_tail(container)) if with_log else str(error)
+
+    def check(self, container: str, health_path: str, *, with_log: bool = True) -> Event:
         try:
             self.proxy.check_instance(container, health_path)
         except CheckFailed as error:
-            return steps.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
+            return steps.CheckRefused(container, self.refusal(error, container, with_log=with_log))
         return steps.Check(container, health_path)
 
-    def await_background_service(self, container: str) -> Event:
+    def await_background_service(self, container: str, *, with_log: bool = True) -> Event:
         try:
             self.host.await_background_service(container, BACKGROUND_SERVICE_STEADY_SECONDS)
         except PartStopped as error:
-            return steps.BackgroundServiceRefused(container, failure_report(error, self.host.read_log_tail(container)))
+            return steps.BackgroundServiceRefused(container, self.refusal(error, container, with_log=with_log))
         return steps.AwaitBackgroundService(container)

@@ -1,12 +1,14 @@
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import pytest
 
 from launchplane.act import MOST_STEPS, Lanes, Stopped
 from launchplane.container_host import HasDatabase, PartStopped
-from launchplane.docker_answers import OnHost
+from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import (
+    BACK_SOON,
     LANE_NETWORK,
     DataSet,
     DataSetDatabase,
@@ -14,18 +16,18 @@ from launchplane.instance import (
     HostNetwork,
     InstanceState,
     LaneBuild,
-    LaneRoute,
     LoadedRoute,
     Mount,
-    ProxyNotRunning,
+    ProxySeen,
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
+    WrittenRoute,
     background_service_container_of,
 )
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed
-from launchplane.steps import FreshNames, Outcome, RetireOutcome
+from launchplane.steps import FreshNames, MaintenanceOutcome, Outcome, RetireOutcome
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 BUILD_B = LaneBuild(product="site", lane="testing", build="site:b")
@@ -47,9 +49,19 @@ class FakeHost:
         self.actions: list[str] = []
         self.most_background_services_running = 0
         self.background_services_that_stop: set[str] = set()
+        self.killed_after: int | None = None
+        self.databases_that_must_be_killed: set[str] = set()
+        self.parts_that_will_not_start: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
+        if len(self.actions) == self.killed_after:
+            raise LaunchplaneKilled
+
+    def change_database(self, container: str, **change: object) -> None:
+        for name, found in self.data_sets.items():
+            databases = tuple(each.model_copy(update=change) if each.container == container else each for each in found.databases)
+            self.data_sets[name] = found.model_copy(update={"databases": databases})
 
     def place(
         self, target: LaneBuild, container: str, state: InstanceState = InstanceState.RUNNING, use: DataSetUse | None = None
@@ -142,7 +154,33 @@ class FakeHost:
         self.record(f"database {data_set} on {network} and {volume} from {image}")
 
     def start_database(self, container: str) -> None:
+        self.change_database(container, state=InstanceState.RUNNING, exit_code=None)
         self.record(f"start database {container}")
+
+    def stop_database(self, container: str) -> None:
+        exit_code = 137 if container in self.databases_that_must_be_killed else 0
+        self.change_database(container, state=InstanceState.STOPPED, exit_code=exit_code)
+        self.ready_databases.discard(container)
+        self.record(f"stop database {container}")
+
+    def change_part(self, container: str, state: InstanceState) -> None:
+        if container in self.background_services:
+            ran = 0.0 if state == InstanceState.RUNNING else None
+            self.background_services[container] = self.background_services[container].model_copy(
+                update={"state": state, "running_for_seconds": ran}
+            )
+        else:
+            self.instances[container] = self.instances[container].model_copy(update={"state": state})
+
+    def start_part(self, container: str) -> None:
+        if container in self.parts_that_will_not_start:
+            raise ContainerHostError(f"Starting {container} on test failed: no such image")
+        self.change_part(container, InstanceState.RUNNING)
+        self.record(f"start {container}")
+
+    def stop_part(self, container: str) -> None:
+        self.change_part(container, InstanceState.STOPPED)
+        self.record(f"stop {container}")
 
     def await_database(self, container: str) -> None:
         self.ready_databases.add(container)
@@ -168,6 +206,13 @@ class FakeHost:
         return f"{part.build} listening on :5678"
 
 
+class LaunchplaneKilled(Exception):
+    pass
+
+
+SINCE = datetime(2026, 11, 16, 14, 2, tzinfo=UTC)
+
+
 class FakeProxy:
     def __init__(self, host: FakeHost, running: bool = True, starts: bool = True) -> None:
         self.host = host
@@ -176,6 +221,7 @@ class FakeProxy:
         self.loaded: dict[str, str] = {}
         self.written: dict[str, str] = {}
         self.failing: set[str] = set()
+        self.disabled: set[str] = set()
         self.while_awaiting: Callable[[], None] = lambda: None
         self.while_checking: Callable[[str], None] = lambda _container: None
 
@@ -183,11 +229,22 @@ class FakeProxy:
         self.running = self.starts
         self.host.record("start proxy")
 
-    def read_lane_route(self, web_address: str) -> ProxyNotRunning | LaneRoute:
-        if not self.running:
-            return ProxyNotRunning()
-        loaded = self.loaded.get(web_address)
-        return LaneRoute(None if loaded is None else LoadedRoute(loaded, RouteStatus.ENABLED), self.written.get(web_address))
+    def read(self) -> ProxySeen:
+        def status(web_address: str) -> RouteStatus:
+            return RouteStatus.DISABLED if web_address in self.disabled else RouteStatus.ENABLED
+
+        return ProxySeen(
+            runs=self.running,
+            back_soon_runs=True,
+            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
+            loaded={web_address: LoadedRoute(container, status(web_address)) for web_address, container in self.loaded.items()}
+            if self.running
+            else {},
+        )
+
+    def show_back_soon(self, web_address: str) -> None:
+        self.written[web_address] = BACK_SOON
+        self.host.record("show back soon")
 
     def await_route(self, web_address: str, container: str | None) -> None:
         written = self.written.get(web_address)
@@ -287,7 +344,7 @@ def test_a_retire_that_finishes_on_its_last_allowed_step_answers_retired_not_sto
 
 def test_a_move_whose_loaded_route_is_disabled_stops_with_why_and_changes_nothing() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
-    proxy.read_lane_route = lambda web_address: LaneRoute(LoadedRoute("a", RouteStatus.DISABLED), "a")
+    proxy.disabled.add(WEB_ADDRESS)
     with pytest.raises(Stopped, match="reports it disabled"):
         lanes.move(BUILD_B)
     assert proxy.host.actions == []
@@ -402,7 +459,7 @@ def test_every_lane_is_judged_for_the_page_even_one_whose_description_cannot_be_
             raise ProductError("The description of broken is not one Launchplane reads.")
         return WITH_DATA
 
-    judged = Lanes(proxy.host, proxy, read_product=read_product).read_judged({WEB_ADDRESS: serving})
+    judged = Lanes(proxy.host, proxy, read_product=read_product).read_judged()
     verdicts = {(verdict.product, verdict.lane): verdict.problems for verdict in judged.lanes}
     assert verdicts[("broken", "testing")] == ["The description of broken is not one Launchplane reads."]
     assert verdicts[("site", "testing")] == [
@@ -413,7 +470,7 @@ def test_every_lane_is_judged_for_the_page_even_one_whose_description_cannot_be_
 
 def test_a_lane_as_it_must_be_is_judged_for_the_page_with_its_database_asked() -> None:
     proxy = lane_brought_up_with_a()
-    judged = lanes_on(proxy).read_judged({WEB_ADDRESS: proxy.written[WEB_ADDRESS]})
+    judged = lanes_on(proxy).read_judged()
     assert [verdict.problems for verdict in judged.lanes] == [[]]
 
 
@@ -423,22 +480,22 @@ def test_only_the_lane_being_moved_is_said_to_be_moving_and_only_meanwhile() -> 
     moving_during_the_check: list[dict[str, bool]] = []
 
     def judge_now(_container: str) -> None:
-        judged = lanes.read_judged({WEB_ADDRESS: "a"})
+        judged = lanes.read_judged()
         moving_during_the_check.append({verdict.lane: verdict.a_move_is_at_work for verdict in judged.lanes})
 
     proxy.while_checking = judge_now
     lanes.move(BUILD_B)
-    after = {verdict.lane: verdict.a_move_is_at_work for verdict in lanes.read_judged(dict(proxy.written)).lanes}
+    after = {verdict.lane: verdict.a_move_is_at_work for verdict in lanes.read_judged().lanes}
     assert moving_during_the_check == [{"other": False, "testing": True}]
     assert after == {"other": False, "testing": False}
 
 
 def test_a_move_that_stops_with_an_error_no_longer_counts_as_at_work_on_its_lane() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
-    proxy.read_lane_route = lambda web_address: LaneRoute(LoadedRoute("a", RouteStatus.DISABLED), "a")
+    proxy.disabled.add(WEB_ADDRESS)
     with pytest.raises(Stopped):
         lanes.move(BUILD_B)
-    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged({WEB_ADDRESS: "a"}).lanes] == [False]
+    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged().lanes] == [False]
 
 
 def test_a_move_that_ends_during_a_read_is_still_at_work_on_what_was_read() -> None:
@@ -452,4 +509,159 @@ def test_a_move_that_ends_during_a_read_is_still_at_work_on_what_was_read() -> N
 
     lanes.lane_being_moved = ("site", "testing")
     proxy.host.read = read_while_the_move_ends
-    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged({WEB_ADDRESS: "a"}).lanes] == [True]
+    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged().lanes] == [True]
+
+
+def state_of(proxy: FakeProxy) -> dict[str, object]:
+    host = proxy.host
+    return {
+        "route": (proxy.loaded.get(WEB_ADDRESS), proxy.written.get(WEB_ADDRESS)),
+        "instances": {name: instance.state for name, instance in host.instances.items()},
+        "background services": {name: running.state for name, running in host.background_services.items()},
+        "databases": {each.container: each.state for found in host.data_sets.values() for each in found.databases},
+    }
+
+
+def lane_in_maintenance() -> FakeProxy:
+    proxy = lane_brought_up_with_a()
+    lanes_on(proxy).begin_maintenance("site", "testing")
+    proxy.host.actions.clear()
+    return proxy
+
+
+def test_a_lane_goes_into_maintenance_route_first_then_background_service_web_part_and_database_last() -> None:
+    proxy = lane_brought_up_with_a()
+    web = proxy.written[WEB_ADDRESS]
+    result = lanes_on(proxy).begin_maintenance("site", "testing")
+    assert proxy.host.actions == [
+        "show back soon",
+        f"stop {background_service_container_of(web)}",
+        f"stop {web}",
+        "stop database database-data-1",
+    ]
+    assert (result.outcome, result.in_maintenance, result.since) == (MaintenanceOutcome.IN_MAINTENANCE, True, SINCE)
+    assert set(proxy.host.instances) == {web}
+    assert list(proxy.host.data_sets) == ["data-1"]
+
+
+def test_a_database_that_had_to_be_killed_is_answered_so_every_time_and_never_as_in_maintenance_cleanly() -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.databases_that_must_be_killed.add("database-data-1")
+    answers = [lanes_on(proxy).begin_maintenance("site", "testing") for _ in range(2)]
+    assert [answer.outcome for answer in answers] == [MaintenanceOutcome.DATABASE_KILLED] * 2
+    assert "exited with code 137" in (answers[0].error or "")
+
+
+def test_a_lane_comes_out_of_maintenance_database_first_and_its_web_address_switches_back_last() -> None:
+    proxy = lane_in_maintenance()
+    [web] = proxy.host.instances
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert proxy.host.actions == [
+        "start database database-data-1",
+        "await database-data-1",
+        f"start {web}",
+        f"check {web}/health",
+        f"start {background_service_container_of(web)}",
+        f"await background service {background_service_container_of(web)}",
+        f"route {web}",
+    ]
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.ENDED, False)
+    assert lanes_on(proxy).move(BUILD_A).outcome == Outcome.UNCHANGED
+
+
+def test_ending_maintenance_on_a_lane_that_is_not_in_it_answers_from_the_mark_alone_with_nothing_else_readable() -> None:
+    proxy = lane_brought_up_with_a()
+
+    def unreadable(has_database: HasDatabase | None = None) -> OnHost:
+        raise ContainerHostError(f"Listing the containers on test failed: timed out, asked with {has_database}")
+
+    def no_description(product: str) -> Product:
+        raise ProductError(f"The description of {product} is not one Launchplane reads.")
+
+    proxy.host.read = unreadable
+    result = Lanes(proxy.host, proxy, read_product=no_description).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance, proxy.host.actions) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, False, [])
+
+
+def test_a_web_part_that_fails_its_check_coming_out_leaves_everything_stopped_behind_the_back_soon_page() -> None:
+    proxy = lane_in_maintenance()
+    stopped = state_of(proxy)
+    [web] = proxy.host.instances
+    proxy.failing.add(web)
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.WEB_PART_FAILED, True)
+    assert "Connection refused" in (result.error or "")
+    assert state_of(proxy) == stopped
+    assert proxy.host.actions[-2:] == [f"stop {web}", "stop database database-data-1"]
+
+
+def test_a_failed_check_whose_log_cannot_be_read_still_leaves_everything_stopped_and_is_answered() -> None:
+    proxy = lane_in_maintenance()
+    stopped = state_of(proxy)
+    [web] = proxy.host.instances
+    proxy.failing.add(web)
+
+    def unreadable(container: str) -> str:
+        raise ContainerHostError(f"Reading the log of {container} on test failed: timed out")
+
+    proxy.host.read_log_tail = unreadable
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.WEB_PART_FAILED, True)
+    assert "Connection refused Its log could not be read" in (result.error or "")
+    assert state_of(proxy) == stopped
+
+
+def test_a_background_service_that_does_not_stay_up_coming_out_leaves_everything_stopped_behind_the_back_soon_page() -> None:
+    proxy = lane_in_maintenance()
+    stopped = state_of(proxy)
+    proxy.host.background_services_that_stop.add(BUILD_A.build)
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.BACKGROUND_SERVICE_FAILED, True)
+    assert state_of(proxy) == stopped
+
+
+def test_ending_maintenance_starts_no_stopped_background_service_on_a_lane_that_is_not_in_maintenance() -> None:
+    proxy = lane_brought_up_with_a()
+    [background_service] = proxy.host.background_services
+    proxy.host.stop_part(background_service)
+    proxy.host.actions.clear()
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, proxy.host.actions) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, [])
+
+
+def test_a_web_part_that_will_not_start_coming_out_leaves_everything_stopped_and_says_why() -> None:
+    proxy = lane_in_maintenance()
+    stopped = state_of(proxy)
+    proxy.host.parts_that_will_not_start.update(proxy.host.instances)
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.WEB_PART_FAILED, True)
+    assert "no such image" in (result.error or "")
+    assert state_of(proxy) == stopped
+
+
+def killed_then_asked_again(start: Callable[[], FakeProxy], call: Callable[[Lanes], object], after: int) -> dict[str, object]:
+    proxy = start()
+    proxy.host.killed_after = len(proxy.host.actions) + after
+    with pytest.raises(LaunchplaneKilled):
+        call(lanes_on(proxy))
+    proxy.host.killed_after = None
+    call(lanes_on(proxy))
+    return state_of(proxy)
+
+
+@pytest.mark.parametrize("after", range(1, 5))
+def test_beginning_maintenance_killed_after_any_action_is_finished_by_the_same_call(after: int) -> None:
+    def begin(lanes: Lanes) -> object:
+        return lanes.begin_maintenance("site", "testing")
+
+    assert killed_then_asked_again(lane_brought_up_with_a, begin, after) == state_of(lane_in_maintenance())
+
+
+@pytest.mark.parametrize("after", range(1, 8))
+def test_ending_maintenance_killed_after_any_action_is_finished_by_the_same_call(after: int) -> None:
+    def end(lanes: Lanes) -> object:
+        return lanes.end_maintenance("site", "testing")
+
+    brought_back = lane_in_maintenance()
+    end(lanes_on(brought_back))
+    assert killed_then_asked_again(lane_in_maintenance, end, after) == state_of(brought_back)

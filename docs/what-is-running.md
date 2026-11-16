@@ -27,16 +27,19 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | --- | --- |
 | `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
 | `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
-| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`). An empty list is a missing part and two are two. |
+| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`). An empty list is a missing part and two are two. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
-| `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `error`. |
-| `lanes` | the verdict on each lane: see [what the page shows for a lane](data-sets.md#what-the-page-shows-for-a-lane). |
+| `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`. |
+| `lanes` | the verdict on each lane: see [the verdict on a lane](data-sets.md#the-verdict-on-a-lane). |
 | `read_at` | the moment the host was asked. |
 
 - `mounts` lists everything a container has mounted, each with `source` (a volume's name, or a folder of the host) and `path`.
 - `receives_visitors_for` is the web address whose visitors the proxy sends to the instance, or `null`.
 - `accepts_connections` is asked at that moment of a running server whose product's description names a database, and is `null` otherwise.
+- `exit_code` is the code a stopped database server exited with, and `null` while it is not stopped. `0` is a clean stop. `image` is the image the server runs.
 - `web_addresses` are every one the proxy routes, and the one of every lane on the host, so a route to an instance that is gone is shown. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, and `error` is why not. A web address the proxy routes nowhere is not requested.
+- A web address of a lane in [maintenance](maintenance.md) has `sends_to_container` `launchplane-back-soon` and `answers` `false`. `shows_back_soon_page` is `true` while the back soon page's container runs.
+- While the proxy is not running every web address has `sends_to_container` `null`, and `error` says the proxy is not running. Each lane's verdict agrees: no instance receives visitors, because the proxy is not running. A lane in maintenance still reads as in maintenance, from its routes file.
 - `state` is Launchplane's word: `running`, `paused`, `restarting`, or `stopped` for Docker's `created`, `exited`, `dead` and `removing`.
 
 `503` with `error` means the host or the proxy could not be read, an answer did not have the expected shape, or Docker refused a question about a container it had just listed during three reads in a row. The error carries the real cause. It never answers "nothing is running". A `503` without `read_at` means Launchplane could not read which secrets it has given out and made no answer (see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane)).
@@ -46,8 +49,10 @@ Data set networks and volumes carry the product, lane and data set labels too.
 `GET /` is one HTML file with its style and script inline. It loads nothing else and reads no host itself, so it opens even when the host cannot be read.
 
 - It asks `/running` once a second, each time after the last answer arrived, and gives up on one answer after 15 s.
-- Each lane's card starts with a row for its web address and whether it answers, and a row for its background service with its state and build. A lane with no background service has no such row. Two background services, or one that belongs to no instance of the lane, show as a fault on that row.
-- Below come the verdict on the lane, its instances with the active one first, each with its state, build and container name, and its data sets.
+- Every row is a name, then a value, then its status pills at the end. A pill is green for good, red for wrong and blue for under way on purpose. A build stands beside the thing it belongs to, and a container's name is a small grey line under its row.
+- A lane's card has its web address, then what the verdict found, one row each, then its background service, its instances with the active one first, and its data sets. A data set's row has the image of its database server, written as a build is, with that server's state, and the server's container name in the grey line.
+- A lane in maintenance has one blue pill, `in maintenance`, with since when under it. A lane Launchplane is at work on has the pill `Launchplane is at work`.
+- A container or data set marked for Launchplane with no lane label is shown in a card of its own, as wrong.
 - A build named by digest is shown as its image name and the first 12 characters of the digest. The full value is the tooltip.
 - When Launchplane answers `503` or cannot be reached, the page shows the error. The last reading stays below it, faded, under `Not current: below is what was read at <time>.` Once a read succeeds again, one line with the last failure stays until dismissed.
 
@@ -55,8 +60,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 - **A refusal from Docker inside the read of the secrets that comes from the Docker client's own follow-up question is not read again.** It answers `503`, and asking again works.
 - **The page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
-- **A marked container with no lane label and no route makes the page say nothing marked for Launchplane is on the host.** `/running` lists it.
-- **The page does not show an instance with no lane label, or where a route to another lane's instance goes.** `/running` answers both.
+- **The page does not show where a route to another lane's instance goes.** `/running` answers it.
 - **No test loads the page or runs its script.** Chris watching the page is the check. Comes back when the page breaks without anyone noticing, or when there is a second page.
 
 ## Measured

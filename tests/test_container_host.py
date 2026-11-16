@@ -31,6 +31,7 @@ def network(
 def container(name: str, part: str, networks: list[str], mounts: Sequence[object] = ()) -> dict[str, object]:
     return {
         "Names": [f"/{name}"],
+        "Image": "postgres:18-alpine",
         "State": "running",
         "Labels": DATA_SET_LABELS | {"launchplane.part": part},
         "NetworkSettings": {"Networks": {each: {} for each in networks}},
@@ -38,9 +39,13 @@ def container(name: str, part: str, networks: list[str], mounts: Sequence[object
     }
 
 
-def background_service_details(name: str, running: bool = True, restarting: bool = False) -> dict[str, object]:
-    state = {"Running": running, "Restarting": restarting, "Paused": False, "StartedAt": STARTED}
+def background_service_details(name: str, running: bool = True, restarting: bool = False, exit_code: int = 0) -> dict[str, object]:
+    state = {"Running": running, "Restarting": restarting, "Paused": False, "StartedAt": STARTED, "ExitCode": exit_code}
     return {"Name": f"/{name}", "Config": {"Env": []}, "State": state}
+
+
+def stopped(listed: dict[str, object]) -> dict[str, object]:
+    return listed | {"State": "exited"}
 
 
 def read(
@@ -52,6 +57,34 @@ def read(
 ) -> OnHost:
     answers = HostAnswers(list(containers), list(networks), {"Volumes": list(volumes)}, list(described), {"SystemTime": system_time})
     return on_host_from_answers(answers)
+
+
+def test_a_stopped_database_is_read_with_how_it_exited_so_a_killed_one_is_told_from_a_clean_stop() -> None:
+    listed: list[object] = [
+        stopped(container("database-clean", "database", [])),
+        stopped(container("database-killed", "database", [])),
+    ]
+    described: list[object] = [
+        background_service_details("database-clean", running=False),
+        background_service_details("database-killed", running=False, exit_code=137),
+    ]
+    [found] = read(listed, described=described).data_sets
+    assert {database.container: database.exit_code for database in found.databases} == {"database-clean": 0, "database-killed": 137}
+
+
+def test_a_stopped_database_docker_lists_but_does_not_describe_is_an_error_not_one_that_stopped_cleanly() -> None:
+    with pytest.raises(ContainerHostError, match="did not describe it"):
+        read([stopped(container("database-d1", "database", []))])
+
+
+def test_a_database_is_given_longer_to_stop_than_a_part_before_docker_kills_it() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, "shop-testing-1", LINK)
+    host.stop_part("shop-testing-1")
+    host.stop_database(DATABASE)
+    assert docker.containers.by_name["shop-testing-1"].calls[-1] == "stop within 30 s"
+    assert docker.containers.by_name[DATABASE].calls[-1] == "stop within 60 s"
 
 
 def data_sets_read(containers: Sequence[object], networks: Sequence[object], volumes: Sequence[object]) -> list[DataSet]:
@@ -67,7 +100,11 @@ def test_a_data_set_is_read_from_its_network_volume_and_database_together() -> N
             data_set="d1",
             networks=(HostNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
             volumes=("launchplane-data-d1-database",),
-            databases=(DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,)),),
+            databases=(
+                DataSetDatabase(
+                    container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,), image="postgres:18-alpine"
+                ),
+            ),
         )
     ]
 

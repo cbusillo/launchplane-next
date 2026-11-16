@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -40,6 +41,25 @@ class RetireResult(BaseModel):
     retired_containers: list[str]
     deleted_data_set: str | None = None
     kept_data_sets: list[str] = []
+
+
+class MaintenanceOutcome(StrEnum):
+    IN_MAINTENANCE = "in maintenance"
+    DATABASE_KILLED = "database killed"
+    ENDED = "ended"
+    NOT_IN_MAINTENANCE = "not in maintenance"
+    WEB_PART_FAILED = "web part failed"
+    BACKGROUND_SERVICE_FAILED = "background service failed"
+
+
+class MaintenanceResult(BaseModel):
+    product: str
+    lane: str
+    web_address: str
+    outcome: MaintenanceOutcome
+    in_maintenance: bool
+    since: datetime | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +167,44 @@ class DeleteDataSet:
 
 
 @dataclass(frozen=True)
+class ShowBackSoon:
+    web_address: str
+
+
+@dataclass(frozen=True)
+class StopPart:
+    container: str
+
+
+@dataclass(frozen=True)
+class StopDatabase:
+    container: str
+
+
+@dataclass(frozen=True)
+class StartStopped:
+    container: str
+
+
+@dataclass(frozen=True)
+class ReadLog:
+    container: str
+
+
+@dataclass(frozen=True)
+class LogRead:
+    container: str
+    tail: str
+    unreadable: str | None = None
+
+
+@dataclass(frozen=True)
+class StartRefused:
+    container: str
+    report: str
+
+
+@dataclass(frozen=True)
 class CheckRefused:
     container: str
     report: str
@@ -185,5 +243,10 @@ type Action = (
     | RemoveInstance
     | Check
     | AwaitBackgroundService
+    | ShowBackSoon
+    | StopPart
+    | StopDatabase
+    | StartStopped
+    | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused
+type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead

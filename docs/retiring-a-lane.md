@@ -4,6 +4,8 @@
 
 A web address left with no instance is retired by the product and lane it names. For example, `y-z.test-bed-x.test` is `/lanes/test-bed-x/y-z/retire`.
 
+A lane in [maintenance](maintenance.md) is retired the same way: its route to the back soon page is removed, then its stopped parts.
+
 A lane's data sets are kept unless one is named in the body as `{"delete_data_set": "<data set>"}`: see [retiring a lane with data](data-sets.md#retiring-a-lane-with-data).
 
 ## What it does

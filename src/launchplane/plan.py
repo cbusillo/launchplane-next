@@ -6,7 +6,6 @@ from launchplane.instance import (
     LaneRoute,
     LaneSeen,
     LoadedRoute,
-    ProxyNotRunning,
     RouteStatus,
     RunningInstance,
     web_address_of,
@@ -42,17 +41,39 @@ from launchplane.steps import (
     Retire,
     RetireOutcome,
     RetireResult,
+    ShowBackSoon,
     StartBackgroundService,
     StartDatabase,
     StartInstance,
     StartProxy,
+    StartStopped,
     Stop,
+    StopDatabase,
+    StopPart,
     WriteRoute,
 )
 
 
+def failure_report(why: str, log_tail: str) -> str:
+    if not log_tail:
+        return f"{why} It wrote no log."
+    return f"{why}\nIts last log lines:\n{log_tail}"
+
+
 def is_loaded_as_written(route: LaneRoute) -> bool:
     return (None if route.loaded is None else route.loaded.container) == route.written
+
+
+def maintenance_change_made_by(event: Event) -> str | None:
+    match event:
+        case ShowBackSoon(web_address=web_address):
+            return f"switched {web_address} to the back soon page"
+        case StopPart(container=container) | StopDatabase(container=container):
+            return f"stopped {container}"
+        case StartStopped(container=container):
+            return f"started {container}"
+        case _:
+            return None
 
 
 def change_made_by(event: Event) -> str | None:
@@ -74,14 +95,14 @@ def change_made_by(event: Event) -> str | None:
         case RemoveInstance(container=container):
             return f"removed {container}"
         case _:
-            return None
+            return maintenance_change_made_by(event)
 
 
 def changes_so_far(done: tuple[Event, ...]) -> str:
     changes = [change for change in map(change_made_by, done) if change is not None]
     if not changes:
         return "Nothing was changed."
-    return f"Before that, this move {', '.join(changes)}, and those changes stay."
+    return f"Before that, this call {', '.join(changes)}, and those changes stay."
 
 
 def disabled_route_stop(web_address: str, loaded: LoadedRoute, done: tuple[Event, ...]) -> Stop:
@@ -120,13 +141,21 @@ def after_refusal(refused: CheckRefused, instances: dict[str, RunningInstance], 
     return Done(answer.model_copy(update={"outcome": Outcome.CHECK_FAILED, "error": refused.report}))
 
 
-def check_then_route(
+def check_or_problems(
     seen: LaneSeen, candidate: RunningInstance, target: LaneBuild, product: Product, done: tuple[Event, ...]
-) -> Action | Stop:
+) -> Check | list[str]:
     check = Check(candidate.container, product.health_path)
     if check not in done or candidate.state != InstanceState.RUNNING:
         return check
-    problems = lane_problems(seen, target, product, switching_to=candidate)
+    return lane_problems(seen, target, product, switching_to=candidate)
+
+
+def check_then_route(
+    seen: LaneSeen, candidate: RunningInstance, target: LaneBuild, product: Product, done: tuple[Event, ...]
+) -> Action | Stop:
+    problems = check_or_problems(seen, candidate, target, product, done)
+    if isinstance(problems, Check):
+        return problems
     if problems:
         return Stop(
             f"The instance {candidate.container} passed its check and the lane is not as it must be to switch to it, so the "
@@ -227,9 +256,14 @@ def settle_serving(
 def decide_move(
     seen: LaneSeen, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
 ) -> Action | Done[MoveResult] | Stop:
-    if isinstance(seen.route, ProxyNotRunning):
-        return StartProxy()
     web_address = web_address_of(target.product, target.lane)
+    if seen.route.in_maintenance:
+        return Stop(
+            f"{target.lane} of {target.product} is in maintenance: the routes file of {web_address} points at the back soon "
+            f"page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was changed."
+        )
+    if not seen.route.proxy_runs:
+        return StartProxy()
     if not is_loaded_as_written(seen.route):
         return AwaitRoute(web_address, seen.route.written)
     if seen.route.loaded is not None and seen.route.loaded.status != RouteStatus.ENABLED:
@@ -291,7 +325,7 @@ def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
 def decide_retire(
     seen: LaneSeen, product: str, lane: str, delete_data_set: str | None, done: tuple[Event, ...]
 ) -> Action | Done[RetireResult] | Stop:
-    if isinstance(seen.route, ProxyNotRunning):
+    if not seen.route.proxy_runs:
         return StartProxy()
     web_address = web_address_of(product, lane)
     if not is_loaded_as_written(seen.route):
