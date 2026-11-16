@@ -174,5 +174,7 @@ On the test bed, Docker 29.9.3 on the scratch container, November 15:
 - Launchplane killed at four points of a bring-up and four of a release, then asked again: each reached one instance of the build with its job running on the one data set, rows kept, and no two jobs' beats interleaved.
 - `postgres:18-alpine` and `python:3.15-slim` pull and run.
 - Reading the secrets before each answer: `/running` with one lane on the host answered the Mac in 0.06 to 0.07 s. With the scratch container unreachable, a call answers `503` after the Docker client's 5 s limit, once, because the secrets are read first and nothing else is tried.
+- `/running` with a database lane and a plain lane on the host, the database's password read from its volume, the database asked whether it accepts connections and both lanes judged: 0.12 to 0.13 s.
+- A database server removed by hand: the next move made it again on the kept volume, the file and the password unchanged, the instance receiving visitors kept, and the rows read back. A server put in its place with the right labels and network and another volume mounted: the move answered `503` naming the volume, and the page showed the same finding.
 - Launchplane killed once the old job had gone, with the page's poll reading the host throughout: no read answered `503`. Before a torn read was read again, a poll that listed the job and then found it gone did.
 
