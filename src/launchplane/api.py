@@ -19,18 +19,27 @@ from pydantic import BaseModel
 from launchplane.act import Judged, Lanes, Stopped, lanes_on
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError, OnHost
-from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningBackgroundService, RunningInstance, web_address_of
+from launchplane.instance import (
+    BACK_SOON,
+    DataSet,
+    HostNetwork,
+    LaneBuild,
+    RunningBackgroundService,
+    RunningInstance,
+    web_address_of,
+)
 from launchplane.judge import LaneVerdict
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
-from launchplane.steps import MoveResult, Outcome, RetireResult
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 
 type HostReader = Callable[[dict[str, str]], Judged]
 type RouteReader = Callable[[], dict[str, str]]
 type WebAddressChecker = Callable[[str], str | None]
 type MoveRequester = Callable[[LaneBuild], MoveResult]
 type RetireRequester = Callable[[str, str, str | None], RetireResult]
+type MaintenanceRequester = Callable[[str, str], MaintenanceResult]
 type Lane = tuple[str, str | None]
 
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -48,6 +57,7 @@ class WebAddressAnswer(BaseModel):
     lane: str | None
     sends_to_container: str | None
     answers: bool
+    shows_back_soon_page: bool
     error: str | None
 
 
@@ -84,6 +94,15 @@ MOVE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
 }
 RETIRE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished}}
+MAINTENANCE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    HTTPStatus.UNPROCESSABLE_CONTENT.value: {"model": MaintenanceResult},
+    HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
+}
+NOT_A_SUCCESS = {
+    MaintenanceOutcome.DATABASE_KILLED,
+    MaintenanceOutcome.WEB_PART_FAILED,
+    MaintenanceOutcome.BACKGROUND_SERVICE_FAILED,
+}
 
 
 def instance_answers(instances: list[RunningInstance], routes: dict[str, str]) -> list[InstanceAnswer]:
@@ -112,7 +131,8 @@ def web_address_answer(web_address: str, owner: Lane | None, sends_to: str | Non
         product=None if owner is None else owner[0],
         lane=None if owner is None else owner[1],
         sends_to_container=sends_to,
-        answers=error is None,
+        answers=error is None and sends_to != BACK_SOON,
+        shows_back_soon_page=error is None and sends_to == BACK_SOON,
         error=error,
     )
 
@@ -124,9 +144,13 @@ def failures_at_once(web_addresses: list[str], why_web_address_fails: WebAddress
         return dict(zip(web_addresses, pool.map(why_web_address_fails, web_addresses), strict=True))
 
 
-def web_address_answers(on_host: OnHost, routes: dict[str, str], why_web_address_fails: WebAddressChecker) -> list[WebAddressAnswer]:
+def web_address_answers(
+    on_host: OnHost, routes: dict[str, str], why_web_address_fails: WebAddressChecker, why_back_soon_fails: WebAddressChecker
+) -> list[WebAddressAnswer]:
     owners = lane_owners(on_host, routes)
-    failures = failures_at_once(sorted(routes), why_web_address_fails)
+    in_maintenance = sorted(web_address for web_address, container in routes.items() if container == BACK_SOON)
+    failures = failures_at_once(sorted(routes.keys() - set(in_maintenance)), why_web_address_fails)
+    failures |= failures_at_once(in_maintenance, why_back_soon_fails)
     return [
         web_address_answer(web_address, owners[web_address], routes.get(web_address), failures.get(web_address))
         for web_address in sorted(owners)
@@ -180,6 +204,33 @@ def running_page() -> str:
     return files("launchplane").joinpath("running.html").read_text()
 
 
+def maintenance_answer(
+    request: MaintenanceRequester, attempt: str, product: str, lane: str, response: Response
+) -> MaintenanceResult | NotFinished:
+    try:
+        result = request(product, lane)
+    except UNREADABLE as error:
+        response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+        return NotFinished(error=f"{attempt} {lane} of {product} stopped, and is safe to ask again: {error}")
+    if result.outcome in NOT_A_SUCCESS:
+        response.status_code = HTTPStatus.UNPROCESSABLE_CONTENT
+    return result
+
+
+def add_maintenance_calls(app: FastAPI, begin: MaintenanceRequester, end: MaintenanceRequester) -> None:
+    @app.post("/lanes/{product}/{lane}/maintenance/begin", responses=MAINTENANCE_ERROR_RESPONSES)
+    def begin_lane_maintenance(
+        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], response: Response
+    ) -> MaintenanceResult | NotFinished:
+        return maintenance_answer(begin, "Putting into maintenance", product, lane, response)
+
+    @app.post("/lanes/{product}/{lane}/maintenance/end", responses=MAINTENANCE_ERROR_RESPONSES)
+    def end_lane_maintenance(
+        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], response: Response
+    ) -> MaintenanceResult | NotFinished:
+        return maintenance_answer(end, "Taking out of maintenance", product, lane, response)
+
+
 def create_app(
     read: HostReader,
     read_routes: RouteReader,
@@ -187,6 +238,9 @@ def create_app(
     move: MoveRequester,
     retire: RetireRequester,
     secrets: Secrets,
+    begin_maintenance: MaintenanceRequester,
+    end_maintenance: MaintenanceRequester,
+    why_back_soon_fails: WebAddressChecker,
 ) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
@@ -204,7 +258,7 @@ def create_app(
             routes = read_routes()
             judged = read(routes)
             on_host = judged.on_host
-            web_addresses = web_address_answers(on_host, routes, why_web_address_fails)
+            web_addresses = web_address_answers(on_host, routes, why_web_address_fails, why_back_soon_fails)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=read_at, error=str(error))
@@ -243,6 +297,7 @@ def create_app(
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return NotFinished(error=f"Retiring {lane} of {product} stopped, and is safe to ask again: {error}")
 
+    add_maintenance_calls(app, begin_maintenance, end_maintenance)
     return app
 
 
@@ -254,6 +309,14 @@ def serve() -> None:
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     lanes = Lanes(host, proxy, products.read)
     app = create_app(
-        lanes.read_judged, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire, host.secrets
+        lanes.read_judged,
+        proxy.read_enabled_routes,
+        proxy.why_web_address_fails,
+        lanes.move,
+        lanes.retire,
+        host.secrets,
+        lanes.begin_maintenance,
+        lanes.end_maintenance,
+        proxy.why_back_soon_fails,
     )
     uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host.secrets))

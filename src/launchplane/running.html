@@ -6,30 +6,30 @@
 <meta name="robots" content="noindex">
 <title>Launchplane: what is running</title>
 <style>
-  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --muted: #6e7781; --line: #8c959f66; }
-  @media (prefers-color-scheme: dark) { :root { --ok: #3fb950; --bad: #f85149; --muted: #8b949e; } }
+  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --way: #0969da; --muted: #6e7781; --line: #8c959f66; }
+  @media (prefers-color-scheme: dark) { :root { --ok: #3fb950; --bad: #f85149; --way: #58a6ff; --muted: #8b949e; } }
   body { font: 16px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 46rem; padding: 1rem; overflow-wrap: anywhere; }
   h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1.1rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.1rem; margin: 0; }
   #reading { color: var(--muted); margin: 0 0 1rem; }
   #reading[role=alert] { color: inherit; border: 2px solid var(--bad); border-radius: .5rem; padding: .75rem; }
   section { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; margin-bottom: 1rem; }
   code { font-size: .9em; overflow-wrap: anywhere; }
   small { display: block; font-size: 1em; color: var(--muted); }
-  [data-health=ok] { color: var(--ok); }
-  [data-health=bad] { color: var(--bad); }
-  [data-row] { display: flex; flex-wrap: wrap; gap: .75rem; align-items: baseline; }
+  [data-row] { display: flex; flex-wrap: wrap; gap: .25rem .75rem; align-items: baseline; margin-top: .5rem; }
   [data-row] > * { min-width: 0; }
-  [data-label] { min-width: 10rem; color: var(--muted); }
-  [data-build] { margin-left: auto; }
-  [data-parts] { border-top: 1px solid var(--line); margin-top: .5rem; padding: .5rem 0 0 1rem; }
-  [data-parts] > [data-row] + [data-row], [data-parts] > small + [data-row] { margin-top: .5rem; }
-  [data-container] { font-size: .8rem; padding-left: 10.75rem; }
+  [data-name] { width: 10rem; color: var(--muted); }
+  [data-value] { flex: 1 1 12rem; }
+  [data-pills] { display: flex; flex-wrap: wrap; gap: .35rem; margin-left: auto; }
+  [data-pill] { font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; white-space: nowrap; }
+  [data-tone=good] { color: var(--ok); }
+  [data-tone=wrong] { color: var(--bad); }
+  [data-tone="on purpose"] { color: var(--way); }
+  [data-note] { font-size: .8rem; padding-left: 10.75rem; }
   #not-current { font-weight: 600; margin: 0 0 .5rem; }
   main[data-not-current] { opacity: .55; }
   #last-failure { border-left: 3px solid var(--bad); padding-left: .5rem; margin: 0 0 1rem; }
   #last-failure button { margin-left: .5rem; }
-  [data-tag] { display: inline-block; font-size: .8rem; border: 1px solid currentColor; border-radius: .25rem; padding: 0 .35rem; }
 </style>
 </head>
 <body>
@@ -40,12 +40,13 @@
 <main id="lanes"></main>
 <script>
 "use strict";
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], data_set: ?string, receives_visitors_for: ?string}} Instance */
-/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], running_for_seconds: ?number, instance: ?string}} BackgroundService */
-/** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string, networks: string[]}[]}} DataSet */
-/** @typedef {{product: string, lane: string, problems: string[], release_under_way: string[], left_unfinished: string[], a_move_is_at_work: boolean}} Lane */
-/** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
-/** @typedef {{read_at: string, instances: Instance[], background_services: BackgroundService[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[], lanes: Lane[]}} Running */
+/** @typedef {"good"|"wrong"|"on purpose"} Tone */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, receives_visitors_for: ?string}} Instance */
+/** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, instance: ?string}} BackgroundService */
+/** @typedef {{product: string, lane: ?string, data_set: string, databases: {container: string, state: string}[]}} DataSet */
+/** @typedef {{product: string, lane: string, problems: string[], release_under_way: string[], left_unfinished: string[], a_move_is_at_work: boolean, in_maintenance: boolean, in_maintenance_since: ?string, parts: Object<string, Tone>}} Lane */
+/** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, shows_back_soon_page: boolean, error: ?string}} WebAddress */
+/** @typedef {{read_at: string, instances: Instance[], background_services: BackgroundService[], data_sets: DataSet[], web_addresses: WebAddress[], lanes: Lane[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -88,90 +89,101 @@ function buildCode(build) {
   return element("code", { title: build }, shortBuild(build));
 }
 
-function health(isGood) {
-  return { "data-health": isGood ? "ok" : "bad" };
-}
-
 function clockTime(isoTime) {
   return new Date(isoTime).toLocaleTimeString();
 }
 
 /**
- * @param {string} label
- * @param {...(Node|string)} values
+ * @param {string} text
+ * @param {Tone} tone
  */
-function row(label, ...values) {
-  return element("div", { "data-row": "" }, element("span", { "data-label": "" }, label), ...values);
+function pill(text, tone) {
+  return element("span", { "data-pill": "", "data-tone": tone }, text);
 }
 
-/** @param {string} state */
-function stateTag(state) {
-  return element("span", { "data-tag": "" }, state);
+/**
+ * Every row on the page: a name, then a value, then its status pills at the end.
+ * @param {string} name
+ * @param {(Node|string)[]} value
+ * @param {Node[]} pills
+ */
+function row(name, value, pills) {
+  return element(
+    "div",
+    { "data-row": "" },
+    element("span", { "data-name": "" }, name),
+    element("span", { "data-value": "" }, ...value),
+    element("span", { "data-pills": "" }, ...pills),
+  );
 }
 
-/** @param {?string} build */
-function buildTag(build) {
-  return element("span", { "data-build": "" }, "build ", buildCode(build));
+/** @param {string} text */
+function note(text) {
+  return element("small", { "data-note": "" }, text);
+}
+
+/**
+ * @param {{container: string, state: string}} part
+ * @param {?Lane} verdict
+ */
+function toneOf(part, verdict) {
+  return verdict?.parts[part.container] ?? (part.state === "running" ? "good" : "wrong");
+}
+
+/**
+ * @param {{container: string, state: string}} part
+ * @param {?Lane} verdict
+ */
+function statePill(part, verdict) {
+  return pill(part.state, toneOf(part, verdict));
 }
 
 /**
  * @param {Instance} instance
  * @param {number} index
+ * @param {?Lane} verdict
  */
-function instanceRows(instance, index) {
-  const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
-  if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
-  heading.append(buildTag(instance.build));
-  return [heading, element("small", { "data-container": "" }, instance.container)];
+function instanceRows(instance, index, verdict) {
+  const pills = [statePill(instance, verdict)];
+  if (instance.receives_visitors_for) pills.push(pill("active", "good"));
+  return [row(`Instance ${index + 1}`, ["build ", buildCode(instance.build)], pills), note(instance.container)];
 }
 
 /**
- * @param {BackgroundService[]} running
- * @param {Instance[]} laneInstances
+ * @param {BackgroundService} running
+ * @param {?Lane} verdict
  */
-function backgroundServiceFault(running, laneInstances) {
-  if (running.length > 1) return `${running.length} are on the host, and only one of a lane may run.`;
-  if (!laneInstances.some((instance) => instance.container === running[0].instance)) return "It belongs to no instance of this lane.";
-  return null;
+function backgroundServiceRows(running, verdict) {
+  return [row("Background service", ["build ", buildCode(running.build)], [statePill(running, verdict)]), note(running.container)];
 }
 
 /**
- * @param {BackgroundService[]} running
- * @param {Instance[]} laneInstances
+ * @param {DataSet} dataSet
+ * @param {?Lane} verdict
  */
-function backgroundServiceRows(running, laneInstances) {
-  if (!running.length) return [];
-  const fault = backgroundServiceFault(running, laneInstances);
-  const parts = running.flatMap((each) => [stateTag(each.state), buildTag(each.build)]);
-  const rows = [row("Background service", ...parts)];
-  if (fault) rows.push(element("small", health(false), fault));
-  return rows;
-}
-
-/** @param {DataSet} dataSet */
-function dataSetRow(dataSet) {
-  const servers = dataSet.databases.flatMap((database) => [element("span", {}, "database"), stateTag(database.state)]);
-  return row("Data set", code(dataSet.data_set), ...servers);
+function dataSetRows(dataSet, verdict) {
+  const pills = dataSet.databases.map((database) => pill(`database ${database.state}`, toneOf(database, verdict)));
+  return [row("Data set", [code(dataSet.data_set)], pills), ...dataSet.databases.map((database) => note(database.container))];
 }
 
 /**
- * @param {string} kind
  * @param {string[]} findings
- * @param {string} heading
- * @param {Object<string, string>} tone
+ * @param {string} status
+ * @param {Tone} tone
  */
-function findingRows(kind, findings, heading, tone) {
-  const lines = findings.length && heading ? [heading, ...findings] : findings;
-  return lines.map((text) => element("small", { "data-finding": kind, ...tone }, text));
+function findingRows(findings, status, tone) {
+  return findings.map((text) => row("Found", [text], [pill(status, tone)]));
 }
 
 /** @param {Lane} verdict */
 function verdictRows(verdict) {
-  return [
-    ...findingRows("wrong", verdict.problems, "", health(false)),
-    ...findingRows("release", verdict.release_under_way, "Launchplane is moving this lane now. A release is under way:", {}),
-    ...findingRows("unfinished", verdict.left_unfinished, "No move is at work on this lane, and it was left unfinished. Asking for a build again finishes it:", health(false)),
+  const rows = [
+    ...findingRows(verdict.problems, "wrong", "wrong"),
+    ...findingRows(verdict.release_under_way, "under way", "on purpose"),
+    ...findingRows(verdict.left_unfinished, "left unfinished", "wrong"),
   ];
+  if (verdict.left_unfinished.length) rows.push(note("No call is at work on this lane. Asking for a build again finishes it."));
+  return rows;
 }
 
 /**
@@ -193,15 +205,33 @@ function whyNotAnswering(entry, allInstances) {
   return entry.error;
 }
 
+/** @param {WebAddress} entry */
+function webAddressPill(entry) {
+  if (entry.shows_back_soon_page) return pill("shows the back soon page", "on purpose");
+  return entry.answers ? pill("answering", "good") : pill("not answering", "wrong");
+}
+
 /**
  * @param {WebAddress} entry
  * @param {Instance[]} allInstances
  */
 function webAddressRows(entry, allInstances) {
-  const status = element("span", health(entry.answers), entry.answers ? "answering" : "not answering");
-  const rows = [row("Web address", code(entry.web_address), status)];
-  if (!entry.answers) rows.push(element("small", health(false), whyNotAnswering(entry, allInstances)));
+  const rows = [row("Web address", [code(entry.web_address)], [webAddressPill(entry)])];
+  if (entry.error) rows.push(note(whyNotAnswering(entry, allInstances)));
   return rows;
+}
+
+/**
+ * @param {string} title
+ * @param {?Lane} verdict
+ */
+function laneHeading(title, verdict) {
+  const pills = [];
+  if (verdict?.in_maintenance) pills.push(pill("in maintenance", "on purpose"));
+  if (verdict?.a_move_is_at_work) pills.push(pill("Launchplane is at work", "on purpose"));
+  const heading = [element("div", { "data-row": "" }, element("h2", { "data-value": "" }, title), element("span", { "data-pills": "" }, ...pills))];
+  if (verdict?.in_maintenance_since) heading.push(element("small", {}, `In maintenance since ${new Date(verdict.in_maintenance_since).toLocaleString()}.`));
+  return heading;
 }
 
 /**
@@ -209,19 +239,19 @@ function webAddressRows(entry, allInstances) {
  * @param {Running} answer
  */
 function laneSection(entry, answer) {
-  const laneInstances = answer.instances.filter((instance) => isOfLane(instance, entry));
-  const running = answer.background_services.filter((each) => isOfLane(each, entry));
+  const verdict = answer.lanes.find((lane) => isOfLane(lane, entry)) ?? null;
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A web address with no instance on the host";
-  const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, answer.instances));
-  section.append(...backgroundServiceRows(running, laneInstances));
-  const verdict = answer.lanes.find((lane) => isOfLane(lane, entry));
-  if (verdict) section.append(...verdictRows(verdict));
-  const parts = [
-    ...laneInstances.toSorted(visitedFirst).flatMap(instanceRows),
-    ...answer.data_sets.filter((each) => isOfLane(each, entry)).map(dataSetRow),
-  ];
-  if (parts.length) section.append(element("div", { "data-parts": "" }, ...parts));
-  return section;
+  const laneInstances = answer.instances.filter((instance) => isOfLane(instance, entry));
+  return element(
+    "section",
+    {},
+    ...laneHeading(title, verdict),
+    ...webAddressRows(entry, answer.instances),
+    ...(verdict ? verdictRows(verdict) : []),
+    ...answer.background_services.filter((each) => isOfLane(each, entry)).flatMap((each) => backgroundServiceRows(each, verdict)),
+    ...laneInstances.toSorted(visitedFirst).flatMap((instance, index) => instanceRows(instance, index, verdict)),
+    ...answer.data_sets.filter((each) => isOfLane(each, entry)).flatMap((each) => dataSetRows(each, verdict)),
+  );
 }
 
 /**
@@ -232,6 +262,27 @@ function isOfLane(part, entry) {
   return entry.product !== null && part.product === entry.product && part.lane === entry.lane;
 }
 
+/**
+ * @param {string} name
+ * @param {{product: string, container: string, state: string}} part
+ */
+function noLaneRows(name, part) {
+  return [row(name, [code(part.container), ` of ${part.product}`], [pill(part.state, "wrong"), pill("no lane label", "wrong")])];
+}
+
+/** @param {Running} answer */
+function noLaneSections(answer) {
+  const rows = [
+    ...answer.instances.filter((each) => each.lane === null).flatMap((each) => noLaneRows("Web part", each)),
+    ...answer.background_services.filter((each) => each.lane === null).flatMap((each) => noLaneRows("Background service", each)),
+    ...answer.data_sets
+      .filter((each) => each.lane === null)
+      .map((each) => row("Data set", [code(each.data_set), ` of ${each.product}`], [pill("no lane label", "wrong")])),
+  ];
+  if (!rows.length) return [];
+  return [element("section", {}, ...laneHeading("Marked for Launchplane, and in no lane", null), ...rows)];
+}
+
 /** @param {Running} answer */
 function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
@@ -239,7 +290,7 @@ function showRunning(answer) {
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
   showLastFailure();
   markReadingCurrent();
-  const sections = answer.web_addresses.map((entry) => laneSection(entry, answer));
+  const sections = [...answer.web_addresses.map((entry) => laneSection(entry, answer)), ...noLaneSections(answer)];
   if (!sections.length) sections.push(element("p", {}, "The host answered, and nothing marked for Launchplane is on it."));
   lanes.replaceChildren(...sections);
 }

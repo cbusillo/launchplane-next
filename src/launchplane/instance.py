@@ -1,12 +1,14 @@
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
 LANE_NETWORK = "launchplane-lanes"
 LANE_DOMAIN = "test"
+BACK_SOON = "launchplane-back-soon"
 
 
 class InstanceState(StrEnum):
@@ -66,6 +68,7 @@ class DataSetDatabase(BaseModel):
     networks: tuple[str, ...]
     accepts_connections: bool | None = None
     mounts: tuple[Mount, ...] = ()
+    exit_code: int | None = None
 
 
 class DataSet(BaseModel):
@@ -115,6 +118,7 @@ class LoadedRoute:
 class LaneRoute:
     loaded: LoadedRoute | None
     written: str | None
+    back_soon_since: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,12 @@ class LaneSeen:
     background_services: tuple[RunningBackgroundService, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
+
+
+def shows_back_soon(route: ProxyNotRunning | LaneRoute) -> bool:
+    if isinstance(route, ProxyNotRunning):
+        return False
+    return BACK_SOON in (route.written, None if route.loaded is None else route.loaded.container)
 
 
 def web_address_of(product: str, lane: str) -> str:

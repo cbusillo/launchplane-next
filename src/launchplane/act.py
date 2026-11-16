@@ -2,11 +2,12 @@ import threading
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
-from launchplane import plan, steps
+from launchplane import maintenance, plan, steps
 from launchplane.container_host import HasDatabase, PartStopped
-from launchplane.docker_answers import OnHost
+from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import (
     DataSet,
     DataSetUse,
@@ -18,12 +19,13 @@ from launchplane.instance import (
     RouteStatus,
     new_container_name,
     new_data_set_name,
+    shows_back_soon,
     web_address_of,
 )
-from launchplane.judge import BACKGROUND_SERVICE_STEADY_SECONDS, LaneVerdict, lane_verdict
+from launchplane.judge import BACKGROUND_SERVICE_STEADY_SECONDS, LaneVerdict, lane_verdict, part_standings
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed
-from launchplane.steps import Action, Done, Event, FreshNames, MoveResult, RetireResult, Stop
+from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceResult, MoveResult, RetireResult, Stop
 
 MOST_STEPS = 50
 
@@ -38,6 +40,9 @@ class InstanceHost(Protocol):
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
+    def start_part(self, container: str) -> None: ...
+    def stop_part(self, container: str) -> None: ...
+    def stop_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
     def remove_instance(self, container: str) -> None: ...
     def retire_instance(self, container: str) -> None: ...
@@ -51,6 +56,8 @@ class Proxy(Protocol):
     def write_route(self, web_address: str, container: str) -> None: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
+    def show_back_soon(self, web_address: str) -> None: ...
+    def back_soon_since(self, web_address: str) -> datetime | None: ...
 
 
 type ProductReader = Callable[[str], Product]
@@ -113,11 +120,18 @@ def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning |
 def verdict_on(
     on_host: OnHost, product: str, lane: str, routes: Mapping[str, str], description: Product | ProductError, a_move_is_at_work: bool
 ) -> LaneVerdict:
-    if isinstance(description, ProductError):
-        return LaneVerdict(product=product, lane=lane, a_move_is_at_work=a_move_is_at_work, problems=[str(description)])
     receiving = routes.get(web_address_of(product, lane))
     route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
     seen = lane_seen(on_host, product, lane, route)
+    if isinstance(description, ProductError):
+        return LaneVerdict(
+            product=product,
+            lane=lane,
+            a_move_is_at_work=a_move_is_at_work,
+            problems=[str(description)],
+            in_maintenance=shows_back_soon(route),
+            parts=part_standings(seen, a_move_is_at_work=a_move_is_at_work),
+        )
     return lane_verdict(seen, description, product, lane, a_move_is_at_work=a_move_is_at_work)
 
 
@@ -142,6 +156,9 @@ TAKE: dict[type, Take] = {
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
+    steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
+    steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
+    steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
 }
 
 
@@ -195,10 +212,16 @@ class Lanes:
         return Judged(
             on_host,
             [
-                verdict_on(on_host, product, lane, routes, description_of(product), (product, lane) in moving)
+                self.dated(verdict_on(on_host, product, lane, routes, description_of(product), (product, lane) in moving))
                 for product, lane in lanes_on(on_host)
             ],
         )
+
+    def dated(self, verdict: LaneVerdict) -> LaneVerdict:
+        if not verdict.in_maintenance:
+            return verdict
+        since = self.proxy.back_soon_since(web_address_of(verdict.product, verdict.lane))
+        return verdict.model_copy(update={"in_maintenance_since": since})
 
     def move(self, target: LaneBuild) -> MoveResult:
         with self.at_work_on(target.product, target.lane):
@@ -214,6 +237,23 @@ class Lanes:
             return self.settle(
                 lambda: self.read(product, lane),
                 lambda seen, done: plan.decide_retire(seen, product, lane, delete_data_set, done),
+                f"{lane} of {product}",
+            )
+
+    def begin_maintenance(self, product: str, lane: str) -> MaintenanceResult:
+        with self.at_work_on(product, lane):
+            return self.settle(
+                lambda: self.read(product, lane),
+                lambda seen, done: maintenance.decide_begin(seen, product, lane, done),
+                f"{lane} of {product}",
+            )
+
+    def end_maintenance(self, product: str, lane: str) -> MaintenanceResult:
+        with self.at_work_on(product, lane):
+            description = self.read_product(product)
+            return self.settle(
+                lambda: self.read(product, lane, has_database=description.database is not None),
+                lambda seen, done: maintenance.decide_end(seen, product, lane, description, done),
                 f"{lane} of {product}",
             )
 
@@ -242,7 +282,16 @@ class Lanes:
             return self.check(action.container, action.health_path)
         if isinstance(action, steps.AwaitBackgroundService):
             return self.await_background_service(action.container)
+        if isinstance(action, steps.StartStopped):
+            return self.start_stopped(action)
         TAKE[type(action)](self.host, self.proxy, action)
+        return action
+
+    def start_stopped(self, action: steps.StartStopped) -> Event:
+        try:
+            self.host.start_part(action.container)
+        except ContainerHostError as error:
+            return steps.StartRefused(action.container, str(error))
         return action
 
     def check(self, container: str, health_path: str) -> Event:

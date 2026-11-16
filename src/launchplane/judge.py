@@ -1,6 +1,9 @@
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 from pydantic import BaseModel
 
@@ -16,6 +19,7 @@ from launchplane.instance import (
     ProxyNotRunning,
     RunningBackgroundService,
     RunningInstance,
+    shows_back_soon,
 )
 from launchplane.product import Product
 
@@ -50,6 +54,12 @@ class Finding:
     of_a_release: bool = False
 
 
+class Standing(StrEnum):
+    GOOD = "good"
+    WRONG = "wrong"
+    ON_PURPOSE = "on purpose"
+
+
 class LaneVerdict(BaseModel):
     product: str
     lane: str
@@ -57,6 +67,16 @@ class LaneVerdict(BaseModel):
     problems: list[str]
     release_under_way: list[str] = []
     left_unfinished: list[str] = []
+    in_maintenance: bool = False
+    in_maintenance_since: datetime | None = None
+    parts: dict[str, Standing] = {}
+
+
+@dataclass(frozen=True)
+class StillUp:
+    container: str
+    text: str
+    is_database: bool = False
 
 
 def data_set_of(seen: LaneSeen, name: str | None) -> DataSet | None:
@@ -303,7 +323,66 @@ def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
     ]
 
 
-def lane_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
+def databases_of(seen: LaneSeen) -> list[DataSetDatabase]:
+    return [database for found in seen.data_sets for database in found.databases]
+
+
+class Stoppable(Protocol):
+    @property
+    def container(self) -> str: ...
+    @property
+    def state(self) -> InstanceState: ...
+
+
+def up_among(part: str, found: Iterable[Stoppable], *, is_database: bool = False) -> list[StillUp]:
+    return [
+        StillUp(each.container, f"The {part} {each.container} is {each.state}, in a lane in maintenance", is_database)
+        for each in sorted(found, key=lambda one: one.container)
+        if each.state != InstanceState.STOPPED
+    ]
+
+
+# In the order maintenance stops them: what writes stops before the web part, and the database stops last.
+def still_up(seen: LaneSeen) -> list[StillUp]:
+    return [
+        *up_among("background service", seen.background_services),
+        *up_among("instance", seen.instances),
+        *up_among("database", databases_of(seen), is_database=True),
+    ]
+
+
+def killed_databases(seen: LaneSeen) -> list[str]:
+    return [
+        f"The database {database.container} did not stop cleanly: it exited with code {database.exit_code}, "
+        "so it was killed or it crashed"
+        for database in databases_of(seen)
+        if database.state == InstanceState.STOPPED and database.exit_code != 0
+    ]
+
+
+def part_standings(seen: LaneSeen, *, a_move_is_at_work: bool) -> dict[str, Standing]:
+    in_maintenance = shows_back_soon(seen.route)
+    meant = InstanceState.STOPPED if in_maintenance else InstanceState.RUNNING
+    as_meant = Standing.ON_PURPOSE if in_maintenance else Standing.GOOD
+    otherwise = Standing.ON_PURPOSE if a_move_is_at_work else Standing.WRONG
+    parts = [*seen.instances, *seen.background_services, *databases_of(seen)]
+    return {part.container: as_meant if part.state == meant else otherwise for part in parts}
+
+
+def maintenance_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
+    up = [each.text for each in still_up(seen)]
+    wrong = [*killed_databases(seen), *connection_faults(seen, product)]
+    return LaneVerdict(
+        product=name,
+        lane=lane,
+        a_move_is_at_work=a_move_is_at_work,
+        problems=wrong if a_move_is_at_work else [*up, *wrong],
+        release_under_way=up if a_move_is_at_work else [],
+        in_maintenance=True,
+    )
+
+
+def verdict_at_rest_or_moving(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
     findings = findings_at_rest(seen, product)
     if a_move_is_at_work:
         wrong = connection_faults(seen, product)
@@ -312,3 +391,9 @@ def lane_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_mo
     wrong = [finding.text for finding in findings if not finding.of_a_release]
     unfinished = [finding.text for finding in findings if finding.of_a_release]
     return LaneVerdict(product=name, lane=lane, a_move_is_at_work=False, problems=wrong, left_unfinished=unfinished)
+
+
+def lane_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
+    judge = maintenance_verdict if shows_back_soon(seen.route) else verdict_at_rest_or_moving
+    verdict = judge(seen, product, name, lane, a_move_is_at_work=a_move_is_at_work)
+    return verdict.model_copy(update={"parts": part_standings(seen, a_move_is_at_work=a_move_is_at_work)})

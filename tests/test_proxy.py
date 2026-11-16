@@ -1,10 +1,11 @@
 import json
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
 import pytest
 
-from launchplane.container_host import CommandResult, HelperContainer
-from launchplane.instance import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
+from launchplane.container_host import CommandResult, FileRead, HelperContainer
+from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
@@ -17,6 +18,7 @@ from launchplane.proxy import (
 
 WEB_ADDRESS = "testing.site.test"
 OTHER = "production.site.test"
+WRITTEN_AT = datetime(2026, 11, 16, 14, 2, tzinfo=UTC)
 INTERNAL_ROUTERS = {"api@internal": {"rule": "PathPrefix(`/api`)", "service": "api@internal", "status": "enabled"}}
 INTERNAL_SERVICES = {"api@internal": {"status": "enabled"}}
 
@@ -37,7 +39,7 @@ class ProxyHost:
         self.files = {route_file_of(web_address): route_text(web_address, container) for web_address, container in routes.items()}
         self.loaded = loaded_from(self.files)
         self.answers = iter(answers or [])
-        self.running = running
+        self.running = {PROXY_NAME} if running else set[str]()
         self.loads_on_write = True
         self.reads_answer = True
         self.log = "error while building configuration"
@@ -47,10 +49,10 @@ class ProxyHost:
         self.loaded = loaded_from(self.files)
 
     def ensure_helper(self, helper: HelperContainer) -> None:
-        self.running = helper.container == PROXY_NAME
+        self.running.add(helper.container)
 
     def is_running(self, container: str) -> bool:
-        return container == PROXY_NAME and self.running
+        return container in self.running
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
         assert container == PROXY_NAME
@@ -69,9 +71,9 @@ class ProxyHost:
             self.load()
         return CommandResult(exit_code=0, output="")
 
-    def read_file(self, container: str, path: PurePosixPath) -> str | None:
+    def read_file(self, container: str, path: PurePosixPath) -> FileRead | None:
         assert container == PROXY_NAME
-        return self.files.get(path)
+        return FileRead(self.files[path], WRITTEN_AT) if path in self.files else None
 
     def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
         assert container == PROXY_NAME
@@ -214,3 +216,26 @@ def test_an_instance_that_never_answers_fails_its_check_with_the_proxys_error() 
     host = ProxyHost({}, answers=[False] * 10)
     with pytest.raises(CheckFailed, match="Connection refused"):
         ticking(host, steady_seconds=2, check_deadline_seconds=3).check_instance("site-t2", "/")
+
+
+def test_showing_the_back_soon_page_starts_its_container_and_changes_only_that_lanes_route() -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
+    proxy = TraefikProxy(host)
+    proxy.show_back_soon(WEB_ADDRESS)
+    assert host.running == {PROXY_NAME, BACK_SOON}
+    assert proxy.read_enabled_routes() == {WEB_ADDRESS: BACK_SOON, OTHER: "site-p1"}
+    assert proxy.why_back_soon_fails(WEB_ADDRESS) is None
+
+
+def test_since_when_is_read_from_the_route_file_of_a_lane_in_maintenance_and_of_no_other() -> None:
+    host = ProxyHost({WEB_ADDRESS: BACK_SOON, OTHER: "site-p1"})
+    proxy = TraefikProxy(host)
+    assert proxy.read_lane_route(WEB_ADDRESS) == LaneRoute(LoadedRoute(BACK_SOON, RouteStatus.ENABLED), BACK_SOON, WRITTEN_AT)
+    assert (proxy.back_soon_since(WEB_ADDRESS), proxy.back_soon_since(OTHER)) == (WRITTEN_AT, None)
+    assert proxy.read_lane_route(OTHER) == LaneRoute(LoadedRoute("site-p1", RouteStatus.ENABLED), "site-p1")
+
+
+def test_a_back_soon_page_whose_container_is_not_running_is_a_fault_at_the_web_address() -> None:
+    fault = TraefikProxy(ProxyHost({WEB_ADDRESS: BACK_SOON})).why_back_soon_fails(WEB_ADDRESS)
+    assert fault is not None
+    assert f"{BACK_SOON} is not running" in fault

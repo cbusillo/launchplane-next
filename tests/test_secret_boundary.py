@@ -15,7 +15,7 @@ from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 from launchplane.judge import LaneVerdict
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
-from launchplane.steps import MoveResult, Outcome, RetireOutcome, RetireResult
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
 from tests.given_secrets import GivenSecrets
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
@@ -75,6 +75,21 @@ def retire_stopped(product: str, lane: str, _delete_data_set: str | None) -> Ret
     raise ContainerHostError(f"Stopping {lane} of {product} failed: {SECRET}")
 
 
+def maintenance_answering(product: str, lane: str) -> MaintenanceResult:
+    return MaintenanceResult(
+        product=product,
+        lane=lane,
+        web_address="testing.site.test",
+        outcome=MaintenanceOutcome.WEB_PART_FAILED,
+        in_maintenance=True,
+        error=f"The check failed. Its last log lines:\nPGPASSWORD={SECRET}",
+    )
+
+
+def maintenance_stopped(product: str, lane: str) -> MaintenanceResult:
+    raise ContainerHostError(f"Stopping a part of {lane} of {product} failed: {SECRET}")
+
+
 @dataclass(frozen=True)
 class Asked:
     method: str
@@ -84,10 +99,13 @@ class Asked:
     read: Callable[[], Judged] = running_with_leaks
     move: Callable[[LaneBuild], MoveResult] = move_stopped
     retire: Callable[[str, str, str | None], RetireResult] = retire_stopped
+    maintenance: Callable[[str, str], MaintenanceResult] = maintenance_stopped
 
 
 MOVE = "/lanes/site/testing/move"
 RETIRE = "/lanes/site/testing/retire"
+MAINTENANCE_BEGIN = "/lanes/site/testing/maintenance/begin"
+MAINTENANCE_END = "/lanes/site/testing/maintenance/end"
 ANSWERS = {
     "what is running, with a web address whose error carries it": Asked("GET", "/running", 200),
     "a host that could not be read": Asked("GET", "/running", 503, read=unreadable_host),
@@ -99,6 +117,8 @@ ANSWERS = {
     "a move that stopped": Asked("POST", MOVE, 503, {"build": "site:b"}),
     "a retirement": Asked("POST", RETIRE, 200, {}, retire=retire_answering),
     "a retirement that stopped": Asked("POST", RETIRE, 503, {}),
+    "a lane whose web part failed coming out of maintenance": Asked("POST", MAINTENANCE_END, 422, maintenance=maintenance_answering),
+    "a lane that could not be put in maintenance": Asked("POST", MAINTENANCE_BEGIN, 503),
     "a request Launchplane refuses, repeating what was sent": Asked("POST", MOVE, 422, {"build": [SECRET]}),
     "a lane name Launchplane refuses, repeating it": Asked("POST", f"/lanes/site/{SECRET}/retire", 422, {}),
     "a redirect to the address asked for, which carries it": Asked("POST", f"/lanes/site/{SECRET}/move/", 307, {}),
@@ -106,7 +126,17 @@ ANSWERS = {
 
 
 def answer_to(asked: Asked, secrets: Secrets) -> tuple[int, str]:
-    app = create_app(lambda _routes: asked.read(), lambda: ROUTES, lambda _web_address: LEAK, asked.move, asked.retire, secrets)
+    app = create_app(
+        lambda _routes: asked.read(),
+        lambda: ROUTES,
+        lambda _web_address: LEAK,
+        asked.move,
+        asked.retire,
+        secrets,
+        asked.maintenance,
+        asked.maintenance,
+        lambda _web_address: LEAK,
+    )
     response = TestClient(app, follow_redirects=False).request(asked.method, asked.path, json=asked.body)
     headers = "".join(f"{name}: {value}\n" for name, value in response.headers.items())
     return response.status_code, headers + response.text
@@ -182,7 +212,17 @@ def test_the_secrets_are_read_before_the_answer_is_made() -> None:
         seen_when_the_host_was_read.append(secrets.secrets_seen())
         raise RuntimeError(f"not an error Launchplane expects: {SECRET}")
 
-    app = create_app(read, lambda: ROUTES, lambda _web_address: LEAK, move_stopped, retire_stopped, secrets)
+    app = create_app(
+        read,
+        lambda: ROUTES,
+        lambda _web_address: LEAK,
+        move_stopped,
+        retire_stopped,
+        secrets,
+        maintenance_stopped,
+        maintenance_stopped,
+        lambda _web_address: LEAK,
+    )
     assert TestClient(app, raise_server_exceptions=False).get("/running").status_code == 500
     assert seen_when_the_host_was_read == [{SECRET}]
 

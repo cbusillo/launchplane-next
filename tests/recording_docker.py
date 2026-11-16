@@ -35,6 +35,7 @@ class RecordingContainer:
     refuses_reads_with: Iterator[Exception] = field(default_factory=lambda: iter(()))
     calls: list[str] = field(default_factory=list[str])
     file_modes: dict[str, int] = field(default_factory=dict[str, int])
+    restart_policy: str = ""
 
     def get_archive(self, path: str) -> tuple[list[bytes], dict[str, Any]]:
         self.calls.append(f"read {path}")
@@ -54,7 +55,7 @@ class RecordingContainer:
 
     @property
     def attrs(self) -> dict[str, Any]:
-        state = {"Running": True, "Restarting": False, "Paused": False, "StartedAt": STARTED}
+        state = {"Running": True, "Restarting": False, "Paused": False, "StartedAt": STARTED, "ExitCode": 0}
         return {"Name": f"/{self.name}", "Config": {"Env": self.environment}, "State": state}
 
     def logs(self, tail: int) -> bytes:
@@ -63,6 +64,9 @@ class RecordingContainer:
 
     def start(self) -> None:
         self.calls.append("start")
+
+    def stop(self, timeout: int) -> None:
+        self.calls.append(f"stop within {timeout} s")
 
     def exec_run(self, command: list[str]) -> ExecResult:
         self.calls.append(" ".join(command))
@@ -83,6 +87,7 @@ class RecordingContainers:
             dict(cast("dict[str, str]", options["labels"])),
             [*(f"{key}={value}" for key, value in given.items()), *IMAGE_ENVIRONMENT],
             self.files_by_volume.setdefault(volume, {}),
+            restart_policy=cast("dict[str, str]", options["restart_policy"])["Name"],
         )
         self.by_name[name] = made
         return made
@@ -121,7 +126,7 @@ class RecordingApi:
 
     @staticmethod
     def inspect_container(container: str) -> dict[str, Any]:
-        state = {"Running": True, "Restarting": False, "Paused": False, "StartedAt": STARTED}
+        state = {"Running": True, "Restarting": False, "Paused": False, "StartedAt": STARTED, "ExitCode": 0}
         return {"Name": f"/{container}", "Config": {"Env": []}, "State": state}
 
     def info(self) -> dict[str, Any]:

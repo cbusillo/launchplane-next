@@ -3,6 +3,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -39,11 +40,11 @@ from launchplane.docker_answers import (
     Part,
     TornRead,
     attempting,
-    background_service_names,
     checked,
+    dated_file_in,
     is_quiet,
+    names_of,
     on_host_from_answers,
-    only_file_in,
     read_whole,
     running_for,
     tar_of,
@@ -55,10 +56,15 @@ MARKED = {"label": PRODUCT_LABEL}
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
 RETIRE_GRACE_SECONDS = 30
+DATABASE_STOP_GRACE_SECONDS = 60
 LOG_TAIL_LINES = 20
 DATABASE_DEADLINE_SECONDS = 60
 BACKGROUND_SERVICE_DEADLINE_MARGIN_SECONDS = 15
 POLL_SECONDS = 0.5
+type RestartPolicy = Literal["always", "unless-stopped"]
+# Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
+STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
+ALWAYS_RUNS: RestartPolicy = "always"
 
 type HasDatabase = Callable[[str], bool]
 
@@ -74,7 +80,18 @@ class HelperContainer:
     command: list[str]
     ports: dict[int, int]
     volumes: dict[str, str]
-    networks: list[str]
+    quiet_networks: list[str]
+    outside_network: str | None = None
+
+    @property
+    def networks(self) -> list[str]:
+        return [*([] if self.outside_network is None else [self.outside_network]), *self.quiet_networks]
+
+
+@dataclass(frozen=True)
+class FileRead:
+    text: str
+    changed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -97,6 +114,7 @@ class RunOptions:
     environment: dict[str, str] = field(default_factory=dict[str, str])
     volumes: dict[str, str] = field(default_factory=dict[str, str])
     ports: dict[int, int] = field(default_factory=dict[int, int])
+    restart: RestartPolicy = STAYS_STOPPED_WHEN_STOPPED
 
 
 def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
@@ -137,6 +155,7 @@ def helper_options(helper: HelperContainer) -> RunOptions:
         command=helper.command,
         volumes=helper.volumes,
         ports=helper.ports,
+        restart=ALWAYS_RUNS,
     )
 
 
@@ -186,9 +205,9 @@ class ContainerHost:
     def read_once(self, has_database: HasDatabase | None) -> OnHost:
         with attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks", self.address):
             containers, networks, volumes = self.list_marked("containers"), self.list_networks(), self.list_marked("volumes")
-            names = background_service_names(containers)
-            details = [self.describe_listed(name) for name in names]
-            system = self.system_information() if names else None
+            background_services = names_of(containers, "background-service")
+            details = [self.describe_listed(name) for name in [*background_services, *names_of(containers, "database")]]
+            system = self.system_information() if background_services else None
         on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, details, system))
         if has_database is None:
             return on_host
@@ -268,7 +287,8 @@ class ContainerHost:
             environment=options.environment,
             volumes={volume: {"bind": path, "mode": "rw"} for volume, path in options.volumes.items()},
             ports={f"{inside}/tcp": outside for inside, outside in options.ports.items()},
-            restart_policy={"Name": "always"},
+            # The stubs name only two of Docker's restart policies; Docker takes unless-stopped.
+            restart_policy={"Name": options.restart},  # pyright: ignore[reportArgumentType]
         )
 
     def run_part(self, options: RunOptions, use: DataSetUse | None) -> None:
@@ -318,6 +338,22 @@ class ContainerHost:
         with attempting(f"Starting the database {container}", self.address):
             self.secrets.start_with_password(self.client.containers.get(container))
 
+    def start_part(self, container: str) -> None:
+        with attempting(f"Starting {container}", self.address):
+            self.client.containers.get(container).start()
+
+    def stop_part(self, container: str) -> None:
+        self.stop(container, RETIRE_GRACE_SECONDS)
+
+    def stop_database(self, container: str) -> None:
+        self.stop(container, DATABASE_STOP_GRACE_SECONDS)
+
+    def stop(self, container: str, grace_seconds: int) -> None:
+        with attempting(f"Stopping {container}", self.address):
+            found = self.find_container(container)
+            if found is not None:
+                found.stop(timeout=grace_seconds)
+
     def await_database(self, container: str) -> None:
         started = self.clock()
         while not (result := self.run_in(container, READY_COMMAND)).succeeded:
@@ -366,8 +402,9 @@ class ContainerHost:
         with attempting(f"Starting Launchplane's own container {helper.container}", self.address):
             found = self.find_container(helper.container)
             if found is None:
-                self.ensure_network(helper.networks[0], quiet=False)
-                for network in helper.networks[1:]:
+                if helper.outside_network is not None:
+                    self.ensure_network(helper.outside_network, quiet=False)
+                for network in helper.quiet_networks:
                     self.ensure_network(network, quiet=True)
                 self.create(helper_options(helper)).start()
             elif found.status != "running":
@@ -389,14 +426,15 @@ class ContainerHost:
             raise ContainerHostError(f"Running {command[0]} in {container} on {self.address} returned before the command finished.")
         return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())
 
-    def read_file(self, container: str, path: PurePosixPath) -> str | None:
+    def read_file(self, container: str, path: PurePosixPath) -> FileRead | None:
         with attempting(f"Reading {path} in {container}", self.address):
             found = self.client.containers.get(container)
             try:
                 chunks, _ = found.get_archive(str(path))
             except NotFound:
                 return None
-            return only_file_in(b"".join(chunks)).decode()
+            content, changed_at = dated_file_in(b"".join(chunks))
+            return FileRead(content.decode(), changed_at)
 
     def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
         with attempting(f"Placing {path} in {container}", self.address):

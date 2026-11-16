@@ -12,8 +12,8 @@ from launchplane.act import Judged
 from launchplane.api import WebAddressChecker, create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
 from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
-from launchplane.instance import LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
-from launchplane.steps import MoveResult, RetireResult
+from launchplane.instance import BACK_SOON, LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
+from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from tests.given_secrets import NO_SECRETS
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
@@ -55,6 +55,10 @@ def no_retire(product: str, lane: str, _delete_data_set: str | None) -> RetireRe
     raise AssertionError(f"Reading what is running asked to retire {lane} of {product}")
 
 
+def no_maintenance(product: str, lane: str) -> MaintenanceResult:
+    raise AssertionError(f"Reading what is running asked to change the maintenance of {lane} of {product}")
+
+
 def every_web_address_answers(_web_address: str) -> str | None:
     return None
 
@@ -63,12 +67,27 @@ type InstanceReader = Callable[[], list[RunningInstance]]
 
 
 def app_reading(
-    read: InstanceReader, routes: dict[str, str] | None = None, why_fails: WebAddressChecker = every_web_address_answers
+    read: InstanceReader,
+    routes: dict[str, str] | None = None,
+    why_fails: WebAddressChecker = every_web_address_answers,
+    why_back_soon_fails: WebAddressChecker = every_web_address_answers,
 ) -> TestClient:
     def read_judged(_routes: dict[str, str]) -> Judged:
         return Judged(OnHost(read(), [], []), [])
 
-    return TestClient(create_app(read_judged, lambda: routes or {}, why_fails, no_move, no_retire, NO_SECRETS))
+    return TestClient(
+        create_app(
+            read_judged,
+            lambda: routes or {},
+            why_fails,
+            no_move,
+            no_retire,
+            NO_SECRETS,
+            no_maintenance,
+            no_maintenance,
+            why_back_soon_fails,
+        )
+    )
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
@@ -202,3 +221,33 @@ def test_web_addresses_are_asked_at_once_so_ones_that_hang_do_not_add_up() -> No
 
     entries = web_addresses_answer([], routes, hang_until_every_web_address_is_asked)
     assert {entry["error"] for entry in entries.values()} == {"download timed out"}
+
+
+def stopped_instance() -> RunningInstance:
+    return RunningInstance(
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, networks=(LANE_NETWORK,)
+    )
+
+
+def test_a_web_address_in_maintenance_says_it_shows_the_back_soon_page_and_is_not_asked_for_the_product() -> None:
+    def no_request(web_address: str) -> str | None:
+        raise AssertionError(f"Asked {web_address} for the product, and it shows the back soon page")
+
+    routes = {"testing.site.test": BACK_SOON}
+    body = app_reading(lambda: [stopped_instance()], routes, no_request).get("/running").json()
+    [entry] = body["web_addresses"]
+    assert (entry["product"], entry["lane"], entry["shows_back_soon_page"], entry["answers"], entry["error"]) == (
+        "site",
+        "testing",
+        True,
+        False,
+        None,
+    )
+    assert [instance["receives_visitors_for"] for instance in body["instances"]] == [None]
+
+
+def test_a_web_address_switched_to_a_back_soon_page_that_is_down_does_not_say_it_shows_it() -> None:
+    routes = {"testing.site.test": BACK_SOON}
+    client = app_reading(lambda: [stopped_instance()], routes, why_back_soon_fails=lambda _: "its container is not running")
+    [entry] = client.get("/running").json()["web_addresses"]
+    assert (entry["shows_back_soon_page"], entry["answers"], entry["error"]) == (False, False, "its container is not running")

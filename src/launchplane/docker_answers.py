@@ -1,9 +1,10 @@
 import io
 import tarfile
+import time
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 import requests
@@ -144,6 +145,7 @@ class DockerContainerState(BaseModel):
     restarting: bool = Field(alias="Restarting")
     paused: bool = Field(alias="Paused")
     started_at: AwareDatetime = Field(alias="StartedAt")
+    exit_code: int = Field(alias="ExitCode")
 
 
 class DockerContainerDetails(BaseModel):
@@ -234,10 +236,6 @@ def running_for(details: DockerContainerDetails, now: datetime) -> float | None:
 def background_service_from(
     summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails], now: datetime
 ) -> RunningBackgroundService:
-    if summary.name not in details:
-        raise ContainerHostError(
-            f"Docker listed the background service {summary.name} but did not describe it, so how long it has run is unknown."
-        )
     return RunningBackgroundService(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
         lane=summary.labels.get(LANE_LABEL),
@@ -245,7 +243,7 @@ def background_service_from(
         container=summary.name,
         state=state_of(summary),
         networks=attached_networks(summary),
-        running_for_seconds=running_for(details[summary.name], now),
+        running_for_seconds=running_for(described(summary, details, "background service"), now),
         instance=summary.labels.get(INSTANCE_LABEL),
         mounts=mounts_of(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
@@ -270,12 +268,22 @@ def grouped[Part](parts: Iterable[tuple[DataSetKey, Part]]) -> dict[DataSetKey, 
     return groups
 
 
-def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
+def described(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails], part: str) -> DockerContainerDetails:
+    if summary.name not in details:
+        raise ContainerHostError(
+            f"Docker listed the {part} {summary.name} but did not describe it, so how it runs or stopped is unknown."
+        )
+    return details[summary.name]
+
+
+def database_part(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails]) -> DataSetDatabase:
+    state = state_of(summary)
     return DataSetDatabase(
         container=summary.name,
-        state=state_of(summary),
+        state=state,
         networks=attached_networks(summary),
         mounts=mounts_of(summary),
+        exit_code=described(summary, details, "database").state.exit_code if state == InstanceState.STOPPED else None,
     )
 
 
@@ -284,7 +292,7 @@ def network_from(network: DockerNetworkSummary) -> HostNetwork:
 
 
 def data_sets_from(
-    databases: Iterable[DockerContainerSummary],
+    databases: Iterable[tuple[DataSetKey, DataSetDatabase]],
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
 ) -> list[DataSet]:
@@ -292,7 +300,7 @@ def data_sets_from(
         (data_set_key(network.labels or {}, f"the network {network.name}"), network_from(network)) for network in networks
     )
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
-    by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary)) for summary in databases)
+    by_database = grouped(databases)
     return [
         DataSet(
             product=key[0],
@@ -311,13 +319,13 @@ class HostAnswers:
     containers: object
     networks: object
     volumes: object
-    background_service_details: list[object] = field(default_factory=list[object])
+    details: list[object] = field(default_factory=list[object])
     system: object = None
 
 
-def background_service_details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
-    described = [checked(DOCKER_CONTAINER_DETAILS, answer, "description of a background service") for answer in answers]
-    return {details.name.removeprefix("/"): details for details in described}
+def details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
+    each = [checked(DOCKER_CONTAINER_DETAILS, answer, "description of a container") for answer in answers]
+    return {details.name.removeprefix("/"): details for details in each}
 
 
 def on_host_from_answers(answers: HostAnswers) -> OnHost:
@@ -328,22 +336,23 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
     by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "background-service": [], "database": []}
     for summary in summaries:
         by_part[part_of(summary)].append(summary)
+    details = details_by_name(answers.details)
     background_services: list[RunningBackgroundService] = []
     if by_part["background-service"]:
         now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
-        details = background_service_details_by_name(answers.background_service_details)
         background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
+    databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
     return OnHost(
         instances=[instance_from(summary) for summary in by_part["web"]],
         background_services=background_services,
-        data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
+        data_sets=data_sets_from(databases, marked_networks, volume_list),
         networks=[network_from(network) for network in every_network],
     )
 
 
-def background_service_names(containers: object) -> list[str]:
+def names_of(containers: object, part: Part) -> list[str]:
     summaries = checked(DOCKER_CONTAINER_LIST, containers, "container list")
-    return [summary.name for summary in summaries if part_of(summary) == "background-service"]
+    return [summary.name for summary in summaries if part_of(summary) == part]
 
 
 def tar_of(file_name: str, content: bytes, mode: int = 0o644) -> bytes:
@@ -352,14 +361,19 @@ def tar_of(file_name: str, content: bytes, mode: int = 0o644) -> bytes:
         member = tarfile.TarInfo(file_name)
         member.size = len(content)
         member.mode = mode
+        member.mtime = int(time.time())
         tar.addfile(member, io.BytesIO(content))
     return archive.getvalue()
 
 
-def only_file_in(archive: bytes) -> bytes:
+def dated_file_in(archive: bytes) -> tuple[bytes, datetime]:
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         member = tar.next()
         content = None if member is None else tar.extractfile(member)
-        if content is None:
+        if member is None or content is None:
             raise ContainerHostError("Docker answered a file read with an archive that holds no file.")
-        return content.read()
+        return content.read(), datetime.fromtimestamp(member.mtime, UTC)
+
+
+def only_file_in(archive: bytes) -> bytes:
+    return dated_file_in(archive)[0]
