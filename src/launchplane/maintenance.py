@@ -7,12 +7,18 @@ from launchplane.instance import (
     LaneSeen,
     ProxyNotRunning,
     RouteStatus,
-    RunningBackgroundService,
     RunningInstance,
     web_address_of,
 )
-from launchplane.judge import StillUp, active_instance, findings_at_rest, killed_databases, still_up
-from launchplane.plan import changes_so_far, check_or_problems, disabled_route_stop, is_loaded_as_written, prepared
+from launchplane.judge import Fix, StillUp, background_service_problems, findings_at_rest, killed_databases, still_up
+from launchplane.plan import (
+    changes_so_far,
+    check_or_problems,
+    disabled_route_stop,
+    failure_report,
+    is_loaded_as_written,
+    prepared,
+)
 from launchplane.product import Product
 from launchplane.steps import (
     Action,
@@ -23,8 +29,10 @@ from launchplane.steps import (
     CheckRefused,
     Done,
     Event,
+    LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
+    ReadLog,
     ShowBackSoon,
     StartProxy,
     StartRefused,
@@ -103,19 +111,55 @@ def the_instance(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...
     return instance, LaneBuild(product=product, lane=lane, build=instance.build)
 
 
-def stop_again(seen: LaneSeen, refused: CheckRefused | StartRefused, answer: MaintenanceResult) -> Step:
+type Refusal = CheckRefused | StartRefused | BackgroundServiceRefused
+
+
+def refusal_report(refused: Refusal, log: LogRead) -> str:
+    if log.unreadable is not None:
+        return f"{refused.report} Its log could not be read: {log.unreadable}"
+    return failure_report(refused.report, log.tail)
+
+
+# Everything stops before the log is read, so a log that cannot be read leaves nothing running.
+def stop_again(seen: LaneSeen, refused: Refusal, answer: MaintenanceResult, done: tuple[Event, ...]) -> Step:
     up = still_up(seen)
     if up:
         return stop_of(up[0])
-    return Done(answer.model_copy(update={"outcome": MaintenanceOutcome.WEB_PART_FAILED, "error": refused.report}))
+    log = next((event for event in done if isinstance(event, LogRead) and event.container == refused.container), None)
+    if log is None:
+        return ReadLog(refused.container)
+    of_the_web_part = any(instance.container == refused.container for instance in seen.instances)
+    outcome = MaintenanceOutcome.WEB_PART_FAILED if of_the_web_part else MaintenanceOutcome.BACKGROUND_SERVICE_FAILED
+    return Done(answer.model_copy(update={"outcome": outcome, "error": refusal_report(refused, log)}))
+
+
+def background_service_step(
+    seen: LaneSeen, instance: RunningInstance, description: Product, done: tuple[Event, ...]
+) -> Action | Stop | None:
+    problems = background_service_problems(seen, instance, description)
+    if not problems:
+        return None
+    first = problems[0]
+    if first.container is None or first.fix == Fix.REPLACE:
+        return Stop(
+            f"The background service is not one ending maintenance can start: {first.text}. {changes_so_far(done)} "
+            "The web address still shows the back soon page. Retiring the lane and moving it to a build again brings it back."
+        )
+    start = StartStopped(first.container)
+    stopped = any(
+        running.container == first.container and running.state == InstanceState.STOPPED for running in seen.background_services
+    )
+    if stopped and start not in done:
+        return start
+    return AwaitBackgroundService(first.container)
 
 
 def bring_back(
     seen: LaneSeen, product: str, lane: str, description: Product, answer: MaintenanceResult, done: tuple[Event, ...]
 ) -> Step:
-    refused = next((event for event in done if isinstance(event, CheckRefused | StartRefused)), None)
+    refused = next((event for event in done if isinstance(event, CheckRefused | StartRefused | BackgroundServiceRefused)), None)
     if refused is not None:
-        return stop_again(seen, refused, answer)
+        return stop_again(seen, refused, answer, done)
     found = the_instance(seen, product, lane, done)
     if isinstance(found, Stop):
         return found
@@ -135,37 +179,12 @@ def bring_back(
             f"the web address still shows the back soon page: {'; '.join(problems)}. {changes_so_far(done)} "
             "Beginning maintenance again stops what was started."
         )
-    return WriteRoute(answer.web_address, instance.container)
-
-
-def own_background_service(seen: LaneSeen, description: Product) -> RunningBackgroundService | None:
-    active = active_instance(seen)
-    if active is None or description.background_service is None:
-        return None
-    own = [running for running in seen.background_services if running.instance == active.container]
-    return own[0] if len(own) == 1 else None
-
-
-def background_service_step(seen: LaneSeen, description: Product, done: tuple[Event, ...]) -> Action | None:
-    background_service = own_background_service(seen, description)
-    if background_service is None:
-        return None
-    start = StartStopped(background_service.container)
-    if background_service.state == InstanceState.STOPPED and start not in done:
-        return start
-    watch = AwaitBackgroundService(background_service.container)
-    return watch if start in done and watch not in done else None
+    return background_service_step(seen, instance, description, done) or WriteRoute(answer.web_address, instance.container)
 
 
 def finish(seen: LaneSeen, description: Product, answer: MaintenanceResult, done: tuple[Event, ...]) -> Step:
     answer = answer.model_copy(update={"in_maintenance": False, "since": None})
-    refused = next((event for event in done if isinstance(event, BackgroundServiceRefused | StartRefused)), None)
-    if refused is not None:
-        return Done(answer.model_copy(update={"outcome": MaintenanceOutcome.BACKGROUND_SERVICE_FAILED, "error": refused.report}))
-    step = background_service_step(seen, description, done)
-    if step is not None:
-        return step
-    if not any(isinstance(event, WriteRoute | StartStopped) for event in done):
+    if not any(isinstance(event, WriteRoute) for event in done):
         return Done(answer.model_copy(update={"outcome": MaintenanceOutcome.NOT_IN_MAINTENANCE}))
     problems = [finding.text for finding in findings_at_rest(seen, description)]
     if problems:

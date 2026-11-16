@@ -187,6 +187,18 @@ class StartStopped:
 
 
 @dataclass(frozen=True)
+class ReadLog:
+    container: str
+
+
+@dataclass(frozen=True)
+class LogRead:
+    container: str
+    tail: str
+    unreadable: str | None = None
+
+
+@dataclass(frozen=True)
 class StartRefused:
     container: str
     report: str
@@ -235,5 +247,6 @@ type Action = (
     | StopPart
     | StopDatabase
     | StartStopped
+    | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused
+type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead

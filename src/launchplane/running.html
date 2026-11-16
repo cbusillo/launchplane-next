@@ -162,8 +162,9 @@ function backgroundServiceRows(running, verdict) {
  * @param {?Lane} verdict
  */
 function dataSetRows(dataSet, verdict) {
-  const pills = dataSet.databases.map((database) => pill(`database ${database.state}`, toneOf(database, verdict)));
-  return [row("Data set", [code(dataSet.data_set)], pills), ...dataSet.databases.map((database) => note(database.container))];
+  const id = () => note(`data set ${dataSet.data_set}`);
+  if (!dataSet.databases.length) return [row("Data set", ["no database server"], []), id()];
+  return dataSet.databases.flatMap((database) => [row("Data set", [code(database.container)], [statePill(database, verdict)]), id()]);
 }
 
 /**

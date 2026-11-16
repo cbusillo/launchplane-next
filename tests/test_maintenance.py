@@ -29,8 +29,10 @@ from launchplane.steps import (
     Done,
     Event,
     FreshNames,
+    LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
+    ReadLog,
     RemoveRoute,
     Retire,
     ShowBackSoon,
@@ -57,8 +59,8 @@ def web(state: InstanceState, container: str = WEB) -> RunningInstance:
     return on_data(lane_instance(container, "b", state), "d1")
 
 
-def background_service(state: InstanceState) -> RunningBackgroundService:
-    return background_service_of(web(RUNNING), running_for=10.0 if state == RUNNING else None).model_copy(update={"state": state})
+def background_service(state: InstanceState, ran: float = 10.0) -> RunningBackgroundService:
+    return background_service_of(web(RUNNING), running_for=ran if state == RUNNING else None).model_copy(update={"state": state})
 
 
 def database(state: InstanceState, *, accepts: bool = True, exit_code: int = 0) -> DataSet:
@@ -68,6 +70,7 @@ def database(state: InstanceState, *, accepts: bool = True, exit_code: int = 0) 
 
 
 STOPPED_DATABASE = database(STOPPED)
+STARTED_DATABASE = database(RUNNING)
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,7 @@ class Lane:
     web: InstanceState | None = STOPPED
     background_service: InstanceState | None = STOPPED
     database: DataSet | None = STOPPED_DATABASE
+    background_service_ran: float = 10.0
 
     def seen(self) -> LaneSeen:
         if self.route is None:
@@ -89,7 +93,7 @@ class Lane:
         return LaneSeen(
             () if self.web is None else (web(self.web),),
             route,
-            () if self.background_service is None else (background_service(self.background_service),),
+            () if self.background_service is None else (background_service(self.background_service, self.background_service_ran),),
             () if self.database is None else (self.database,),
             QUIET,
         )
@@ -176,8 +180,11 @@ def test_a_lane_with_nothing_on_the_host_is_not_given_a_back_soon_page() -> None
 STARTED_WEB = StartStopped(WEB)
 CHECKED = Check(WEB, "/health")
 STARTED_BACKGROUND_SERVICE = StartStopped(BACKGROUND_SERVICE)
+WATCHED = AwaitBackgroundService(BACKGROUND_SERVICE)
 CHECK_REFUSED = CheckRefused(WEB, "Connection refused")
 START_REFUSED = StartRefused(WEB, "Starting web failed: no such image")
+WATCH_REFUSED = BackgroundServiceRefused(BACKGROUND_SERVICE, "It stopped.")
+ALL_UP_BEHIND_BACK_SOON = Lane(IN_MAINTENANCE, RUNNING, RUNNING, STARTED_DATABASE)
 ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
     "with no proxy running, it is started first": (Lane(None), (), StartProxy()),
     "the database is started first": (Lane(IN_MAINTENANCE), (), StartDatabase(DATABASE)),
@@ -187,43 +194,48 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
         AwaitDatabase(DATABASE),
     ),
     "the web part is started once the database accepts connections": (
-        Lane(IN_MAINTENANCE, database=database(RUNNING)),
+        Lane(IN_MAINTENANCE, database=STARTED_DATABASE),
         (),
         STARTED_WEB,
     ),
     "killed after the web part started: it is checked while the back soon page still shows": (
-        Lane(IN_MAINTENANCE, RUNNING, STOPPED, database(RUNNING)),
+        Lane(IN_MAINTENANCE, RUNNING, STOPPED, STARTED_DATABASE),
         (),
         CHECKED,
     ),
     "a web part this call started that reads stopped again is checked, so its failure is answered, not started in a loop": (
-        Lane(IN_MAINTENANCE, STOPPED, STOPPED, database(RUNNING)),
+        Lane(IN_MAINTENANCE, STOPPED, STOPPED, STARTED_DATABASE),
         (STARTED_WEB,),
         CHECKED,
     ),
-    "the web address is switched back only once the web part passed its check in this call": (
-        Lane(IN_MAINTENANCE, RUNNING, STOPPED, database(RUNNING)),
+    "the background service is started only once the web part passed its check in this call": (
+        Lane(IN_MAINTENANCE, RUNNING, STOPPED, STARTED_DATABASE),
         (STARTED_WEB, CHECKED),
+        STARTED_BACKGROUND_SERVICE,
+    ),
+    "killed after the background service started: it is watched as read, whoever started it, before the web address moves": (
+        Lane(IN_MAINTENANCE, RUNNING, RUNNING, STARTED_DATABASE, background_service_ran=1.0),
+        (CHECKED,),
+        WATCHED,
+    ),
+    "a background service this call started that reads stopped again is watched, so its failure is answered": (
+        Lane(IN_MAINTENANCE, RUNNING, STOPPED, STARTED_DATABASE),
+        (CHECKED, STARTED_BACKGROUND_SERVICE),
+        WATCHED,
+    ),
+    "the web address is switched back last, once the background service is read as having stayed up": (
+        ALL_UP_BEHIND_BACK_SOON,
+        (CHECKED,),
         WriteRoute(WEB_ADDRESS, WEB),
     ),
-    "killed after the route was written back: the proxy is waited on before the background service starts": (
-        Lane((BACK_SOON, WEB), RUNNING, STOPPED, database(RUNNING)),
+    "killed after the route was written back: the proxy is waited on": (
+        Lane((BACK_SOON, WEB), RUNNING, RUNNING, STARTED_DATABASE),
         (),
         AwaitRoute(WEB_ADDRESS, WEB),
     ),
-    "killed after the web address switched back: the background service is still started, last": (
-        Lane(SERVING, RUNNING, STOPPED, database(RUNNING)),
-        (),
-        STARTED_BACKGROUND_SERVICE,
-    ),
-    "a background service this call started is watched until it has stayed up": (
-        Lane(SERVING, RUNNING, RUNNING, database(RUNNING)),
-        (STARTED_BACKGROUND_SERVICE,),
-        AwaitBackgroundService(BACKGROUND_SERVICE),
-    ),
-    "a call that brought the lane back answers ended": (
+    "a call that switched the web address back answers ended, from the lane as read then": (
         UP,
-        (STARTED_BACKGROUND_SERVICE, AwaitBackgroundService(BACKGROUND_SERVICE)),
+        (CHECKED, WriteRoute(WEB_ADDRESS, WEB), AwaitRoute(WEB_ADDRESS, WEB)),
         answered(MaintenanceOutcome.ENDED, in_maintenance=False),
     ),
     "a lane that is not in maintenance is left as it is and answered so": (
@@ -231,35 +243,58 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
         (),
         answered(MaintenanceOutcome.NOT_IN_MAINTENANCE, in_maintenance=False),
     ),
+    "a lane that is not in maintenance has no stopped background service started for it": (
+        Lane(SERVING, RUNNING, STOPPED, STARTED_DATABASE),
+        (),
+        answered(MaintenanceOutcome.NOT_IN_MAINTENANCE, in_maintenance=False),
+    ),
     "a web part that failed its check is stopped again": (
-        Lane(IN_MAINTENANCE, RUNNING, STOPPED, database(RUNNING)),
+        Lane(IN_MAINTENANCE, RUNNING, STOPPED, STARTED_DATABASE),
         (STARTED_WEB, CHECK_REFUSED),
         StopPart(WEB),
     ),
     "after a failed check the database is stopped again too": (
-        Lane(IN_MAINTENANCE, STOPPED, STOPPED, database(RUNNING)),
+        Lane(IN_MAINTENANCE, STOPPED, STOPPED, STARTED_DATABASE),
         (STARTED_WEB, CHECK_REFUSED, StopPart(WEB)),
         StopDatabase(DATABASE),
     ),
-    "a failed check is answered with why, and the lane is still in maintenance": (
+    "the log of a web part that failed its check is read only once everything has stopped": (
         Lane(IN_MAINTENANCE),
         (STARTED_WEB, CHECK_REFUSED, StopPart(WEB), StopDatabase(DATABASE)),
-        answered(MaintenanceOutcome.WEB_PART_FAILED, in_maintenance=True, error="Connection refused"),
+        ReadLog(WEB),
+    ),
+    "a failed check is answered with why and the log, and the lane is still in maintenance": (
+        Lane(IN_MAINTENANCE),
+        (CHECK_REFUSED, LogRead(WEB, "listening on :5678")),
+        answered(
+            MaintenanceOutcome.WEB_PART_FAILED,
+            in_maintenance=True,
+            error="Connection refused\nIts last log lines:\nlistening on :5678",
+        ),
+    ),
+    "a failed check whose log could not be read is still answered, with everything stopped": (
+        Lane(IN_MAINTENANCE),
+        (CHECK_REFUSED, LogRead(WEB, "", unreadable="Docker refused")),
+        answered(
+            MaintenanceOutcome.WEB_PART_FAILED,
+            in_maintenance=True,
+            error="Connection refused Its log could not be read: Docker refused",
+        ),
     ),
     "a web part that would not start has the database stopped again": (
-        Lane(IN_MAINTENANCE, database=database(RUNNING)),
+        Lane(IN_MAINTENANCE, database=STARTED_DATABASE),
         (START_REFUSED,),
         StopDatabase(DATABASE),
     ),
-    "a web part that would not start is answered with why, and the lane is still in maintenance": (
-        Lane(IN_MAINTENANCE),
-        (START_REFUSED, StopDatabase(DATABASE)),
-        answered(MaintenanceOutcome.WEB_PART_FAILED, in_maintenance=True, error=START_REFUSED.report),
+    "a background service that did not stay up has itself stopped first, then the rest": (
+        Lane(IN_MAINTENANCE, RUNNING, InstanceState.RESTARTING, STARTED_DATABASE),
+        (CHECKED, STARTED_BACKGROUND_SERVICE, WATCH_REFUSED),
+        StopPart(BACKGROUND_SERVICE),
     ),
-    "a background service that did not stay up is answered as failed, with the lane out of maintenance": (
-        Lane(SERVING, RUNNING, InstanceState.RESTARTING, database(RUNNING)),
-        (STARTED_BACKGROUND_SERVICE, BackgroundServiceRefused(BACKGROUND_SERVICE, "It stopped.")),
-        answered(MaintenanceOutcome.BACKGROUND_SERVICE_FAILED, in_maintenance=False, error="It stopped."),
+    "a background service that did not stay up is answered as failed, and the lane is still in maintenance": (
+        Lane(IN_MAINTENANCE),
+        (WATCH_REFUSED, LogRead(BACKGROUND_SERVICE, "")),
+        answered(MaintenanceOutcome.BACKGROUND_SERVICE_FAILED, in_maintenance=True, error="It stopped. It wrote no log."),
     ),
 }
 

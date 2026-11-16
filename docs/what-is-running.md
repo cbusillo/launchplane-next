@@ -49,7 +49,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 - It asks `/running` once a second, each time after the last answer arrived, and gives up on one answer after 15 s.
 - Every row is a name, then a value, then its status pills at the end. A pill is green for good, red for wrong and blue for under way on purpose. A build stands beside the thing it belongs to, and a container's name is a small grey line under its row.
-- A lane's card has its web address, then what the verdict found, one row each, then its background service, its instances with the active one first, and its data sets.
+- A lane's card has its web address, then what the verdict found, one row each, then its background service, its instances with the active one first, and its data sets. A data set's row names the database server it runs, with that server's state, and has the data set's id in the grey line.
 - A lane in maintenance has one blue pill, `in maintenance`, with since when under it. A lane Launchplane is at work on has the pill `Launchplane is at work`.
 - A container or data set marked for Launchplane with no lane label is shown in a card of its own, as wrong.
 - A build named by digest is shown as its image name and the first 12 characters of the digest. The full value is the tooltip.

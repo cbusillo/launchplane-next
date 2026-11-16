@@ -56,6 +56,12 @@ from launchplane.steps import (
 )
 
 
+def failure_report(why: str, log_tail: str) -> str:
+    if not log_tail:
+        return f"{why} It wrote no log."
+    return f"{why}\nIts last log lines:\n{log_tail}"
+
+
 def is_loaded_as_written(route: LaneRoute) -> bool:
     return (None if route.loaded is None else route.loaded.container) == route.written
 

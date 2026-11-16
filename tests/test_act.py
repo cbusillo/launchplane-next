@@ -559,7 +559,7 @@ def test_a_database_that_had_to_be_killed_is_answered_so_every_time_and_never_as
     assert "exited with code 137" in (answers[0].error or "")
 
 
-def test_a_lane_comes_out_of_maintenance_database_first_checked_behind_the_back_soon_page_and_background_service_last() -> None:
+def test_a_lane_comes_out_of_maintenance_database_first_and_its_web_address_switches_back_last() -> None:
     proxy = lane_in_maintenance()
     [web] = proxy.host.instances
     result = lanes_on(proxy).end_maintenance("site", "testing")
@@ -568,9 +568,9 @@ def test_a_lane_comes_out_of_maintenance_database_first_checked_behind_the_back_
         "await database-data-1",
         f"start {web}",
         f"check {web}/health",
-        f"route {web}",
         f"start {background_service_container_of(web)}",
         f"await background service {background_service_container_of(web)}",
+        f"route {web}",
     ]
     assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.ENDED, False)
     assert lanes_on(proxy).move(BUILD_A).outcome == Outcome.UNCHANGED
@@ -592,6 +592,40 @@ def test_a_web_part_that_fails_its_check_coming_out_leaves_everything_stopped_be
     assert "Connection refused" in (result.error or "")
     assert state_of(proxy) == stopped
     assert proxy.host.actions[-2:] == [f"stop {web}", "stop database database-data-1"]
+
+
+def test_a_failed_check_whose_log_cannot_be_read_still_leaves_everything_stopped_and_is_answered() -> None:
+    proxy = lane_in_maintenance()
+    stopped = state_of(proxy)
+    [web] = proxy.host.instances
+    proxy.failing.add(web)
+
+    def unreadable(container: str) -> str:
+        raise ContainerHostError(f"Reading the log of {container} on test failed: timed out")
+
+    proxy.host.read_log_tail = unreadable
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.WEB_PART_FAILED, True)
+    assert "Connection refused Its log could not be read" in (result.error or "")
+    assert state_of(proxy) == stopped
+
+
+def test_a_background_service_that_does_not_stay_up_coming_out_leaves_everything_stopped_behind_the_back_soon_page() -> None:
+    proxy = lane_in_maintenance()
+    stopped = state_of(proxy)
+    proxy.host.background_services_that_stop.add(BUILD_A.build)
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.BACKGROUND_SERVICE_FAILED, True)
+    assert state_of(proxy) == stopped
+
+
+def test_ending_maintenance_starts_no_stopped_background_service_on_a_lane_that_is_not_in_maintenance() -> None:
+    proxy = lane_brought_up_with_a()
+    [background_service] = proxy.host.background_services
+    proxy.host.stop_part(background_service)
+    proxy.host.actions.clear()
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, proxy.host.actions) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, [])
 
 
 def test_a_web_part_that_will_not_start_coming_out_leaves_everything_stopped_and_says_why() -> None:

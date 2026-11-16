@@ -47,19 +47,20 @@ Docker sends each container its image's stop signal and kills it after 30 s, or 
 2. Start the database server and wait up to 60 s until it accepts connections. A missing part of the data set is made again as a [move](data-sets.md#a-move-with-data) makes it.
 3. Start the web part.
 4. Check the web part as a move checks a new instance, while the web address still shows the back soon page.
-5. Write the route back to the web part.
-
-Once the web address goes to the web part again:
-
-6. Start its stopped background service and watch it stay up 3 s.
+5. Start the background service and watch it stay up 3 s. One read as running for less is watched too, whoever started it.
+6. Write the route back to the web part, and wait until the proxy has loaded it.
 7. Answer.
+
+The web address changes first going in and last coming out, so a call killed anywhere before step 6 leaves the lane in maintenance.
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
-| `ended` | 200 | The web address goes to the web part again and the lane was read as it must be. |
-| `not in maintenance` | 200 | The web address did not show the back soon page and the lane had no stopped background service to start. Nothing changed. |
-| `web part failed` | 422 | Docker refused to start the web part, or it failed its check. Everything was stopped again and the back soon page stays: the lane is still in maintenance. `error` has why, with the web part's last log lines after a failed check. |
-| `background service failed` | 422 | The web address goes to the web part again, and its background service did not start or did not stay up 3 s. `error` has why. A move to the lane's build replaces it. |
+| `ended` | 200 | This call switched the web address back to the web part, and the lane was then read as it must be. |
+| `not in maintenance` | 200 | The web address did not show the back soon page. Nothing changed, whatever state the lane is in. |
+| `web part failed` | 422 | Docker refused to start the web part, or it failed its check. |
+| `background service failed` | 422 | Docker refused to start the background service, or it did not stay up 3 s. |
+
+After either failure everything is stopped again and the back soon page stays: the lane is still in maintenance. The parts are stopped first and the failed part's log is read after. `error` has why and its last log lines, or says that the log could not be read.
 
 Every answer also has `in_maintenance`, and `since` while it is true.
 
@@ -67,7 +68,8 @@ It stops with `503`, leaving the back soon page, when:
 
 - the lane has no instance or more than one, so there is no telling which received visitors. Retire the lane and move it to a build again; its data set is kept;
 - the data set has a fault a move would also stop for;
-- the web part passed its check and is attached or mounted where it must not be.
+- the web part passed its check and is attached or mounted where it must not be;
+- the background service is missing, doubled, of another build, or attached or mounted where it must not be.
 
 ## The back soon page
 
@@ -94,7 +96,7 @@ Every web part, background service and database server is made with Docker's res
 - **A container made before restart policies changed has the policy `always`**, and Docker starts it again after a restart even in maintenance. Nothing is converted. A move makes a web part and a background service again; a database server keeps its policy until it is removed and made again.
 - **A database server that does not accept connections within 60 s while maintenance ends** stops the call with `503` and is left running behind the back soon page. Beginning maintenance again stops it.
 - **A back soon page container that is gone while a lane is in maintenance is not started by beginning that lane's maintenance again.** The web address then answers the proxy's own error, and the page shows it as a fault. Docker brings the container back after a crash or a restart. Comes back if anything ever removes it.
-- **Ending maintenance on a lane that was never in it starts a stopped background service of its active instance.** That is how a call killed after the web address switched back is finished.
+- **A call ending maintenance that is killed after it wrote the route back** has finished its work. Asked again it waits for the proxy and answers `not in maintenance`, not `ended`.
 - **The test-bed kill tests cannot say at which action the kill landed.** They show that the same call asked again reaches the same end. The unit tests cover each action.
 - **Untried:** a paused part, and a lane whose route the proxy reports as disabled.
 

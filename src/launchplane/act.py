@@ -73,12 +73,6 @@ class Judged:
     lanes: list[LaneVerdict]
 
 
-def failure_report(error: CheckFailed | PartStopped, log_tail: str) -> str:
-    if not log_tail:
-        return f"{error} It wrote no log."
-    return f"{error}\nIts last log lines:\n{log_tail}"
-
-
 def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
@@ -255,6 +249,7 @@ class Lanes:
                 lambda: self.read(product, lane, has_database=description.database is not None),
                 lambda seen, done: maintenance.decide_end(seen, product, lane, description, done),
                 f"{lane} of {product}",
+                self.take_behind_back_soon,
             )
 
     def settle[Answer](
@@ -262,6 +257,7 @@ class Lanes:
         read: Callable[[], LaneSeen],
         next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer] | Stop],
         lane_name: str,
+        take: Callable[[Action], Event] | None = None,
     ) -> Answer:
         done: list[Event] = []
         while True:
@@ -275,7 +271,7 @@ class Lanes:
                     f"{lane_name} was not finished after {MOST_STEPS} steps, so Launchplane stopped before {step}. "
                     "What was done stays done, and asking again goes on from there."
                 )
-            done.append(self.take(step))
+            done.append((take or self.take)(step))
 
     def take(self, action: Action) -> Event:
         if isinstance(action, steps.Check):
@@ -294,16 +290,35 @@ class Lanes:
             return steps.StartRefused(action.container, str(error))
         return action
 
-    def check(self, container: str, health_path: str) -> Event:
+    # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
+    def take_behind_back_soon(self, action: Action) -> Event:
+        if isinstance(action, steps.Check):
+            return self.check(action.container, action.health_path, with_log=False)
+        if isinstance(action, steps.AwaitBackgroundService):
+            return self.await_background_service(action.container, with_log=False)
+        if isinstance(action, steps.ReadLog):
+            return self.read_log(action.container)
+        return self.take(action)
+
+    def read_log(self, container: str) -> Event:
+        try:
+            return steps.LogRead(container, self.host.read_log_tail(container))
+        except ContainerHostError as error:
+            return steps.LogRead(container, "", unreadable=str(error))
+
+    def refusal(self, error: CheckFailed | PartStopped, container: str, *, with_log: bool) -> str:
+        return plan.failure_report(str(error), self.host.read_log_tail(container)) if with_log else str(error)
+
+    def check(self, container: str, health_path: str, *, with_log: bool = True) -> Event:
         try:
             self.proxy.check_instance(container, health_path)
         except CheckFailed as error:
-            return steps.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
+            return steps.CheckRefused(container, self.refusal(error, container, with_log=with_log))
         return steps.Check(container, health_path)
 
-    def await_background_service(self, container: str) -> Event:
+    def await_background_service(self, container: str, *, with_log: bool = True) -> Event:
         try:
             self.host.await_background_service(container, BACKGROUND_SERVICE_STEADY_SECONDS)
         except PartStopped as error:
-            return steps.BackgroundServiceRefused(container, failure_report(error, self.host.read_log_tail(container)))
+            return steps.BackgroundServiceRefused(container, self.refusal(error, container, with_log=with_log))
         return steps.AwaitBackgroundService(container)
