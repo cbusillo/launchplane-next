@@ -7,7 +7,6 @@ from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -419,10 +418,6 @@ def secrets_held(labels: Mapping[str, str], details: object, what: str) -> set[s
     return held
 
 
-def is_of_a_container_that_changed(error: APIError) -> bool:
-    return isinstance(error, NotFound) or error.status_code == HTTPStatus.CONFLICT
-
-
 def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
     return {network: EndpointConfig(DOCKER_API_VERSION, aliases=aliases or None) for network, aliases in networks.items()}
 
@@ -572,17 +567,20 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    def read(self, probing: ServerOfProduct | None = None) -> OnHost:
+    def read_until_whole[Read](self, read_once: Callable[[], Read]) -> Read:
         torn: TornRead | None = None
         for _ in range(MOST_READS):
             try:
-                return self.read_once(probing)
+                return read_once()
             except TornRead as error:
                 torn = error
         raise ContainerHostError(
-            f"What is on {self.address} changed during each of {MOST_READS} reads in a row, so nothing was read. "
-            f"The last time: {torn}"
+            f"What is on {self.address} changed, or Docker refused to say, during each of {MOST_READS} reads in a row, "
+            f"so nothing was read. The last time: {torn}"
         ) from torn
+
+    def read(self, probing: ServerOfProduct | None = None) -> OnHost:
+        return self.read_until_whole(lambda: self.read_once(probing))
 
     def read_once(self, probing: ServerOfProduct | None) -> OnHost:
         with self.attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks"):
@@ -596,8 +594,8 @@ class ContainerHost:
     def describe_listed(self, container: str) -> object:
         try:
             return self.describe(container)
-        except NotFound as error:
-            raise TornRead(f"{container} was listed and had gone before it was described.") from error
+        except APIError as error:
+            raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
     def probed(self, on_host: OnHost, server_of: ServerOfProduct) -> OnHost:
         return replace(
@@ -620,9 +618,7 @@ class ContainerHost:
             try:
                 return self.command_result_in(container, server.ready_command).succeeded
             except APIError as error:
-                if is_of_a_container_that_changed(error):
-                    raise TornRead(f"The database {container} was listed as running and was not when it was asked.") from error
-                raise
+                raise TornRead(f"The database {container} was listed as running, and Docker refused to ask it: {error}") from error
 
     def job_running_for(self, container: str) -> float | None:
         with self.attempting(f"Reading how long the job {container} has run"):
@@ -638,12 +634,18 @@ class ContainerHost:
         return self.seen_secrets
 
     def read_secrets(self) -> frozenset[str]:
+        self.read_until_whole(self.read_secrets_once)
+        return self.seen_secrets
+
+    def read_secrets_once(self) -> None:
         with self.attempting("Reading the secrets Launchplane has given to what is"):
             marked: dict[str, str | list[str] | bool] = {"label": PRODUCT_LABEL}
             for holder in self.client.containers.list(all=True, filters=marked, ignore_removed=True):
                 self.note_secrets(secrets_held(holder.labels, holder.attrs, str(holder.name)))
-                self.password_kept_with_the_data_of(holder)
-        return self.seen_secrets
+                try:
+                    self.password_kept_with_the_data_of(holder)
+                except APIError as error:
+                    raise TornRead(f"{holder.name} was listed, and Docker refused to read its password file: {error}") from error
 
     def find_container(self, container: str) -> Container | None:
         try:

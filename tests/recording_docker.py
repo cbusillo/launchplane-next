@@ -32,6 +32,7 @@ class RecordingContainer:
     ready: bool = True
     removed: bool = False
     refuses_commands_with: Exception | None = None
+    refuses_reads_with: Iterator[Exception] = field(default_factory=lambda: iter(()))
     calls: builtins.list[str] = field(default_factory=builtins.list[str])
     volumes: dict[str, str] = field(default_factory=dict[str, str])
     files_by_volume: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
@@ -43,6 +44,8 @@ class RecordingContainer:
 
     def get_archive(self, path: str) -> tuple[builtins.list[bytes], dict[str, Any]]:
         self.calls.append(f"read {path}")
+        for refusal in self.refuses_reads_with:
+            raise refusal
         if path not in self.files_at(path):
             raise NotFound(f"Could not find the file {path} in container {self.name}")
         return [tar_of(path.rsplit("/", 1)[1], self.files_at(path)[path])], {}

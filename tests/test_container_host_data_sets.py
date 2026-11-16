@@ -1,3 +1,4 @@
+import itertools
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -470,7 +471,7 @@ def test_a_host_that_changes_during_three_reads_in_a_row_is_an_error_not_read_wi
     docker = RecordingDocker()
     docker.api.container_lists = iter([[JOB]] * 10)
     docker.api.gone_before_described = {"a-job"}
-    with pytest.raises(ContainerHostError, match="changed during each of 3 reads"):
+    with pytest.raises(ContainerHostError, match="during each of 3 reads in a row"):
         ContainerHost(docker.as_client(), "test").read()
     assert len(list(docker.api.container_lists)) == 7
 
@@ -478,10 +479,14 @@ def test_a_host_that_changes_during_three_reads_in_a_row_is_an_error_not_read_wi
 def refusal(status: int) -> APIError:
     response = requests.Response()
     response.status_code = status
-    return APIError("the container is not running", response=response)
+    return APIError("refused", response=response, explanation="the container is not running")
 
 
-NO_LONGER_AS_LISTED = {"gone": NotFound("No such container"), "not running any more": refusal(409)}
+NO_LONGER_AS_LISTED = {
+    "gone": NotFound("No such container"),
+    "not running any more": refusal(409),
+    "being removed, which Docker answers as a fault of its own": refusal(500),
+}
 
 
 @pytest.mark.parametrize("answer", NO_LONGER_AS_LISTED.values(), ids=NO_LONGER_AS_LISTED.keys())
@@ -494,14 +499,29 @@ def test_a_database_listed_as_running_and_found_otherwise_when_asked_is_read_aga
     assert [(database.state, database.accepts_connections) for database in found.databases] == [(InstanceState.STOPPED, None)]
 
 
-def test_a_database_that_cannot_be_asked_for_another_reason_is_an_error_at_once_not_read_again() -> None:
+def test_a_database_docker_refuses_to_ask_three_reads_in_a_row_is_an_error_carrying_dockers_refusal() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
     docker.containers.by_name[DATABASE].refuses_commands_with = refusal(500)
-    docker.api.container_lists = iter([[RUNNING_DATABASE]] * 3)
-    with pytest.raises(ContainerHostError, match="whether it accepts connections"):
+    docker.api.container_lists = iter([[RUNNING_DATABASE]] * 5)
+    with pytest.raises(ContainerHostError, match="the container is not running"):
         host.read(servers_of_shop)
     assert len(list(docker.api.container_lists)) == 2
+
+
+def test_a_container_being_removed_while_its_password_is_read_has_the_secrets_read_again_not_the_answer_refused() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    docker.containers.by_name[DATABASE].refuses_reads_with = iter([refusal(500)])
+    assert restarted_launchplane(docker).read_secrets() == {password_kept(docker)}
+
+
+def test_a_password_file_docker_refuses_to_read_three_times_in_a_row_is_an_error_not_an_answer_left_uncleaned() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    docker.containers.by_name[DATABASE].refuses_reads_with = itertools.repeat(refusal(500))
+    with pytest.raises(ContainerHostError, match="refused to read its password file"):
+        restarted_launchplane(docker).read_secrets()
 
 
 def test_only_the_databases_of_a_product_whose_server_is_known_are_asked_whether_they_accept_connections() -> None:
