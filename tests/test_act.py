@@ -646,8 +646,6 @@ def killed_then_asked_again(start: Callable[[], FakeProxy], call: Callable[[Lane
         call(lanes_on(proxy))
     proxy.host.killed_after = None
     call(lanes_on(proxy))
-    # The proxy loads a routes file in its own time, even when no call waits for it.
-    proxy.loaded = dict(proxy.written)
     return state_of(proxy)
 
 

@@ -129,11 +129,12 @@ class LaneRoute:
     def in_maintenance(self) -> bool:
         return self.written == BACK_SOON
 
+    # What visitors get is what the running proxy has loaded, never what the file says.
     @property
     def sends_visitors_to(self) -> str | None:
-        if not self.proxy_runs:
-            return self.written
-        return self.loaded.container if self.loaded is not None and self.loaded.status == RouteStatus.ENABLED else None
+        if not self.proxy_runs or self.loaded is None or self.loaded.status != RouteStatus.ENABLED:
+            return None
+        return self.loaded.container
 
 
 @dataclass(frozen=True)

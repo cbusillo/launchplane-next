@@ -225,9 +225,12 @@ class Lanes:
 
     def end_maintenance(self, product: str, lane: str) -> MaintenanceResult:
         with self.at_work_on(product, lane):
-            # The mark is looked at first: a lane that is not in maintenance is answered with nothing else read.
-            route = self.proxy.read().route_of(web_address_of(product, lane))
+            # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
+            web_address = web_address_of(product, lane)
+            route = self.proxy.read().route_of(web_address)
             if not route.in_maintenance:
+                if route.proxy_runs and not plan.is_loaded_as_written(route):
+                    self.proxy.await_route(web_address, route.written)
                 return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
             description = self.read_product(product)
             return self.settle(

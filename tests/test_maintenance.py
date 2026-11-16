@@ -383,3 +383,20 @@ def test_outside_maintenance_a_running_part_is_good_and_a_stopped_one_is_wrong()
         False,
         {WEB: Standing.GOOD, BACKGROUND_SERVICE: Standing.WRONG, DATABASE: Standing.GOOD},
     )
+
+
+def test_with_the_proxy_down_a_lane_says_no_instance_receives_visitors_though_its_file_names_one() -> None:
+    seen = UP.seen()
+    down = LaneSeen(seen.instances, LaneRoute(None, WEB, proxy_runs=False), seen.background_services, seen.data_sets, QUIET)
+    verdict = lane_verdict(down, WITH_DATA, "site", "testing", a_move_is_at_work=False)
+    assert verdict.left_unfinished == ["No instance receives visitors: the proxy is not running"]
+
+
+def test_a_move_refuses_a_lane_in_maintenance_before_it_starts_the_proxy() -> None:
+    seen = Lane(IN_MAINTENANCE).seen()
+    down = LaneSeen(
+        seen.instances, LaneRoute(None, BACK_SOON, SINCE, proxy_runs=False), seen.background_services, seen.data_sets, QUIET
+    )
+    step = decide_move(down, TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), ())
+    assert isinstance(step, Stop)
+    assert "Nothing was changed." in step.reason

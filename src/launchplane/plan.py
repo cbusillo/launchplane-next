@@ -256,14 +256,14 @@ def settle_serving(
 def decide_move(
     seen: LaneSeen, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
 ) -> Action | Done[MoveResult] | Stop:
-    if not seen.route.proxy_runs:
-        return StartProxy()
     web_address = web_address_of(target.product, target.lane)
     if seen.route.in_maintenance:
         return Stop(
-            f"{target.lane} of {target.product} is in maintenance: {web_address} shows the back soon page. End maintenance "
-            f"first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was changed."
+            f"{target.lane} of {target.product} is in maintenance: the routes file of {web_address} points at the back soon "
+            f"page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was changed."
         )
+    if not seen.route.proxy_runs:
+        return StartProxy()
     if not is_loaded_as_written(seen.route):
         return AwaitRoute(web_address, seen.route.written)
     if seen.route.loaded is not None and seen.route.loaded.status != RouteStatus.ENABLED:

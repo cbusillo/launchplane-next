@@ -269,10 +269,15 @@ def data_set_findings(found: DataSet | None, seen: LaneSeen, product: Product) -
     return [Finding(problem.text, problem.fixable) for problem in data_set_problems(found, seen, product.database is not None)]
 
 
+def no_visitors(seen: LaneSeen) -> Finding:
+    why = "" if seen.route.proxy_runs else ": the proxy is not running"
+    return Finding(f"No instance receives visitors{why}", of_a_release=True)
+
+
 def lane_findings(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[Finding]:
     active = switching_to or active_instance(seen)
     if active is None:
-        return [Finding("No instance receives visitors", of_a_release=True)]
+        return [no_visitors(seen)]
     to_receive_visitors = [
         *[Finding(problem) for problem in instance_problems(active, target, product, seen)],
         *data_set_findings(data_set_of(seen, active.data_set), seen, product),
@@ -298,7 +303,7 @@ def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
         finding for found in seen.data_sets if found.data_set != used for finding in data_set_findings(found, seen, product)
     ]
     if active is None:
-        return [Finding("No instance receives visitors", of_a_release=True), *of_other_data_sets]
+        return [no_visitors(seen), *of_other_data_sets]
     if active.lane is None or active.build is None:
         return [Finding(f"The instance {active.container} does not say which lane and build it is"), *of_other_data_sets]
     running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
