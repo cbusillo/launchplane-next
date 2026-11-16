@@ -104,8 +104,8 @@ Every web part, background service and database server is made with Docker's res
 
 On the test bed, November 16, with the pretend ledger product (a web part, a background service writing a row every 0.2 s, PostgreSQL 18):
 
-- Into maintenance: 3.0 to 3.5 s. Asking again: 0.07 to 0.09 s.
-- Out of maintenance: 10.2 to 10.3 s, of which the check is 3 s and the watch on the background service 3 s. Asking again: 0.11 to 0.14 s.
+- Into maintenance: 2.8 to 3.5 s. Asking again: 0.07 to 0.09 s.
+- Out of maintenance: 10.0 to 10.2 s, of which the check is 3 s and the watch on the background service 3 s. Asking again: 0.09 to 0.11 s.
 - A plain nginx lane: 2.75 s in and 5.80 s out.
 - In maintenance, a `GET` and a `POST` at the web address answered `503` with `Retry-After: 60` and `Cache-Control: no-store`, the row was not stored, and `pg_isready` from a container on the data set's network got no answer.
 - After `systemctl restart docker` on the scratch container the lane was still in maintenance: every part stopped, no container of the lane running, the back soon page answering.
