@@ -47,7 +47,7 @@ A data set's password lives with its data: the file `launchplane-password` at th
 - A database server removed by hand is made again on the kept volume with the same password.
 - A password is made only for a new data set, one whose data PostgreSQL has not made yet.
 - Data that exists without its password file stops the start with `503` naming the data set, and the server is left stopped. Put the password back in the file, or delete the data set by name.
-- A password file that is not text answers `503` naming the data set.
+- A password file that is not text answers `503` naming the data set, on every call, until the password is put back in the file by hand.
 
 Anyone who can read the volume, or run `docker inspect` on a web part or background service, can read the password.
 
@@ -122,6 +122,8 @@ How the page lays a lane out is in [the page](what-is-running.md#the-page).
 - **With a lane's route removed by hand**, the verdict says only that no instance receives visitors.
 - **Two running background services** show as release progress while a move is at work.
 - **A release that finishes between two readings of the move flag** can show for one reading as left unfinished.
+- **A password file that is not text makes every call answer `503`,** the page's reading and deleting that data set included, because no answer is made while a secret cannot be read. Only putting the file right by hand ends it.
+- **A container made before the background service was named, marked `launchplane.part=job`, makes the host unreadable.** No version has been released, so nothing is converted: the test bed's lanes are made again.
 - **Rules no test catches:** reading the host again when Docker refuses a question about a container it has just listed, asking only the databases of a product that has one whether they accept connections, refusing to start a database that does not say where its password or its data is kept, and finishing a delete whose parts have already gone. Comes back when one of them breaks without a test noticing.
 
 ## On the test bed

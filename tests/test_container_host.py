@@ -1,7 +1,10 @@
+import itertools
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+import requests
+from docker.errors import APIError
 
 from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
@@ -161,6 +164,10 @@ def database_made(docker: RecordingDocker) -> ContainerHost:
     return host
 
 
+def password_kept(docker: RecordingDocker) -> str:
+    return docker.containers.files_by_volume[VOLUME][PASSWORD_PATH].decode()
+
+
 def test_the_password_is_written_for_its_owner_only_before_the_database_first_starts() -> None:
     docker = RecordingDocker()
     database_made(docker)
@@ -209,13 +216,50 @@ def test_nothing_is_attached_to_a_lanes_network_that_exists_and_is_not_quiet() -
 def test_a_secret_is_read_from_whatever_still_holds_it_whichever_containers_are_gone(left: str) -> None:
     docker = RecordingDocker()
     host = database_made(docker)
-    password = docker.containers.files_by_volume[VOLUME][PASSWORD_PATH].decode()
+    password = password_kept(docker)
     host.start_instance(TARGET, "shop-testing-1", LINK)
     host.start_background_service(TARGET, "shop-testing-1", LINK, ["work"])
     for name, holder in docker.containers.by_name.items():
         holder.removed = name != left
     restarted_launchplane = ContainerHost(docker.as_client(), "test")
     assert restarted_launchplane.secrets.read_secrets() == {password}
+
+
+def test_a_secret_this_launchplane_gave_out_stays_one_after_everything_holding_it_is_gone() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    password = password_kept(docker)
+    docker.containers.by_name[DATABASE].removed = True
+    assert (host.secrets.read_secrets(), host.secrets.secrets_seen()) == ({password}, {password})
+
+
+def test_a_password_read_to_give_to_an_instance_is_a_secret_at_once() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    restarted_launchplane = ContainerHost(docker.as_client(), "test")
+    restarted_launchplane.start_instance(TARGET, "shop-testing-1", LINK)
+    assert restarted_launchplane.secrets.secrets_seen() == {password_kept(docker)}
+
+
+def refused_by_docker() -> APIError:
+    response = requests.Response()
+    response.status_code = 500
+    return APIError("refused", response=response, explanation="RWLayer of container is unexpectedly nil")
+
+
+def test_a_container_removed_while_its_password_is_read_has_the_secrets_read_again() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    docker.containers.by_name[DATABASE].refuses_reads_with = iter([refused_by_docker()])
+    assert ContainerHost(docker.as_client(), "test").secrets.read_secrets() == {password_kept(docker)}
+
+
+def test_a_password_file_docker_refuses_three_times_in_a_row_is_an_error_not_secrets_read_without_it() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    docker.containers.by_name[DATABASE].refuses_reads_with = itertools.repeat(refused_by_docker())
+    with pytest.raises(ContainerHostError, match="refused to read its password file"):
+        ContainerHost(docker.as_client(), "test").secrets.read_secrets()
 
 
 def test_a_description_of_unexpected_shape_is_an_error_that_repeats_nothing_docker_answered() -> None:

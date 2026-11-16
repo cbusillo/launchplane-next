@@ -55,6 +55,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 - **A refusal from Docker inside the read of the secrets that comes from the Docker client's own follow-up question is not read again.** It answers `503`, and asking again works.
 - **The page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
+- **A marked container with no lane label and no route makes the page say nothing marked for Launchplane is on the host.** `/running` lists it.
 - **The page does not show an instance with no lane label, or where a route to another lane's instance goes.** `/running` answers both.
 - **No test loads the page or runs its script.** Chris watching the page is the check. Comes back when the page breaks without anyone noticing, or when there is a second page.
 

@@ -94,7 +94,7 @@ class HostSecrets:
             raise ContainerHostError(
                 f"The password file {path} of the data set {database.labels.get(DATA_SET_LABEL)} is not text, so the password "
                 f"kept in the database {database.name} could not be read: {error}. "
-                "Put the password back in that file, or delete the data set by name."
+                "Put the password back in that file by hand."
             ) from error
         self.note([password])
         return password or None

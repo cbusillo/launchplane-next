@@ -32,11 +32,14 @@ class RecordingContainer:
     environment: list[str]
     files: dict[str, bytes]
     removed: bool = False
+    refuses_reads_with: Iterator[Exception] = field(default_factory=lambda: iter(()))
     calls: list[str] = field(default_factory=list[str])
     file_modes: dict[str, int] = field(default_factory=dict[str, int])
 
     def get_archive(self, path: str) -> tuple[list[bytes], dict[str, Any]]:
         self.calls.append(f"read {path}")
+        for refusal in self.refuses_reads_with:
+            raise refusal
         if path not in self.files:
             raise NotFound(f"Could not find the file {path} in container {self.name}")
         return [tar_of(path.rsplit("/", 1)[1], self.files[path])], {}
