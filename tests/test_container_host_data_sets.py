@@ -33,6 +33,8 @@ DATA_SET_NETWORK = "launchplane-data-d1"
 DATABASE = "shop-testing-database-d1"
 LINK = DatabaseLink("d1", DATA_SET_NETWORK, DATABASE, SERVER)
 STARTED = "2026-11-15T20:00:00.000000001Z"
+MADE = 1794772790
+READ_AT = {"SystemTime": "2026-11-15T20:00:00Z"}
 
 
 def network(
@@ -48,6 +50,7 @@ def container(name: str, part: str, networks: list[str], mounts: Sequence[object
         "Labels": DATA_SET_LABELS | {"launchplane.part": part},
         "NetworkSettings": {"Networks": {each: {} for each in networks}},
         "Mounts": list(mounts),
+        "Created": MADE,
     }
 
 
@@ -61,7 +64,7 @@ def read(
     networks: Sequence[object] = (),
     volumes: Sequence[object] = (),
     described: Sequence[object] = (),
-    system: object = None,
+    system: object = READ_AT,
 ) -> OnHost:
     return on_host_from_answers(HostAnswers(list(containers), list(networks), {"Volumes": list(volumes)}, list(described), system))
 
@@ -79,7 +82,9 @@ def test_a_data_set_is_read_from_its_network_volume_and_database_together() -> N
             data_set="d1",
             networks=(HostNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
             volumes=("launchplane-data-d1-database",),
-            databases=(DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,)),),
+            databases=(
+                DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,), age_seconds=10),
+            ),
         )
     ]
 
@@ -160,6 +165,7 @@ def test_every_network_an_instance_joins_is_made_quiet(make: str) -> None:
 
 
 PASSWORD_PATH = "/var/lib/postgresql/launchplane-password"  # noqa: S105 where a password is kept, not one
+DATA_MADE_PATH = "/var/lib/postgresql/18/docker/PG_VERSION"
 
 
 def database_made(docker: RecordingDocker, data_set: str = "d1") -> ContainerHost:
@@ -201,7 +207,7 @@ def test_the_password_is_written_to_the_data_sets_volume_for_its_owner_only_befo
     docker = RecordingDocker()
     database_made(docker)
     database = docker.containers.by_name[DATABASE]
-    assert database.calls == [f"read {PASSWORD_PATH}", f"write {PASSWORD_PATH}", "start"]
+    assert database.calls == [f"read {PASSWORD_PATH}", f"read {DATA_MADE_PATH}", f"write {PASSWORD_PATH}", "start"]
     assert database.file_modes == {PASSWORD_PATH: 0o600}
 
 
@@ -225,8 +231,85 @@ def test_a_database_made_and_never_given_its_password_gets_one_when_it_is_starte
     docker = RecordingDocker()
     host = database_made(docker)
     del docker.containers.files_by_volume["launchplane-data-d1-database"][PASSWORD_PATH]
-    host.start_database(DATABASE)
+    host.start_database(DATABASE, SERVER)
     assert len(password_kept(docker)) >= 32
+
+
+def test_data_that_exists_without_its_password_is_an_error_naming_the_data_set_not_given_a_new_password() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    files = docker.containers.files_by_volume["launchplane-data-d1-database"]
+    files[DATA_MADE_PATH] = b"18\n"
+    del files[PASSWORD_PATH]
+    docker.containers.by_name[DATABASE].calls.clear()
+    with pytest.raises(ContainerHostError, match="The data set d1 has data and no password"):
+        host.start_database(DATABASE, SERVER)
+    assert PASSWORD_PATH not in files
+    assert "start" not in docker.containers.by_name[DATABASE].calls
+
+
+def test_a_database_server_made_again_on_data_without_its_password_is_not_started_either() -> None:
+    docker = RecordingDocker()
+    database_made(docker)
+    files = docker.containers.files_by_volume["launchplane-data-d1-database"]
+    files[DATA_MADE_PATH] = b"18\n"
+    del files[PASSWORD_PATH]
+    docker.containers.by_name[DATABASE].removed = True
+    with pytest.raises(ContainerHostError, match="has data and no password"):
+        database_made(docker)
+    assert "start" not in docker.containers.by_name[DATABASE].calls
+
+
+def test_a_database_that_does_not_say_where_its_password_is_kept_is_refused_not_started_without_one() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    database = docker.containers.by_name[DATABASE]
+    del database.labels["launchplane.password-file"]
+    database.calls.clear()
+    with pytest.raises(ContainerHostError, match="does not say where its data keeps its password"):
+        host.start_database(DATABASE, SERVER)
+    assert database.calls == []
+
+
+def test_a_database_that_does_not_say_where_its_data_is_is_refused_because_it_cannot_be_told_new_from_made() -> None:
+    docker = RecordingDocker()
+    docker.containers.environment_of_every_image = ()
+    with pytest.raises(ContainerHostError, match="cannot tell whether its data set is new"):
+        database_made(docker)
+
+
+def test_an_instance_and_its_job_are_given_everything_a_postgresql_client_needs_and_say_which_data_set_they_run_against() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    reaching_the_database = {
+        "PGHOST": "database",
+        "PGPORT": "5432",
+        "PGUSER": "postgres",
+        "PGDATABASE": "postgres",
+        "PGPASSWORD": password_kept(docker),
+    }
+    host.start_instance(TARGET, "shop-testing-1", LINK)
+    host.start_job(TARGET, "shop-testing-1", LINK, ["job"])
+    for started in docker.containers.runs[1:]:
+        assert started["environment"] == reaching_the_database
+        assert started["labels"]["launchplane.data-set"] == "d1"
+
+
+def test_a_job_is_read_with_the_data_set_it_says_it_runs_against() -> None:
+    jobs = read([container("a-job", "job", [])], described=[job_details("a-job")]).jobs
+    assert [job.data_set for job in jobs] == ["d1"]
+
+
+def test_deleting_a_data_set_whose_parts_have_already_gone_finishes_as_a_delete_cut_short_and_asked_again_must() -> None:
+    gone = DataSet(
+        product="shop",
+        lane="testing",
+        data_set="d1",
+        networks=(HostNetwork(name="network-d1", is_quiet=True),),
+        volumes=("volume-d1",),
+        databases=(DataSetDatabase(container="database-d1", state=InstanceState.RUNNING, networks=("network-d1",)),),
+    )
+    ContainerHost(RecordingDocker().as_client(), "test").delete_data_set(gone)
 
 
 def test_a_database_that_never_accepts_connections_is_an_error_after_its_deadline_not_awaited_without_end() -> None:

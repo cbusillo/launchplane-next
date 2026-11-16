@@ -102,6 +102,7 @@ class FakeHost:
             networks=(LANE_NETWORK,) if link is None else (link.network,),
             running_for_seconds=0.0,
             instance=instance,
+            data_set=None if link is None else link.data_set,
         )
         self.most_jobs_running = max(self.most_jobs_running, len(self.jobs))
         self.record(f"start job {instance} on {None if link is None else link.network} with {' '.join(command)}")
@@ -140,8 +141,8 @@ class FakeHost:
         self.change_data_set(product, lane, data_set, databases=(database,))
         self.record(f"database {data_set} on {network} and {volume} from {server.image}")
 
-    def start_database(self, container: str) -> None:
-        self.record(f"start database {container}")
+    def start_database(self, container: str, server: DatabaseServer) -> None:
+        self.record(f"start database {container} from {server.image}")
 
     def await_database(self, container: str, server: DatabaseServer) -> None:
         self.ready_databases.add(container)

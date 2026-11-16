@@ -1,9 +1,11 @@
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pydantic import BaseModel
 
+from launchplane.data_set import postgres_server
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
@@ -18,6 +20,7 @@ from launchplane.product import Database, Product
 
 LANE_DOMAIN = "test"
 JOB_STEADY_SECONDS = 3.0
+MOVE_MOST_SECONDS = 180
 
 
 class Outcome(StrEnum):
@@ -119,6 +122,20 @@ class JobProblem:
     text: str
     fix: JobFix
     job: str | None = None
+    of_a_release: bool = False
+
+
+@dataclass(frozen=True)
+class Finding:
+    text: str
+    of_a_release: bool = False
+
+
+@dataclass(frozen=True)
+class Verdict:
+    problems: list[str]
+    release_under_way: list[str]
+    seconds_since_anything_was_made: float | None
 
 
 @dataclass(frozen=True)
@@ -159,6 +176,7 @@ class CreateDatabase:
 @dataclass(frozen=True)
 class StartDatabase:
     container: str
+    database: Database
 
 
 @dataclass(frozen=True)
@@ -313,13 +331,19 @@ def attachment_problems(part: str, attached: tuple[str, ...], expected: set[str]
     ]
 
 
-def mount_problems(part: str, mounts: tuple[Mount, ...], expected: set[str]) -> list[str]:
-    mounted = {mount.source for mount in mounts}
-    extra = sorted(mounted - expected)
-    missing = sorted(expected - mounted)
+def described(mounts: Counter[Mount]) -> str:
+    return ", ".join(
+        f"{mount.source} mounted at {mount.path}" + (f" {times} times" if times > 1 else "")
+        for mount, times in sorted(mounts.items(), key=lambda counted: (counted[0].path, counted[0].source))
+    )
+
+
+def mount_problems(part: str, mounts: tuple[Mount, ...], expected: tuple[Mount, ...]) -> list[str]:
+    extra = Counter(mounts) - Counter(expected)
+    missing = Counter(expected) - Counter(mounts)
     return [
-        *([f"{part} has {', '.join(extra)} mounted, which it must not have"] if extra else []),
-        *([f"{part} does not have {', '.join(missing)} mounted"] if missing else []),
+        *([f"{part} has {described(extra)}, which it must not have"] if extra else []),
+        *([f"{part} does not have {described(missing)}"] if missing else []),
     ]
 
 
@@ -342,7 +366,7 @@ def instance_problems(instance: RunningInstance, target: LaneBuild, product: Pro
         *([f"{part} is {instance.state}"] if instance.state != InstanceState.RUNNING else []),
         *data_set_label_problems(instance, product, seen),
         *attachment_problems(part, instance.networks, expected, seen),
-        *mount_problems(part, instance.mounts, set()),
+        *mount_problems(part, instance.mounts, ()),
     ]
 
 
@@ -355,11 +379,19 @@ def doubled_parts(found: DataSet) -> list[str]:
     return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
 
 
-def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen) -> list[DataSetProblem]:
+def mounts_of_a_database(found: DataSet, described_as: Database | None) -> tuple[Mount, ...]:
+    if described_as is None:
+        return ()
+    return tuple(Mount(source=volume, path=postgres_server(described_as).data_path) for volume in found.volumes)
+
+
+def database_problems(
+    found: DataSet, database: DataSetDatabase, seen: LaneSeen, described_as: Database | None
+) -> list[DataSetProblem]:
     part = f"The database {database.container}"
     connected = [
         *attachment_problems(part, database.networks, network_names(found), seen),
-        *mount_problems(part, database.mounts, set(found.volumes)),
+        *mount_problems(part, database.mounts, mounts_of_a_database(found, described_as)),
     ]
     if database.state == InstanceState.STOPPED:
         state = [DataSetProblem(f"{part} is {database.state}", a_step_puts_right=True)]
@@ -372,7 +404,7 @@ def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen)
     return [*state, *[DataSetProblem(problem) for problem in connected]]
 
 
-def data_set_problems(found: DataSet, seen: LaneSeen) -> list[DataSetProblem]:
+def data_set_problems(found: DataSet, seen: LaneSeen, described_as: Database | None) -> list[DataSetProblem]:
     part = f"The data set {found.data_set}"
     missing = [
         kind for kind, parts in (("network", found.networks), ("volume", found.volumes), ("database", found.databases)) if not parts
@@ -381,7 +413,7 @@ def data_set_problems(found: DataSet, seen: LaneSeen) -> list[DataSetProblem]:
         *[DataSetProblem(f"{part} has {doubled} where it must have one") for doubled in doubled_parts(found)],
         *[DataSetProblem(f"{part} has no {kind}", a_step_puts_right=True) for kind in missing],
         *[DataSetProblem(f"{part}'s network {network.name} is not quiet") for network in found.networks if not network.is_quiet],
-        *[problem for database in found.databases for problem in database_problems(found, database, seen)],
+        *[problem for database in found.databases for problem in database_problems(found, database, seen, described_as)],
     ]
 
 
@@ -391,7 +423,7 @@ def job_state_problems(job: RunningJob) -> list[JobProblem]:
         return [JobProblem(f"{part} is {job.state}", JobFix.REPLACE_UNLESS_JUST_STARTED, job.container)]
     if job.running_for_seconds < JOB_STEADY_SECONDS:
         text = f"{part} has run {job.running_for_seconds:.1f} s of the {JOB_STEADY_SECONDS:g} s it must stay up"
-        return [JobProblem(text, JobFix.WATCH, job.container)]
+        return [JobProblem(text, JobFix.WATCH, job.container, of_a_release=True)]
     return []
 
 
@@ -399,17 +431,27 @@ def job_connection_problems(job: RunningJob, active: RunningInstance, seen: Lane
     part = f"The job {job.container}"
     found = data_set_of(seen, active.data_set)
     expected = network_names(found) if found is not None else {LANE_NETWORK}
-    return [*attachment_problems(part, job.networks, expected, seen), *mount_problems(part, job.mounts, set())]
+    labelled = (
+        []
+        if job.data_set == active.data_set
+        else [f"{part} says it runs against the data set {job.data_set}, not {active.data_set}"]
+    )
+    return [*labelled, *attachment_problems(part, job.networks, expected, seen), *mount_problems(part, job.mounts, ())]
 
 
 def problems_of_the_one_job(job: RunningJob, active: RunningInstance, seen: LaneSeen) -> list[JobProblem]:
     part = f"The job {job.container}"
-    to_replace = [
-        *([] if job.instance == active.container else [f"{part} belongs to {job.instance}, not {active.container}"]),
-        *([] if job.build == active.build else [f"{part} runs {job.build}, not {active.build}"]),
-        *job_connection_problems(job, active, seen),
-    ]
-    return [*[JobProblem(text, JobFix.REPLACE, job.container) for text in to_replace], *job_state_problems(job)]
+    connected = [JobProblem(text, JobFix.REPLACE, job.container) for text in job_connection_problems(job, active, seen)]
+    if job.instance != active.container:
+        of_an_instance_beside = any(instance.container == job.instance for instance in seen.instances)
+        text = f"{part} belongs to {job.instance}, not {active.container}"
+        return [JobProblem(text, JobFix.REPLACE, job.container, of_a_release=of_an_instance_beside), *connected]
+    build = (
+        []
+        if job.build == active.build
+        else [JobProblem(f"{part} runs {job.build}, not {active.build}", JobFix.REPLACE, job.container)]
+    )
+    return [*build, *connected, *job_state_problems(job)]
 
 
 def job_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> list[JobProblem]:
@@ -420,7 +462,7 @@ def job_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> l
         return problems_of_the_one_job(jobs[0], active, seen)
     names = ", ".join(job.container for job in jobs) or "none"
     text = f"The lane has {len(jobs)} jobs ({names}) where it must have one, belonging to {active.container}"
-    return [JobProblem(text, JobFix.REPLACE, jobs[0].container) if jobs else JobProblem(text, JobFix.START)]
+    return [JobProblem(text, JobFix.REPLACE, jobs[0].container) if jobs else JobProblem(text, JobFix.START, of_a_release=True)]
 
 
 def instance_receiving_visitors(seen: LaneSeen) -> RunningInstance | None:
@@ -438,37 +480,67 @@ def data_set_change_problems(seen: LaneSeen, switching_to: RunningInstance) -> l
     ]
 
 
-def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[str]:
+def data_set_findings(found: DataSet | None, seen: LaneSeen, product: Product) -> list[Finding]:
+    if found is None:
+        return []
+    return [Finding(problem.text, problem.a_step_puts_right) for problem in data_set_problems(found, seen, product.database)]
+
+
+def lane_findings(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[Finding]:
     active = switching_to or instance_receiving_visitors(seen)
     if active is None:
-        return ["No instance receives visitors"]
-    found = data_set_of(seen, active.data_set)
+        return [Finding("No instance receives visitors", of_a_release=True)]
     to_receive_visitors = [
-        *instance_problems(active, target, product, seen),
-        *([problem.text for problem in data_set_problems(found, seen)] if found is not None else []),
+        *map(Finding, instance_problems(active, target, product, seen)),
+        *data_set_findings(data_set_of(seen, active.data_set), seen, product),
     ]
     if switching_to is not None:
-        return [*to_receive_visitors, *data_set_change_problems(seen, switching_to)]
+        return [*to_receive_visitors, *map(Finding, data_set_change_problems(seen, switching_to))]
     others = sorted(instance.container for instance in seen.instances if instance.container != active.container)
     return [
         *to_receive_visitors,
-        *[problem.text for problem in job_problems(seen, active, product)],
-        *[f"The instance {other} runs beside the active one" for other in others],
+        *[Finding(problem.text, problem.of_a_release) for problem in job_problems(seen, active, product)],
+        *[Finding(f"The instance {other} runs beside the active one", of_a_release=True) for other in others],
     ]
 
 
-def lane_verdict(seen: LaneSeen, product: Product) -> list[str]:
+def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[str]:
+    return [finding.text for finding in lane_findings(seen, target, product, switching_to)]
+
+
+def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
     active = instance_receiving_visitors(seen)
     used = None if active is None else active.data_set
     of_other_data_sets = [
-        problem.text for found in seen.data_sets if found.data_set != used for problem in data_set_problems(found, seen)
+        finding for found in seen.data_sets if found.data_set != used for finding in data_set_findings(found, seen, product)
     ]
     if active is None:
-        return ["No instance receives visitors", *of_other_data_sets]
+        return [Finding("No instance receives visitors", of_a_release=True), *of_other_data_sets]
     if active.lane is None or active.build is None:
-        return [f"The instance {active.container} does not say which lane and build it is", *of_other_data_sets]
+        return [Finding(f"The instance {active.container} does not say which lane and build it is"), *of_other_data_sets]
     running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
-    return [*lane_problems(seen, running, product), *of_other_data_sets]
+    return [*lane_findings(seen, running, product), *of_other_data_sets]
+
+
+def seconds_since_anything_was_made(seen: LaneSeen) -> float | None:
+    databases = [database for found in seen.data_sets for database in found.databases]
+    ages = [part.age_seconds for part in (*seen.instances, *seen.jobs, *databases) if part.age_seconds is not None]
+    return min(ages, default=None)
+
+
+def lane_verdict(seen: LaneSeen, product: Product) -> Verdict:
+    findings = findings_at_rest(seen, product)
+    wrong = [finding.text for finding in findings if not finding.of_a_release]
+    of_a_release = [finding.text for finding in findings if finding.of_a_release]
+    quiet_for = seconds_since_anything_was_made(seen)
+    if not of_a_release or (quiet_for is not None and quiet_for < MOVE_MOST_SECONDS):
+        return Verdict(wrong, of_a_release, quiet_for)
+    how_long = "" if quiet_for is None else f" for {quiet_for:.0f} s"
+    left_unfinished = (
+        f"Nothing in this lane has been made{how_long}, longer than the {MOVE_MOST_SECONDS} s a move can take, so no move is at "
+        "work on it: it was left unfinished. Asking for a build again finishes it."
+    )
+    return Verdict([*wrong, *of_a_release, left_unfinished], [], quiet_for)
 
 
 def candidate_for(
@@ -543,14 +615,14 @@ def step_toward_ready(found: DataSet, target: LaneBuild, database: Database) -> 
         return CreateDatabase(product, lane, found.data_set, found.networks[0].name, found.volumes[0], database)
     server = found.databases[0]
     if server.state == InstanceState.STOPPED:
-        return StartDatabase(server.container)
+        return StartDatabase(server.container, database)
     return AwaitDatabase(server.container, database)
 
 
 def data_set_step(
     found: DataSet, target: LaneBuild, database: Database, seen: LaneSeen, done: tuple[Event, ...]
 ) -> Action | Stop | DataSetUse:
-    problems = data_set_problems(found, seen)
+    problems = data_set_problems(found, seen, database)
     not_a_moves_to_put_right = [problem.text for problem in problems if not problem.a_step_puts_right]
     if not_a_moves_to_put_right:
         return unfixable_data_set_stop(found, not_a_moves_to_put_right, done)

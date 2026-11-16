@@ -43,6 +43,7 @@ class ProxyHost:
         self.loads_on_write = True
         self.reads_answer = True
         self.log = "error while building configuration"
+        self.refused_commands: set[str] = set()
 
     def load(self) -> None:
         self.loaded = loaded_from(self.files)
@@ -55,6 +56,8 @@ class ProxyHost:
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
         assert container == PROXY_NAME
+        if command[0] in self.refused_commands:
+            return CommandResult(exit_code=1, output=f"{command[0]}: Read-only file system")
         if command[0] == "mv":
             self.files[PurePosixPath(command[2])] = self.files.pop(PurePosixPath(command[1]))
         elif command[0] == "rm":
@@ -168,6 +171,15 @@ def test_writing_a_route_changes_only_that_lanes_file() -> None:
     assert host.files == {route_file_of(WEB_ADDRESS): route_text(WEB_ADDRESS, "site-t2"), route_file_of(OTHER): other_file}
     TraefikProxy(host).remove_route(WEB_ADDRESS)
     assert host.files == {route_file_of(OTHER): other_file}
+
+
+@pytest.mark.parametrize("command", ["mv", "rm"])
+def test_a_routes_file_command_that_fails_is_an_error_with_why_not_a_route_taken_as_changed(command: str) -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1"})
+    host.refused_commands.add(command)
+    proxy = TraefikProxy(host)
+    with pytest.raises(ProxyError, match="Read-only file system"):
+        proxy.write_route(WEB_ADDRESS, "site-t2") if command == "mv" else proxy.remove_route(WEB_ADDRESS)
 
 
 def test_a_route_is_written_beside_its_file_then_renamed_into_place_so_no_half_file_is_read() -> None:

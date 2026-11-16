@@ -162,6 +162,7 @@ class DockerContainerSummary(BaseModel):
     labels: dict[str, str] = Field(alias="Labels")
     network_settings: DockerAttachedNetworks = Field(alias="NetworkSettings")
     mounts: list[DockerMount] = Field(alias="Mounts")
+    created: AwareDatetime = Field(alias="Created")
 
     @property
     def name(self) -> str:
@@ -272,10 +273,14 @@ def attached_networks(summary: DockerContainerSummary) -> tuple[str, ...]:
 
 def mounts_of(summary: DockerContainerSummary) -> tuple[Mount, ...]:
     mounts = (Mount(source=mount.name or mount.source, path=mount.destination) for mount in summary.mounts)
-    return tuple(sorted(mounts, key=lambda mount: mount.path))
+    return tuple(sorted(mounts, key=lambda mount: (mount.path, mount.source)))
 
 
-def instance_from(summary: DockerContainerSummary) -> RunningInstance:
+def age_of(summary: DockerContainerSummary, now: datetime) -> float:
+    return (now - summary.created).total_seconds()
+
+
+def instance_from(summary: DockerContainerSummary, now: datetime) -> RunningInstance:
     return RunningInstance(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
         lane=summary.labels.get(LANE_LABEL),
@@ -285,6 +290,7 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
         mounts=mounts_of(summary),
+        age_seconds=age_of(summary, now),
     )
 
 
@@ -307,6 +313,8 @@ def job_from(summary: DockerContainerSummary, details: Mapping[str, DockerContai
         running_for_seconds=running_for(details[summary.name], now),
         instance=summary.labels.get(INSTANCE_LABEL),
         mounts=mounts_of(summary),
+        data_set=summary.labels.get(DATA_SET_LABEL),
+        age_seconds=age_of(summary, now),
     )
 
 
@@ -328,9 +336,13 @@ def grouped[Part](parts: Iterable[tuple[DataSetKey, Part]]) -> dict[DataSetKey, 
     return groups
 
 
-def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
+def database_part(summary: DockerContainerSummary, now: datetime) -> DataSetDatabase:
     return DataSetDatabase(
-        container=summary.name, state=state_of(summary), networks=attached_networks(summary), mounts=mounts_of(summary)
+        container=summary.name,
+        state=state_of(summary),
+        networks=attached_networks(summary),
+        mounts=mounts_of(summary),
+        age_seconds=age_of(summary, now),
     )
 
 
@@ -339,13 +351,16 @@ def network_from(network: DockerNetworkSummary) -> HostNetwork:
 
 
 def data_sets_from(
-    databases: Iterable[DockerContainerSummary], networks: Iterable[DockerNetworkSummary], volumes: Iterable[DockerVolumeSummary]
+    databases: Iterable[DockerContainerSummary],
+    networks: Iterable[DockerNetworkSummary],
+    volumes: Iterable[DockerVolumeSummary],
+    now: datetime,
 ) -> list[DataSet]:
     by_network = grouped(
         (data_set_key(network.labels or {}, f"the network {network.name}"), network_from(network)) for network in networks
     )
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
-    by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary)) for summary in databases)
+    by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary, now)) for summary in databases)
     return [
         DataSet(
             product=key[0],
@@ -381,15 +396,12 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
     by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "job": [], "database": []}
     for summary in summaries:
         by_part[part_of(summary)].append(summary)
-    jobs: list[RunningJob] = []
-    if by_part["job"]:
-        now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
-        details = job_details_by_name(answers.job_details)
-        jobs = [job_from(summary, details, now) for summary in by_part["job"]]
+    now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
+    details = job_details_by_name(answers.job_details)
     return OnHost(
-        instances=[instance_from(summary) for summary in by_part["web"]],
-        jobs=jobs,
-        data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
+        instances=[instance_from(summary, now) for summary in by_part["web"]],
+        jobs=[job_from(summary, details, now) for summary in by_part["job"]],
+        data_sets=data_sets_from(by_part["database"], marked_networks, volume_list, now),
         networks=[network_from(network) for network in every_network],
     )
 
@@ -565,7 +577,7 @@ class ContainerHost:
             containers, networks, volumes = self.list_marked_containers(), self.list_networks(), self.list_marked_volumes()
             jobs = job_names(containers)
             job_details = [self.describe_listed(job) for job in jobs]
-            system = self.system_information() if jobs else None
+            system = self.system_information()
         on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, job_details, system))
         return on_host if probing is None else self.probed(on_host, probing)
 
@@ -690,18 +702,41 @@ class ContainerHost:
             )
         return password
 
-    def start_with_the_password_its_data_keeps(self, database: Container) -> None:
+    def data_is_made(self, database: Container, server: DatabaseServer) -> bool:
+        environment = checked(DOCKER_CONTAINER_DETAILS, database.attrs, f"description of {database.name}").config.environment
+        made_with_the_data = server.path_made_with_the_data(environment or [])
+        if made_with_the_data is None:
+            raise ContainerHostError(
+                f"The database {database.name} does not say where its data is ({server.data_folder_variable}), so Launchplane "
+                "cannot tell whether its data set is new and may be given a password. It was not started."
+            )
+        try:
+            database.get_archive(str(made_with_the_data))
+        except NotFound:
+            return False
+        return True
+
+    def start_with_the_password_its_data_keeps(self, database: Container, server: DatabaseServer) -> None:
         if PASSWORD_FILE_LABEL not in database.labels:
             raise ContainerHostError(
                 f"The database {database.name} does not say where its data keeps its password ({PASSWORD_FILE_LABEL}), "
                 "so it was not started."
             )
         if self.password_kept_with_the_data_of(database) is None:
-            password = new_password()
-            self.note_secrets([password])
-            path = PurePosixPath(database.labels[PASSWORD_FILE_LABEL])
-            database.put_archive(str(path.parent), tar_of(path.name, password.encode(), ONLY_ITS_OWNER_READS))  # pyright: ignore[reportUnknownMemberType]
+            self.give_a_new_data_set_its_password(database, server)
         database.start()
+
+    def give_a_new_data_set_its_password(self, database: Container, server: DatabaseServer) -> None:
+        path = PurePosixPath(database.labels[PASSWORD_FILE_LABEL])
+        if self.data_is_made(database, server):
+            raise ContainerHostError(
+                f"The data set {database.labels.get(DATA_SET_LABEL)} has data and no password: {path} is not on its volume. "
+                f"A password is made only for a new data set, because data that exists accepts only the one it was made with. "
+                f"The database {database.name} was not started. Put the password back in that file, or delete the data set by name."
+            )
+        password = new_password()
+        self.note_secrets([password])
+        database.put_archive(str(path.parent), tar_of(path.name, password.encode(), ONLY_ITS_OWNER_READS))  # pyright: ignore[reportUnknownMemberType]
 
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None:
         with self.attempting(f"Starting the instance {container} from build {target.build}"):
@@ -736,11 +771,11 @@ class ContainerHost:
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None:
         with self.attempting(f"Making the database of the data set {data_set}"):
             made = self.create(database_options(product, lane, data_set, network, volume, server))
-            self.start_with_the_password_its_data_keeps(made)
+            self.start_with_the_password_its_data_keeps(made, server)
 
-    def start_database(self, container: str) -> None:
+    def start_database(self, container: str, server: DatabaseServer) -> None:
         with self.attempting(f"Starting the database {container}"):
-            self.start_with_the_password_its_data_keeps(self.client.containers.get(container))
+            self.start_with_the_password_its_data_keeps(self.client.containers.get(container), server)
 
     def await_database(self, container: str, server: DatabaseServer) -> None:
         started = self.clock()

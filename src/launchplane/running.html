@@ -42,8 +42,9 @@
 /** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], data_set: ?string, receives_visitors_for: ?string}} Instance */
 /** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], running_for_seconds: ?number, instance: ?string}} Job */
 /** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string, networks: string[]}[]}} DataSet */
+/** @typedef {{product: string, lane: string, problems: string[], release_under_way: string[], seconds_since_anything_was_made: ?number}} Lane */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
-/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[], lanes: {product: string, lane: string, problems: string[]}[]}} Running */
+/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[], lanes: Lane[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -137,9 +138,13 @@ function dataSetRow(dataSet) {
   return row("Data set", code(dataSet.data_set), ...servers);
 }
 
-/** @param {string[]} problems */
-function verdictRows(problems) {
-  return problems.map((problem) => element("small", health(false), problem));
+/** @param {Lane} verdict */
+function verdictRows(verdict) {
+  const wrong = verdict.problems.map((problem) => element("small", { "data-finding": "wrong", ...health(false) }, problem));
+  if (!verdict.release_under_way.length) return wrong;
+  const since = Math.round(verdict.seconds_since_anything_was_made ?? 0);
+  const heading = element("small", { "data-finding": "release" }, `A release is under way. The last thing made in this lane was made ${since} s ago.`);
+  return [...wrong, heading, ...verdict.release_under_way.map((state) => element("small", { "data-finding": "release" }, state))];
 }
 
 /** @param {Job} job */
@@ -206,7 +211,7 @@ function laneSection(entry, answer) {
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A web address with no instance on the host";
   const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, answer.instances));
   const verdict = answer.lanes.find((lane) => isOfLane(lane, entry));
-  if (verdict) section.append(...verdictRows(verdict.problems));
+  if (verdict) section.append(...verdictRows(verdict));
   for (const dataSet of answer.data_sets.filter((each) => isOfLane(each, entry))) section.append(dataSetRow(dataSet));
   if (entry.sends_to_container && !laneInstances.some((instance) => instance.container === entry.sends_to_container)) {
     section.append(routeElsewhere(entry.sends_to_container, answer.instances));

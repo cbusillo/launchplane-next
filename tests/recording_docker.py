@@ -1,5 +1,6 @@
 import builtins
 import io
+import itertools
 import tarfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -99,6 +100,7 @@ class RecordingContainers:
     by_name: dict[str, RecordingContainer] = field(default_factory=dict[str, RecordingContainer])
     listed: builtins.list[bool] = field(default_factory=builtins.list[bool])
     files_by_volume: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
+    environment_of_every_image: tuple[str, ...] = ("PGDATA=/var/lib/postgresql/18/docker",)
 
     def create(self, image: str, command: builtins.list[str] | None = None, **options: object) -> RecordingContainer:
         self.runs.append({"image": image, "command": command, **options})
@@ -108,7 +110,7 @@ class RecordingContainers:
         made = RecordingContainer(
             cast("str", options["name"]),
             dict(labels),
-            [f"{key}={value}" for key, value in given.items()],
+            [*(f"{key}={value}" for key, value in given.items()), *self.environment_of_every_image],
             status="created",
             volumes={volume: bind["bind"] for volume, bind in binds.items()},
             files_by_volume=self.files_by_volume,
@@ -158,6 +160,9 @@ class RecordingVolumes:
         self.made.append(name)
         self.labels[name] = labels or {}
 
+    def get(self, name: str) -> object:
+        raise NotFound(f"get {name}: no such volume")
+
 
 @dataclass
 class RecordingImages:
@@ -172,7 +177,7 @@ class RecordingImages:
 class RecordingApi:
     started_at: dict[str, str] = field(default_factory=dict[str, str])
     running: dict[str, bool] = field(default_factory=dict[str, bool])
-    system_times: Iterator[str] = field(default_factory=lambda: iter(()))
+    system_times: Iterator[str] = field(default_factory=lambda: itertools.repeat("2026-11-15T20:00:00Z"))
     container_lists: Iterator[Sequence[object]] = field(default_factory=lambda: iter(()))
     network_list: Sequence[object] = ()
     gone_before_described: set[str] = field(default_factory=set[str])

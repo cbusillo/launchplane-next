@@ -41,7 +41,7 @@ class InstanceHost(Protocol):
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None: ...
-    def start_database(self, container: str) -> None: ...
+    def start_database(self, container: str, server: DatabaseServer) -> None: ...
     def await_database(self, container: str, server: DatabaseServer) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
     def remove_instance(self, container: str) -> None: ...
@@ -69,6 +69,8 @@ class LaneVerdict(BaseModel):
     product: str
     lane: str
     problems: list[str]
+    release_under_way: list[str] = []
+    seconds_since_anything_was_made: float | None = None
 
 
 @dataclass(frozen=True)
@@ -134,8 +136,13 @@ def verdict_on(
         return LaneVerdict(product=product, lane=lane, problems=[str(description)])
     receiving = routes.get(decide.web_address_of(product, lane))
     route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
+    verdict = decide.lane_verdict(lane_seen(on_host, product, lane, route), description)
     return LaneVerdict(
-        product=product, lane=lane, problems=decide.lane_verdict(lane_seen(on_host, product, lane, route), description)
+        product=product,
+        lane=lane,
+        problems=verdict.problems,
+        release_under_way=verdict.release_under_way,
+        seconds_since_anything_was_made=verdict.seconds_since_anything_was_made,
     )
 
 
@@ -259,8 +266,8 @@ class Lanes:
             case decide.CreateDatabase() as create:
                 server = postgres_server(create.database)
                 self.host.create_database(create.product, create.lane, create.data_set, create.network, create.volume, server)
-            case decide.StartDatabase(container=container):
-                self.host.start_database(container)
+            case decide.StartDatabase(container=container, database=database):
+                self.host.start_database(container, postgres_server(database))
             case decide.AwaitDatabase(container=container, database=database):
                 self.host.await_database(container, postgres_server(database))
             case decide.DeleteDataSet(found=found):

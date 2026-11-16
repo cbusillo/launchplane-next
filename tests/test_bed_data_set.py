@@ -250,6 +250,34 @@ def test_a_release_that_keeps_the_data_set_switches_without_failing_a_request_an
     assert rows_read() == ["before the release"]
 
 
+def verdict_now() -> str:
+    [verdict] = [lane for lane in read_running()["lanes"] if (lane["product"], lane["lane"]) == (PRODUCT, LANE)]
+    return json.dumps({"wrong": verdict["problems"], "release": verdict["release_under_way"]})
+
+
+@pytest.mark.usefixtures("lane_on_a")
+def test_a_good_release_is_shown_as_a_release_under_way_and_never_as_something_wrong() -> None:
+    with request_loop(verdict_now) as loop:
+        move(BUILD_B)
+    verdicts = [json.loads(verdict) for verdict in loop.answers_in_order()]
+    assert loop.failures == []
+    assert [verdict["wrong"] for verdict in verdicts if verdict["wrong"]] == []
+    assert any("runs beside the active one" in state for verdict in verdicts for state in verdict["release"])
+    assert (verdicts[0], verdicts[-1]) == ({"wrong": [], "release": []}, {"wrong": [], "release": []})
+
+
+def test_data_left_without_its_password_is_reported_by_name_and_given_no_new_password(lane_on_a: LaneView) -> None:
+    [data_set] = lane_on_a.data_sets
+    on_scratch(f"docker exec {database_of(data_set)} rm /var/lib/postgresql/launchplane-password")
+    on_scratch(f"docker rm --force {database_of(data_set)}")
+    status, body = move_lane(PRODUCT, LANE, BUILD_A)
+    assert status == 503, body
+    assert f"The data set {data_set['data_set']} has data and no password" in body["error"]
+    [remade] = lane_view().data_sets[0]["databases"]
+    kept = on_scratch(f"docker cp {remade['container']}:/var/lib/postgresql/launchplane-password - 2>&1 || true")
+    assert (remade["state"], "launchplane-password" in kept and "Could not find" not in kept) == ("stopped", False)
+
+
 def test_during_a_release_the_job_never_runs_twice_at_once(lane_on_a: LaneView) -> None:
     move(BUILD_B)
     time.sleep(2)
@@ -421,7 +449,7 @@ def test_a_database_with_another_volume_mounted_is_refused_and_shown_on_the_page
         status, body = move_lane(PRODUCT, LANE, BUILD_A)
         [verdict] = [lane for lane in read_running()["lanes"] if (lane["product"], lane["lane"]) == (PRODUCT, LANE)]
         assert status == 503, body
-        assert "has test-bed-another-volume mounted, which it must not have" in body["error"]
+        assert "has test-bed-another-volume mounted at /var/lib/postgresql, which it must not have" in body["error"]
         assert any("has test-bed-another-volume mounted" in problem for problem in verdict["problems"])
     finally:
         on_scratch("docker rm --force test-bed-impostor; docker volume rm test-bed-another-volume")

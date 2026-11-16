@@ -35,10 +35,12 @@ from launchplane.decide import (
     StartJob,
     StartProxy,
     Stop,
+    Verdict,
     WriteRoute,
     decide_move,
     decide_retire,
     lane_problems,
+    lane_verdict,
 )
 from launchplane.instance import (
     LANE_NETWORK,
@@ -279,6 +281,7 @@ def job_of(
         networks=networks or (f"network-{instance.data_set}",),
         running_for_seconds=running_for,
         instance=instance.container,
+        data_set=instance.data_set,
     )
 
 
@@ -300,8 +303,8 @@ def mounting(part: RunningInstance, source: str) -> RunningInstance:
     return part.model_copy(update={"mounts": (Mount(source=source, path="/data"),)})
 
 
-def with_database_mounting(found: DataSet, *sources: str) -> DataSet:
-    mounts = tuple(Mount(source=source, path="/var/lib/postgresql") for source in sources)
+def with_database_mounting(found: DataSet, *sources: str, at: tuple[str, ...] = ("/var/lib/postgresql",)) -> DataSet:
+    mounts = tuple(Mount(source=source, path=path) for source in sources for path in at)
     return found.model_copy(update={"databases": (found.databases[0].model_copy(update={"mounts": mounts}),)})
 
 
@@ -330,7 +333,7 @@ DATA_MOVES = {
         None,
         (RENAMED_STOPPED,),
         (),
-        StartDatabase("renamed-database"),
+        StartDatabase("renamed-database", DATABASE),
     ),
     "a database read as not accepting connections is waited for before an instance starts on it": DataCase(
         (), None, (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1", DATABASE)
@@ -394,6 +397,9 @@ DATA_MOVES = {
     "a serving instance with a volume mounted is replaced, not kept": DataCase(
         (mounting(NEW_ON_D1, "volume-d2"),), "new", (D1,), (), StartInstance(TARGET, FRESH, USE_D1), (NEW_JOB,)
     ),
+    "a job labelled for another data set than its instance runs against is replaced": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (NEW_JOB.model_copy(update={"data_set": "d2"}),)
+    ),
     "a job that can reach out is replaced": DataCase(
         (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (job_of(NEW_ON_D1, networks=("network-d1", "bridge")),)
     ),
@@ -404,7 +410,7 @@ DATA_MOVES = {
         (OLD_ON_D1,), "old", (D1,), (), Retire("gone-job"), (job_of(on_data(lane_instance("gone", "a"), "d1")),)
     ),
     "a stopped database under a serving instance is started, not answered unchanged": DataCase(
-        (NEW_ON_D1,), "new", (data_set("d1", InstanceState.STOPPED),), (), StartDatabase("database-d1"), (NEW_JOB,)
+        (NEW_ON_D1,), "new", (data_set("d1", InstanceState.STOPPED),), (), StartDatabase("database-d1", DATABASE), (NEW_JOB,)
     ),
     "a serving lane whose database does not accept connections is waited on, not answered": DataCase(
         (NEW_ON_D1,), "new", (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1", DATABASE), (NEW_JOB,)
@@ -478,7 +484,17 @@ DATA_STOPS = {
     ),
     "a running database with the right labels and network and another volume mounted": (
         DataCase((NEW_ON_D1,), "new", (with_database_mounting(D1, "another-volume"),), (), None, (NEW_JOB,)),
-        "has another-volume mounted, which it must not have; The database database-d1 does not have volume-d1 mounted",
+        "has another-volume mounted at /var/lib/postgresql, which it must not have; "
+        "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+    ),
+    "a database with its data set's volume mounted somewhere its data is not kept": (
+        DataCase((), None, (with_database_mounting(D1, "volume-d1", at=("/somewhere-else",)),), (), None),
+        "has volume-d1 mounted at /somewhere-else, which it must not have; "
+        "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+    ),
+    "a database with its data set's volume mounted twice": (
+        DataCase((), None, (with_database_mounting(D1, "volume-d1", at=("/var/lib/postgresql", "/copy")),), (), None),
+        "has volume-d1 mounted at /copy, which it must not have",
     ),
     "a database with a second volume mounted beside its own": (
         DataCase((), None, (with_database_mounting(D1, "volume-d1", "another-volume"),), (), None),
@@ -551,6 +567,10 @@ LANE_PROBLEMS = {
         DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB.model_copy(update={"mounts": (Mount(source="v", path="/data"),)}),)),
         "The job new-job has v mounted",
     ),
+    "a job labelled for another data set": (
+        DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB.model_copy(update={"data_set": "d2"}),)),
+        "says it runs against the data set d2, not d1",
+    ),
     "a job of another build": (
         DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB.model_copy(update={"build": "a"}),)),
         "runs a, not b",
@@ -590,6 +610,82 @@ def test_the_lane_is_judged_not_fit_to_switch_to_an_instance_when(candidate: Run
 def test_before_the_switch_the_old_instance_and_its_job_are_not_problems_because_the_steps_after_it_replace_them() -> None:
     lane_seen = lane_seen_of(DataCase((OLD_ON_D1, NEW_ON_D1), "old", (D1,), (), None, (job_of(OLD_ON_D1),)))
     assert lane_problems(lane_seen, TARGET, WITH_DATA, switching_to=NEW_ON_D1) == []
+
+
+def aged(part: RunningInstance, seconds: float) -> RunningInstance:
+    return part.model_copy(update={"age_seconds": seconds})
+
+
+OLD_JOB = job_of(OLD_ON_D1)
+JUST_MADE = aged(NEW_ON_D1, 5)
+LONG_SERVING = aged(OLD_ON_D1, 4000)
+STATES_OF_A_RELEASE = {
+    "a new instance being prepared beside the active one": (
+        DataCase((LONG_SERVING, JUST_MADE), "old", (D1,), (), None, (OLD_JOB,)),
+        ["The instance new runs beside the active one"],
+    ),
+    "the web address moved and the old instance and its job still there": (
+        DataCase((LONG_SERVING, JUST_MADE), "new", (D1,), (), None, (OLD_JOB,)),
+        ["The job old-job belongs to old, not new", "The instance old runs beside the active one"],
+    ),
+    "the old job stopped and the new one not yet started": (
+        DataCase((LONG_SERVING, JUST_MADE), "new", (D1,), (), None),
+        ["The lane has 0 jobs (none) where it must have one, belonging to new", "The instance old runs beside the active one"],
+    ),
+    "the new job not yet up as long as it must stay up": (
+        DataCase((JUST_MADE,), "new", (D1,), (), None, (job_of(NEW_ON_D1, 1.0),)),
+        ["The job new-job has run 1.0 s of the 3 s it must stay up"],
+    ),
+    "a lane being brought up, its database not yet accepting connections": (
+        DataCase((JUST_MADE,), None, (data_set("d1", accepts=False),), (), None),
+        ["No instance receives visitors", "The database database-d1 does not accept connections"],
+    ),
+}
+
+
+def verdict_on(case: DataCase) -> Verdict:
+    return lane_verdict(lane_seen_of(case), WITH_DATA)
+
+
+@pytest.mark.parametrize(("case", "states"), STATES_OF_A_RELEASE.values(), ids=STATES_OF_A_RELEASE.keys())
+def test_a_state_a_release_passes_through_is_told_as_a_release_under_way_and_not_as_something_wrong(
+    case: DataCase, states: list[str]
+) -> None:
+    verdict = verdict_on(case)
+    assert (verdict.problems, verdict.release_under_way, verdict.seconds_since_anything_was_made) == ([], states, 5)
+
+
+def test_a_lane_at_rest_and_as_it_must_be_has_nothing_wrong_and_no_release_under_way() -> None:
+    verdict = verdict_on(DataCase((LONG_SERVING,), "old", (D1,), (), None, (OLD_JOB,)))
+    assert (verdict.problems, verdict.release_under_way) == ([], [])
+
+
+def test_something_wrong_during_a_release_is_still_told_as_wrong_beside_the_release() -> None:
+    reaching_out = aged(on_data(NEW, "d1", "bridge"), 5)
+    verdict = verdict_on(DataCase((LONG_SERVING, reaching_out), "new", (D1,), (), None, (OLD_JOB,)))
+    assert verdict.problems == [
+        "The instance new is attached to bridge, which it must not be",
+        "The instance new can reach out through bridge",
+    ]
+    assert verdict.release_under_way == ["The job old-job belongs to old, not new", "The instance old runs beside the active one"]
+
+
+def test_a_job_that_keeps_restarting_is_wrong_not_a_release_under_way_however_new_it_is() -> None:
+    restarting = job_of(NEW_ON_D1).model_copy(update={"state": InstanceState.RESTARTING, "running_for_seconds": None})
+    verdict = verdict_on(DataCase((JUST_MADE,), "new", (D1,), (), None, (restarting,)))
+    assert (verdict.problems, verdict.release_under_way) == (["The job new-job is restarting"], [])
+
+
+@pytest.mark.parametrize("newest_made_seconds_ago", [181, None])
+def test_a_release_no_move_can_still_be_at_work_on_is_told_as_left_unfinished_and_wrong(
+    newest_made_seconds_ago: float | None,
+) -> None:
+    beside = NEW_ON_D1.model_copy(update={"age_seconds": newest_made_seconds_ago})
+    serving = OLD_ON_D1.model_copy(update={"age_seconds": None if newest_made_seconds_ago is None else 4000})
+    verdict = verdict_on(DataCase((serving, beside), "old", (D1,), (), None, (OLD_JOB,)))
+    assert verdict.release_under_way == []
+    assert verdict.problems[0] == "The instance new runs beside the active one"
+    assert "left unfinished" in verdict.problems[1]
 
 
 def test_a_lane_as_it_must_be_has_no_problems() -> None:

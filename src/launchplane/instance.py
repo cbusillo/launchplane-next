@@ -31,6 +31,7 @@ class RunningInstance(BaseModel):
     networks: tuple[str, ...]
     data_set: str | None = None
     mounts: tuple[Mount, ...] = ()
+    age_seconds: float | None = None
 
 
 class RunningJob(BaseModel):
@@ -45,6 +46,8 @@ class RunningJob(BaseModel):
     running_for_seconds: float | None
     instance: str | None
     mounts: tuple[Mount, ...] = ()
+    data_set: str | None = None
+    age_seconds: float | None = None
 
 
 class HostNetwork(BaseModel):
@@ -62,6 +65,7 @@ class DataSetDatabase(BaseModel):
     networks: tuple[str, ...]
     accepts_connections: bool | None = None
     mounts: tuple[Mount, ...] = ()
+    age_seconds: float | None = None
 
 
 class DataSet(BaseModel):

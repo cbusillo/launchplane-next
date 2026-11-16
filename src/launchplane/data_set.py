@@ -19,6 +19,8 @@ class DatabaseServer:
     image: str
     data_path: str
     password_file_variable: str
+    data_folder_variable: str
+    file_made_with_the_data: str
     ready_command: list[str]
     user: str
     database: str
@@ -30,6 +32,10 @@ class DatabaseServer:
     @property
     def client_secret_variables(self) -> tuple[str, ...]:
         return (CLIENT_PASSWORD_VARIABLE,)
+
+    def path_made_with_the_data(self, environment: list[str]) -> PurePosixPath | None:
+        folder = variable_value(environment, self.data_folder_variable)
+        return None if folder is None else PurePosixPath(folder) / self.file_made_with_the_data
 
     def server_environment(self) -> dict[str, str]:
         return {self.password_file_variable: str(self.password_path)}
@@ -49,6 +55,8 @@ def postgres_server(database: Database) -> DatabaseServer:
         image=database.image,
         data_path="/var/lib/postgresql",
         password_file_variable="POSTGRES_PASSWORD_FILE",  # noqa: S106 the name of the variable, not a password
+        data_folder_variable="PGDATA",
+        file_made_with_the_data="PG_VERSION",
         ready_command=["pg_isready", "--host=127.0.0.1", "--username=postgres", "--quiet"],
         user="postgres",
         database="postgres",
