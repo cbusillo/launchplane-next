@@ -37,13 +37,13 @@ You are building the new Launchplane in this repository. `README.md` is the spec
 22. The issue's status lines are where the next session picks up: next actor, next action, last verified. Edit them in place.
 23. A comment is permanent and every later reader pays for it. Post one only for a question, a decision, or the result when a step closes.
 24. Nothing a program can look up goes on an issue: who is working, whether checks passed, what merged.
-25. A fact about how the system behaves goes in this repository's documentation. A fact about the work goes in the issue. Keep no plan or notes file.
+25. The documentation says what a person operating Launchplane needs: what each call does and answers, what is known and not fixed, and what was measured. It does not restate how the code works. A fact about the work goes in the issue. Keep no plan or notes file.
 
 ## Style
 
 Ruff, the type checker and inspection enforce most of the style. These are the rules no tool can check.
 
-26. Write no docstrings, except ones a tool shows. Write no comment a name could carry: extract the step and name it for the reason.
+26. Write no comment that restates the code. Where a reason or a rule cannot be read from the code, say it in one short comment at the place it applies. Keep names short enough to say aloud.
 27. When a name cannot carry a constraint, write a test whose name states it.
 28. Keep history out of code. Issue numbers and "this used to" belong in the commit.
 29. One job per function. A function that needs a section comment is two functions.
