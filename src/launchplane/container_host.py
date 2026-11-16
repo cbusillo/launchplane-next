@@ -5,7 +5,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
@@ -277,6 +277,8 @@ class ContainerHost:
 
     def create(self, options: RunOptions) -> Container:
         self.ensure_image(options.image)
+        # The stubs name only two of Docker's restart policies; Docker takes unless-stopped.
+        restart: Any = {"Name": options.restart}
         return self.client.containers.create(
             options.image,
             options.command,
@@ -287,8 +289,7 @@ class ContainerHost:
             environment=options.environment,
             volumes={volume: {"bind": path, "mode": "rw"} for volume, path in options.volumes.items()},
             ports={f"{inside}/tcp": outside for inside, outside in options.ports.items()},
-            # The stubs name only two of Docker's restart policies; Docker takes unless-stopped.
-            restart_policy={"Name": options.restart},  # pyright: ignore[reportArgumentType]
+            restart_policy=restart,
         )
 
     def run_part(self, options: RunOptions, use: DataSetUse | None) -> None:

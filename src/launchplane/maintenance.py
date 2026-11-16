@@ -55,14 +55,15 @@ def has_nothing(seen: LaneSeen) -> bool:
 
 
 def decide_begin(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> Step:
-    if isinstance(seen.route, ProxyNotRunning):
+    route = seen.route
+    if isinstance(route, ProxyNotRunning):
         return StartProxy()
     web_address = web_address_of(product, lane)
-    step = route_step(seen.route, web_address, done)
+    step = route_step(route, web_address, done)
     if step is not None:
         return step
-    if seen.route.written != BACK_SOON:
-        if seen.route.written is None and has_nothing(seen):
+    if route.written != BACK_SOON:
+        if route.written is None and has_nothing(seen):
             return Stop(
                 f"{lane} of {product} has no route, no instance, no background service and no data set on the host, "
                 "so there is nothing to put in maintenance. Nothing was changed."
@@ -77,7 +78,7 @@ def decide_begin(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...
         web_address=web_address,
         outcome=MaintenanceOutcome.IN_MAINTENANCE,
         in_maintenance=True,
-        since=seen.route.back_soon_since,
+        since=route.back_soon_since,
     )
     killed = killed_databases(seen)
     if killed:
@@ -177,10 +178,11 @@ def finish(seen: LaneSeen, description: Product, answer: MaintenanceResult, done
 
 
 def decide_end(seen: LaneSeen, product: str, lane: str, description: Product, done: tuple[Event, ...]) -> Step:
-    if isinstance(seen.route, ProxyNotRunning):
+    route = seen.route
+    if isinstance(route, ProxyNotRunning):
         return StartProxy()
     web_address = web_address_of(product, lane)
-    step = route_step(seen.route, web_address, done)
+    step = route_step(route, web_address, done)
     if step is not None:
         return step
     answer = MaintenanceResult(
@@ -189,8 +191,8 @@ def decide_end(seen: LaneSeen, product: str, lane: str, description: Product, do
         web_address=web_address,
         outcome=MaintenanceOutcome.ENDED,
         in_maintenance=True,
-        since=seen.route.back_soon_since,
+        since=route.back_soon_since,
     )
-    if seen.route.written == BACK_SOON:
+    if route.written == BACK_SOON:
         return bring_back(seen, product, lane, description, answer, done)
     return finish(seen, description, answer, done)

@@ -89,15 +89,18 @@ class NotFinished(BaseModel):
 
 
 RUNNING_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": HostUnreadable}}
-MOVE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
-    HTTPStatus.UNPROCESSABLE_CONTENT.value: {"model": MoveResult},
-    HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
-}
+
+
+def responses_when_not_done(result: type[BaseModel]) -> dict[int | str, dict[str, Any]]:
+    return {
+        HTTPStatus.UNPROCESSABLE_CONTENT.value: {"model": result},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
+    }
+
+
+MOVE_ERROR_RESPONSES = responses_when_not_done(MoveResult)
 RETIRE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished}}
-MAINTENANCE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
-    HTTPStatus.UNPROCESSABLE_CONTENT.value: {"model": MaintenanceResult},
-    HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
-}
+MAINTENANCE_ERROR_RESPONSES = responses_when_not_done(MaintenanceResult)
 NOT_A_SUCCESS = {
     MaintenanceOutcome.DATABASE_KILLED,
     MaintenanceOutcome.WEB_PART_FAILED,

@@ -11,14 +11,15 @@ Each call takes one step at a time and reads the host and the proxy again before
 The next step is the first of these that applies:
 
 1. If the proxy is not running, start it.
-2. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file.
-3. If the proxy reports the lane's route disabled or with a warning, stop with `503`, that status and what this call had changed. Retiring the lane removes the route.
-4. If an instance failed its check in this call, remove it and answer `check failed`. The web address never moved.
-5. If the web address goes to a running instance of this build, retire any other instance of the lane, then answer.
-6. Retire any instance that is neither receiving visitors nor the one to switch to: the newest this call started, or a running instance of the build left by an interrupted move.
-7. If there is no instance to switch to, start one. An instance receiving visitors that has stopped is replaced, not restarted.
-8. Check the instance, unless it passed in this call and is still running.
-9. Point the web address at it. Step 2 then waits for the proxy, and step 5 retires the old instance.
+2. If the lane is in [maintenance](maintenance.md), stop with `503` and say to end maintenance first.
+3. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file.
+4. If the proxy reports the lane's route disabled or with a warning, stop with `503`, that status and what this call had changed. Retiring the lane removes the route.
+5. If an instance failed its check in this call, remove it and answer `check failed`. The web address never moved.
+6. If the web address goes to a running instance of this build, retire any other instance of the lane, then answer.
+7. Retire any instance that is neither receiving visitors nor the one to switch to: the newest this call started, or a running instance of the build left by an interrupted move.
+8. If there is no instance to switch to, start one. An instance receiving visitors that has stopped is replaced, not restarted.
+9. Check the instance, unless it passed in this call and is still running.
+10. Point the web address at it. Step 3 then waits for the proxy, and step 6 retires the old instance.
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
@@ -28,7 +29,7 @@ The next step is the first of these that applies:
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service: see [a move with data](data-sets.md#a-move-with-data). |
 
-A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again. One move or retirement runs at a time in a Launchplane process; a second call waits.
+A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again. One move, retirement or maintenance call runs at a time in a Launchplane process; a second call waits.
 
 **The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error.
 

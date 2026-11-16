@@ -101,20 +101,25 @@ curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/retire \
 
 The data set is deleted once the lane has no background service and no instance left: its database servers, then its volumes, then its networks. The answer's `outcome` is `deleted` and its `deleted_data_set` names it. A name that is not one of this lane's data sets deletes nothing.
 
-## What the page shows for a lane
+## The verdict on a lane
 
 `/running` answers a verdict for every lane in `lanes`, and the page shows it as given.
 
 | Field | Meaning | On the page |
 | --- | --- | --- |
-| `a_move_is_at_work` | This Launchplane is moving or retiring the lane right now. Nothing is stored for it; it is gone when the process is. | |
-| `problems` | What is wrong. | red |
-| `release_under_way` | While a move is at work: what it has not finished yet. | ordinary colour, under `Launchplane is moving this lane now. A release is under way:` |
-| `left_unfinished` | With no move at work: what a move would finish. | red, under `No move is at work on this lane, and it was left unfinished. Asking for a build again finishes it:` |
+| `a_move_is_at_work` | This Launchplane is moving the lane, retiring it, or putting it in or taking it out of maintenance right now. Nothing is stored for it; it is gone when the process is. | the pill `Launchplane is at work` |
+| `problems` | What is wrong. | a row each, with the red pill `wrong` |
+| `release_under_way` | While a call is at work: what it has not finished yet. | a row each, with the blue pill `under way` |
+| `left_unfinished` | With no call at work: what a move would finish. | a row each, with the red pill `left unfinished` |
+| `in_maintenance` | The lane's route points at the back soon page: see [a lane in maintenance](maintenance.md). | the pill `in maintenance` |
+| `in_maintenance_since` | When that route was written, or `null`. | under the lane's name |
+| `parts` | For each container of the lane, `good`, `wrong` or `on purpose`. Running is good, and anything else is wrong, or on purpose while a call is at work. In maintenance stopped is on purpose. | the colour of the part's state pill |
 
 While a move is at work, only a part attached or mounted where it must not be is a problem. After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
 
 How the page lays a lane out is in [the page](what-is-running.md#the-page).
+
+A web part, a background service and a database server are each made with the restart policy `unless-stopped`: see [what stays stopped](maintenance.md#what-stays-stopped).
 
 ## Known and not fixed
 
