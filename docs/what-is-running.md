@@ -23,7 +23,7 @@ Only containers carrying `launchplane.product` are listed. Any other container o
 
 ## The answer
 
-Each instance has `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set` and `receives_visitors_for`. `networks` lists every network its container is attached to, and `mounts` everything it has mounted, each with `source` (a volume's name, or a folder of the host) and `path`. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
+Each instance has `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set` and `receives_visitors_for`. `networks` lists every network its container is attached to, and `mounts` everything it has mounted, each with `source` (a volume's name, or a folder of the host) and `path`. Instances, jobs and databases each have `made_at`, when Docker made the container. A job also has `data_set`, the data set its label names. A missing lane or build label is `null`. `container` is the container's own name on the host. `receives_visitors_for` is the web address whose visitors the proxy sends to this instance, read from the proxy's loaded routes, or `null` (see [the move](the-move.md)). `state` is Launchplane's word, not the host's:
 
 | `state` | Docker's states |
 | --- | --- |
@@ -36,7 +36,7 @@ Each job has `product`, `lane`, `build`, `container`, `state`, `networks`, `moun
 
 Each web address has `web_address`, `product`, `lane`, `sends_to_container`, `answers` and `error`. The web addresses are every one the proxy routes and the one of every lane that has an instance, a job or a data set on the host, so a route to an instance that is gone is shown, not dropped. `product` and `lane` come from an instance of that lane, or from the instance the route sends to, and are `null` when neither is on the host. `sends_to_container` is the container the proxy's loaded route names, or `null`. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, the same request real visitors make; `error` is why not, for example `wget: server returned error: HTTP/1.1 502 Bad Gateway` for a route to a stopped instance, or `The proxy sends … to no instance.` A web address the proxy routes nowhere is not requested.
 
-- `200` with `instances`, `jobs`, `data_sets`, `networks` (every network on the host, with `name` and `is_quiet`), `web_addresses` and `lanes` (for every lane on the host, `product`, `lane` and `problems`, what the judge finds wrong with it; see [the page](data-sets.md#the-page)): the host was read. An empty list means the host answered and nothing marked is on it.
+- `200` with `instances`, `jobs`, `data_sets`, `networks` (every network on the host, with `name` and `is_quiet`), `web_addresses` and `lanes` (for every lane on the host, `product`, `lane`, `problems`, what the judge finds wrong with it, `release_under_way`, the states of a release it finds, and `seconds_since_anything_was_made`; see [the page](data-sets.md#the-page)): the host was read. An empty list means the host answered and nothing marked is on it.
 - `503` with `error`: the host or the proxy could not be read, an answer did not have the expected shape, or the host changed during three reads in a row (see [what is read](data-sets.md#what-is-read)). The error carries the real cause. It never answers "nothing is running".
 
 Both carry `read_at`, the moment the host was asked. The one `503` without it is the answer made when Launchplane could not read which secrets it has given out: nothing was read for it, and it has only `error` (see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane)).
@@ -70,7 +70,7 @@ Measured on the test bed from the control container: listing the instances takes
 ### Known and not fixed
 
 - **Like `/running`, the page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
-- **No test loads the page or runs its script.** A blank page, polling that stops, old lanes kept after an error, or colours swapped would each pass every test. Chris watching the page is the check for now. Comes back when the page breaks without anyone noticing, or when there is a second page.
+- **The page's tests cover what it shows for a lane, not everything it does.** `tests/test_page.py` loads the page in a headless Chromium with Playwright and checks the judge's findings, a release under way, a lane with neither, and a host that cannot be read. Polling that stops, old lanes kept after an error, or the wording for a web address that does not answer would still pass every test. Comes back when one of those breaks without anyone noticing.
 
 ## How Launchplane reaches the host
 

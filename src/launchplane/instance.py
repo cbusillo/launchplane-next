@@ -1,7 +1,7 @@
 import secrets
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 LANE_NETWORK = "launchplane-lanes"
 
@@ -31,7 +31,7 @@ class RunningInstance(BaseModel):
     networks: tuple[str, ...]
     data_set: str | None = None
     mounts: tuple[Mount, ...] = ()
-    age_seconds: float | None = None
+    made_at: AwareDatetime | None = None
 
 
 class RunningJob(BaseModel):
@@ -47,7 +47,7 @@ class RunningJob(BaseModel):
     instance: str | None
     mounts: tuple[Mount, ...] = ()
     data_set: str | None = None
-    age_seconds: float | None = None
+    made_at: AwareDatetime | None = None
 
 
 class HostNetwork(BaseModel):
@@ -65,7 +65,7 @@ class DataSetDatabase(BaseModel):
     networks: tuple[str, ...]
     accepts_connections: bool | None = None
     mounts: tuple[Mount, ...] = ()
-    age_seconds: float | None = None
+    made_at: AwareDatetime | None = None
 
 
 class DataSet(BaseModel):

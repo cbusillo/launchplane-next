@@ -1,6 +1,7 @@
 import subprocess
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,6 @@ DATABASE = "shop-testing-database-d1"
 LINK = DatabaseLink("d1", DATA_SET_NETWORK, DATABASE, SERVER)
 STARTED = "2026-11-15T20:00:00.000000001Z"
 MADE = 1794772790
-READ_AT = {"SystemTime": "2026-11-15T20:00:00Z"}
 
 
 def network(
@@ -64,9 +64,10 @@ def read(
     networks: Sequence[object] = (),
     volumes: Sequence[object] = (),
     described: Sequence[object] = (),
-    system: object = READ_AT,
+    system_time: str = "2026-11-15T20:00:00Z",
 ) -> OnHost:
-    return on_host_from_answers(HostAnswers(list(containers), list(networks), {"Volumes": list(volumes)}, list(described), system))
+    answers = HostAnswers(list(containers), list(networks), {"Volumes": list(volumes)}, list(described), {"SystemTime": system_time})
+    return on_host_from_answers(answers)
 
 
 def data_sets_read(containers: Sequence[object], networks: Sequence[object], volumes: Sequence[object]) -> list[DataSet]:
@@ -83,7 +84,12 @@ def test_a_data_set_is_read_from_its_network_volume_and_database_together() -> N
             networks=(HostNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
             volumes=("launchplane-data-d1-database",),
             databases=(
-                DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,), age_seconds=10),
+                DataSetDatabase(
+                    container=DATABASE,
+                    state=InstanceState.RUNNING,
+                    networks=(DATA_SET_NETWORK,),
+                    made_at=datetime(2026, 11, 15, 19, 59, 50, tzinfo=UTC),
+                ),
             ),
         )
     ]
@@ -126,24 +132,24 @@ def test_an_instance_is_read_with_every_network_it_is_attached_to_not_a_summary_
 def test_a_job_is_read_with_how_long_it_has_run_by_dockers_own_clock() -> None:
     described: list[object] = [job_details("a-job"), job_details("b-job", running=False)]
     containers: list[object] = [container("a-job", "job", []), container("b-job", "job", [])]
-    jobs = read(containers, described=described, system={"SystemTime": "2026-11-15T20:00:02.5Z"}).jobs
+    jobs = read(containers, described=described, system_time="2026-11-15T20:00:02.5Z").jobs
     assert {job.container: job.running_for_seconds for job in jobs} == {"a-job": pytest.approx(2.5), "b-job": None}
 
 
 def test_a_job_docker_calls_running_while_it_waits_to_restart_has_not_run_at_all() -> None:
     described: list[object] = [job_details("a-job", restarting=True)]
-    jobs = read([container("a-job", "job", [])], described=described, system={"SystemTime": "2026-11-15T20:00:09Z"}).jobs
+    jobs = read([container("a-job", "job", [])], described=described, system_time="2026-11-15T20:00:09Z").jobs
     assert jobs[0].running_for_seconds is None
 
 
 def test_a_job_docker_lists_but_does_not_describe_is_an_error_not_a_job_of_unknown_age() -> None:
     with pytest.raises(ContainerHostError, match="did not describe it"):
-        read([container("a-job", "job", [])], described=[], system={"SystemTime": "2026-11-15T20:00:02Z"})
+        read([container("a-job", "job", [])], described=[], system_time="2026-11-15T20:00:02Z")
 
 
 def test_a_database_and_a_job_are_not_read_as_instances() -> None:
     containers: list[object] = [container("db", "database", []), container("a-job", "job", [])]
-    on_host = read(containers, described=[job_details("a-job")], system={"SystemTime": "2026-11-15T20:00:02Z"})
+    on_host = read(containers, described=[job_details("a-job")], system_time="2026-11-15T20:00:02Z")
     assert (on_host.instances, [found.container for found in on_host.jobs]) == ([], ["a-job"])
 
 

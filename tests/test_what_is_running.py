@@ -49,7 +49,7 @@ def saved_container_list() -> object:
 
 def instances_from_answer(answer: object) -> list[RunningInstance]:
     answers = HostAnswers(answer, [], {"Volumes": None}, system={"SystemTime": "2026-11-15T20:00:00Z"})
-    return [instance.model_copy(update={"age_seconds": None}) for instance in on_host_from_answers(answers).instances]
+    return [instance.model_copy(update={"made_at": None}) for instance in on_host_from_answers(answers).instances]
 
 
 def refusing_host() -> ContainerHost:

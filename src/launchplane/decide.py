@@ -1,6 +1,7 @@
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -88,6 +89,7 @@ class LaneSeen:
     jobs: tuple[RunningJob, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
+    host_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -491,11 +493,11 @@ def lane_findings(seen: LaneSeen, target: LaneBuild, product: Product, switching
     if active is None:
         return [Finding("No instance receives visitors", of_a_release=True)]
     to_receive_visitors = [
-        *map(Finding, instance_problems(active, target, product, seen)),
+        *[Finding(problem) for problem in instance_problems(active, target, product, seen)],
         *data_set_findings(data_set_of(seen, active.data_set), seen, product),
     ]
     if switching_to is not None:
-        return [*to_receive_visitors, *map(Finding, data_set_change_problems(seen, switching_to))]
+        return [*to_receive_visitors, *[Finding(problem) for problem in data_set_change_problems(seen, switching_to)]]
     others = sorted(instance.container for instance in seen.instances if instance.container != active.container)
     return [
         *to_receive_visitors,
@@ -524,8 +526,10 @@ def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
 
 def seconds_since_anything_was_made(seen: LaneSeen) -> float | None:
     databases = [database for found in seen.data_sets for database in found.databases]
-    ages = [part.age_seconds for part in (*seen.instances, *seen.jobs, *databases) if part.age_seconds is not None]
-    return min(ages, default=None)
+    made = [part.made_at for part in (*seen.instances, *seen.jobs, *databases) if part.made_at is not None]
+    if seen.host_time is None or not made:
+        return None
+    return (seen.host_time - max(made)).total_seconds()
 
 
 def lane_verdict(seen: LaneSeen, product: Product) -> Verdict:

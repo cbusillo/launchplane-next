@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -420,7 +421,7 @@ DATA_MOVES = {
 
 def lane_seen_of(case: DataCase) -> LaneSeen:
     loaded = None if case.receiving is None else LoadedRoute(case.receiving, RouteStatus.ENABLED)
-    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets, QUIET)
+    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets, QUIET, HOST_TIME)
 
 
 def next_data_move_step(case: DataCase) -> Action | Done[MoveResult] | Stop:
@@ -612,8 +613,11 @@ def test_before_the_switch_the_old_instance_and_its_job_are_not_problems_because
     assert lane_problems(lane_seen, TARGET, WITH_DATA, switching_to=NEW_ON_D1) == []
 
 
-def aged(part: RunningInstance, seconds: float) -> RunningInstance:
-    return part.model_copy(update={"age_seconds": seconds})
+HOST_TIME = datetime(2026, 11, 15, 20, tzinfo=UTC)
+
+
+def aged(part: RunningInstance, seconds: float | None) -> RunningInstance:
+    return part.model_copy(update={"made_at": None if seconds is None else HOST_TIME - timedelta(seconds=seconds)})
 
 
 OLD_JOB = job_of(OLD_ON_D1)
@@ -680,8 +684,8 @@ def test_a_job_that_keeps_restarting_is_wrong_not_a_release_under_way_however_ne
 def test_a_release_no_move_can_still_be_at_work_on_is_told_as_left_unfinished_and_wrong(
     newest_made_seconds_ago: float | None,
 ) -> None:
-    beside = NEW_ON_D1.model_copy(update={"age_seconds": newest_made_seconds_ago})
-    serving = OLD_ON_D1.model_copy(update={"age_seconds": None if newest_made_seconds_ago is None else 4000})
+    beside = aged(NEW_ON_D1, newest_made_seconds_ago)
+    serving = aged(OLD_ON_D1, None if newest_made_seconds_ago is None else 4000)
     verdict = verdict_on(DataCase((serving, beside), "old", (D1,), (), None, (OLD_JOB,)))
     assert verdict.release_under_way == []
     assert verdict.problems[0] == "The instance new runs beside the active one"

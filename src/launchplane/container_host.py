@@ -108,6 +108,7 @@ class OnHost:
     jobs: list[RunningJob]
     data_sets: list[DataSet]
     networks: list[HostNetwork] = field(default_factory=list[HostNetwork])
+    host_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -276,11 +277,7 @@ def mounts_of(summary: DockerContainerSummary) -> tuple[Mount, ...]:
     return tuple(sorted(mounts, key=lambda mount: (mount.path, mount.source)))
 
 
-def age_of(summary: DockerContainerSummary, now: datetime) -> float:
-    return (now - summary.created).total_seconds()
-
-
-def instance_from(summary: DockerContainerSummary, now: datetime) -> RunningInstance:
+def instance_from(summary: DockerContainerSummary) -> RunningInstance:
     return RunningInstance(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
         lane=summary.labels.get(LANE_LABEL),
@@ -290,7 +287,7 @@ def instance_from(summary: DockerContainerSummary, now: datetime) -> RunningInst
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
         mounts=mounts_of(summary),
-        age_seconds=age_of(summary, now),
+        made_at=summary.created,
     )
 
 
@@ -314,7 +311,7 @@ def job_from(summary: DockerContainerSummary, details: Mapping[str, DockerContai
         instance=summary.labels.get(INSTANCE_LABEL),
         mounts=mounts_of(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
-        age_seconds=age_of(summary, now),
+        made_at=summary.created,
     )
 
 
@@ -336,13 +333,13 @@ def grouped[Part](parts: Iterable[tuple[DataSetKey, Part]]) -> dict[DataSetKey, 
     return groups
 
 
-def database_part(summary: DockerContainerSummary, now: datetime) -> DataSetDatabase:
+def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
     return DataSetDatabase(
         container=summary.name,
         state=state_of(summary),
         networks=attached_networks(summary),
         mounts=mounts_of(summary),
-        age_seconds=age_of(summary, now),
+        made_at=summary.created,
     )
 
 
@@ -354,13 +351,12 @@ def data_sets_from(
     databases: Iterable[DockerContainerSummary],
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
-    now: datetime,
 ) -> list[DataSet]:
     by_network = grouped(
         (data_set_key(network.labels or {}, f"the network {network.name}"), network_from(network)) for network in networks
     )
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
-    by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary, now)) for summary in databases)
+    by_database = grouped((data_set_key(summary.labels, summary.name), database_part(summary)) for summary in databases)
     return [
         DataSet(
             product=key[0],
@@ -399,9 +395,10 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
     now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
     details = job_details_by_name(answers.job_details)
     return OnHost(
-        instances=[instance_from(summary, now) for summary in by_part["web"]],
+        instances=[instance_from(summary) for summary in by_part["web"]],
         jobs=[job_from(summary, details, now) for summary in by_part["job"]],
-        data_sets=data_sets_from(by_part["database"], marked_networks, volume_list, now),
+        data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
+        host_time=now,
         networks=[network_from(network) for network in every_network],
     )
 
@@ -509,6 +506,21 @@ def service_options(service: Service) -> RunOptions:
         volumes=service.volumes,
         ports=service.ports,
     )
+
+
+def data_is_made(database: Container, server: DatabaseServer) -> bool:
+    environment = checked(DOCKER_CONTAINER_DETAILS, database.attrs, f"description of {database.name}").config.environment
+    made_with_the_data = server.path_made_with_the_data(environment or [])
+    if made_with_the_data is None:
+        raise ContainerHostError(
+            f"The database {database.name} does not say where its data is ({server.data_folder_variable}), so Launchplane "
+            "cannot tell whether its data set is new and may be given a password. It was not started."
+        )
+    try:
+        database.get_archive(str(made_with_the_data))
+    except NotFound:
+        return False
+    return True
 
 
 class ContainerHost:
@@ -702,20 +714,6 @@ class ContainerHost:
             )
         return password
 
-    def data_is_made(self, database: Container, server: DatabaseServer) -> bool:
-        environment = checked(DOCKER_CONTAINER_DETAILS, database.attrs, f"description of {database.name}").config.environment
-        made_with_the_data = server.path_made_with_the_data(environment or [])
-        if made_with_the_data is None:
-            raise ContainerHostError(
-                f"The database {database.name} does not say where its data is ({server.data_folder_variable}), so Launchplane "
-                "cannot tell whether its data set is new and may be given a password. It was not started."
-            )
-        try:
-            database.get_archive(str(made_with_the_data))
-        except NotFound:
-            return False
-        return True
-
     def start_with_the_password_its_data_keeps(self, database: Container, server: DatabaseServer) -> None:
         if PASSWORD_FILE_LABEL not in database.labels:
             raise ContainerHostError(
@@ -728,7 +726,7 @@ class ContainerHost:
 
     def give_a_new_data_set_its_password(self, database: Container, server: DatabaseServer) -> None:
         path = PurePosixPath(database.labels[PASSWORD_FILE_LABEL])
-        if self.data_is_made(database, server):
+        if data_is_made(database, server):
             raise ContainerHostError(
                 f"The data set {database.labels.get(DATA_SET_LABEL)} has data and no password: {path} is not on its volume. "
                 f"A password is made only for a new data set, because data that exists accepts only the one it was made with. "

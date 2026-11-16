@@ -36,11 +36,11 @@ def browser() -> Iterator[Browser]:
         launched.close()
 
 
-def page_showing(browser: Browser, verdict: LaneVerdict | None) -> Page:
+def page_showing(browser: Browser, judged: LaneVerdict | None) -> Page:
     def read(_routes: dict[str, str]) -> Judged:
-        if verdict is None:
+        if judged is None:
             raise ContainerHostError("Connection refused")
-        return Judged(OnHost([SERVING], [], []), [verdict])
+        return Judged(OnHost([SERVING], [], []), [judged])
 
     app = TestClient(
         create_app(read, lambda: {WEB_ADDRESS: SERVING.container}, lambda _web_address: None, no_move, no_retire, NO_SECRETS)

@@ -179,7 +179,10 @@ def test_a_routes_file_command_that_fails_is_an_error_with_why_not_a_route_taken
     host.refused_commands.add(command)
     proxy = TraefikProxy(host)
     with pytest.raises(ProxyError, match="Read-only file system"):
-        proxy.write_route(WEB_ADDRESS, "site-t2") if command == "mv" else proxy.remove_route(WEB_ADDRESS)
+        if command == "mv":
+            proxy.write_route(WEB_ADDRESS, "site-t2")
+        else:
+            proxy.remove_route(WEB_ADDRESS)
 
 
 def test_a_route_is_written_beside_its_file_then_renamed_into_place_so_no_half_file_is_read() -> None:

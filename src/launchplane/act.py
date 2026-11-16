@@ -126,6 +126,7 @@ def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning |
         jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
         data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
         network_quiet={network.name: network.is_quiet for network in on_host.networks},
+        host_time=on_host.host_time,
     )
 
 
