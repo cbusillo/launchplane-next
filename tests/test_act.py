@@ -1,9 +1,10 @@
+import threading
 from collections.abc import Callable
 
 import pytest
 
 from launchplane.act import MOST_STEPS, Lanes, Stopped
-from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ProbedLane
+from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ServerOfProduct
 from launchplane.data_set import DatabaseServer
 from launchplane.decide import (
     FreshNames,
@@ -22,11 +23,12 @@ from launchplane.instance import (
     HostNetwork,
     InstanceState,
     LaneBuild,
+    Mount,
     RunningInstance,
     RunningJob,
     job_container_of,
 )
-from launchplane.product import Database, Job, Product
+from launchplane.product import Database, Job, Product, ProductError
 from launchplane.proxy import CheckFailed
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
@@ -74,7 +76,7 @@ class FakeHost:
         found = self.instances[container]
         self.instances[container] = found.model_copy(update={"networks": (*found.networks, network)})
 
-    def read(self, probing: ProbedLane | None = None) -> OnHost:
+    def read(self, probing: ServerOfProduct | None = None) -> OnHost:
         networks = [HostNetwork(name=name, is_quiet=quiet) for name, quiet in self.networks.items()]
         data_sets = list(self.data_sets.values()) if probing is None else [self.asked(found) for found in self.data_sets.values()]
         return OnHost(list(self.instances.values()), list(self.jobs.values()), data_sets, networks)
@@ -129,7 +131,12 @@ class FakeHost:
         self.record(f"volume {data_set}")
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None:
-        database = DataSetDatabase(container=f"database-{data_set}", state=InstanceState.RUNNING, networks=(network,))
+        database = DataSetDatabase(
+            container=f"database-{data_set}",
+            state=InstanceState.RUNNING,
+            networks=(network,),
+            mounts=(Mount(source=volume, path="/var/lib/postgresql"),),
+        )
         self.change_data_set(product, lane, data_set, databases=(database,))
         self.record(f"database {data_set} on {network} and {volume} from {server.image}")
 
@@ -425,3 +432,52 @@ def test_a_job_that_never_runs_answers_job_failed_within_the_step_limit() -> Non
 
     proxy.host.start_job = start_restarting
     assert lanes_on(proxy).move(BUILD_B).outcome == Outcome.JOB_FAILED
+
+
+def test_a_retire_asked_during_a_move_waits_for_it_and_touches_nothing_until_the_move_is_done() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    checking, checked = threading.Event(), threading.Event()
+
+    def hold_the_check(_container: str) -> None:
+        checking.set()
+        assert checked.wait(timeout=5)
+
+    proxy.while_checking = hold_the_check
+    move = threading.Thread(target=lanes.move, args=(BUILD_B,))
+    retire = threading.Thread(target=lanes.retire, args=("site", "testing"))
+    move.start()
+    assert checking.wait(timeout=5)
+    retire.start()
+    retire.join(timeout=0.3)
+    done_while_the_move_was_held = list(proxy.host.actions)
+    checked.set()
+    move.join(timeout=5)
+    retire.join(timeout=5)
+    assert [action.split()[0] for action in done_while_the_move_was_held] == ["start", "check"]
+    assert proxy.host.actions[-2:] == ["unroute", f"retire {proxy.host.actions[0].split()[1]}"]
+
+
+def test_the_page_is_given_the_judges_verdict_on_every_lane_including_one_whose_description_cannot_be_read() -> None:
+    proxy = lane_brought_up_with_a()
+    serving = proxy.written[WEB_ADDRESS]
+    proxy.host.place(LaneBuild(product="broken", lane="testing", build="broken:a"), "broken-1")
+    proxy.host.attach(serving, "bridge", quiet=False)
+
+    def read_product(product: str) -> Product:
+        if product == "broken":
+            raise ProductError("The description of broken is not one Launchplane reads.")
+        return WITH_DATA
+
+    judged = Lanes(proxy.host, proxy, read_product=read_product).read_judged({WEB_ADDRESS: serving})
+    verdicts = {(verdict.product, verdict.lane): verdict.problems for verdict in judged.lanes}
+    assert verdicts[("broken", "testing")] == ["The description of broken is not one Launchplane reads."]
+    assert verdicts[("site", "testing")] == [
+        f"The instance {serving} is attached to bridge, which it must not be",
+        f"The instance {serving} can reach out through bridge",
+    ]
+
+
+def test_a_lane_as_it_must_be_is_given_to_the_page_with_no_problems_its_database_having_been_asked() -> None:
+    proxy = lane_brought_up_with_a()
+    judged = lanes_on(proxy).read_judged({WEB_ADDRESS: proxy.written[WEB_ADDRESS]})
+    assert [verdict.problems for verdict in judged.lanes] == [[]]

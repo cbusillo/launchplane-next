@@ -43,7 +43,7 @@
 /** @typedef {{product: string, lane: ?string, build: ?string, container: string, state: string, networks: string[], running_for_seconds: ?number, instance: ?string}} Job */
 /** @typedef {{product: string, lane: ?string, data_set: string, networks: {name: string, is_quiet: boolean}[], volumes: string[], databases: {container: string, state: string, networks: string[]}[]}} DataSet */
 /** @typedef {{web_address: string, product: ?string, lane: ?string, sends_to_container: ?string, answers: boolean, error: ?string}} WebAddress */
-/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[]}} Running */
+/** @typedef {{read_at: string, instances: Instance[], jobs: Job[], data_sets: DataSet[], networks: {name: string, is_quiet: boolean}[], web_addresses: WebAddress[], lanes: {product: string, lane: string, problems: string[]}[]}} Running */
 const READ_EVERY_MS = 1000;
 const GIVE_UP_AFTER_MS = 15000;
 const reading = document.getElementById("reading");
@@ -54,7 +54,6 @@ const lastFailureLine = document.getElementById("last-failure");
 const lastFailureText = document.getElementById("last-failure-text");
 let lastGoodReadAt = null;
 /** @type {Set<string>} */
-let quietNetworks = new Set();
 /** @type {?{at: string, text: string}} */
 let lastFailure = null;
 
@@ -117,7 +116,6 @@ function stateTag(state) {
 function instanceItem(instance, index, jobs) {
   const heading = row(`Instance ${index + 1}`, stateTag(instance.state));
   if (instance.receives_visitors_for) heading.append(element("span", { "data-tag": "" }, "active"));
-  if (!isQuiet(instance.networks)) heading.append(reachesOutTag());
   const container = element("small", { "data-container": "" }, instance.container);
   const item = element("li", {}, heading, container, row("Build", buildCode(instance.build)));
   if (instance.data_set) item.append(row("Data set", code(instance.data_set)));
@@ -125,48 +123,23 @@ function instanceItem(instance, index, jobs) {
   return item;
 }
 
-/** @param {string[]} networks */
-function isQuiet(networks) {
-  return networks.every((network) => quietNetworks.has(network));
-}
-
-function reachesOutTag() {
-  return element("span", { "data-tag": "", ...health(false) }, "can reach out");
-}
-
 /**
  * @param {string} label
  * @param {Job} job
  */
 function jobRow(label, job) {
-  const jobRowElement = row(label, stateTag(job.state));
-  if (!isQuiet(job.networks)) jobRowElement.append(reachesOutTag());
-  return jobRowElement;
-}
-
-/**
- * @param {string} kind
- * @param {string[]} names
- */
-function partProblem(kind, names) {
-  if (names.length === 0) return `Its ${kind} is missing.`;
-  if (names.length > 1) return `It has ${names.length} of what should be one ${kind}: ${names.join(", ")}.`;
-  return null;
+  return row(label, stateTag(job.state));
 }
 
 /** @param {DataSet} dataSet */
-function dataSetRows(dataSet) {
-  const [database] = dataSet.databases;
-  const state = dataSet.databases.length === 1 ? stateTag(database.state) : element("span", health(false), "not one");
-  const rows = [row("Data set", code(dataSet.data_set), element("span", {}, "database"), state)];
-  const problems = [
-    partProblem("network", dataSet.networks.map((network) => network.name)),
-    partProblem("volume", dataSet.volumes),
-    partProblem("database server", dataSet.databases.map((each) => each.container)),
-    ...dataSet.networks.filter((network) => !network.is_quiet).map((network) => `Its network ${network.name} is not quiet: what is attached to it can reach out.`),
-  ].filter((problem) => problem !== null);
-  if (problems.length) rows.push(element("small", health(false), problems.join(" ")));
-  return rows;
+function dataSetRow(dataSet) {
+  const servers = dataSet.databases.flatMap((database) => [element("span", {}, "database"), stateTag(database.state)]);
+  return row("Data set", code(dataSet.data_set), ...servers);
+}
+
+/** @param {string[]} problems */
+function verdictRows(problems) {
+  return problems.map((problem) => element("small", health(false), problem));
 }
 
 /** @param {Job} job */
@@ -232,7 +205,9 @@ function laneSection(entry, answer) {
   const laneJobs = answer.jobs.filter((job) => isOfLane(job, entry));
   const title = entry.product ? `${entry.product} · ${entry.lane ?? "no lane"}` : "A web address with no instance on the host";
   const section = element("section", {}, element("h2", {}, title), ...webAddressRows(entry, answer.instances));
-  for (const dataSet of answer.data_sets.filter((each) => isOfLane(each, entry))) section.append(...dataSetRows(dataSet));
+  const verdict = answer.lanes.find((lane) => isOfLane(lane, entry));
+  if (verdict) section.append(...verdictRows(verdict.problems));
+  for (const dataSet of answer.data_sets.filter((each) => isOfLane(each, entry))) section.append(dataSetRow(dataSet));
   if (entry.sends_to_container && !laneInstances.some((instance) => instance.container === entry.sends_to_container)) {
     section.append(routeElsewhere(entry.sends_to_container, answer.instances));
   }
@@ -253,7 +228,6 @@ function isOfLane(part, entry) {
 /** @param {Running} answer */
 function showRunning(answer) {
   lastGoodReadAt = answer.read_at;
-  quietNetworks = new Set(answer.networks.filter((network) => network.is_quiet).map((network) => network.name));
   reading.removeAttribute("role");
   reading.textContent = `Read from the host at ${clockTime(answer.read_at)}.`;
   showLastFailure();

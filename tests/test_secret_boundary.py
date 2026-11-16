@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import logging.config
 from collections.abc import Callable, Iterator
@@ -8,14 +9,14 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.act import Stopped
+from launchplane.act import Judged, LaneVerdict, Stopped
 from launchplane.api import cleaned_log_config, create_app
 from launchplane.container_host import ContainerHost, ContainerHostError, DatabaseLink, OnHost
 from launchplane.data_set import postgres_server
 from launchplane.decide import MoveResult, Outcome, RetireOutcome, RetireResult
 from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 from launchplane.product import Database
-from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets
+from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
 from tests.given_secrets import GivenSecrets
 from tests.recording_docker import RecordingDocker
 
@@ -30,11 +31,12 @@ def leaking_instance() -> RunningInstance:
     )
 
 
-def running_with_leaks() -> OnHost:
-    return OnHost([leaking_instance()], [], [])
+def running_with_leaks() -> Judged:
+    problems = [f"The instance site-testing-1 has {SECRET} mounted, which it must not have"]
+    return Judged(OnHost([leaking_instance()], [], []), [LaneVerdict(product="site", lane="testing", problems=problems)])
 
 
-def unreadable_host() -> OnHost:
+def unreadable_host() -> Judged:
     raise ContainerHostError(f"Docker refused: {SECRET}")
 
 
@@ -78,7 +80,7 @@ class Asked:
     path: str
     status: int
     body: dict[str, Any] | None = None
-    read: Callable[[], OnHost] = running_with_leaks
+    read: Callable[[], Judged] = running_with_leaks
     move: Callable[[LaneBuild], MoveResult] = move_stopped
     retire: Callable[[str, str, str | None], RetireResult] = retire_stopped
 
@@ -96,13 +98,15 @@ ANSWERS = {
     "a retirement that stopped": Asked("POST", RETIRE, 503, {}),
     "a request Launchplane refuses, repeating what was sent": Asked("POST", MOVE, 422, {"build": [SECRET]}),
     "a lane name Launchplane refuses, repeating it": Asked("POST", f"/lanes/site/{SECRET}/retire", 422, {}),
+    "a redirect to the address asked for, which carries it": Asked("POST", f"/lanes/site/{SECRET}/move/", 307, {}),
 }
 
 
 def answer_to(asked: Asked, secrets: Secrets) -> tuple[int, str]:
-    app = create_app(asked.read, lambda: ROUTES, lambda _web_address: LEAK, asked.move, asked.retire, secrets)
-    response = TestClient(app).request(asked.method, asked.path, json=asked.body)
-    return response.status_code, response.text
+    app = create_app(lambda _routes: asked.read(), lambda: ROUTES, lambda _web_address: LEAK, asked.move, asked.retire, secrets)
+    response = TestClient(app, follow_redirects=False).request(asked.method, asked.path, json=asked.body)
+    headers = "".join(f"{name}: {value}\n" for name, value in response.headers.items())
+    return response.status_code, headers + response.text
 
 
 @pytest.mark.parametrize("asked", ANSWERS.values(), ids=ANSWERS.keys())
@@ -142,11 +146,24 @@ def test_the_reason_no_answer_was_made_is_cleaned_of_the_secrets_already_seen() 
 def test_a_secret_that_json_writes_differently_is_still_removed() -> None:
     awkward = 'pass"word\\with ünicode\n'
 
-    def read() -> OnHost:
+    def read() -> Judged:
         raise ContainerHostError(f"Docker refused: {awkward}")
 
     status, text = answer_to(Asked("GET", "/running", 503, read=read), GivenSecrets(on_host=frozenset({awkward})))
     assert (status, "ünicode" in text or "\\u00fcnicode" in text, SECRET_REMOVED in text) == (503, False, True)
+
+
+def test_a_secret_in_the_name_of_a_json_value_is_removed_like_one_in_the_value() -> None:
+    body = json.dumps({f"variable {SECRET}": {f"inner {SECRET}": [SECRET]}}).encode()
+    assert json.loads(cleaned_body(body, "application/json", {SECRET})) == {
+        f"variable {SECRET_REMOVED}": {f"inner {SECRET_REMOVED}": [SECRET_REMOVED]}
+    }
+
+
+def test_cleaning_replaces_only_the_secret_and_keeps_the_explanation_around_it() -> None:
+    status, text = answer_to(ANSWERS["a move that stopped"], GivenSecrets(on_host=frozenset({SECRET})))
+    explanation = "The move of testing of site to site:b stopped, and is safe to ask again: The lane is not as it must be: "
+    assert (status, json.loads(text.split("\n")[-1])) == (503, {"error": explanation + SECRET_REMOVED})
 
 
 def test_the_page_opens_when_the_secrets_cannot_be_read_because_it_is_made_without_reading_anything() -> None:
@@ -159,7 +176,7 @@ def test_with_the_database_removed_a_password_another_container_printed_is_still
     host = ContainerHost(docker.as_client(), "test")
     server = postgres_server(Database(image="postgres:18-alpine"))
     host.create_database("site", "testing", "d1", "launchplane-data-d1", "launchplane-data-d1-database", server)
-    password = docker.last_run()["environment"]["POSTGRES_PASSWORD"]
+    [password] = [kept.decode() for kept in docker.containers.files_by_volume["launchplane-data-d1-database"].values()]
     link = DatabaseLink("d1", "launchplane-data-d1", "site-testing-database-d1", server)
     host.start_job(LaneBuild(product="site", lane="testing", build="site:a"), "site-testing-1", link, ["job"])
     docker.containers.by_name["site-testing-database-d1"].removed = True
@@ -176,7 +193,7 @@ def test_the_secrets_are_read_before_the_answer_is_made_so_a_log_line_about_its_
     secrets = GivenSecrets(on_host=frozenset({SECRET}))
     seen_when_the_host_was_read: list[frozenset[str]] = []
 
-    def read() -> OnHost:
+    def read(_routes: dict[str, str]) -> Judged:
         seen_when_the_host_was_read.append(secrets.secrets_seen())
         raise RuntimeError(f"not an error Launchplane expects: {SECRET}")
 

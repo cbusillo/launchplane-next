@@ -27,6 +27,7 @@ from launchplane.instance import (
     HostNetwork,
     InstanceState,
     LaneBuild,
+    Mount,
     RunningInstance,
     RunningJob,
     job_container_of,
@@ -40,6 +41,8 @@ PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
 SECRET_VARIABLES_LABEL = "launchplane.secret-variables"  # noqa: S105 the name of a label, not a secret
+PASSWORD_FILE_LABEL = "launchplane.password-file"  # noqa: S105 the name of a label, not a password
+ONLY_ITS_OWNER_READS = 0o600
 MARKED = {"label": PRODUCT_LABEL}
 
 DOCKER_API_VERSION = "1.47"
@@ -115,11 +118,7 @@ class DatabaseLink:
     server: DatabaseServer
 
 
-@dataclass(frozen=True)
-class ProbedLane:
-    product: str
-    lane: str
-    server: DatabaseServer
+type ServerOfProduct = Callable[[str], DatabaseServer | None]
 
 
 @dataclass(frozen=True)
@@ -147,6 +146,14 @@ class DockerAttachedNetworks(BaseModel):
     networks: dict[str, object] = Field(alias="Networks")
 
 
+class DockerMount(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    name: str | None = Field(default=None, alias="Name")
+    source: str = Field(alias="Source")
+    destination: str = Field(alias="Destination")
+
+
 class DockerContainerSummary(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
@@ -154,6 +161,7 @@ class DockerContainerSummary(BaseModel):
     state: DockerState = Field(alias="State")
     labels: dict[str, str] = Field(alias="Labels")
     network_settings: DockerAttachedNetworks = Field(alias="NetworkSettings")
+    mounts: list[DockerMount] = Field(alias="Mounts")
 
     @property
     def name(self) -> str:
@@ -262,6 +270,11 @@ def attached_networks(summary: DockerContainerSummary) -> tuple[str, ...]:
     return tuple(sorted(summary.network_settings.networks))
 
 
+def mounts_of(summary: DockerContainerSummary) -> tuple[Mount, ...]:
+    mounts = (Mount(source=mount.name or mount.source, path=mount.destination) for mount in summary.mounts)
+    return tuple(sorted(mounts, key=lambda mount: mount.path))
+
+
 def instance_from(summary: DockerContainerSummary) -> RunningInstance:
     return RunningInstance(
         product=required_label(summary.labels, PRODUCT_LABEL, summary.name),
@@ -271,6 +284,7 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         state=state_of(summary),
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
+        mounts=mounts_of(summary),
     )
 
 
@@ -292,6 +306,7 @@ def job_from(summary: DockerContainerSummary, details: Mapping[str, DockerContai
         networks=attached_networks(summary),
         running_for_seconds=running_for(details[summary.name], now),
         instance=summary.labels.get(INSTANCE_LABEL),
+        mounts=mounts_of(summary),
     )
 
 
@@ -314,7 +329,9 @@ def grouped[Part](parts: Iterable[tuple[DataSetKey, Part]]) -> dict[DataSetKey, 
 
 
 def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
-    return DataSetDatabase(container=summary.name, state=state_of(summary), networks=attached_networks(summary))
+    return DataSetDatabase(
+        container=summary.name, state=state_of(summary), networks=attached_networks(summary), mounts=mounts_of(summary)
+    )
 
 
 def network_from(network: DockerNetworkSummary) -> HostNetwork:
@@ -417,17 +434,14 @@ def data_set_labels(product: str, lane: str, data_set: str) -> dict[str, str]:
     return {PRODUCT_LABEL: product, LANE_LABEL: lane, DATA_SET_LABEL: data_set}
 
 
-def database_options(
-    product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer, password: str
-) -> RunOptions:
+def database_options(product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> RunOptions:
     return RunOptions(
         image=server.image,
         container=database_container_of(product, lane, data_set),
-        labels=data_set_labels(product, lane, data_set) | {PART_LABEL: "database"},
+        labels=data_set_labels(product, lane, data_set) | {PART_LABEL: "database", PASSWORD_FILE_LABEL: str(server.password_path)},
         networks={network: [DATABASE_ADDRESS]},
-        environment=server.server_environment(password),
+        environment=server.server_environment(),
         volumes={volume: server.data_path},
-        secret_variables=server.server_secret_variables,
     )
 
 
@@ -534,7 +548,7 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    def read(self, probing: ProbedLane | None = None) -> OnHost:
+    def read(self, probing: ServerOfProduct | None = None) -> OnHost:
         torn: TornRead | None = None
         for _ in range(MOST_READS):
             try:
@@ -546,7 +560,7 @@ class ContainerHost:
             f"The last time: {torn}"
         ) from torn
 
-    def read_once(self, probing: ProbedLane | None) -> OnHost:
+    def read_once(self, probing: ServerOfProduct | None) -> OnHost:
         with self.attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks"):
             containers, networks, volumes = self.list_marked_containers(), self.list_networks(), self.list_marked_volumes()
             jobs = job_names(containers)
@@ -561,15 +575,14 @@ class ContainerHost:
         except NotFound as error:
             raise TornRead(f"{container} was listed and had gone before it was described.") from error
 
-    def probed(self, on_host: OnHost, probing: ProbedLane) -> OnHost:
-        lane = (probing.product, probing.lane)
-        data_sets = [
-            self.with_databases_asked(found, probing.server) if (found.product, found.lane) == lane else found
-            for found in on_host.data_sets
-        ]
-        return replace(on_host, data_sets=data_sets)
+    def probed(self, on_host: OnHost, server_of: ServerOfProduct) -> OnHost:
+        return replace(
+            on_host, data_sets=[self.with_databases_asked(found, server_of(found.product)) for found in on_host.data_sets]
+        )
 
-    def with_databases_asked(self, found: DataSet, server: DatabaseServer) -> DataSet:
+    def with_databases_asked(self, found: DataSet, server: DatabaseServer | None) -> DataSet:
+        if server is None:
+            return found
         databases = tuple(
             each.model_copy(update={"accepts_connections": self.listed_database_accepts_connections(each.container, server)})
             if each.state == InstanceState.RUNNING
@@ -601,10 +614,11 @@ class ContainerHost:
         return self.seen_secrets
 
     def read_secrets(self) -> frozenset[str]:
-        holders: dict[str, str | list[str] | bool] = {"label": SECRET_VARIABLES_LABEL}
         with self.attempting("Reading the secrets Launchplane has given to what is"):
-            for holder in self.client.containers.list(all=True, filters=holders, ignore_removed=True):
+            marked: dict[str, str | list[str] | bool] = {"label": PRODUCT_LABEL}
+            for holder in self.client.containers.list(all=True, filters=marked, ignore_removed=True):
                 self.note_secrets(secrets_held(holder.labels, holder.attrs, str(holder.name)))
+                self.password_kept_with_the_data_of(holder)
         return self.seen_secrets
 
     def find_container(self, container: str) -> Container | None:
@@ -638,12 +652,14 @@ class ContainerHost:
             )
 
     def run(self, options: RunOptions) -> None:
+        self.create(options).start()
+
+    def create(self, options: RunOptions) -> Container:
         self.ensure_image(options.image)
-        self.client.containers.run(
+        return self.client.containers.create(
             options.image,
             options.command,
             name=options.container,
-            detach=True,
             labels=labels_naming_secrets(options),
             network=next(iter(options.networks)),
             networking_config=endpoints(options.networks),
@@ -653,17 +669,39 @@ class ContainerHost:
             restart_policy={"Name": "always"},
         )
 
+    def password_kept_with_the_data_of(self, database: Container) -> str | None:
+        path = database.labels.get(PASSWORD_FILE_LABEL)
+        if path is None:
+            return None
+        try:
+            chunks, _ = database.get_archive(path)
+        except NotFound:
+            return None
+        password = only_file_in(b"".join(chunks)).decode()
+        self.note_secrets([password])
+        return password or None
+
     def password_of(self, link: DatabaseLink) -> str:
-        details = self.client.containers.get(link.database_container).attrs
-        entries = checked(DOCKER_CONTAINER_DETAILS, details, f"description of {link.database_container}").config.environment or []
-        password = link.server.password_in(entries)
+        password = self.password_kept_with_the_data_of(self.client.containers.get(link.database_container))
         if password is None:
             raise ContainerHostError(
-                f"The database {link.database_container} of the data set {link.data_set} has no password, "
+                f"The database {link.database_container} of the data set {link.data_set} keeps no password with its data, "
                 "so no instance can be given one."
             )
-        self.note_secrets([password])
         return password
+
+    def start_with_the_password_its_data_keeps(self, database: Container) -> None:
+        if PASSWORD_FILE_LABEL not in database.labels:
+            raise ContainerHostError(
+                f"The database {database.name} does not say where its data keeps its password ({PASSWORD_FILE_LABEL}), "
+                "so it was not started."
+            )
+        if self.password_kept_with_the_data_of(database) is None:
+            password = new_password()
+            self.note_secrets([password])
+            path = PurePosixPath(database.labels[PASSWORD_FILE_LABEL])
+            database.put_archive(str(path.parent), tar_of(path.name, password.encode(), ONLY_ITS_OWNER_READS))  # pyright: ignore[reportUnknownMemberType]
+        database.start()
 
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None:
         with self.attempting(f"Starting the instance {container} from build {target.build}"):
@@ -697,13 +735,12 @@ class ContainerHost:
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None:
         with self.attempting(f"Making the database of the data set {data_set}"):
-            password = new_password()
-            self.note_secrets([password])
-            self.run(database_options(product, lane, data_set, network, volume, server, password))
+            made = self.create(database_options(product, lane, data_set, network, volume, server))
+            self.start_with_the_password_its_data_keeps(made)
 
     def start_database(self, container: str) -> None:
         with self.attempting(f"Starting the database {container}"):
-            self.client.containers.get(container).start()
+            self.start_with_the_password_its_data_keeps(self.client.containers.get(container))
 
     def await_database(self, container: str, server: DatabaseServer) -> None:
         started = self.clock()
@@ -790,11 +827,12 @@ class ContainerHost:
             self.client.containers.get(container).put_archive(str(path.parent), tar_of(path.name, content.encode()))  # pyright: ignore[reportUnknownMemberType]
 
 
-def tar_of(file_name: str, content: bytes) -> bytes:
+def tar_of(file_name: str, content: bytes, mode: int = 0o644) -> bytes:
     archive = io.BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as tar:
         member = tarfile.TarInfo(file_name)
         member.size = len(content)
+        member.mode = mode
         tar.addfile(member, io.BytesIO(content))
     return archive.getvalue()
 

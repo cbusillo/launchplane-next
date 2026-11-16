@@ -1,9 +1,12 @@
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
+from pydantic import BaseModel
+
 from launchplane import decide
-from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ProbedLane
+from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ServerOfProduct
 from launchplane.data_set import DatabaseServer, postgres_server
 from launchplane.decide import (
     Action,
@@ -15,21 +18,23 @@ from launchplane.decide import (
     InstanceAction,
     LaneRoute,
     LaneSeen,
+    LoadedRoute,
     MoveResult,
     ProxyAction,
     ProxyNotRunning,
     RetireResult,
+    RouteStatus,
     Stop,
 )
 from launchplane.instance import DataSet, LaneBuild, new_container_name, new_data_set_name
-from launchplane.product import Database, Product
+from launchplane.product import Database, Product, ProductError
 from launchplane.proxy import CheckFailed
 
 MOST_STEPS = 50
 
 
 class InstanceHost(Protocol):
-    def read(self, probing: ProbedLane | None = None) -> OnHost: ...
+    def read(self, probing: ServerOfProduct | None = None) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None: ...
     def start_job(self, target: LaneBuild, instance: str, link: DatabaseLink | None, command: list[str]) -> None: ...
     def await_job(self, container: str, steady_seconds: float) -> None: ...
@@ -60,6 +65,18 @@ class Stopped(Exception):
     pass
 
 
+class LaneVerdict(BaseModel):
+    product: str
+    lane: str
+    problems: list[str]
+
+
+@dataclass(frozen=True)
+class Judged:
+    on_host: OnHost
+    lanes: list[LaneVerdict]
+
+
 def failure_report(error: CheckFailed | PartStopped, log_tail: str) -> str:
     if not log_tail:
         return f"{error} It wrote no log."
@@ -87,6 +104,32 @@ def is_of_lane(product: str, lane: str, part: PartOfLane) -> bool:
     return (part.product, part.lane) == (product, lane)
 
 
+def parts_of(on_host: OnHost) -> list[PartOfLane]:
+    return [*on_host.instances, *on_host.jobs, *on_host.data_sets]
+
+
+def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning | LaneRoute) -> LaneSeen:
+    return LaneSeen(
+        instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
+        route=route,
+        jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
+        data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
+        network_quiet={network.name: network.is_quiet for network in on_host.networks},
+    )
+
+
+def verdict_on(
+    on_host: OnHost, product: str, lane: str, routes: Mapping[str, str], description: Product | ProductError
+) -> LaneVerdict:
+    if isinstance(description, ProductError):
+        return LaneVerdict(product=product, lane=lane, problems=[str(description)])
+    receiving = routes.get(decide.web_address_of(product, lane))
+    route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
+    return LaneVerdict(
+        product=product, lane=lane, problems=decide.lane_verdict(lane_seen(on_host, product, lane, route), description)
+    )
+
+
 class Lanes:
     def __init__(
         self,
@@ -103,14 +146,31 @@ class Lanes:
 
     def read(self, product: str, lane: str, database: Database | None = None) -> LaneSeen:
         route = self.proxy.read_lane_route(decide.web_address_of(product, lane))
-        on_host = self.host.read(None if database is None else ProbedLane(product, lane, postgres_server(database)))
-        return LaneSeen(
-            instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
-            route=route,
-            jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
-            data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
-            network_quiet={network.name: network.is_quiet for network in on_host.networks},
-        )
+        server = None if database is None else postgres_server(database)
+        return lane_seen(self.host.read(lambda asked: server if asked == product else None), product, lane, route)
+
+    def read_judged(self, routes: Mapping[str, str]) -> Judged:
+        descriptions: dict[str, Product | ProductError] = {}
+
+        def description_of(product: str) -> Product | ProductError:
+            if product not in descriptions:
+                try:
+                    descriptions[product] = self.read_product(product)
+                except ProductError as error:
+                    descriptions[product] = error
+            return descriptions[product]
+
+        def server_of(product: str) -> DatabaseServer | None:
+            description = description_of(product)
+            return (
+                None
+                if isinstance(description, ProductError) or description.database is None
+                else postgres_server(description.database)
+            )
+
+        on_host = self.host.read(server_of)
+        lanes = sorted({(part.product, part.lane) for part in parts_of(on_host) if part.lane is not None})
+        return Judged(on_host, [verdict_on(on_host, product, lane, routes, description_of(product)) for product, lane in lanes])
 
     def move(self, target: LaneBuild) -> MoveResult:
         with self.one_at_a_time:

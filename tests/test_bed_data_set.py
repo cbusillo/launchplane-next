@@ -173,6 +173,10 @@ def environment_of(container: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in lines if "=" in line)
 
 
+def password_kept_with(data_set: dict[str, Any]) -> str:
+    return on_scratch(f"docker exec {database_of(data_set)} cat /var/lib/postgresql/launchplane-password")
+
+
 def beats(database_container: str) -> list[str]:
     query = "psql --username=postgres --tuples-only --no-align --command='SELECT run FROM beats ORDER BY at'"
     return on_scratch(f"docker exec {database_container} {query}").split()
@@ -372,10 +376,11 @@ def test_a_release_killed_at_this_point_reaches_the_same_end_on_the_same_data_wh
 def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_shown(lane_on_a: LaneView) -> None:
     move(BUILD_A, OTHER_LANE)
     other = lane_view(OTHER_LANE)
-    passwords = [environment_of(database_of(view.data_sets[0]))["POSTGRES_PASSWORD"] for view in (lane_on_a, other)]
+    passwords = [password_kept_with(view.data_sets[0]) for view in (lane_on_a, other)]
     instance = lane_on_a.receiving()["container"]
     [job] = lane_on_a.jobs
     assert passwords[0] != passwords[1]
+    assert "PASSWORD=" not in on_scratch(f"docker inspect --format '{{{{.Config.Env}}}}' {database_of(lane_on_a.data_sets[0])}")
     assert environment_of(instance)["PGPASSWORD"] == environment_of(job["container"])["PGPASSWORD"] == passwords[0]
     assert not in_container(instance, "env PGPASSWORD=wrong python -c 'import psycopg; psycopg.connect(\"connect_timeout=3\")'")[0]
     shown = json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
@@ -383,8 +388,47 @@ def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_show
     retire_lane_and_its_data(OTHER_LANE)
 
 
+def test_a_database_server_removed_by_hand_is_made_again_and_the_kept_data_accepts_the_same_password(lane_on_a: LaneView) -> None:
+    write_row("before the server was removed")
+    [data_set] = lane_on_a.data_sets
+    password = password_kept_with(data_set)
+    on_scratch(f"docker rm --force {database_of(data_set)}")
+    body = move(BUILD_A)
+    view = assert_lane_finished_on(BUILD_A)
+    assert (body["data_set"], password_kept_with(view.data_sets[0])) == (data_set["data_set"], password)
+    assert view.receiving()["container"] == lane_on_a.receiving()["container"]
+    assert rows_read() == ["before the server was removed"]
+
+
+def test_a_database_with_another_volume_mounted_is_refused_and_shown_on_the_page_as_the_judge_finds_it(lane_on_a: LaneView) -> None:
+    [data_set] = lane_on_a.data_sets
+    [network] = data_set["networks"]
+    labels = " ".join(
+        f"--label {label}"
+        for label in (
+            f"launchplane.product={PRODUCT}",
+            f"launchplane.lane={LANE}",
+            f"launchplane.data-set={data_set['data_set']}",
+            "launchplane.part=database",
+        )
+    )
+    on_scratch(f"docker rm --force {database_of(data_set)}")
+    on_scratch(
+        f"docker run --detach --name test-bed-impostor {labels} --network {network['name']} --network-alias database "
+        "--env POSTGRES_PASSWORD=impostor --volume test-bed-another-volume:/var/lib/postgresql postgres:18-alpine"
+    )
+    try:
+        status, body = move_lane(PRODUCT, LANE, BUILD_A)
+        [verdict] = [lane for lane in read_running()["lanes"] if (lane["product"], lane["lane"]) == (PRODUCT, LANE)]
+        assert status == 503, body
+        assert "has test-bed-another-volume mounted, which it must not have" in body["error"]
+        assert any("has test-bed-another-volume mounted" in problem for problem in verdict["problems"])
+    finally:
+        on_scratch("docker rm --force test-bed-impostor; docker volume rm test-bed-another-volume")
+
+
 def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_on_a: LaneView) -> None:
-    password = environment_of(database_of(lane_on_a.data_sets[0]))["POSTGRES_PASSWORD"]
+    password = password_kept_with(lane_on_a.data_sets[0])
     status, body = move_lane(PRODUCT, LANE, BUILD_TELLTALE)
     assert (status, body["outcome"]) == (422, "check failed"), body
     assert f"my password is {SECRET_REMOVED}" in body["error"]
@@ -396,7 +440,7 @@ def test_a_job_that_prints_its_password_and_fails_has_its_log_returned_without_t
     try:
         status, body = move_lane(LEAKY_PRODUCT, LANE, BUILD_A)
         [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
-        password = environment_of(database_of(data_set))["POSTGRES_PASSWORD"]
+        password = password_kept_with(data_set)
         assert (status, body["outcome"]) == (422, "job failed"), body
         assert f"connecting with password {SECRET_REMOVED}" in body["error"]
         journal = on_control("journalctl --unit launchplane --no-pager --since '-10 min'")

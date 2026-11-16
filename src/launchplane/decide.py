@@ -4,7 +4,16 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from launchplane.instance import LANE_NETWORK, DataSet, DataSetDatabase, InstanceState, LaneBuild, RunningInstance, RunningJob
+from launchplane.instance import (
+    LANE_NETWORK,
+    DataSet,
+    DataSetDatabase,
+    InstanceState,
+    LaneBuild,
+    Mount,
+    RunningInstance,
+    RunningJob,
+)
 from launchplane.product import Database, Product
 
 LANE_DOMAIN = "test"
@@ -96,6 +105,20 @@ class DataSetUse:
 class DataSetProblem:
     text: str
     a_step_puts_right: bool = False
+
+
+class JobFix(StrEnum):
+    START = "start one"
+    REPLACE = "retire it, and start one if the product has a job"
+    REPLACE_UNLESS_JUST_STARTED = "retire it, unless this move started it and is about to watch it"
+    WATCH = "watch it until it has stayed up"
+
+
+@dataclass(frozen=True)
+class JobProblem:
+    text: str
+    fix: JobFix
+    job: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +313,16 @@ def attachment_problems(part: str, attached: tuple[str, ...], expected: set[str]
     ]
 
 
+def mount_problems(part: str, mounts: tuple[Mount, ...], expected: set[str]) -> list[str]:
+    mounted = {mount.source for mount in mounts}
+    extra = sorted(mounted - expected)
+    missing = sorted(expected - mounted)
+    return [
+        *([f"{part} has {', '.join(extra)} mounted, which it must not have"] if extra else []),
+        *([f"{part} does not have {', '.join(missing)} mounted"] if missing else []),
+    ]
+
+
 def data_set_label_problems(instance: RunningInstance, product: Product, seen: LaneSeen) -> list[str]:
     part = f"The instance {instance.container}"
     if product.database is None:
@@ -309,6 +342,7 @@ def instance_problems(instance: RunningInstance, target: LaneBuild, product: Pro
         *([f"{part} is {instance.state}"] if instance.state != InstanceState.RUNNING else []),
         *data_set_label_problems(instance, product, seen),
         *attachment_problems(part, instance.networks, expected, seen),
+        *mount_problems(part, instance.mounts, set()),
     ]
 
 
@@ -323,7 +357,10 @@ def doubled_parts(found: DataSet) -> list[str]:
 
 def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen) -> list[DataSetProblem]:
     part = f"The database {database.container}"
-    attached = attachment_problems(part, database.networks, network_names(found), seen)
+    connected = [
+        *attachment_problems(part, database.networks, network_names(found), seen),
+        *mount_problems(part, database.mounts, set(found.volumes)),
+    ]
     if database.state == InstanceState.STOPPED:
         state = [DataSetProblem(f"{part} is {database.state}", a_step_puts_right=True)]
     elif database.state != InstanceState.RUNNING:
@@ -332,7 +369,7 @@ def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen)
         state = [DataSetProblem(f"{part} does not accept connections", a_step_puts_right=True)]
     else:
         state = []
-    return [*state, *[DataSetProblem(problem) for problem in attached]]
+    return [*state, *[DataSetProblem(problem) for problem in connected]]
 
 
 def data_set_problems(found: DataSet, seen: LaneSeen) -> list[DataSetProblem]:
@@ -348,33 +385,42 @@ def data_set_problems(found: DataSet, seen: LaneSeen) -> list[DataSetProblem]:
     ]
 
 
-def job_state_problems(job: RunningJob) -> list[str]:
+def job_state_problems(job: RunningJob) -> list[JobProblem]:
     part = f"The job {job.container}"
     if job.state != InstanceState.RUNNING or job.running_for_seconds is None:
-        return [f"{part} is {job.state}"]
+        return [JobProblem(f"{part} is {job.state}", JobFix.REPLACE_UNLESS_JUST_STARTED, job.container)]
     if job.running_for_seconds < JOB_STEADY_SECONDS:
-        return [f"{part} has run {job.running_for_seconds:.1f} s of the {JOB_STEADY_SECONDS:g} s it must stay up"]
+        text = f"{part} has run {job.running_for_seconds:.1f} s of the {JOB_STEADY_SECONDS:g} s it must stay up"
+        return [JobProblem(text, JobFix.WATCH, job.container)]
     return []
 
 
-def job_attachment_problems(job: RunningJob, active: RunningInstance, seen: LaneSeen) -> list[str]:
+def job_connection_problems(job: RunningJob, active: RunningInstance, seen: LaneSeen) -> list[str]:
+    part = f"The job {job.container}"
     found = data_set_of(seen, active.data_set)
     expected = network_names(found) if found is not None else {LANE_NETWORK}
-    return attachment_problems(f"The job {job.container}", job.networks, expected, seen)
+    return [*attachment_problems(part, job.networks, expected, seen), *mount_problems(part, job.mounts, set())]
 
 
-def job_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> list[str]:
+def problems_of_the_one_job(job: RunningJob, active: RunningInstance, seen: LaneSeen) -> list[JobProblem]:
+    part = f"The job {job.container}"
+    to_replace = [
+        *([] if job.instance == active.container else [f"{part} belongs to {job.instance}, not {active.container}"]),
+        *([] if job.build == active.build else [f"{part} runs {job.build}, not {active.build}"]),
+        *job_connection_problems(job, active, seen),
+    ]
+    return [*[JobProblem(text, JobFix.REPLACE, job.container) for text in to_replace], *job_state_problems(job)]
+
+
+def job_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> list[JobProblem]:
+    jobs = sorted(seen.jobs, key=lambda job: job.container)
     if product.job is None:
-        return [f"The job {job.container} runs; the product has no job" for job in seen.jobs]
-    if len(seen.jobs) != 1:
-        names = ", ".join(sorted(job.container for job in seen.jobs)) or "none"
-        return [f"The lane has {len(seen.jobs)} jobs ({names}) where it must have one, belonging to {active.container}"]
-    [job] = seen.jobs
-    owner = (
-        [] if job.instance == active.container else [f"The job {job.container} belongs to {job.instance}, not {active.container}"]
-    )
-    build = [] if job.build == active.build else [f"The job {job.container} runs {job.build}, not {active.build}"]
-    return [*owner, *build, *job_state_problems(job), *job_attachment_problems(job, active, seen)]
+        return [JobProblem(f"The job {job.container} runs; the product has no job", JobFix.REPLACE, job.container) for job in jobs]
+    if len(jobs) == 1:
+        return problems_of_the_one_job(jobs[0], active, seen)
+    names = ", ".join(job.container for job in jobs) or "none"
+    text = f"The lane has {len(jobs)} jobs ({names}) where it must have one, belonging to {active.container}"
+    return [JobProblem(text, JobFix.REPLACE, jobs[0].container) if jobs else JobProblem(text, JobFix.START)]
 
 
 def instance_receiving_visitors(seen: LaneSeen) -> RunningInstance | None:
@@ -406,9 +452,23 @@ def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product, switching
     others = sorted(instance.container for instance in seen.instances if instance.container != active.container)
     return [
         *to_receive_visitors,
-        *job_problems(seen, active, product),
+        *[problem.text for problem in job_problems(seen, active, product)],
         *[f"The instance {other} runs beside the active one" for other in others],
     ]
+
+
+def lane_verdict(seen: LaneSeen, product: Product) -> list[str]:
+    active = instance_receiving_visitors(seen)
+    used = None if active is None else active.data_set
+    of_other_data_sets = [
+        problem.text for found in seen.data_sets if found.data_set != used for problem in data_set_problems(found, seen)
+    ]
+    if active is None:
+        return ["No instance receives visitors", *of_other_data_sets]
+    if active.lane is None or active.build is None:
+        return [f"The instance {active.container} does not say which lane and build it is", *of_other_data_sets]
+    running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
+    return [*lane_problems(seen, running, product), *of_other_data_sets]
 
 
 def candidate_for(
@@ -517,23 +577,17 @@ def prepared(
 def job_step(
     seen: LaneSeen, serving: RunningInstance, target: LaneBuild, product: Product, use: DataSetUse | None, done: tuple[Event, ...]
 ) -> Action | None:
-    own = sorted((job for job in seen.jobs if job.instance == serving.container), key=lambda job: job.container)
-    if product.job is None:
-        return Retire(own[0].container) if own else None
-    if any(isinstance(event, JobRefused) for event in done):
+    problems = job_problems(seen, serving, product)
+    if not problems or any(isinstance(event, JobRefused) for event in done):
         return None
-    if len(own) > 1:
-        return Retire(own[0].container)
-    if not own:
-        return StartJob(target, serving.container, use, tuple(product.job.command))
-    [job] = own
-    ran = job.running_for_seconds
-    started_here = StartJob(target, serving.container, use, tuple(product.job.command)) in done
-    if job_attachment_problems(job, serving, seen):
-        return Retire(job.container)
-    if ran is None or job.state != InstanceState.RUNNING:
-        return AwaitJob(job.container) if started_here else Retire(job.container)
-    return AwaitJob(job.container) if ran < JOB_STEADY_SECONDS else None
+    command = () if product.job is None else tuple(product.job.command)
+    start = StartJob(target, serving.container, use, command)
+    first = problems[0]
+    if first.job is None:
+        return start
+    if first.fix == JobFix.WATCH or (first.fix == JobFix.REPLACE_UNLESS_JUST_STARTED and start in done):
+        return AwaitJob(first.job)
+    return Retire(first.job)
 
 
 def finished(

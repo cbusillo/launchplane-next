@@ -47,6 +47,7 @@ from launchplane.instance import (
     HostNetwork,
     InstanceState,
     LaneBuild,
+    Mount,
     RunningInstance,
     RunningJob,
 )
@@ -252,6 +253,7 @@ def data_set(
                 state=state or InstanceState.RUNNING,
                 networks=(f"network-{name}",),
                 accepts_connections=accepts if state == InstanceState.RUNNING else None,
+                mounts=(Mount(source=f"volume-{name}", path="/var/lib/postgresql"),),
             )
             for server in servers
         ),
@@ -292,6 +294,15 @@ class DataCase:
 
 def with_database_on(found: DataSet, *networks: str) -> DataSet:
     return found.model_copy(update={"databases": (found.databases[0].model_copy(update={"networks": networks}),)})
+
+
+def mounting(part: RunningInstance, source: str) -> RunningInstance:
+    return part.model_copy(update={"mounts": (Mount(source=source, path="/data"),)})
+
+
+def with_database_mounting(found: DataSet, *sources: str) -> DataSet:
+    mounts = tuple(Mount(source=source, path="/var/lib/postgresql") for source in sources)
+    return found.model_copy(update={"databases": (found.databases[0].model_copy(update={"mounts": mounts}),)})
 
 
 OLD_ON_D1 = on_data(OLD, "d1")
@@ -369,6 +380,20 @@ DATA_MOVES = {
     "a job read as restarting is replaced, however long Docker says it ran": DataCase(
         (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (NEW_JOB.model_copy(update={"state": InstanceState.RESTARTING}),)
     ),
+    "a job of another build than the instance it belongs to is replaced": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (NEW_JOB.model_copy(update={"build": "a"}),)
+    ),
+    "a job with a volume mounted is replaced": DataCase(
+        (NEW_ON_D1,),
+        "new",
+        (D1,),
+        (),
+        Retire("new-job"),
+        (NEW_JOB.model_copy(update={"mounts": (Mount(source="volume-d1", path="/data"),)}),),
+    ),
+    "a serving instance with a volume mounted is replaced, not kept": DataCase(
+        (mounting(NEW_ON_D1, "volume-d2"),), "new", (D1,), (), StartInstance(TARGET, FRESH, USE_D1), (NEW_JOB,)
+    ),
     "a job that can reach out is replaced": DataCase(
         (NEW_ON_D1,), "new", (D1,), (), Retire("new-job"), (job_of(NEW_ON_D1, networks=("network-d1", "bridge")),)
     ),
@@ -405,13 +430,6 @@ def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:
     step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB,)))
     assert isinstance(step, Done)
     assert step.answer.outcome == Outcome.UNCHANGED
-
-
-def test_a_lane_the_steps_leave_as_it_is_still_answers_success_only_if_the_judge_finds_nothing() -> None:
-    other_build = NEW_JOB.model_copy(update={"build": "a"})
-    step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (other_build,)))
-    assert isinstance(step, Stop)
-    assert "runs a, not b" in step.reason
 
 
 def test_a_job_that_stops_during_its_watch_answers_job_failed_with_why_not_switched() -> None:
@@ -457,6 +475,22 @@ DATA_STOPS = {
             (NEW_JOB,),
         ),
         "can reach out through bridge",
+    ),
+    "a running database with the right labels and network and another volume mounted": (
+        DataCase((NEW_ON_D1,), "new", (with_database_mounting(D1, "another-volume"),), (), None, (NEW_JOB,)),
+        "has another-volume mounted, which it must not have; The database database-d1 does not have volume-d1 mounted",
+    ),
+    "a database with a second volume mounted beside its own": (
+        DataCase((), None, (with_database_mounting(D1, "volume-d1", "another-volume"),), (), None),
+        "has another-volume mounted",
+    ),
+    "a stopped database with another volume mounted, which is not started first": (
+        DataCase((), None, (with_database_mounting(data_set("d1", InstanceState.STOPPED), "another-volume"),), (), None),
+        "has another-volume mounted",
+    ),
+    "a new instance that passed its check with a volume mounted": (
+        DataCase((OLD_ON_D1, mounting(NEW_ON_D1, "volume-d1")), "old", (D1,), (STARTED_NEW, Check("new", "/health")), None),
+        "has volume-d1 mounted",
     ),
     "an instance this call started and checked, on another data set than the one receiving visitors runs against": (
         DataCase(
@@ -508,6 +542,18 @@ LANE_PROBLEMS = {
             (NEW_JOB,),
         ),
         "can reach out through bridge",
+    ),
+    "a database with nothing mounted": (
+        DataCase((NEW_ON_D1,), "new", (with_database_mounting(D1),), (), None, (NEW_JOB,)),
+        "does not have volume-d1 mounted",
+    ),
+    "a job with a volume mounted": (
+        DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB.model_copy(update={"mounts": (Mount(source="v", path="/data"),)}),)),
+        "The job new-job has v mounted",
+    ),
+    "a job of another build": (
+        DataCase((NEW_ON_D1,), "new", (D1,), (), None, (NEW_JOB.model_copy(update={"build": "a"}),)),
+        "runs a, not b",
     ),
     "a second instance beside the active one": (
         DataCase((NEW_ON_D1, OLD_ON_D1), "new", (D1,), (), None, (NEW_JOB,)),

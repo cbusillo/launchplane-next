@@ -8,6 +8,7 @@ import docker
 import pytest
 from fastapi.testclient import TestClient
 
+from launchplane.act import Judged
 from launchplane.api import WebAddressChecker, create_app
 from launchplane.container_host import (
     DOCKER_API_VERSION,
@@ -24,7 +25,7 @@ from tests.given_secrets import NO_SECRETS
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
 
-NO_NETWORKS: dict[str, object] = {"NetworkSettings": {"Networks": {}}}
+NO_NETWORKS: dict[str, object] = {"NetworkSettings": {"Networks": {}}, "Mounts": []}
 SITE = {"launchplane.product": "site"}
 UNEXPECTED_ANSWERS: dict[str, object] = {
     "an object instead of a list": {"message": "page not found"},
@@ -32,7 +33,10 @@ UNEXPECTED_ANSWERS: dict[str, object] = {
     "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": SITE} | NO_NETWORKS],
     "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}} | NO_NETWORKS],
     "a container without a name": [{"Names": [], "State": "running", "Labels": SITE} | NO_NETWORKS],
-    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE}],
+    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE, "Mounts": []}],
+    "a container without its mounts": [
+        {"Names": ["/site"], "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}}
+    ],
 }
 
 
@@ -67,7 +71,10 @@ type InstanceReader = Callable[[], list[RunningInstance]]
 def app_reading(
     read: InstanceReader, routes: dict[str, str] | None = None, why_fails: WebAddressChecker = every_web_address_answers
 ) -> TestClient:
-    return TestClient(create_app(lambda: OnHost(read(), [], []), lambda: routes or {}, why_fails, no_move, no_retire, NO_SECRETS))
+    def read_judged(_routes: dict[str, str]) -> Judged:
+        return Judged(OnHost(read(), [], []), [])
+
+    return TestClient(create_app(read_judged, lambda: routes or {}, why_fails, no_move, no_retire, NO_SECRETS))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:

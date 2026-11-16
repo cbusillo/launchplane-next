@@ -1,10 +1,14 @@
 import builtins
+import io
+import tarfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import docker
 from docker.errors import NotFound
+
+from launchplane.container_host import only_file_in, tar_of
 
 
 def as_docker_client(fake: object) -> docker.DockerClient:
@@ -28,6 +32,27 @@ class RecordingContainer:
     removed: bool = False
     refuses_commands_with: Exception | None = None
     calls: builtins.list[str] = field(default_factory=builtins.list[str])
+    volumes: dict[str, str] = field(default_factory=dict[str, str])
+    files_by_volume: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
+    file_modes: dict[str, int] = field(default_factory=dict[str, int])
+
+    def files_at(self, path: str) -> dict[str, bytes]:
+        volume = next(volume for volume, mounted_at in self.volumes.items() if path.startswith(mounted_at))
+        return self.files_by_volume.setdefault(volume, {})
+
+    def get_archive(self, path: str) -> tuple[builtins.list[bytes], dict[str, Any]]:
+        self.calls.append(f"read {path}")
+        if path not in self.files_at(path):
+            raise NotFound(f"Could not find the file {path} in container {self.name}")
+        return [tar_of(path.rsplit("/", 1)[1], self.files_at(path)[path])], {}
+
+    def put_archive(self, folder: str, archive: bytes) -> None:
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            [member] = tar.getmembers()
+        path = f"{folder}/{member.name}"
+        self.calls.append(f"write {path}")
+        self.file_modes[path] = member.mode
+        self.files_at(path)[path] = only_file_in(archive)
 
     @property
     def attrs(self) -> dict[str, Any]:
@@ -42,6 +67,7 @@ class RecordingContainer:
         return self.log
 
     def start(self) -> None:
+        self.calls.append("start")
         self.status = "running"
 
     def stop(self, timeout: int) -> None:
@@ -72,12 +98,21 @@ class RecordingContainers:
     runs: builtins.list[dict[str, Any]] = field(default_factory=builtins.list[dict[str, Any]])
     by_name: dict[str, RecordingContainer] = field(default_factory=dict[str, RecordingContainer])
     listed: builtins.list[bool] = field(default_factory=builtins.list[bool])
+    files_by_volume: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
 
-    def run(self, image: str, command: builtins.list[str] | None = None, **options: object) -> RecordingContainer:
+    def create(self, image: str, command: builtins.list[str] | None = None, **options: object) -> RecordingContainer:
         self.runs.append({"image": image, "command": command, **options})
         given = cast("dict[str, str]", options.get("environment") or {})
         labels = cast("dict[str, str]", options.get("labels") or {})
-        made = RecordingContainer(cast("str", options["name"]), dict(labels), [f"{key}={value}" for key, value in given.items()])
+        binds = cast("dict[str, dict[str, str]]", options.get("volumes") or {})
+        made = RecordingContainer(
+            cast("str", options["name"]),
+            dict(labels),
+            [f"{key}={value}" for key, value in given.items()],
+            status="created",
+            volumes={volume: bind["bind"] for volume, bind in binds.items()},
+            files_by_volume=self.files_by_volume,
+        )
         self.by_name[made.name] = made
         return made
 

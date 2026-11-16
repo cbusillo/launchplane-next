@@ -13,6 +13,13 @@ class InstanceState(StrEnum):
     STOPPED = "stopped"
 
 
+class Mount(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source: str
+    path: str
+
+
 class RunningInstance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -23,6 +30,7 @@ class RunningInstance(BaseModel):
     state: InstanceState
     networks: tuple[str, ...]
     data_set: str | None = None
+    mounts: tuple[Mount, ...] = ()
 
 
 class RunningJob(BaseModel):
@@ -36,6 +44,7 @@ class RunningJob(BaseModel):
     networks: tuple[str, ...]
     running_for_seconds: float | None
     instance: str | None
+    mounts: tuple[Mount, ...] = ()
 
 
 class HostNetwork(BaseModel):
@@ -52,6 +61,7 @@ class DataSetDatabase(BaseModel):
     state: InstanceState
     networks: tuple[str, ...]
     accepts_connections: bool | None = None
+    mounts: tuple[Mount, ...] = ()
 
 
 class DataSet(BaseModel):

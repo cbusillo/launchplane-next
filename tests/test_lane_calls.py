@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from launchplane.act import Judged
 from launchplane.api import MoveRequester, RetireRequester, create_app
 from launchplane.container_host import OnHost
 from launchplane.decide import MoveResult, Outcome, RetireResult
@@ -8,8 +9,8 @@ from launchplane.proxy import ProxyError
 from tests.given_secrets import NO_SECRETS
 
 
-def nothing_running() -> OnHost:
-    return OnHost([], [], [])
+def nothing_running(_routes: dict[str, str]) -> Judged:
+    return Judged(OnHost([], [], []), [])
 
 
 def unreadable_proxy_on_move(target: LaneBuild) -> MoveResult:

@@ -1,6 +1,6 @@
 import copy
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -16,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from launchplane.act import Lanes, Stopped
+from launchplane.act import Judged, Lanes, LaneVerdict, Stopped
 from launchplane.container_host import ContainerHost, ContainerHostError, OnHost
 from launchplane.decide import MoveResult, Outcome, RetireResult, web_address_of
 from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob
@@ -24,7 +24,7 @@ from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 
-type HostReader = Callable[[], OnHost]
+type HostReader = Callable[[dict[str, str]], Judged]
 type RouteReader = Callable[[], dict[str, str]]
 type WebAddressChecker = Callable[[str], str | None]
 type MoveRequester = Callable[[LaneBuild], MoveResult]
@@ -56,6 +56,7 @@ class RunningAnswer(BaseModel):
     data_sets: list[DataSet]
     networks: list[HostNetwork]
     web_addresses: list[WebAddressAnswer]
+    lanes: list[LaneVerdict]
 
 
 class HostUnreadable(BaseModel):
@@ -147,8 +148,8 @@ def not_answered(error: Exception, secrets: Secrets) -> Response:
     )
 
 
-def without_length(headers: dict[str, str]) -> dict[str, str]:
-    return {name: value for name, value in headers.items() if name.lower() != "content-length"}
+def cleaned_headers(headers: Mapping[str, str], secrets: Collection[str]) -> dict[str, str]:
+    return {cleaned(name, secrets): cleaned(value, secrets) for name, value in headers.items() if name.lower() != "content-length"}
 
 
 def let_no_secret_leave(app: FastAPI, secrets: Secrets, path_answered_without_reading_anything: str) -> None:
@@ -161,8 +162,9 @@ def let_no_secret_leave(app: FastAPI, secrets: Secrets, path_answered_without_re
                 return not_answered(error, secrets)
         response = await answer(request)
         body = b"".join([chunk async for chunk in response.body_iterator])
-        headers = without_length(dict(response.headers))
-        return Response(cleaned_body(body, headers.get("content-type", ""), secrets.secrets_seen()), response.status_code, headers)
+        given_out = secrets.secrets_seen()
+        headers = cleaned_headers(response.headers, given_out)
+        return Response(cleaned_body(body, headers.get("content-type", ""), given_out), response.status_code, headers)
 
 
 def cleaned_log_config(secrets: Secrets) -> dict[str, Any]:
@@ -202,7 +204,9 @@ def create_app(
     def running(response: Response) -> RunningAnswer | HostUnreadable:
         read_at = datetime.now(UTC)
         try:
-            on_host, routes = read(), read_routes()
+            routes = read_routes()
+            judged = read(routes)
+            on_host = judged.on_host
             web_addresses = web_address_answers(on_host, routes, why_web_address_fails)
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
@@ -214,6 +218,7 @@ def create_app(
             data_sets=on_host.data_sets,
             networks=on_host.networks,
             web_addresses=web_addresses,
+            lanes=judged.lanes,
         )
 
     @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
@@ -251,5 +256,5 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     lanes = Lanes(host, proxy, products.read)
-    app = create_app(host.read, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire, host)
+    app = create_app(lanes.read_judged, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire, host)
     uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host))
