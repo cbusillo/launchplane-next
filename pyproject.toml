@@ -5,6 +5,8 @@ requires-python = ">=3.15"
 dependencies = [
     "docker>=7.2,<8",
     "fastapi>=0.162.6",
+    "pydantic>=2.14",
+    "requests>=2.34",
     "uvicorn>=0.54.0",
 ]
 
@@ -23,7 +25,6 @@ dev = [
     "types-docker>=7.2.0.20261102",
     "httpx2>=2.16.0",
     "psycopg>=3.3.9",
-    "playwright>=1.65.2",
 ]
 
 [tool.ruff]

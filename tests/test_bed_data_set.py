@@ -223,7 +223,7 @@ def lane_on_a() -> Iterator[LaneView]:
 
 
 @pytest.mark.usefixtures("fresh_lane")
-def test_a_lane_brought_up_with_a_fresh_data_set_shows_it_and_keeps_rows_written_through_its_web_address() -> None:
+def test_a_lane_brought_up_with_a_fresh_data_set_shows_it_and_keeps_rows() -> None:
     body = move(BUILD_A)
     view = lane_view()
     [data_set] = view.data_sets
@@ -237,7 +237,7 @@ def test_a_lane_brought_up_with_a_fresh_data_set_shows_it_and_keeps_rows_written
     assert rows_read() == ["first", "second"]
 
 
-def test_a_release_that_keeps_the_data_set_switches_without_failing_a_request_and_keeps_the_rows(lane_on_a: LaneView) -> None:
+def test_a_release_on_the_same_data_set_fails_no_request_and_keeps_the_rows(lane_on_a: LaneView) -> None:
     write_row("before the release")
     with request_loop(version_answering) as loop:
         body = move(BUILD_B)
@@ -297,7 +297,7 @@ def test_during_a_release_the_job_never_runs_twice_at_once(lane_on_a: LaneView) 
     assert len(runs_in_order(runs)) == len(set(runs)) == 2, runs_in_order(runs)
 
 
-def test_a_quiet_instance_reaches_nothing_outside_and_its_job_calls_out_only_through_a_way_out(lane_on_a: LaneView) -> None:
+def test_a_quiet_instance_reaches_nothing_outside_until_given_a_way_out(lane_on_a: LaneView) -> None:
     instance = lane_on_a.receiving()["container"]
     [job] = lane_on_a.jobs
     attempts = {
@@ -428,7 +428,7 @@ def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_show
     retire_lane_and_its_data(OTHER_LANE)
 
 
-def test_a_database_server_removed_by_hand_is_made_again_and_the_kept_data_accepts_the_same_password(lane_on_a: LaneView) -> None:
+def test_a_database_server_removed_by_hand_is_made_again_with_the_same_password(lane_on_a: LaneView) -> None:
     write_row("before the server was removed")
     [data_set] = lane_on_a.data_sets
     password = password_kept_with(data_set)
@@ -440,7 +440,7 @@ def test_a_database_server_removed_by_hand_is_made_again_and_the_kept_data_accep
     assert rows_read() == ["before the server was removed"]
 
 
-def test_a_database_with_another_volume_mounted_is_refused_and_shown_on_the_page_as_the_judge_finds_it(lane_on_a: LaneView) -> None:
+def test_a_database_with_another_volume_mounted_is_refused_and_shown_so(lane_on_a: LaneView) -> None:
     [data_set] = lane_on_a.data_sets
     [network] = data_set["networks"]
     labels = " ".join(

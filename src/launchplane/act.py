@@ -2,47 +2,42 @@ import threading
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
-from launchplane import decide
-from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ServerOfProduct
-from launchplane.data_set import DatabaseServer, postgres_server
-from launchplane.decide import (
-    Action,
-    DataSetAction,
+from launchplane import plan, steps
+from launchplane.container_host import HasDatabase, PartStopped
+from launchplane.docker_answers import OnHost
+from launchplane.instance import (
+    DataSet,
     DataSetUse,
-    Done,
-    Event,
-    FreshNames,
-    InstanceAction,
+    LaneBuild,
     LaneRoute,
     LaneSeen,
-    LaneVerdict,
     LoadedRoute,
-    MoveResult,
-    ProxyAction,
     ProxyNotRunning,
-    RetireResult,
     RouteStatus,
-    Stop,
+    new_container_name,
+    new_data_set_name,
+    web_address_of,
 )
-from launchplane.instance import DataSet, LaneBuild, new_container_name, new_data_set_name
-from launchplane.product import Database, Product, ProductError
+from launchplane.judge import JOB_STEADY_SECONDS, LaneVerdict, lane_verdict
+from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed
+from launchplane.steps import Action, Done, Event, FreshNames, MoveResult, RetireResult, Stop
 
 MOST_STEPS = 50
 
 
 class InstanceHost(Protocol):
-    def read(self, probing: ServerOfProduct | None = None) -> OnHost: ...
-    def start_instance(self, target: LaneBuild, container: str, link: DatabaseLink | None) -> None: ...
-    def start_job(self, target: LaneBuild, instance: str, link: DatabaseLink | None, command: list[str]) -> None: ...
+    def read(self, has_database: HasDatabase | None = None) -> OnHost: ...
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None: ...
+    def start_job(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
     def await_job(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
-    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, server: DatabaseServer) -> None: ...
-    def start_database(self, container: str, server: DatabaseServer) -> None: ...
-    def await_database(self, container: str, server: DatabaseServer) -> None: ...
+    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
+    def start_database(self, container: str) -> None: ...
+    def await_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
     def remove_instance(self, container: str) -> None: ...
     def retire_instance(self, container: str) -> None: ...
@@ -75,12 +70,6 @@ def failure_report(error: CheckFailed | PartStopped, log_tail: str) -> str:
     if not log_tail:
         return f"{error} It wrote no log."
     return f"{error}\nIts last log lines:\n{log_tail}"
-
-
-def link_for(use: DataSetUse | None) -> DatabaseLink | None:
-    if use is None:
-        return None
-    return DatabaseLink(use.data_set, use.network, use.database_container, postgres_server(use.database))
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -126,10 +115,32 @@ def verdict_on(
 ) -> LaneVerdict:
     if isinstance(description, ProductError):
         return LaneVerdict(product=product, lane=lane, a_move_is_at_work=a_move_is_at_work, problems=[str(description)])
-    receiving = routes.get(decide.web_address_of(product, lane))
+    receiving = routes.get(web_address_of(product, lane))
     route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
     seen = lane_seen(on_host, product, lane, route)
-    return decide.lane_verdict(seen, description, product, lane, a_move_is_at_work=a_move_is_at_work)
+    return lane_verdict(seen, description, product, lane, a_move_is_at_work=a_move_is_at_work)
+
+
+type Take = Callable[[InstanceHost, Proxy, Any], None]
+
+TAKE: dict[type, Take] = {
+    steps.StartProxy: lambda _host, proxy, _step: proxy.start(),
+    steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container),
+    steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container),
+    steps.RemoveRoute: lambda _host, proxy, step: proxy.remove_route(step.web_address),
+    steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(step.product, step.lane, step.data_set),
+    steps.CreateDataSetVolume: lambda host, _proxy, step: host.create_data_set_volume(step.product, step.lane, step.data_set),
+    steps.CreateDatabase: lambda host, _proxy, step: host.create_database(
+        step.product, step.lane, step.data_set, step.network, step.volume, step.image
+    ),
+    steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
+    steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),
+    steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
+    steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use),
+    steps.StartJob: lambda host, _proxy, step: host.start_job(step.target, step.instance, step.use, list(step.command)),
+    steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
+    steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
+}
 
 
 class Lanes:
@@ -156,10 +167,9 @@ class Lanes:
             finally:
                 self.lane_being_moved = None
 
-    def read(self, product: str, lane: str, database: Database | None = None) -> LaneSeen:
-        route = self.proxy.read_lane_route(decide.web_address_of(product, lane))
-        server = None if database is None else postgres_server(database)
-        return lane_seen(self.host.read(lambda asked: server if asked == product else None), product, lane, route)
+    def read(self, product: str, lane: str, *, has_database: bool = False) -> LaneSeen:
+        route = self.proxy.read_lane_route(web_address_of(product, lane))
+        return lane_seen(self.host.read(lambda asked: has_database and asked == product), product, lane, route)
 
     def read_judged(self, routes: Mapping[str, str]) -> Judged:
         descriptions: dict[str, Product | ProductError] = {}
@@ -172,22 +182,18 @@ class Lanes:
                     descriptions[product] = error
             return descriptions[product]
 
-        def server_of(product: str) -> DatabaseServer | None:
+        def has_database(product: str) -> bool:
             description = description_of(product)
-            return (
-                None
-                if isinstance(description, ProductError) or description.database is None
-                else postgres_server(description.database)
-            )
+            return not isinstance(description, ProductError) and description.database is not None
 
         # A move that starts or ends while the host is read is at work on what was read.
-        moved_during_the_read = {self.lane_being_moved}
-        on_host = self.host.read(server_of)
-        moved_during_the_read.add(self.lane_being_moved)
+        moving = {self.lane_being_moved}
+        on_host = self.host.read(has_database)
+        moving.add(self.lane_being_moved)
         return Judged(
             on_host,
             [
-                verdict_on(on_host, product, lane, routes, description_of(product), (product, lane) in moved_during_the_read)
+                verdict_on(on_host, product, lane, routes, description_of(product), (product, lane) in moving)
                 for product, lane in lanes_on(on_host)
             ],
         )
@@ -196,8 +202,8 @@ class Lanes:
         with self.at_work_on(target.product, target.lane):
             product = self.read_product(target.product)
             return self.settle(
-                lambda: self.read(target.product, target.lane, product.database),
-                lambda seen, done: decide.decide_move(seen, target, product, self.name_fresh(target), done),
+                lambda: self.read(target.product, target.lane, has_database=product.database is not None),
+                lambda seen, done: plan.decide_move(seen, target, product, self.name_fresh(target), done),
                 f"{target.lane} of {target.product}",
             )
 
@@ -205,7 +211,7 @@ class Lanes:
         with self.at_work_on(product, lane):
             return self.settle(
                 lambda: self.read(product, lane),
-                lambda seen, done: decide.decide_retire(seen, product, lane, delete_data_set, done),
+                lambda seen, done: plan.decide_retire(seen, product, lane, delete_data_set, done),
                 f"{lane} of {product}",
             )
 
@@ -230,74 +236,23 @@ class Lanes:
             done.append(self.take(step))
 
     def take(self, action: Action) -> Event:
-        match action:
-            case decide.Check(container=container, health_path=health_path):
-                return self.check(container, health_path)
-            case decide.AwaitJob(container=container):
-                return self.await_job(container)
-            case decide.StartProxy() | decide.AwaitRoute() | decide.WriteRoute() | decide.RemoveRoute():
-                self.take_on_proxy(action)
-            case (
-                decide.CreateDataSetNetwork()
-                | decide.CreateDataSetVolume()
-                | decide.CreateDatabase()
-                | decide.StartDatabase()
-                | decide.AwaitDatabase()
-                | decide.DeleteDataSet()
-            ):
-                self.take_on_data_set(action)
-            case _:
-                self.take_on_instance(action)
+        if isinstance(action, steps.Check):
+            return self.check(action.container, action.health_path)
+        if isinstance(action, steps.AwaitJob):
+            return self.await_job(action.container)
+        TAKE[type(action)](self.host, self.proxy, action)
         return action
-
-    def take_on_proxy(self, action: ProxyAction) -> None:
-        match action:
-            case decide.StartProxy():
-                self.proxy.start()
-            case decide.AwaitRoute(web_address=web_address, container=container):
-                self.proxy.await_route(web_address, container)
-            case decide.WriteRoute(web_address=web_address, container=container):
-                self.proxy.write_route(web_address, container)
-            case decide.RemoveRoute(web_address=web_address):
-                self.proxy.remove_route(web_address)
-
-    def take_on_data_set(self, action: DataSetAction) -> None:
-        match action:
-            case decide.CreateDataSetNetwork(product=product, lane=lane, data_set=data_set):
-                self.host.create_data_set_network(product, lane, data_set)
-            case decide.CreateDataSetVolume(product=product, lane=lane, data_set=data_set):
-                self.host.create_data_set_volume(product, lane, data_set)
-            case decide.CreateDatabase() as create:
-                server = postgres_server(create.database)
-                self.host.create_database(create.product, create.lane, create.data_set, create.network, create.volume, server)
-            case decide.StartDatabase(container=container, database=database):
-                self.host.start_database(container, postgres_server(database))
-            case decide.AwaitDatabase(container=container, database=database):
-                self.host.await_database(container, postgres_server(database))
-            case decide.DeleteDataSet(found=found):
-                self.host.delete_data_set(found)
-
-    def take_on_instance(self, action: InstanceAction) -> None:
-        match action:
-            case decide.StartInstance(target=target, container=container, use=use):
-                self.host.start_instance(target, container, link_for(use))
-            case decide.StartJob(target=target, instance=instance, use=use, command=command):
-                self.host.start_job(target, instance, link_for(use), list(command))
-            case decide.Retire(container=container):
-                self.host.retire_instance(container)
-            case decide.RemoveInstance(container=container):
-                self.host.remove_instance(container)
 
     def check(self, container: str, health_path: str) -> Event:
         try:
             self.proxy.check_instance(container, health_path)
         except CheckFailed as error:
-            return decide.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
-        return decide.Check(container, health_path)
+            return steps.CheckRefused(container, failure_report(error, self.host.read_log_tail(container)))
+        return steps.Check(container, health_path)
 
     def await_job(self, container: str) -> Event:
         try:
-            self.host.await_job(container, decide.JOB_STEADY_SECONDS)
+            self.host.await_job(container, JOB_STEADY_SECONDS)
         except PartStopped as error:
-            return decide.JobRefused(container, failure_report(error, self.host.read_log_tail(container)))
-        return decide.AwaitJob(container)
+            return steps.JobRefused(container, failure_report(error, self.host.read_log_tail(container)))
+        return steps.AwaitJob(container)

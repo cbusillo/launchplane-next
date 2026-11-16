@@ -1,9 +1,12 @@
 import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
 LANE_NETWORK = "launchplane-lanes"
+LANE_DOMAIN = "test"
 
 
 class InstanceState(StrEnum):
@@ -82,6 +85,49 @@ class LaneBuild(BaseModel):
     product: str
     lane: str
     build: str
+
+
+@dataclass(frozen=True)
+class DataSetUse:
+    data_set: str
+    network: str
+    database_container: str
+
+
+@dataclass(frozen=True)
+class ProxyNotRunning:
+    pass
+
+
+class RouteStatus(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    WARNING = "warning"
+
+
+@dataclass(frozen=True)
+class LoadedRoute:
+    container: str
+    status: RouteStatus
+
+
+@dataclass(frozen=True)
+class LaneRoute:
+    loaded: LoadedRoute | None
+    written: str | None
+
+
+@dataclass(frozen=True)
+class LaneSeen:
+    instances: tuple[RunningInstance, ...]
+    route: ProxyNotRunning | LaneRoute
+    jobs: tuple[RunningJob, ...] = ()
+    data_sets: tuple[DataSet, ...] = ()
+    network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
+
+
+def web_address_of(product: str, lane: str) -> str:
+    return f"{lane}.{product}.{LANE_DOMAIN}"
 
 
 def new_container_name(target: LaneBuild) -> str:

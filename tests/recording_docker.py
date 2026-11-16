@@ -9,7 +9,7 @@ from typing import Any, cast
 import docker
 from docker.errors import NotFound
 
-from launchplane.container_host import only_file_in, tar_of
+from launchplane.docker_answers import only_file_in, tar_of
 
 
 def as_docker_client(fake: object) -> docker.DockerClient:
@@ -103,7 +103,7 @@ class RecordingContainers:
     by_name: dict[str, RecordingContainer] = field(default_factory=dict[str, RecordingContainer])
     listed: builtins.list[bool] = field(default_factory=builtins.list[bool])
     files_by_volume: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
-    environment_of_every_image: tuple[str, ...] = ("PGDATA=/var/lib/postgresql/18/docker",)
+    image_environment: tuple[str, ...] = ("PGDATA=/var/lib/postgresql/18/docker",)
 
     def create(self, image: str, command: builtins.list[str] | None = None, **options: object) -> RecordingContainer:
         self.runs.append({"image": image, "command": command, **options})
@@ -113,7 +113,7 @@ class RecordingContainers:
         made = RecordingContainer(
             cast("str", options["name"]),
             dict(labels),
-            [*(f"{key}={value}" for key, value in given.items()), *self.environment_of_every_image],
+            [*(f"{key}={value}" for key, value in given.items()), *self.image_environment],
             status="created",
             volumes={volume: bind["bind"] for volume, bind in binds.items()},
             files_by_volume=self.files_by_volume,

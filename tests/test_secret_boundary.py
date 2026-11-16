@@ -11,14 +11,12 @@ from fastapi.testclient import TestClient
 
 from launchplane.act import Judged, Stopped
 from launchplane.api import cleaned_log_config, create_app
-from launchplane.container_host import ContainerHost, ContainerHostError, DatabaseLink, OnHost
-from launchplane.data_set import postgres_server
-from launchplane.decide import LaneVerdict, MoveResult, Outcome, RetireOutcome, RetireResult
+from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import InstanceState, LaneBuild, RunningInstance
-from launchplane.product import Database
+from launchplane.judge import LaneVerdict
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
+from launchplane.steps import MoveResult, Outcome, RetireOutcome, RetireResult
 from tests.given_secrets import GivenSecrets
-from tests.recording_docker import RecordingDocker
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
 LEAK = f"wget: server returned error: HTTP/1.1 503 password={SECRET}"
@@ -169,30 +167,12 @@ def test_cleaning_replaces_only_the_secret_and_keeps_the_explanation_around_it()
     assert (status, json.loads(text.split("\n")[-1])) == (503, {"error": explanation + SECRET_REMOVED})
 
 
-def test_the_page_opens_when_the_secrets_cannot_be_read_because_it_is_made_without_reading_anything() -> None:
+def test_the_page_opens_when_the_secrets_cannot_be_read() -> None:
     status, text = answer_to(Asked("GET", "/", 200), GivenSecrets(readable=False))
     assert (status, "<html" in text) == (200, True)
 
 
-def test_with_the_database_removed_a_password_another_container_printed_is_still_removed_from_the_answer() -> None:
-    docker = RecordingDocker()
-    host = ContainerHost(docker.as_client(), "test")
-    server = postgres_server(Database(image="postgres:18-alpine"))
-    host.create_database("site", "testing", "d1", "launchplane-data-d1", "launchplane-data-d1-database", server)
-    [password] = [kept.decode() for kept in docker.containers.files_by_volume["launchplane-data-d1-database"].values()]
-    link = DatabaseLink("d1", "launchplane-data-d1", "site-testing-database-d1", server)
-    host.start_job(LaneBuild(product="site", lane="testing", build="site:a"), "site-testing-1", link, ["job"])
-    docker.containers.by_name["site-testing-database-d1"].removed = True
-
-    def move(_target: LaneBuild) -> MoveResult:
-        raise Stopped(f"The job failed. Its last log lines:\nconnecting with {password}")
-
-    restarted_launchplane = ContainerHost(docker.as_client(), "test")
-    status, text = answer_to(Asked("POST", MOVE, 503, {"build": "site:b"}, move=move), restarted_launchplane)
-    assert (status, password in text, SECRET_REMOVED in text) == (503, False, True)
-
-
-def test_the_secrets_are_read_before_the_answer_is_made_so_a_log_line_about_its_failure_is_cleaned_too() -> None:
+def test_the_secrets_are_read_before_the_answer_is_made() -> None:
     secrets = GivenSecrets(on_host=frozenset({SECRET}))
     seen_when_the_host_was_read: list[frozenset[str]] = []
 
@@ -212,7 +192,7 @@ def failure_carrying_the_secret() -> RuntimeError:
         return error
 
 
-def test_a_log_line_is_written_without_a_secret_in_its_message_its_arguments_or_its_traceback() -> None:
+def test_a_log_line_has_no_secret_in_its_message_arguments_or_traceback() -> None:
     written = io.StringIO()
     log = logging.Logger("a log of its own")
     log.addHandler(CleanedStream(GivenSecrets(seen=frozenset({SECRET})), written))

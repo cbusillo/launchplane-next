@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from launchplane.container_host import ContainerHostError
+from launchplane.docker_answers import ContainerHostError
 
 
 @dataclass

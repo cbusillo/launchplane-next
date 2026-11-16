@@ -10,16 +10,10 @@ from fastapi.testclient import TestClient
 
 from launchplane.act import Judged
 from launchplane.api import WebAddressChecker, create_app
-from launchplane.container_host import (
-    DOCKER_API_VERSION,
-    ContainerHost,
-    ContainerHostError,
-    HostAnswers,
-    OnHost,
-    on_host_from_answers,
-)
-from launchplane.decide import MoveResult, RetireResult
+from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
+from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
 from launchplane.instance import LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
+from launchplane.steps import MoveResult, RetireResult
 from tests.given_secrets import NO_SECRETS
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
@@ -131,7 +125,7 @@ def test_a_refused_connection_raises_with_the_real_error_instead_of_listing_noth
         refusing_host().read()
 
 
-def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_cannot_be_read() -> None:
+def test_an_unreadable_host_answers_unavailable_with_the_real_error() -> None:
     status, body = ask_running(lambda: refusing_host().read().instances)
     assert status == 503
     assert "Connection refused" in body["error"]
@@ -175,7 +169,7 @@ def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_prox
     assert "no instance" in entry["error"]
 
 
-def test_a_stopped_instance_receiving_visitors_leaves_its_web_address_not_answering_with_the_proxys_error() -> None:
+def test_a_stopped_active_instance_leaves_its_web_address_not_answering() -> None:
     instance = RunningInstance(
         product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, networks=(LANE_NETWORK,)
     )

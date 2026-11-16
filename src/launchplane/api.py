@@ -16,13 +16,15 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from launchplane.act import Judged, Lanes, Stopped
-from launchplane.container_host import ContainerHost, ContainerHostError, OnHost
-from launchplane.decide import LaneVerdict, MoveResult, Outcome, RetireResult, web_address_of
-from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob
+from launchplane.act import Judged, Lanes, Stopped, lanes_on
+from launchplane.container_host import ContainerHost
+from launchplane.docker_answers import ContainerHostError, OnHost
+from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob, web_address_of
+from launchplane.judge import LaneVerdict
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
+from launchplane.steps import MoveResult, Outcome, RetireResult
 
 type HostReader = Callable[[dict[str, str]], Judged]
 type RouteReader = Callable[[], dict[str, str]]
@@ -92,20 +94,14 @@ def instance_answers(instances: list[RunningInstance], routes: dict[str, str]) -
     ]
 
 
-def lanes_on_host(on_host: OnHost) -> set[Lane]:
-    parts: list[RunningInstance | RunningJob | DataSet] = [*on_host.instances, *on_host.jobs, *on_host.data_sets]
-    return {(part.product, part.lane) for part in parts}
-
-
 def lane_owners(on_host: OnHost, routes: dict[str, str]) -> dict[str, Lane | None]:
     by_container = {instance.container: instance for instance in on_host.instances}
     owners: dict[str, Lane | None] = {
         web_address: None if (instance := by_container.get(container)) is None else (instance.product, instance.lane)
         for web_address, container in routes.items()
     }
-    for product, lane in lanes_on_host(on_host):
-        if lane is not None:
-            owners[web_address_of(product, lane)] = (product, lane)
+    for product, lane in lanes_on(on_host):
+        owners[web_address_of(product, lane)] = (product, lane)
     return owners
 
 
@@ -152,13 +148,14 @@ def cleaned_headers(headers: Mapping[str, str], secrets: Collection[str]) -> dic
     return {cleaned(name, secrets): cleaned(value, secrets) for name, value in headers.items() if name.lower() != "content-length"}
 
 
-def let_no_secret_leave(app: FastAPI, secrets: Secrets, path_answered_without_reading_anything: str) -> None:
+def clean_answers(app: FastAPI, secrets: Secrets, static_path: str) -> None:
     @app.middleware("http")
     async def clean_the_answer(request: Request, answer: Callable[[Request], Awaitable[Any]]) -> Response:
         try:
             await run_in_threadpool(secrets.read_secrets)
         except UNREADABLE as error:
-            if request.url.path != path_answered_without_reading_anything:
+            # The page is a file of Launchplane's own, so it can open and say the host cannot be read.
+            if request.url.path != static_path:
                 return not_answered(error, secrets)
         response = await answer(request)
         body = b"".join([chunk async for chunk in response.body_iterator])
@@ -198,7 +195,7 @@ def create_app(
     def show_running() -> str:
         return page
 
-    let_no_secret_leave(app, secrets, path_answered_without_reading_anything=app.url_path_for(show_running.__name__))
+    clean_answers(app, secrets, static_path=app.url_path_for(show_running.__name__))
 
     @app.get("/running", responses=RUNNING_ERROR_RESPONSES)
     def running(response: Response) -> RunningAnswer | HostUnreadable:
@@ -256,5 +253,7 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     lanes = Lanes(host, proxy, products.read)
-    app = create_app(lanes.read_judged, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire, host)
-    uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host))
+    app = create_app(
+        lanes.read_judged, proxy.read_enabled_routes, proxy.why_web_address_fails, lanes.move, lanes.retire, host.secrets
+    )
+    uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host.secrets))

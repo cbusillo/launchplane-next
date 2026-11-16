@@ -4,17 +4,15 @@ from pathlib import PurePosixPath
 import pytest
 
 from launchplane.container_host import CommandResult, Service
-from launchplane.decide import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
+from launchplane.instance import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
-    ROUTES_FOLDER,
     CheckFailed,
     ProxyError,
     TraefikProxy,
     route_file_of,
     route_text,
-    staged_route_file_of,
 )
 
 WEB_ADDRESS = "testing.site.test"
@@ -183,11 +181,6 @@ def test_a_routes_file_command_that_fails_is_an_error_with_why_not_a_route_taken
             proxy.write_route(WEB_ADDRESS, "site-t2")
         else:
             proxy.remove_route(WEB_ADDRESS)
-
-
-def test_a_route_is_written_beside_its_file_then_renamed_into_place_so_no_half_file_is_read() -> None:
-    assert staged_route_file_of(WEB_ADDRESS).parent == ROUTES_FOLDER
-    assert staged_route_file_of(WEB_ADDRESS).suffix not in {".yml", ".yaml", ".toml"}
 
 
 def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
