@@ -15,6 +15,10 @@ IMAGE_ENVIRONMENT = ("PGDATA=/var/lib/postgresql/18/docker",)
 NOT_READY = 2
 
 
+def as_docker_client(fake: object) -> docker.DockerClient:
+    return cast("docker.DockerClient", fake)
+
+
 @dataclass
 class ExecResult:
     exit_code: int
@@ -129,4 +133,4 @@ class RecordingDocker:
     api: RecordingApi = field(default_factory=RecordingApi)
 
     def as_client(self) -> docker.DockerClient:
-        return cast("docker.DockerClient", self)
+        return as_docker_client(self)
