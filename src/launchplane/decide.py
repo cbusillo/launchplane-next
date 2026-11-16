@@ -130,11 +130,13 @@ class Finding:
     of_a_release: bool = False
 
 
-@dataclass(frozen=True)
-class Verdict:
+class LaneVerdict(BaseModel):
+    product: str
+    lane: str
+    a_move_is_at_work: bool
     problems: list[str]
-    release_under_way: list[str]
-    left_unfinished: list[str]
+    release_under_way: list[str] = []
+    left_unfinished: list[str] = []
 
 
 @dataclass(frozen=True)
@@ -357,15 +359,19 @@ def data_set_label_problems(instance: RunningInstance, product: Product, seen: L
     return []
 
 
-def instance_problems(instance: RunningInstance, target: LaneBuild, product: Product, seen: LaneSeen) -> list[str]:
+def instance_connection_problems(instance: RunningInstance, seen: LaneSeen) -> list[str]:
     part = f"The instance {instance.container}"
     expected = {LANE_NETWORK} | network_names(data_set_of(seen, instance.data_set))
+    return [*attachment_problems(part, instance.networks, expected, seen), *mount_problems(part, instance.mounts, ())]
+
+
+def instance_problems(instance: RunningInstance, target: LaneBuild, product: Product, seen: LaneSeen) -> list[str]:
+    part = f"The instance {instance.container}"
     return [
         *([f"{part} runs {instance.build}, not {target.build}"] if instance.build != target.build else []),
         *([f"{part} is {instance.state}"] if instance.state != InstanceState.RUNNING else []),
         *data_set_label_problems(instance, product, seen),
-        *attachment_problems(part, instance.networks, expected, seen),
-        *mount_problems(part, instance.mounts, ()),
+        *instance_connection_problems(instance, seen),
     ]
 
 
@@ -532,42 +538,24 @@ def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
 
 
 def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
-    instances = {instance.container: instance for instance in seen.instances}
-    of_instances = [
-        problem
-        for instance in seen.instances
-        for problem in [
-            *attachment_problems(
-                f"The instance {instance.container}",
-                instance.networks,
-                {LANE_NETWORK} | network_names(data_set_of(seen, instance.data_set)),
-                seen,
-            ),
-            *mount_problems(f"The instance {instance.container}", instance.mounts, ()),
-        ]
+    jobs_with_owner = [(job, owner) for job in seen.jobs for owner in seen.instances if owner.container == job.instance]
+    databases = [(found, database) for found in seen.data_sets for database in found.databases]
+    return [
+        *[fault for instance in seen.instances for fault in instance_connection_problems(instance, seen)],
+        *[fault for job, owner in jobs_with_owner for fault in job_connection_problems(job, owner, seen)],
+        *[fault for found, each in databases for fault in database_connection_problems(found, each, seen, product.database)],
     ]
-    of_jobs = [
-        problem
-        for job in seen.jobs
-        if job.instance in instances
-        for problem in job_connection_problems(job, instances[job.instance], seen)
-    ]
-    of_databases = [
-        problem
-        for found in seen.data_sets
-        for database in found.databases
-        for problem in database_connection_problems(found, database, seen, product.database)
-    ]
-    return [*of_instances, *of_jobs, *of_databases]
 
 
-def lane_verdict(seen: LaneSeen, product: Product, *, a_move_is_at_work: bool) -> Verdict:
+def lane_verdict(seen: LaneSeen, product: Product, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
     findings = findings_at_rest(seen, product)
     if a_move_is_at_work:
-        never_acceptable = connection_faults(seen, product)
-        return Verdict(never_acceptable, [finding.text for finding in findings if finding.text not in never_acceptable], [])
+        wrong = connection_faults(seen, product)
+        under_way = [finding.text for finding in findings if finding.text not in wrong]
+        return LaneVerdict(product=name, lane=lane, a_move_is_at_work=True, problems=wrong, release_under_way=under_way)
     wrong = [finding.text for finding in findings if not finding.of_a_release]
-    return Verdict(wrong, [], [finding.text for finding in findings if finding.of_a_release])
+    unfinished = [finding.text for finding in findings if finding.of_a_release]
+    return LaneVerdict(product=name, lane=lane, a_move_is_at_work=False, problems=wrong, left_unfinished=unfinished)
 
 
 def candidate_for(

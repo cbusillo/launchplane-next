@@ -16,9 +16,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from launchplane.act import Judged, Lanes, LaneVerdict, Stopped
+from launchplane.act import Judged, Lanes, Stopped
 from launchplane.container_host import ContainerHost, ContainerHostError, OnHost
-from launchplane.decide import MoveResult, Outcome, RetireResult, web_address_of
+from launchplane.decide import LaneVerdict, MoveResult, Outcome, RetireResult, web_address_of
 from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningInstance, RunningJob
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy

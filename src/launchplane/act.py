@@ -4,8 +4,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic import BaseModel
-
 from launchplane import decide
 from launchplane.container_host import DatabaseLink, OnHost, PartStopped, ServerOfProduct
 from launchplane.data_set import DatabaseServer, postgres_server
@@ -19,6 +17,7 @@ from launchplane.decide import (
     InstanceAction,
     LaneRoute,
     LaneSeen,
+    LaneVerdict,
     LoadedRoute,
     MoveResult,
     ProxyAction,
@@ -64,15 +63,6 @@ type ProductReader = Callable[[str], Product]
 
 class Stopped(Exception):
     pass
-
-
-class LaneVerdict(BaseModel):
-    product: str
-    lane: str
-    problems: list[str]
-    release_under_way: list[str] = []
-    left_unfinished: list[str] = []
-    a_move_is_at_work: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,18 +125,11 @@ def verdict_on(
     on_host: OnHost, product: str, lane: str, routes: Mapping[str, str], description: Product | ProductError, a_move_is_at_work: bool
 ) -> LaneVerdict:
     if isinstance(description, ProductError):
-        return LaneVerdict(product=product, lane=lane, problems=[str(description)], a_move_is_at_work=a_move_is_at_work)
+        return LaneVerdict(product=product, lane=lane, a_move_is_at_work=a_move_is_at_work, problems=[str(description)])
     receiving = routes.get(decide.web_address_of(product, lane))
     route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
-    verdict = decide.lane_verdict(lane_seen(on_host, product, lane, route), description, a_move_is_at_work=a_move_is_at_work)
-    return LaneVerdict(
-        product=product,
-        lane=lane,
-        problems=verdict.problems,
-        release_under_way=verdict.release_under_way,
-        left_unfinished=verdict.left_unfinished,
-        a_move_is_at_work=a_move_is_at_work,
-    )
+    seen = lane_seen(on_host, product, lane, route)
+    return decide.lane_verdict(seen, description, product, lane, a_move_is_at_work=a_move_is_at_work)
 
 
 class Lanes:

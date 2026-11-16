@@ -9,11 +9,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.act import Judged, LaneVerdict, Stopped
+from launchplane.act import Judged, Stopped
 from launchplane.api import cleaned_log_config, create_app
 from launchplane.container_host import ContainerHost, ContainerHostError, DatabaseLink, OnHost
 from launchplane.data_set import postgres_server
-from launchplane.decide import MoveResult, Outcome, RetireOutcome, RetireResult
+from launchplane.decide import LaneVerdict, MoveResult, Outcome, RetireOutcome, RetireResult
 from launchplane.instance import InstanceState, LaneBuild, RunningInstance
 from launchplane.product import Database
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
@@ -33,7 +33,10 @@ def leaking_instance() -> RunningInstance:
 
 def running_with_leaks() -> Judged:
     problems = [f"The instance site-testing-1 has {SECRET} mounted, which it must not have"]
-    return Judged(OnHost([leaking_instance()], [], []), [LaneVerdict(product="site", lane="testing", problems=problems)])
+    return Judged(
+        OnHost([leaking_instance()], [], []),
+        [LaneVerdict(product="site", lane="testing", a_move_is_at_work=False, problems=problems)],
+    )
 
 
 def unreadable_host() -> Judged:

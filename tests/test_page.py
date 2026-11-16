@@ -4,10 +4,10 @@ import pytest
 from fastapi.testclient import TestClient
 from playwright.sync_api import Browser, Page, Route, sync_playwright
 
-from launchplane.act import Judged, LaneVerdict
+from launchplane.act import Judged
 from launchplane.api import create_app
 from launchplane.container_host import ContainerHostError, OnHost
-from launchplane.decide import MoveResult, RetireResult
+from launchplane.decide import LaneVerdict, MoveResult, RetireResult
 from launchplane.instance import LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
 from tests.given_secrets import NO_SECRETS
 
@@ -58,7 +58,14 @@ def page_showing(browser: Browser, judged: LaneVerdict | None, instance: Running
 
 
 def verdict(problems: list[str], under_way: list[str], unfinished: list[str]) -> LaneVerdict:
-    return LaneVerdict(product="site", lane="testing", problems=problems, release_under_way=under_way, left_unfinished=unfinished)
+    return LaneVerdict(
+        product="site",
+        lane="testing",
+        a_move_is_at_work=bool(under_way),
+        problems=problems,
+        release_under_way=under_way,
+        left_unfinished=unfinished,
+    )
 
 
 def findings_shown(page: Page, kind: str) -> list[str]:

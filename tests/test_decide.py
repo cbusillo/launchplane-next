@@ -20,6 +20,7 @@ from launchplane.decide import (
     JobRefused,
     LaneRoute,
     LaneSeen,
+    LaneVerdict,
     LoadedRoute,
     MoveResult,
     Outcome,
@@ -35,7 +36,6 @@ from launchplane.decide import (
     StartJob,
     StartProxy,
     Stop,
-    Verdict,
     WriteRoute,
     decide_move,
     decide_retire,
@@ -641,26 +641,30 @@ STATES_OF_A_RELEASE = {
 }
 
 
-def verdict_on(case: DataCase, *, moving: bool) -> Verdict:
-    return lane_verdict(lane_seen_of(case), WITH_DATA, a_move_is_at_work=moving)
+def verdict_on(case: DataCase, *, moving: bool) -> LaneVerdict:
+    return lane_verdict(lane_seen_of(case), WITH_DATA, "site", "testing", a_move_is_at_work=moving)
+
+
+def findings_of(verdict: LaneVerdict) -> tuple[list[str], list[str], list[str]]:
+    return verdict.problems, verdict.release_under_way, verdict.left_unfinished
 
 
 @pytest.mark.parametrize(("case", "states"), STATES_OF_A_RELEASE.values(), ids=STATES_OF_A_RELEASE.keys())
 def test_while_a_move_is_at_work_what_is_read_is_a_release_under_way_and_none_of_it_is_wrong(
     case: DataCase, states: list[str]
 ) -> None:
-    assert verdict_on(case, moving=True) == Verdict(problems=[], release_under_way=states, left_unfinished=[])
+    assert findings_of(verdict_on(case, moving=True)) == ([], states, [])
 
 
 @pytest.mark.parametrize(("case", "states"), STATES_OF_A_RELEASE.values(), ids=STATES_OF_A_RELEASE.keys())
 def test_with_no_move_at_work_the_same_state_is_a_release_left_unfinished_however_lately_it_was_made(
     case: DataCase, states: list[str]
 ) -> None:
-    assert verdict_on(case, moving=False) == Verdict(problems=[], release_under_way=[], left_unfinished=states)
+    assert findings_of(verdict_on(case, moving=False)) == ([], [], states)
 
 
 def test_a_lane_at_rest_and_as_it_must_be_has_nothing_wrong_nothing_under_way_and_nothing_unfinished() -> None:
-    assert verdict_on(DataCase((OLD_ON_D1,), "old", (D1,), (), None, (OLD_JOB,)), moving=False) == Verdict([], [], [])
+    assert findings_of(verdict_on(DataCase((OLD_ON_D1,), "old", (D1,), (), None, (OLD_JOB,)), moving=False)) == ([], [], [])
 
 
 NEVER_ACCEPTABLE = {
@@ -700,7 +704,7 @@ def test_what_is_never_acceptable_is_wrong_even_while_a_move_is_at_work_and_is_n
 def test_a_job_that_keeps_restarting_with_no_move_at_work_is_wrong_not_something_left_unfinished() -> None:
     restarting = job_of(NEW_ON_D1).model_copy(update={"state": InstanceState.RESTARTING, "running_for_seconds": None})
     verdict = verdict_on(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (restarting,)), moving=False)
-    assert verdict == Verdict(["The job new-job is restarting"], [], [])
+    assert findings_of(verdict) == (["The job new-job is restarting"], [], [])
 
 
 def test_a_lane_as_it_must_be_has_no_problems() -> None:

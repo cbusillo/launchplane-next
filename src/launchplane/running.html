@@ -145,14 +145,14 @@ function dataSetRow(dataSet) {
  * @param {Object<string, string>} tone
  */
 function findingRows(kind, findings, heading, tone) {
-  if (!findings.length) return [];
-  return [heading, ...findings].map((text) => element("small", { "data-finding": kind, ...tone }, text));
+  const lines = findings.length && heading ? [heading, ...findings] : findings;
+  return lines.map((text) => element("small", { "data-finding": kind, ...tone }, text));
 }
 
 /** @param {Lane} verdict */
 function verdictRows(verdict) {
   return [
-    ...verdict.problems.map((problem) => element("small", { "data-finding": "wrong", ...health(false) }, problem)),
+    ...findingRows("wrong", verdict.problems, "", health(false)),
     ...findingRows("release", verdict.release_under_way, "Launchplane is moving this lane now. A release is under way:", {}),
     ...findingRows("unfinished", verdict.left_unfinished, "No move is at work on this lane, and it was left unfinished. Asking for a build again finishes it:", health(false)),
   ];
