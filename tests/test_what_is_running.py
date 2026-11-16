@@ -1,5 +1,6 @@
 import json
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -7,25 +8,38 @@ import docker
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.api import InstanceReader, WebAddressChecker, create_app
-from launchplane.container_host import DOCKER_API_VERSION, ContainerHost, ContainerHostError, instances_from_answer
-from launchplane.decide import MoveResult, RetireResult
-from launchplane.instance import InstanceState, LaneBuild, RunningInstance
+from launchplane.act import Judged
+from launchplane.api import WebAddressChecker, create_app
+from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
+from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
+from launchplane.instance import LANE_NETWORK, InstanceState, LaneBuild, RunningInstance
+from launchplane.steps import MoveResult, RetireResult
+from tests.given_secrets import NO_SECRETS
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
 
+NO_NETWORKS: dict[str, object] = {"NetworkSettings": {"Networks": {}}, "Mounts": []}
+SITE = {"launchplane.product": "site"}
 UNEXPECTED_ANSWERS: dict[str, object] = {
     "an object instead of a list": {"message": "page not found"},
-    "a container without a state": [{"Names": ["/site"], "Labels": {"launchplane.product": "site"}}],
-    "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": {"launchplane.product": "site"}}],
-    "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}}],
-    "a container without a name": [{"Names": [], "State": "running", "Labels": {"launchplane.product": "site"}}],
+    "a container without a state": [{"Names": ["/site"], "Labels": SITE} | NO_NETWORKS],
+    "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": SITE} | NO_NETWORKS],
+    "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}} | NO_NETWORKS],
+    "a container without a name": [{"Names": [], "State": "running", "Labels": SITE} | NO_NETWORKS],
+    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE, "Mounts": []}],
+    "a container without its mounts": [
+        {"Names": ["/site"], "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}}
+    ],
 }
 
 
 def saved_container_list() -> object:
     return json.loads(SAVED_CONTAINER_LIST.read_text())
+
+
+def instances_from_answer(answer: object) -> list[RunningInstance]:
+    return on_host_from_answers(HostAnswers(answer, [], {"Volumes": None})).instances
 
 
 def refusing_host() -> ContainerHost:
@@ -37,7 +51,7 @@ def no_move(target: LaneBuild) -> MoveResult:
     raise AssertionError(f"Reading what is running asked for a move to {target.build}")
 
 
-def no_retire(product: str, lane: str) -> RetireResult:
+def no_retire(product: str, lane: str, _delete_data_set: str | None) -> RetireResult:
     raise AssertionError(f"Reading what is running asked to retire {lane} of {product}")
 
 
@@ -45,10 +59,16 @@ def every_web_address_answers(_web_address: str) -> str | None:
     return None
 
 
+type InstanceReader = Callable[[], list[RunningInstance]]
+
+
 def app_reading(
     read: InstanceReader, routes: dict[str, str] | None = None, why_fails: WebAddressChecker = every_web_address_answers
 ) -> TestClient:
-    return TestClient(create_app(read, lambda: routes or {}, why_fails, no_move, no_retire))
+    def read_judged(_routes: dict[str, str]) -> Judged:
+        return Judged(OnHost(read(), [], []), [])
+
+    return TestClient(create_app(read_judged, lambda: routes or {}, why_fails, no_move, no_retire, NO_SECRETS))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
@@ -60,16 +80,36 @@ def test_a_saved_docker_answer_reads_as_instances_in_launchplane_terms() -> None
     instances = {instance.container: instance for instance in instances_from_answer(saved_container_list())}
     assert instances == {
         "site-production": RunningInstance(
-            product="site", lane="production", build="b2", container="site-production", state=InstanceState.RUNNING
+            product="site",
+            lane="production",
+            build="b2",
+            container="site-production",
+            state=InstanceState.RUNNING,
+            networks=("bridge",),
         ),
         "site-testing": RunningInstance(
-            product="site", lane="testing", build="b3", container="site-testing", state=InstanceState.STOPPED
+            product="site",
+            lane="testing",
+            build="b3",
+            container="site-testing",
+            state=InstanceState.STOPPED,
+            networks=("bridge",),
         ),
         "site-preview-7": RunningInstance(
-            product="site", lane="preview-7", build="b4", container="site-preview-7", state=InstanceState.PAUSED
+            product="site",
+            lane="preview-7",
+            build="b4",
+            container="site-preview-7",
+            state=InstanceState.PAUSED,
+            networks=("bridge",),
         ),
         "site-unmarked-lane": RunningInstance(
-            product="site", lane=None, build=None, container="site-unmarked-lane", state=InstanceState.RUNNING
+            product="site",
+            lane=None,
+            build=None,
+            container="site-unmarked-lane",
+            state=InstanceState.RUNNING,
+            networks=("bridge",),
         ),
     }
 
@@ -82,11 +122,11 @@ def test_an_answer_of_unexpected_shape_is_an_error_not_an_empty_list(answer: obj
 
 def test_a_refused_connection_raises_with_the_real_error_instead_of_listing_nothing() -> None:
     with pytest.raises(ContainerHostError, match="Connection refused"):
-        refusing_host().read_instances()
+        refusing_host().read()
 
 
-def test_the_running_call_answers_unavailable_with_the_real_error_when_the_host_cannot_be_read() -> None:
-    status, body = ask_running(refusing_host().read_instances)
+def test_an_unreadable_host_answers_unavailable_with_the_real_error() -> None:
+    status, body = ask_running(lambda: refusing_host().read().instances)
     assert status == 503
     assert "Connection refused" in body["error"]
     assert "instances" not in body
@@ -121,14 +161,18 @@ def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_prox
     def no_request(web_address: str) -> str | None:
         raise AssertionError(f"Asked through the proxy for {web_address}, which it routes nowhere")
 
-    instance = RunningInstance(product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING)
+    instance = RunningInstance(
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING, networks=(LANE_NETWORK,)
+    )
     entry = web_addresses_answer([instance], {}, no_request)["testing.site.test"]
     assert (entry["product"], entry["lane"], entry["sends_to_container"], entry["answers"]) == ("site", "testing", None, False)
     assert "no instance" in entry["error"]
 
 
-def test_a_stopped_instance_receiving_visitors_leaves_its_web_address_not_answering_with_the_proxys_error() -> None:
-    instance = RunningInstance(product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED)
+def test_a_stopped_active_instance_leaves_its_web_address_not_answering() -> None:
+    instance = RunningInstance(
+        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, networks=(LANE_NETWORK,)
+    )
     routes = {"testing.site.test": instance.container}
     entry = web_addresses_answer([instance], routes, lambda _: "502 Bad Gateway")["testing.site.test"]
     assert (entry["sends_to_container"], entry["answers"], entry["error"]) == (instance.container, False, "502 Bad Gateway")

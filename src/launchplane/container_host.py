@@ -1,45 +1,69 @@
-import io
 import os
-import tarfile
-from collections.abc import Generator
-from contextlib import contextmanager
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import docker
-import requests
-from docker.errors import DockerException, ImageNotFound, NotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 from docker.models.containers import Container
 from docker.tls import TLSConfig
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from docker.types import EndpointConfig
 
-from launchplane.instance import InstanceState, LaneBuild, RunningInstance
+from launchplane.data_set import (
+    CLIENT_PASSWORD_VARIABLE,
+    DATA_PATH,
+    DATABASE_ADDRESS,
+    PASSWORD_PATH,
+    READY_COMMAND,
+    SERVER_ENVIRONMENT,
+    client_environment,
+)
+from launchplane.docker_answers import (
+    BUILD_LABEL,
+    DATA_SET_LABEL,
+    DOCKER_CONTAINER_DETAILS,
+    DOCKER_NETWORK,
+    DOCKER_SYSTEM_TIME,
+    GATEWAY_MODE_OPTION,
+    INSTANCE_LABEL,
+    LANE_LABEL,
+    PART_LABEL,
+    PRODUCT_LABEL,
+    QUIET_GATEWAY_MODE,
+    ContainerHostError,
+    HostAnswers,
+    OnHost,
+    Part,
+    TornRead,
+    attempting,
+    checked,
+    is_quiet,
+    job_names,
+    on_host_from_answers,
+    only_file_in,
+    read_whole,
+    running_for,
+    tar_of,
+)
+from launchplane.host_secrets import PASSWORD_FILE_LABEL, SECRET_VARIABLES_LABEL, HostSecrets
+from launchplane.instance import LANE_NETWORK, DataSet, DataSetUse, InstanceState, LaneBuild, job_container_of
 
-PRODUCT_LABEL = "launchplane.product"
-LANE_LABEL = "launchplane.lane"
-BUILD_LABEL = "launchplane.build"
-
+MARKED = {"label": PRODUCT_LABEL}
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
-LANE_NETWORK = "launchplane-lanes"
 RETIRE_GRACE_SECONDS = 30
 LOG_TAIL_LINES = 20
+DATABASE_DEADLINE_SECONDS = 60
+JOB_DEADLINE_MARGIN_SECONDS = 15
+POLL_SECONDS = 0.5
 
-type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
-
-INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
-    "created": InstanceState.STOPPED,
-    "running": InstanceState.RUNNING,
-    "paused": InstanceState.PAUSED,
-    "restarting": InstanceState.RESTARTING,
-    "removing": InstanceState.STOPPED,
-    "exited": InstanceState.STOPPED,
-    "dead": InstanceState.STOPPED,
-}
+type HasDatabase = Callable[[str], bool]
 
 
-class ContainerHostError(Exception):
+class PartStopped(Exception):
     pass
 
 
@@ -50,6 +74,7 @@ class Service:
     command: list[str]
     ports: dict[int, int]
     volumes: dict[str, str]
+    networks: list[str]
 
 
 @dataclass(frozen=True)
@@ -62,41 +87,72 @@ class CommandResult:
         return self.exit_code == 0
 
 
-class DockerContainerSummary(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
+@dataclass(frozen=True)
+class RunOptions:
+    image: str
+    container: str
+    labels: dict[str, str]
+    networks: dict[str, list[str]]
+    command: list[str] | None = None
+    environment: dict[str, str] = field(default_factory=dict[str, str])
+    volumes: dict[str, str] = field(default_factory=dict[str, str])
+    ports: dict[int, int] = field(default_factory=dict[int, int])
 
-    names: list[str] = Field(alias="Names", min_length=1)
-    state: DockerState = Field(alias="State")
-    labels: dict[str, str] = Field(alias="Labels")
+
+def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
+    return {network: EndpointConfig(DOCKER_API_VERSION, aliases=aliases or None) for network, aliases in networks.items()}
 
 
-DOCKER_CONTAINER_LIST = TypeAdapter(list[DockerContainerSummary])
+def data_set_labels(product: str, lane: str, data_set: str) -> dict[str, str]:
+    return {PRODUCT_LABEL: product, LANE_LABEL: lane, DATA_SET_LABEL: data_set}
 
 
-def instance_from(summary: DockerContainerSummary) -> RunningInstance:
-    if PRODUCT_LABEL not in summary.labels:
-        raise ContainerHostError(f"Docker listed {summary.names[0]} for the {PRODUCT_LABEL} filter, but it has no such label.")
-    return RunningInstance(
-        product=summary.labels[PRODUCT_LABEL],
-        lane=summary.labels.get(LANE_LABEL),
-        build=summary.labels.get(BUILD_LABEL),
-        container=summary.names[0].removeprefix("/"),
-        state=INSTANCE_STATE_FOR_DOCKER_STATE[summary.state],
+def database_options(product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> RunOptions:
+    return RunOptions(
+        image=image,
+        container=f"{product}-{lane}-database-{data_set}",
+        labels=data_set_labels(product, lane, data_set) | {PART_LABEL: "database", PASSWORD_FILE_LABEL: str(PASSWORD_PATH)},
+        networks={network: [DATABASE_ADDRESS]},
+        environment=SERVER_ENVIRONMENT,
+        volumes={volume: DATA_PATH},
     )
 
 
-def instances_from_answer(answer: object) -> list[RunningInstance]:
-    try:
-        summaries = DOCKER_CONTAINER_LIST.validate_python(answer)
-    except ValidationError as error:
-        raise ContainerHostError(f"Docker's container list did not have the expected shape, so nothing was read: {error}") from error
-    return [instance_from(summary) for summary in summaries]
+def part_options(target: LaneBuild, container: str, part: Part, networks: list[str], command: list[str] | None) -> RunOptions:
+    labels = {PRODUCT_LABEL: target.product, LANE_LABEL: target.lane, BUILD_LABEL: target.build, PART_LABEL: part}
+    return RunOptions(target.build, container, labels, {network: [] for network in networks}, command)
+
+
+def on_data_set(options: RunOptions, use: DataSetUse, password: str) -> RunOptions:
+    labels = options.labels | {DATA_SET_LABEL: use.data_set, SECRET_VARIABLES_LABEL: CLIENT_PASSWORD_VARIABLE}
+    return replace(options, labels=labels, environment=client_environment(password))
+
+
+def service_options(service: Service) -> RunOptions:
+    return RunOptions(
+        image=service.image,
+        container=service.container,
+        labels={},
+        networks={network: [] for network in service.networks},
+        command=service.command,
+        volumes=service.volumes,
+        ports=service.ports,
+    )
 
 
 class ContainerHost:
-    def __init__(self, client: docker.DockerClient, address: str) -> None:
+    def __init__(
+        self,
+        client: docker.DockerClient,
+        address: str,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.client = client
         self.address = address
+        self.sleep = sleep
+        self.clock = clock
+        self.secrets = HostSecrets(client, address)
 
     @classmethod
     def from_environment(cls) -> ContainerHost:
@@ -110,20 +166,64 @@ class ContainerHost:
         client = docker.DockerClient(base_url=address, tls=tls, version=DOCKER_API_VERSION, timeout=ANSWER_TIMEOUT_SECONDS)
         return cls(client, address)
 
-    def list_marked_containers(self) -> object:
-        return self.client.api.containers(all=True, filters={"label": PRODUCT_LABEL})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    def list_marked(self, kind: Literal["containers", "volumes"]) -> object:
+        if kind == "containers":
+            return self.client.api.containers(all=True, filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        return self.client.api.volumes(filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    @contextmanager
-    def attempting(self, action: str) -> Generator[None]:
+    def list_networks(self) -> object:
+        return self.client.api.networks()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+    def describe(self, container: str) -> object:
+        return self.client.api.inspect_container(container)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+    def system_information(self) -> object:
+        return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+    def read(self, has_database: HasDatabase | None = None) -> OnHost:
+        return read_whole(lambda: self.read_once(has_database), self.address)
+
+    def read_once(self, has_database: HasDatabase | None) -> OnHost:
+        with attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks", self.address):
+            containers, networks, volumes = self.list_marked("containers"), self.list_networks(), self.list_marked("volumes")
+            jobs = job_names(containers)
+            job_details = [self.describe_listed(job) for job in jobs]
+            system = self.system_information() if jobs else None
+        on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, job_details, system))
+        if has_database is None:
+            return on_host
+        return replace(
+            on_host, data_sets=[self.probed(found) if has_database(found.product) else found for found in on_host.data_sets]
+        )
+
+    # A refusal about one container Docker has just listed means the host changed during the read.
+    def describe_listed(self, container: str) -> object:
         try:
-            yield
-        except (DockerException, requests.RequestException, ValueError) as error:
-            raise ContainerHostError(f"{action} on {self.address} failed: {error}") from error
+            return self.describe(container)
+        except APIError as error:
+            raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
-    def read_instances(self) -> list[RunningInstance]:
-        with self.attempting(f"Listing the containers marked {PRODUCT_LABEL}"):
-            answer = self.list_marked_containers()
-        return instances_from_answer(answer)
+    def probed(self, found: DataSet) -> DataSet:
+        databases = tuple(
+            each.model_copy(update={"accepts_connections": self.accepts_connections(each.container)})
+            if each.state == InstanceState.RUNNING
+            else each
+            for each in found.databases
+        )
+        return found.model_copy(update={"databases": databases})
+
+    def accepts_connections(self, container: str) -> bool:
+        with attempting(f"Asking the database {container} whether it accepts connections", self.address):
+            try:
+                return self.command_result_in(container, READY_COMMAND).succeeded
+            except APIError as error:
+                raise TornRead(f"The database {container} was listed as running, and Docker refused to ask it: {error}") from error
+
+    def job_running_for(self, container: str) -> float | None:
+        with attempting(f"Reading how long the job {container} has run", self.address):
+            details = checked(DOCKER_CONTAINER_DETAILS, self.describe(container), f"description of {container}")
+            now = checked(DOCKER_SYSTEM_TIME, self.system_information(), "system information").system_time
+        return running_for(details, now)
 
     def find_container(self, container: str) -> Container | None:
         try:
@@ -137,79 +237,156 @@ class ContainerHost:
         except ImageNotFound:
             self.client.images.pull(image)
 
-    def ensure_lane_network(self) -> None:
-        try:
-            self.client.networks.get(LANE_NETWORK)
-        except NotFound:
-            self.client.networks.create(LANE_NETWORK, driver="bridge")
+    def create_network(self, name: str, labels: dict[str, str] | None, *, quiet: bool) -> None:
+        if quiet:
+            options = {GATEWAY_MODE_OPTION: QUIET_GATEWAY_MODE}
+            self.client.networks.create(name, driver="bridge", internal=True, options=options, labels=labels)
+        else:
+            self.client.networks.create(name, driver="bridge", labels=labels)
 
-    def start_instance(self, target: LaneBuild, container: str) -> None:
-        with self.attempting(f"Starting the instance {container} from build {target.build}"):
-            self.ensure_lane_network()
-            self.ensure_image(target.build)
-            self.client.containers.run(
-                target.build,
-                name=container,
-                detach=True,
-                labels={PRODUCT_LABEL: target.product, LANE_LABEL: target.lane, BUILD_LABEL: target.build},
-                network=LANE_NETWORK,
-                restart_policy={"Name": "always"},
+    def ensure_network(self, name: str, *, quiet: bool) -> None:
+        try:
+            found = self.client.networks.get(name)
+        except NotFound:
+            self.create_network(name, None, quiet=quiet)
+            return
+        if quiet and not is_quiet(checked(DOCKER_NETWORK, found.attrs, f"description of the network {name}")):
+            raise ContainerHostError(
+                f"The network {name} exists and is not quiet: it lets what is attached to it reach out. "
+                "Launchplane attaches nothing to it until it is removed and made again."
             )
 
+    def create(self, options: RunOptions) -> Container:
+        self.ensure_image(options.image)
+        return self.client.containers.create(
+            options.image,
+            options.command,
+            name=options.container,
+            labels=options.labels,
+            network=next(iter(options.networks)),
+            networking_config=endpoints(options.networks),
+            environment=options.environment,
+            volumes={volume: {"bind": path, "mode": "rw"} for volume, path in options.volumes.items()},
+            ports={f"{inside}/tcp": outside for inside, outside in options.ports.items()},
+            restart_policy={"Name": "always"},
+        )
+
+    def run_part(self, options: RunOptions, use: DataSetUse | None) -> None:
+        if LANE_NETWORK in options.networks:
+            self.ensure_network(LANE_NETWORK, quiet=True)
+        ready = options if use is None else on_data_set(options, use, self.secrets.password_of(use))
+        self.create(ready).start()
+
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
+        networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
+        with attempting(f"Starting the instance {container} from build {target.build}", self.address):
+            self.run_part(part_options(target, container, "web", networks, None), use)
+
+    def start_job(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
+        networks = [LANE_NETWORK] if use is None else [use.network]
+        options = part_options(target, job_container_of(instance), "job", networks, command)
+        with attempting(f"Starting the job of the instance {instance}", self.address):
+            self.run_part(replace(options, labels=options.labels | {INSTANCE_LABEL: instance}), use)
+
+    def await_job(self, container: str, steady_seconds: float) -> None:
+        started = self.clock()
+        while (ran := self.job_running_for(container)) is None or ran < steady_seconds:
+            if ran is None:
+                raise PartStopped(f"The job {container} is not running: it stopped before it had run {steady_seconds:g} s.")
+            if self.clock() - started >= steady_seconds + JOB_DEADLINE_MARGIN_SECONDS:
+                raise PartStopped(f"The job {container} did not stay up {steady_seconds:g} s in a row; it keeps starting again.")
+            self.sleep(POLL_SECONDS)
+
+    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
+        with attempting(f"Making the network of the data set {data_set}", self.address):
+            self.create_network(f"launchplane-data-{data_set}", data_set_labels(product, lane, data_set), quiet=True)
+
+    def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
+        with attempting(f"Making the volume of the data set {data_set}", self.address):
+            self.client.volumes.create(f"launchplane-data-{data_set}-database", labels=data_set_labels(product, lane, data_set))
+
+    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
+        with attempting(f"Making the database of the data set {data_set}", self.address):
+            made = self.create(database_options(product, lane, data_set, network, volume, image))
+            self.secrets.start_with_password(made)
+
+    def start_database(self, container: str) -> None:
+        with attempting(f"Starting the database {container}", self.address):
+            self.secrets.start_with_password(self.client.containers.get(container))
+
+    def await_database(self, container: str) -> None:
+        started = self.clock()
+        while not (result := self.run_in(container, READY_COMMAND)).succeeded:
+            if self.clock() - started >= DATABASE_DEADLINE_SECONDS:
+                raise ContainerHostError(
+                    f"The database {container} did not accept connections within {DATABASE_DEADLINE_SECONDS} s "
+                    f"of being asked: {result.output or 'no answer'}. Its last log lines:\n{self.read_log_tail(container)}"
+                )
+            self.sleep(POLL_SECONDS)
+
+    def delete_data_set(self, found: DataSet) -> None:
+        with attempting(f"Deleting the data set {found.data_set}", self.address):
+            for database in found.databases:
+                self.retire_container(database.container)
+            for volume in found.volumes:
+                with suppress(NotFound):
+                    self.client.volumes.get(volume).remove()
+            for network in found.networks:
+                with suppress(NotFound):
+                    self.client.networks.get(network.name).remove()
+
+    def retire_container(self, container: str) -> None:
+        found = self.find_container(container)
+        if found is not None:
+            found.stop(timeout=RETIRE_GRACE_SECONDS)
+            found.remove()
+
     def remove_instance(self, container: str) -> None:
-        with self.attempting(f"Removing the instance {container}"):
+        with attempting(f"Removing the instance {container}", self.address):
             found = self.find_container(container)
             if found is not None:
                 found.remove(force=True)
 
     def retire_instance(self, container: str) -> None:
-        with self.attempting(f"Stopping and removing the instance {container}"):
-            found = self.find_container(container)
-            if found is not None:
-                found.stop(timeout=RETIRE_GRACE_SECONDS)
-                found.remove()
+        with attempting(f"Stopping and removing {container}", self.address):
+            self.retire_container(container)
 
     def read_log_tail(self, container: str) -> str:
-        with self.attempting(f"Reading the log of {container}"):
+        with attempting(f"Reading the log of {container}", self.address):
             found = self.find_container(container)
             if found is None:
                 return ""
             return found.logs(tail=LOG_TAIL_LINES).decode(errors="replace")
 
     def ensure_service(self, service: Service) -> None:
-        with self.attempting(f"Starting the service {service.container}"):
+        with attempting(f"Starting the service {service.container}", self.address):
             found = self.find_container(service.container)
             if found is None:
-                self.ensure_lane_network()
-                self.ensure_image(service.image)
-                self.client.containers.run(
-                    service.image,
-                    service.command,
-                    name=service.container,
-                    detach=True,
-                    network=LANE_NETWORK,
-                    ports={f"{inside}/tcp": outside for inside, outside in service.ports.items()},
-                    volumes={volume: {"bind": path, "mode": "rw"} for volume, path in service.volumes.items()},
-                    restart_policy={"Name": "always"},
-                )
+                self.ensure_network(service.networks[0], quiet=False)
+                for network in service.networks[1:]:
+                    self.ensure_network(network, quiet=True)
+                self.create(service_options(service)).start()
             elif found.status != "running":
                 found.start()
 
     def is_running(self, container: str) -> bool:
-        with self.attempting(f"Reading the state of {container}"):
+        with attempting(f"Reading the state of {container}", self.address):
             found = self.find_container(container)
             return found is not None and found.status == "running"
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
-        with self.attempting(f"Running {command[0]} in {container}"):
-            result = self.client.containers.get(container).exec_run(command)
+        with attempting(f"Running {command[0]} in {container}", self.address):
+            return self.command_result_in(container, command)
+
+    def command_result_in(self, container: str, command: list[str]) -> CommandResult:
+        result = self.client.containers.get(container).exec_run(command)
         exit_code, output = result.exit_code, result.output
         if exit_code is None or not isinstance(output, bytes):
             raise ContainerHostError(f"Running {command[0]} in {container} on {self.address} returned before the command finished.")
         return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())
 
     def read_file(self, container: str, path: PurePosixPath) -> str | None:
-        with self.attempting(f"Reading {path} in {container}"):
+        with attempting(f"Reading {path} in {container}", self.address):
             found = self.client.containers.get(container)
             try:
                 chunks, _ = found.get_archive(str(path))
@@ -218,23 +395,5 @@ class ContainerHost:
             return only_file_in(b"".join(chunks)).decode()
 
     def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
-        with self.attempting(f"Placing {path} in {container}"):
+        with attempting(f"Placing {path} in {container}", self.address):
             self.client.containers.get(container).put_archive(str(path.parent), tar_of(path.name, content.encode()))  # pyright: ignore[reportUnknownMemberType]
-
-
-def tar_of(file_name: str, content: bytes) -> bytes:
-    archive = io.BytesIO()
-    with tarfile.open(fileobj=archive, mode="w") as tar:
-        member = tarfile.TarInfo(file_name)
-        member.size = len(content)
-        tar.addfile(member, io.BytesIO(content))
-    return archive.getvalue()
-
-
-def only_file_in(archive: bytes) -> bytes:
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        member = tar.next()
-        content = None if member is None else tar.extractfile(member)
-        if content is None:
-            raise ContainerHostError("Docker answered a file read with an archive that holds no file.")
-        return content.read()

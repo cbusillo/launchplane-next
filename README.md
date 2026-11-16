@@ -18,7 +18,8 @@ To start, people see two pages: the Client's accept page and one status page. Th
   - **Testing:** always up, so a Client who goes to test never finds it down. It is built from production's data, with private details removed and keys for outside services removed or replaced with testing keys.
   - **Preview:** a short-lived lane for one pull request. It is built from testing, with data cloned from testing, shared until something changes, and is paused when not in use.
 - **Web address:** what a person types to reach a lane, such as `testing.cellmechanic.com`. A lane has one. The proxy sends visits for it to one lane instance.
-- **Lane instance:** one running set of a lane: a build together with its own data. A lane normally has one. During a move it has two for a short time, the one visitors reach and the new one being prepared. Called an instance for short where the lane is clear. Making an instance's data from another's is cloning.
+- **Data set:** a lane's database server, its data and its files. A lane instance runs against one data set. A release that changes the data's structure makes a new data set by cloning. A release that does not keeps the same one.
+- **Lane instance:** a build running against one data set. A lane normally has one. During a release it has two for a short time. Called an instance for short where the lane is clear.
 - **Active:** the lane instance a web address currently sends visitors to.
 - **Live:** a product is Live when its Client uses production for real business. A Live site is the production lane of a Live product.
 - **Prelaunch:** a product whose production lane exists but whose Client does not yet run their business on it. Its production is not Live.
@@ -146,6 +147,6 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 
 ## What exists today
 
-- The test bed is two containers. The control container will run Launchplane. The scratch container is a plain Docker host for the pretend products. A fresh Dokploy is installed on the control container and is not used. Neither container is connected to anything real.
+- The test bed is two containers. The control container runs Launchplane as the systemd service `launchplane`. The scratch container is a plain Docker host for the pretend products. A fresh Dokploy is installed on the control container and is not used. Neither container is connected to anything real.
 - The pretend website and pretend Odoo product do not exist yet. Creating their repositories needs Chris.
 - An earlier build of an Odoo system usually cannot run on a database a later build has updated. Going back after a switch will often find it cannot, and then the choice is Chris's.

@@ -19,6 +19,7 @@ INSPECTOR_HOME = Path("/Volumes/Developer-Artifacts/host-caches/launchplane-pych
 PROFILE = REPOSITORY / "scripts" / "inspection-profile.xml"
 INSPECTED_FOLDERS = ("src", "tests", "scripts")
 ANALYZED_LINE_PREFIX = "Analyzing code in …/"
+AGGREGATE_REPORT_SUFFIX = "_aggregate.json"
 RESULTS_INDEX = ".descriptions.json"
 TYPESHED_STDLIB = INSPECTOR.parents[1] / "plugins" / "python-ce" / "helpers" / "typeshed" / "stdlib"
 DEFAULT_INTERPRETER_NAME = "launchplane inspection"
@@ -57,7 +58,7 @@ def read_findings(output: Path) -> list[Finding]:
         raise InspectionUnknownError(f"PyCharm wrote no results index to {output}, so the inspection did not finish.")
     findings: list[Finding] = []
     for report in sorted(output.glob("*.json")):
-        if report.name == RESULTS_INDEX:
+        if report.name == RESULTS_INDEX or report.name.endswith(AGGREGATE_REPORT_SUFFIX):
             continue
         findings.extend(
             Finding(

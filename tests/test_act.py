@@ -1,44 +1,171 @@
+import threading
 from collections.abc import Callable
 
 import pytest
 
 from launchplane.act import MOST_STEPS, Lanes, Stopped
-from launchplane.decide import LaneRoute, LoadedRoute, Outcome, ProxyNotRunning, RetireOutcome, RouteStatus
-from launchplane.instance import InstanceState, LaneBuild, RunningInstance
+from launchplane.container_host import HasDatabase, PartStopped
+from launchplane.docker_answers import OnHost
+from launchplane.instance import (
+    LANE_NETWORK,
+    DataSet,
+    DataSetDatabase,
+    DataSetUse,
+    HostNetwork,
+    InstanceState,
+    LaneBuild,
+    LaneRoute,
+    LoadedRoute,
+    Mount,
+    ProxyNotRunning,
+    RouteStatus,
+    RunningInstance,
+    RunningJob,
+    job_container_of,
+)
+from launchplane.judge import lane_problems
+from launchplane.product import Database, Job, Product, ProductError
 from launchplane.proxy import CheckFailed
+from launchplane.steps import FreshNames, Outcome, RetireOutcome
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 BUILD_B = LaneBuild(product="site", lane="testing", build="site:b")
 WEB_ADDRESS = "testing.site.test"
+WITH_DATA = Product(health_path="/health", database=Database(image="postgres:18"), job=Job(command=["job"]))
+
+
+class Killed(Exception):
+    pass
 
 
 class FakeHost:
     def __init__(self) -> None:
         self.instances: dict[str, RunningInstance] = {}
+        self.jobs: dict[str, RunningJob] = {}
+        self.data_sets: dict[str, DataSet] = {}
+        self.networks: dict[str, bool] = {LANE_NETWORK: True}
+        self.ready_databases: set[str] = set()
         self.actions: list[str] = []
+        self.most_jobs_running = 0
+        self.killed_after: int | None = None
+        self.jobs_that_stop: set[str] = set()
 
-    def place(self, target: LaneBuild, container: str, state: InstanceState = InstanceState.RUNNING) -> None:
+    def record(self, action: str) -> None:
+        self.actions.append(action)
+        if len(self.actions) == self.killed_after:
+            raise Killed(f"killed after {action}")
+
+    def place(
+        self, target: LaneBuild, container: str, state: InstanceState = InstanceState.RUNNING, use: DataSetUse | None = None
+    ) -> None:
         self.instances[container] = RunningInstance(
-            product=target.product, lane=target.lane, build=target.build, container=container, state=state
+            product=target.product,
+            lane=target.lane,
+            build=target.build,
+            container=container,
+            state=state,
+            networks=(LANE_NETWORK,) if use is None else (LANE_NETWORK, use.network),
+            data_set=None if use is None else use.data_set,
         )
 
-    def read_instances(self) -> list[RunningInstance]:
-        return list(self.instances.values())
+    def attach(self, container: str, network: str, *, quiet: bool) -> None:
+        self.networks[network] = quiet
+        found = self.instances[container]
+        self.instances[container] = found.model_copy(update={"networks": (*found.networks, network)})
 
-    def start_instance(self, target: LaneBuild, container: str) -> None:
-        self.place(target, container)
-        self.actions.append(f"start {container}")
+    def read(self, has_database: HasDatabase | None = None) -> OnHost:
+        networks = [HostNetwork(name=name, is_quiet=quiet) for name, quiet in self.networks.items()]
+        data_sets = [
+            self.asked(found) if has_database is not None and has_database(found.product) else found
+            for found in self.data_sets.values()
+        ]
+        return OnHost(list(self.instances.values()), list(self.jobs.values()), data_sets, networks)
+
+    def asked(self, found: DataSet) -> DataSet:
+        databases = tuple(
+            each.model_copy(update={"accepts_connections": each.container in self.ready_databases}) for each in found.databases
+        )
+        return found.model_copy(update={"databases": databases})
+
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
+        self.place(target, container, use=use)
+        self.record(f"start {container}")
+
+    def start_job(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
+        container = job_container_of(instance)
+        self.jobs[container] = RunningJob(
+            product=target.product,
+            lane=target.lane,
+            build=target.build,
+            container=container,
+            state=InstanceState.RUNNING,
+            networks=(LANE_NETWORK,) if use is None else (use.network,),
+            running_for_seconds=0.0,
+            instance=instance,
+            data_set=None if use is None else use.data_set,
+        )
+        self.most_jobs_running = max(self.most_jobs_running, len(self.jobs))
+        self.record(f"start job {instance} on {None if use is None else use.network} with {' '.join(command)}")
+
+    def await_job(self, container: str, steady_seconds: float) -> None:
+        self.record(f"await job {container}")
+        if self.jobs[container].build in self.jobs_that_stop:
+            self.jobs[container] = self.jobs[container].model_copy(
+                update={"state": InstanceState.RESTARTING, "running_for_seconds": None}
+            )
+            raise PartStopped(f"The job {container} is not running: it stopped before it had run {steady_seconds:g} s.")
+        self.jobs[container] = self.jobs[container].model_copy(update={"running_for_seconds": steady_seconds})
+
+    def change_data_set(self, product: str, lane: str, data_set: str, **parts: object) -> None:
+        found = self.data_sets.get(data_set) or DataSet(
+            product=product, lane=lane, data_set=data_set, networks=(), volumes=(), databases=()
+        )
+        self.data_sets[data_set] = found.model_copy(update=parts)
+
+    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
+        self.networks[f"network-{data_set}"] = True
+        self.change_data_set(product, lane, data_set, networks=(HostNetwork(name=f"network-{data_set}", is_quiet=True),))
+        self.record(f"network {data_set}")
+
+    def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
+        self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",))
+        self.record(f"volume {data_set}")
+
+    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
+        database = DataSetDatabase(
+            container=f"database-{data_set}",
+            state=InstanceState.RUNNING,
+            networks=(network,),
+            mounts=(Mount(source=volume, path="/var/lib/postgresql"),),
+        )
+        self.change_data_set(product, lane, data_set, databases=(database,))
+        self.record(f"database {data_set} on {network} and {volume} from {image}")
+
+    def start_database(self, container: str) -> None:
+        self.record(f"start database {container}")
+
+    def await_database(self, container: str) -> None:
+        self.ready_databases.add(container)
+        self.record(f"await {container}")
+
+    def delete_data_set(self, found: DataSet) -> None:
+        del self.data_sets[found.data_set]
+        self.record(f"delete {found.data_set}")
 
     def remove_instance(self, container: str) -> None:
         del self.instances[container]
-        self.actions.append(f"remove {container}")
+        self.record(f"remove {container}")
 
     def retire_instance(self, container: str) -> None:
-        del self.instances[container]
-        self.actions.append(f"retire {container}")
+        if container in self.jobs:
+            del self.jobs[container]
+        else:
+            del self.instances[container]
+        self.record(f"retire {container}")
 
     def read_log_tail(self, container: str) -> str:
-        return f"{self.instances[container].build} listening on :5678"
+        part = self.jobs.get(container) or self.instances[container]
+        return f"{part.build} listening on :5678"
 
 
 class FakeProxy:
@@ -50,10 +177,11 @@ class FakeProxy:
         self.written: dict[str, str] = {}
         self.failing: set[str] = set()
         self.while_awaiting: Callable[[], None] = lambda: None
+        self.while_checking: Callable[[str], None] = lambda _container: None
 
     def start(self) -> None:
         self.running = self.starts
-        self.host.actions.append("start proxy")
+        self.host.record("start proxy")
 
     def read_lane_route(self, web_address: str) -> ProxyNotRunning | LaneRoute:
         if not self.running:
@@ -69,39 +197,40 @@ class FakeProxy:
 
     def write_route(self, web_address: str, container: str) -> None:
         self.written[web_address] = container
-        self.host.actions.append(f"route {container}")
+        self.host.record(f"route {container}")
 
     def remove_route(self, web_address: str) -> None:
         del self.written[web_address]
-        self.host.actions.append("unroute")
+        self.host.record("unroute")
 
-    def check_instance(self, container: str) -> None:
-        self.host.actions.append(f"check {container}")
+    def check_instance(self, container: str, health_path: str) -> None:
+        self.host.record(f"check {container}{health_path}")
+        self.while_checking(container)
         if container in self.failing:
             raise CheckFailed("Connection refused")
 
 
-def numbered_containers() -> Callable[[LaneBuild], str]:
+def numbered_names() -> Callable[[LaneBuild], FreshNames]:
     numbers = iter(range(1000))
-    return lambda target: f"{target.product}-{target.lane}-{next(numbers)}"
+    return lambda target: FreshNames(f"{target.product}-{target.lane}-{next(numbers)}", f"data-{next(numbers)}")
 
 
 def lanes_serving(build: LaneBuild, container: str) -> tuple[Lanes, FakeProxy]:
     proxy = FakeProxy(FakeHost())
     proxy.host.place(build, container)
     proxy.loaded[WEB_ADDRESS] = proxy.written[WEB_ADDRESS] = container
-    return Lanes(proxy.host, proxy, name_container=numbered_containers()), proxy
+    return Lanes(proxy.host, proxy, name_fresh=numbered_names()), proxy
 
 
 def test_a_move_reads_again_after_each_step_and_switches_in_order() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
     result = lanes.move(BUILD_B)
     new = result.container_receiving_visitors
-    assert proxy.host.actions == [f"start {new}", f"check {new}", f"route {new}", "retire a"]
+    assert proxy.host.actions == [f"start {new}", f"check {new}/", f"route {new}", "retire a"]
     assert (result.outcome, list(proxy.host.instances)) == (Outcome.SWITCHED, [new])
 
 
-def test_an_instance_that_stops_while_its_route_is_awaited_is_replaced_not_kept_receiving_visitors() -> None:
+def test_an_instance_that_stops_while_its_route_is_awaited_is_replaced() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
     proxy.host.place(BUILD_B, "b")
     proxy.written[WEB_ADDRESS] = "b"
@@ -122,13 +251,13 @@ def test_a_failed_check_is_answered_as_check_failed_with_the_log_and_the_instanc
     assert result.error is not None
     assert "Connection refused" in result.error
     assert "site:b listening on :5678" in result.error
-    assert proxy.host.actions == ["start site-testing-0", "check site-testing-0", "remove site-testing-0"]
+    assert proxy.host.actions == ["start site-testing-0", "check site-testing-0/", "remove site-testing-0"]
     assert proxy.written == {WEB_ADDRESS: "a"}
 
 
 def test_the_first_move_starts_the_proxy_then_moves() -> None:
     proxy = FakeProxy(FakeHost(), running=False)
-    result = Lanes(proxy.host, proxy, name_container=numbered_containers()).move(BUILD_B)
+    result = Lanes(proxy.host, proxy, name_fresh=numbered_names()).move(BUILD_B)
     assert proxy.host.actions[0] == "start proxy"
     assert result.outcome == Outcome.SWITCHED
 
@@ -162,3 +291,198 @@ def test_a_move_whose_loaded_route_is_disabled_stops_with_why_and_changes_nothin
     with pytest.raises(Stopped, match="reports it disabled"):
         lanes.move(BUILD_B)
     assert proxy.host.actions == []
+
+
+def lanes_on(proxy: FakeProxy) -> Lanes:
+    return Lanes(proxy.host, proxy, read_product=lambda _product: WITH_DATA, name_fresh=numbered_names())
+
+
+def lane_brought_up_with_a() -> FakeProxy:
+    proxy = FakeProxy(FakeHost())
+    lanes_on(proxy).move(BUILD_A)
+    proxy.host.actions.clear()
+    return proxy
+
+
+def lane_end_state(proxy: FakeProxy, target: LaneBuild) -> tuple[list[str | None], list[str | None], list[str]]:
+    host = proxy.host
+    routed = host.instances[proxy.written[WEB_ADDRESS]]
+    assert lane_problems(lanes_on(proxy).read("site", "testing", has_database=True), target, WITH_DATA) == []
+    return [instance.build for instance in host.instances.values()], [routed.data_set], list(host.data_sets)
+
+
+def test_a_lane_with_data_is_brought_up_data_set_first_and_job_last() -> None:
+    proxy = FakeProxy(FakeHost())
+    result = lanes_on(proxy).move(BUILD_A)
+    new = proxy.written[WEB_ADDRESS]
+    assert (result.outcome, result.data_set) == (Outcome.SWITCHED, "data-1")
+    assert proxy.host.actions == [
+        "network data-1",
+        "volume data-1",
+        "database data-1 on network-data-1 and volume-data-1 from postgres:18",
+        "await database-data-1",
+        f"start {new}",
+        f"check {new}/health",
+        f"route {new}",
+        f"start job {new} on network-data-1 with job",
+        f"await job {job_container_of(new)}",
+    ]
+
+
+def test_a_release_keeps_the_data_set_and_stops_the_old_job_before_the_new_one_starts() -> None:
+    proxy = lane_brought_up_with_a()
+    old = proxy.written[WEB_ADDRESS]
+    result = lanes_on(proxy).move(BUILD_B)
+    new = proxy.written[WEB_ADDRESS]
+    assert proxy.host.actions == [
+        f"start {new}",
+        f"check {new}/health",
+        f"route {new}",
+        f"retire {job_container_of(old)}",
+        f"start job {new} on network-data-1 with job",
+        f"await job {job_container_of(new)}",
+        f"retire {old}",
+    ]
+    assert result.data_set == "data-1"
+    assert proxy.host.most_jobs_running == 1
+
+
+def uninterrupted_steps(proxy: FakeProxy, target: LaneBuild) -> int:
+    lanes_on(proxy).move(target)
+    return len(proxy.host.actions)
+
+
+def test_a_bring_up_killed_after_any_step_reaches_the_same_end_when_asked_again() -> None:
+    for killed_after in range(1, uninterrupted_steps(FakeProxy(FakeHost()), BUILD_A)):
+        proxy = FakeProxy(FakeHost())
+        proxy.host.killed_after = killed_after
+        with pytest.raises(Killed):
+            lanes_on(proxy).move(BUILD_A)
+        proxy.host.killed_after = None
+        lanes_on(proxy).move(BUILD_A)
+        assert lane_end_state(proxy, BUILD_A) == (["site:a"], ["data-1"], ["data-1"]), proxy.host.actions
+
+
+def test_a_release_killed_after_any_step_reaches_the_same_end_on_the_same_data() -> None:
+    for killed_after in range(1, uninterrupted_steps(lane_brought_up_with_a(), BUILD_B)):
+        proxy = lane_brought_up_with_a()
+        proxy.host.killed_after = killed_after
+        with pytest.raises(Killed):
+            lanes_on(proxy).move(BUILD_B)
+        proxy.host.killed_after = None
+        lanes_on(proxy).move(BUILD_B)
+        assert lane_end_state(proxy, BUILD_B) == (["site:b"], ["data-1"], ["data-1"]), proxy.host.actions
+        assert proxy.host.most_jobs_running == 1
+
+
+def test_retiring_a_lane_with_data_stops_its_job_first_and_keeps_the_data_set_unless_named() -> None:
+    proxy = lane_brought_up_with_a()
+    instance = proxy.written[WEB_ADDRESS]
+    kept = lanes_on(proxy).retire("site", "testing")
+    assert proxy.host.actions == ["unroute", f"retire {job_container_of(instance)}", f"retire {instance}"]
+    assert (kept.deleted_data_set, kept.kept_data_sets) == (None, ["data-1"])
+    deleted = lanes_on(proxy).retire("site", "testing", delete_data_set="data-1")
+    assert (deleted.outcome, deleted.deleted_data_set, deleted.kept_data_sets) == (RetireOutcome.RETIRED, "data-1", [])
+
+
+def test_naming_a_data_set_of_another_lane_deletes_nothing() -> None:
+    proxy = lane_brought_up_with_a()
+    result = lanes_on(proxy).retire("site", "other", delete_data_set="data-1")
+    assert (result.outcome, result.deleted_data_set) == (RetireOutcome.UNCHANGED, None)
+    assert list(proxy.host.data_sets) == ["data-1"]
+
+
+def test_a_retry_after_a_crash_before_the_job_was_watched_watches_it() -> None:
+    proxy = lane_brought_up_with_a()
+    job = next(iter(proxy.host.jobs))
+    proxy.host.jobs[job] = proxy.host.jobs[job].model_copy(update={"running_for_seconds": 0.5})
+    result = lanes_on(proxy).move(BUILD_A)
+    assert proxy.host.actions == [f"await job {job}"]
+    assert result.outcome == Outcome.UNCHANGED
+
+
+def test_a_retire_asked_during_a_move_waits_for_it() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    checking, checked = threading.Event(), threading.Event()
+
+    def hold_the_check(_container: str) -> None:
+        checking.set()
+        assert checked.wait(timeout=5)
+
+    proxy.while_checking = hold_the_check
+    move = threading.Thread(target=lanes.move, args=(BUILD_B,))
+    retire = threading.Thread(target=lanes.retire, args=("site", "testing"))
+    move.start()
+    assert checking.wait(timeout=5)
+    retire.start()
+    retire.join(timeout=0.3)
+    done_while_the_move_was_held = list(proxy.host.actions)
+    checked.set()
+    move.join(timeout=5)
+    retire.join(timeout=5)
+    assert [action.split()[0] for action in done_while_the_move_was_held] == ["start", "check"]
+    assert proxy.host.actions[-2:] == ["unroute", f"retire {proxy.host.actions[0].split()[1]}"]
+
+
+def test_every_lane_is_judged_for_the_page_even_one_whose_description_cannot_be_read() -> None:
+    proxy = lane_brought_up_with_a()
+    serving = proxy.written[WEB_ADDRESS]
+    proxy.host.place(LaneBuild(product="broken", lane="testing", build="broken:a"), "broken-1")
+    proxy.host.attach(serving, "bridge", quiet=False)
+
+    def read_product(product: str) -> Product:
+        if product == "broken":
+            raise ProductError("The description of broken is not one Launchplane reads.")
+        return WITH_DATA
+
+    judged = Lanes(proxy.host, proxy, read_product=read_product).read_judged({WEB_ADDRESS: serving})
+    verdicts = {(verdict.product, verdict.lane): verdict.problems for verdict in judged.lanes}
+    assert verdicts[("broken", "testing")] == ["The description of broken is not one Launchplane reads."]
+    assert verdicts[("site", "testing")] == [
+        f"The instance {serving} is attached to bridge, which it must not be",
+        f"The instance {serving} can reach out through bridge",
+    ]
+
+
+def test_a_lane_as_it_must_be_is_judged_for_the_page_with_its_database_asked() -> None:
+    proxy = lane_brought_up_with_a()
+    judged = lanes_on(proxy).read_judged({WEB_ADDRESS: proxy.written[WEB_ADDRESS]})
+    assert [verdict.problems for verdict in judged.lanes] == [[]]
+
+
+def test_only_the_lane_being_moved_is_said_to_be_moving_and_only_meanwhile() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    proxy.host.place(LaneBuild(product="site", lane="other", build="site:a"), "other-1")
+    moving_during_the_check: list[dict[str, bool]] = []
+
+    def judge_now(_container: str) -> None:
+        judged = lanes.read_judged({WEB_ADDRESS: "a"})
+        moving_during_the_check.append({verdict.lane: verdict.a_move_is_at_work for verdict in judged.lanes})
+
+    proxy.while_checking = judge_now
+    lanes.move(BUILD_B)
+    after = {verdict.lane: verdict.a_move_is_at_work for verdict in lanes.read_judged(dict(proxy.written)).lanes}
+    assert moving_during_the_check == [{"other": False, "testing": True}]
+    assert after == {"other": False, "testing": False}
+
+
+def test_a_move_that_stops_with_an_error_no_longer_counts_as_at_work_on_its_lane() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    proxy.read_lane_route = lambda web_address: LaneRoute(LoadedRoute("a", RouteStatus.DISABLED), "a")
+    with pytest.raises(Stopped):
+        lanes.move(BUILD_B)
+    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged({WEB_ADDRESS: "a"}).lanes] == [False]
+
+
+def test_a_move_that_ends_during_a_read_is_still_at_work_on_what_was_read() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    read_as_before = proxy.host.read
+
+    def read_while_the_move_ends(has_database: HasDatabase | None = None) -> OnHost:
+        on_host = read_as_before(has_database)
+        lanes.lane_being_moved = None
+        return on_host
+
+    lanes.lane_being_moved = ("site", "testing")
+    proxy.host.read = read_while_the_move_ends
+    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged({WEB_ADDRESS: "a"}).lanes] == [True]

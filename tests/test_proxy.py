@@ -4,17 +4,15 @@ from pathlib import PurePosixPath
 import pytest
 
 from launchplane.container_host import CommandResult, Service
-from launchplane.decide import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
+from launchplane.instance import LaneRoute, LoadedRoute, ProxyNotRunning, RouteStatus
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
-    ROUTES_FOLDER,
     CheckFailed,
     ProxyError,
     TraefikProxy,
     route_file_of,
     route_text,
-    staged_route_file_of,
 )
 
 WEB_ADDRESS = "testing.site.test"
@@ -43,6 +41,7 @@ class ProxyHost:
         self.loads_on_write = True
         self.reads_answer = True
         self.log = "error while building configuration"
+        self.refused_commands: set[str] = set()
 
     def load(self) -> None:
         self.loaded = loaded_from(self.files)
@@ -55,6 +54,8 @@ class ProxyHost:
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
         assert container == PROXY_NAME
+        if command[0] in self.refused_commands:
+            return CommandResult(exit_code=1, output=f"{command[0]}: Read-only file system")
         if command[0] == "mv":
             self.files[PurePosixPath(command[2])] = self.files.pop(PurePosixPath(command[1]))
         elif command[0] == "rm":
@@ -170,9 +171,16 @@ def test_writing_a_route_changes_only_that_lanes_file() -> None:
     assert host.files == {route_file_of(OTHER): other_file}
 
 
-def test_a_route_is_written_beside_its_file_then_renamed_into_place_so_no_half_file_is_read() -> None:
-    assert staged_route_file_of(WEB_ADDRESS).parent == ROUTES_FOLDER
-    assert staged_route_file_of(WEB_ADDRESS).suffix not in {".yml", ".yaml", ".toml"}
+@pytest.mark.parametrize("command", ["mv", "rm"])
+def test_a_routes_file_command_that_fails_is_an_error_with_why_not_a_route_taken_as_changed(command: str) -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1"})
+    host.refused_commands.add(command)
+    proxy = TraefikProxy(host)
+    with pytest.raises(ProxyError, match="Read-only file system"):
+        if command == "mv":
+            proxy.write_route(WEB_ADDRESS, "site-t2")
+        else:
+            proxy.remove_route(WEB_ADDRESS)
 
 
 def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
@@ -198,11 +206,11 @@ def test_a_route_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> 
 
 def test_an_instance_must_answer_steadily_so_one_answer_between_failures_does_not_pass() -> None:
     host = ProxyHost({}, answers=[True, False, True, True, True])
-    ticking(host, steady_seconds=2, check_deadline_seconds=100).check_instance("site-t2")
+    ticking(host, steady_seconds=2, check_deadline_seconds=100).check_instance("site-t2", "/")
     assert next(host.answers, None) is None
 
 
 def test_an_instance_that_never_answers_fails_its_check_with_the_proxys_error() -> None:
     host = ProxyHost({}, answers=[False] * 10)
     with pytest.raises(CheckFailed, match="Connection refused"):
-        ticking(host, steady_seconds=2, check_deadline_seconds=3).check_instance("site-t2")
+        ticking(host, steady_seconds=2, check_deadline_seconds=3).check_instance("site-t2", "/")
