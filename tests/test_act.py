@@ -573,7 +573,7 @@ def test_ending_maintenance_on_a_lane_that_is_not_in_it_answers_from_the_mark_al
     proxy = lane_brought_up_with_a()
 
     def unreadable(has_database: HasDatabase | None = None) -> OnHost:
-        raise ContainerHostError("Listing the containers on test failed: timed out")
+        raise ContainerHostError(f"Listing the containers on test failed: timed out, asked with {has_database}")
 
     def no_description(product: str) -> Product:
         raise ProductError(f"The description of {product} is not one Launchplane reads.")
@@ -646,7 +646,7 @@ def killed_then_asked_again(start: Callable[[], FakeProxy], call: Callable[[Lane
         call(lanes_on(proxy))
     proxy.host.killed_after = None
     call(lanes_on(proxy))
-    # The proxy loads a routes file in its own time, whether or not a call waits for it.
+    # The proxy loads a routes file in its own time, even when no call waits for it.
     proxy.loaded = dict(proxy.written)
     return state_of(proxy)
 

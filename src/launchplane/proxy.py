@@ -187,16 +187,14 @@ class TraefikProxy:
         return loaded_routes_from_answer(result.output)
 
     def read_written(self) -> dict[str, WrittenRoute]:
-        files = self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
-        return {
-            name.removesuffix(ROUTE_FILE_SUFFIX): WrittenRoute(
-                written_route_from_file(file.text, name.removesuffix(ROUTE_FILE_SUFFIX)), file.changed_at
-            )
-            for name, file in files.items()
-            if name.endswith(ROUTE_FILE_SUFFIX)
-        }
+        written: dict[str, WrittenRoute] = {}
+        for name, file in self.host.read_folder(PROXY_NAME, ROUTES_FOLDER).items():
+            if name.endswith(ROUTE_FILE_SUFFIX):
+                web_address = name.removesuffix(ROUTE_FILE_SUFFIX)
+                written[web_address] = WrittenRoute(written_route_from_file(file.text, web_address), file.changed_at)
+        return written
 
-    # The route files are read from the proxy's container whether or not it runs; what it has loaded only while it runs.
+    # The route files are read from the proxy's container even while it is stopped; what it has loaded only while it runs.
     def read(self) -> ProxySeen:
         runs = self.host.is_running(PROXY_NAME)
         return ProxySeen(
