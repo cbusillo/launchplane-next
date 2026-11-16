@@ -482,3 +482,41 @@ def test_a_lane_as_it_must_be_is_given_to_the_page_with_no_problems_its_database
     proxy = lane_brought_up_with_a()
     judged = lanes_on(proxy).read_judged({WEB_ADDRESS: proxy.written[WEB_ADDRESS]})
     assert [verdict.problems for verdict in judged.lanes] == [[]]
+
+
+def test_a_lane_is_said_to_be_moving_only_while_this_launchplane_is_moving_it_and_no_other_lane_is() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    proxy.host.place(LaneBuild(product="site", lane="other", build="site:a"), "other-1")
+    moving_during_the_check: list[dict[str, bool]] = []
+
+    def judge_now(_container: str) -> None:
+        judged = lanes.read_judged({WEB_ADDRESS: "a"})
+        moving_during_the_check.append({verdict.lane: verdict.a_move_is_at_work for verdict in judged.lanes})
+
+    proxy.while_checking = judge_now
+    lanes.move(BUILD_B)
+    after = {verdict.lane: verdict.a_move_is_at_work for verdict in lanes.read_judged(dict(proxy.written)).lanes}
+    assert moving_during_the_check == [{"other": False, "testing": True}]
+    assert after == {"other": False, "testing": False}
+
+
+def test_a_move_that_stops_with_an_error_no_longer_counts_as_at_work_on_its_lane() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    proxy.read_lane_route = lambda web_address: LaneRoute(LoadedRoute("a", RouteStatus.DISABLED), "a")
+    with pytest.raises(Stopped):
+        lanes.move(BUILD_B)
+    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged({WEB_ADDRESS: "a"}).lanes] == [False]
+
+
+def test_a_move_that_ends_while_the_host_is_being_read_is_still_at_work_on_what_that_read_saw() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    read_as_before = proxy.host.read
+
+    def read_while_the_move_ends(probing: ServerOfProduct | None = None) -> OnHost:
+        on_host = read_as_before(probing)
+        lanes.lane_being_moved = None
+        return on_host
+
+    lanes.lane_being_moved = ("site", "testing")
+    proxy.host.read = read_while_the_move_ends
+    assert [verdict.a_move_is_at_work for verdict in lanes.read_judged({WEB_ADDRESS: "a"}).lanes] == [True]

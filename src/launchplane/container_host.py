@@ -107,7 +107,6 @@ class OnHost:
     jobs: list[RunningJob]
     data_sets: list[DataSet]
     networks: list[HostNetwork] = field(default_factory=list[HostNetwork])
-    host_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +161,6 @@ class DockerContainerSummary(BaseModel):
     labels: dict[str, str] = Field(alias="Labels")
     network_settings: DockerAttachedNetworks = Field(alias="NetworkSettings")
     mounts: list[DockerMount] = Field(alias="Mounts")
-    created: AwareDatetime = Field(alias="Created")
 
     @property
     def name(self) -> str:
@@ -286,7 +284,6 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
         mounts=mounts_of(summary),
-        made_at=summary.created,
     )
 
 
@@ -310,7 +307,6 @@ def job_from(summary: DockerContainerSummary, details: Mapping[str, DockerContai
         instance=summary.labels.get(INSTANCE_LABEL),
         mounts=mounts_of(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
-        made_at=summary.created,
     )
 
 
@@ -338,7 +334,6 @@ def database_part(summary: DockerContainerSummary) -> DataSetDatabase:
         state=state_of(summary),
         networks=attached_networks(summary),
         mounts=mounts_of(summary),
-        made_at=summary.created,
     )
 
 
@@ -391,13 +386,15 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
     by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "job": [], "database": []}
     for summary in summaries:
         by_part[part_of(summary)].append(summary)
-    now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
-    details = job_details_by_name(answers.job_details)
+    jobs: list[RunningJob] = []
+    if by_part["job"]:
+        now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
+        details = job_details_by_name(answers.job_details)
+        jobs = [job_from(summary, details, now) for summary in by_part["job"]]
     return OnHost(
         instances=[instance_from(summary) for summary in by_part["web"]],
-        jobs=[job_from(summary, details, now) for summary in by_part["job"]],
+        jobs=jobs,
         data_sets=data_sets_from(by_part["database"], marked_networks, volume_list),
-        host_time=now,
         networks=[network_from(network) for network in every_network],
     )
 
@@ -587,7 +584,7 @@ class ContainerHost:
             containers, networks, volumes = self.list_marked_containers(), self.list_networks(), self.list_marked_volumes()
             jobs = job_names(containers)
             job_details = [self.describe_listed(job) for job in jobs]
-            system = self.system_information()
+            system = self.system_information() if jobs else None
         on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, job_details, system))
         return on_host if probing is None else self.probed(on_host, probing)
 

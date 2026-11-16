@@ -1,7 +1,6 @@
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -21,7 +20,6 @@ from launchplane.product import Database, Product
 
 LANE_DOMAIN = "test"
 JOB_STEADY_SECONDS = 3.0
-MOVE_MOST_SECONDS = 180
 
 
 class Outcome(StrEnum):
@@ -89,7 +87,6 @@ class LaneSeen:
     jobs: tuple[RunningJob, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
-    host_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -137,7 +134,7 @@ class Finding:
 class Verdict:
     problems: list[str]
     release_under_way: list[str]
-    seconds_since_anything_was_made: float | None
+    left_unfinished: list[str]
 
 
 @dataclass(frozen=True)
@@ -387,14 +384,21 @@ def mounts_of_a_database(found: DataSet, described_as: Database | None) -> tuple
     return tuple(Mount(source=volume, path=postgres_server(described_as).data_path) for volume in found.volumes)
 
 
+def database_connection_problems(
+    found: DataSet, database: DataSetDatabase, seen: LaneSeen, described_as: Database | None
+) -> list[str]:
+    part = f"The database {database.container}"
+    return [
+        *attachment_problems(part, database.networks, network_names(found), seen),
+        *mount_problems(part, database.mounts, mounts_of_a_database(found, described_as)),
+    ]
+
+
 def database_problems(
     found: DataSet, database: DataSetDatabase, seen: LaneSeen, described_as: Database | None
 ) -> list[DataSetProblem]:
     part = f"The database {database.container}"
-    connected = [
-        *attachment_problems(part, database.networks, network_names(found), seen),
-        *mount_problems(part, database.mounts, mounts_of_a_database(found, described_as)),
-    ]
+    connected = database_connection_problems(found, database, seen, described_as)
     if database.state == InstanceState.STOPPED:
         state = [DataSetProblem(f"{part} is {database.state}", a_step_puts_right=True)]
     elif database.state != InstanceState.RUNNING:
@@ -527,27 +531,43 @@ def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
     return [*lane_findings(seen, running, product), *of_other_data_sets]
 
 
-def seconds_since_anything_was_made(seen: LaneSeen) -> float | None:
-    databases = [database for found in seen.data_sets for database in found.databases]
-    made = [part.made_at for part in (*seen.instances, *seen.jobs, *databases) if part.made_at is not None]
-    if seen.host_time is None or not made:
-        return None
-    return (seen.host_time - max(made)).total_seconds()
+def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
+    instances = {instance.container: instance for instance in seen.instances}
+    of_instances = [
+        problem
+        for instance in seen.instances
+        for problem in [
+            *attachment_problems(
+                f"The instance {instance.container}",
+                instance.networks,
+                {LANE_NETWORK} | network_names(data_set_of(seen, instance.data_set)),
+                seen,
+            ),
+            *mount_problems(f"The instance {instance.container}", instance.mounts, ()),
+        ]
+    ]
+    of_jobs = [
+        problem
+        for job in seen.jobs
+        if job.instance in instances
+        for problem in job_connection_problems(job, instances[job.instance], seen)
+    ]
+    of_databases = [
+        problem
+        for found in seen.data_sets
+        for database in found.databases
+        for problem in database_connection_problems(found, database, seen, product.database)
+    ]
+    return [*of_instances, *of_jobs, *of_databases]
 
 
-def lane_verdict(seen: LaneSeen, product: Product) -> Verdict:
+def lane_verdict(seen: LaneSeen, product: Product, *, a_move_is_at_work: bool) -> Verdict:
     findings = findings_at_rest(seen, product)
+    if a_move_is_at_work:
+        never_acceptable = connection_faults(seen, product)
+        return Verdict(never_acceptable, [finding.text for finding in findings if finding.text not in never_acceptable], [])
     wrong = [finding.text for finding in findings if not finding.of_a_release]
-    of_a_release = [finding.text for finding in findings if finding.of_a_release]
-    quiet_for = seconds_since_anything_was_made(seen)
-    if not of_a_release or (quiet_for is not None and quiet_for < MOVE_MOST_SECONDS):
-        return Verdict(wrong, of_a_release, quiet_for)
-    how_long = "" if quiet_for is None else f" for {quiet_for:.0f} s"
-    left_unfinished = (
-        f"Nothing in this lane has been made{how_long}, longer than the {MOVE_MOST_SECONDS} s a move can take, so no move is at "
-        "work on it: it was left unfinished. Asking for a build again finishes it."
-    )
-    return Verdict([*wrong, *of_a_release, left_unfinished], [], quiet_for)
+    return Verdict(wrong, [], [finding.text for finding in findings if finding.of_a_release])
 
 
 def candidate_for(

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -421,7 +420,7 @@ DATA_MOVES = {
 
 def lane_seen_of(case: DataCase) -> LaneSeen:
     loaded = None if case.receiving is None else LoadedRoute(case.receiving, RouteStatus.ENABLED)
-    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets, QUIET, HOST_TIME)
+    return LaneSeen(case.instances, LaneRoute(loaded, case.receiving), case.jobs, case.data_sets, QUIET)
 
 
 def next_data_move_step(case: DataCase) -> Action | Done[MoveResult] | Stop:
@@ -613,87 +612,95 @@ def test_before_the_switch_the_old_instance_and_its_job_are_not_problems_because
     assert lane_problems(lane_seen, TARGET, WITH_DATA, switching_to=NEW_ON_D1) == []
 
 
-HOST_TIME = datetime(2026, 11, 15, 20, tzinfo=UTC)
-
-
-def aged(part: RunningInstance, seconds: float | None) -> RunningInstance:
-    return part.model_copy(update={"made_at": None if seconds is None else HOST_TIME - timedelta(seconds=seconds)})
-
-
 OLD_JOB = job_of(OLD_ON_D1)
-JUST_MADE = aged(NEW_ON_D1, 5)
-LONG_SERVING = aged(OLD_ON_D1, 4000)
 STATES_OF_A_RELEASE = {
     "a new instance being prepared beside the active one": (
-        DataCase((LONG_SERVING, JUST_MADE), "old", (D1,), (), None, (OLD_JOB,)),
+        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (D1,), (), None, (OLD_JOB,)),
         ["The instance new runs beside the active one"],
     ),
     "the web address moved and the old instance and its job still there": (
-        DataCase((LONG_SERVING, JUST_MADE), "new", (D1,), (), None, (OLD_JOB,)),
+        DataCase((OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), None, (OLD_JOB,)),
         ["The job old-job belongs to old, not new", "The instance old runs beside the active one"],
     ),
     "the old job stopped and the new one not yet started": (
-        DataCase((LONG_SERVING, JUST_MADE), "new", (D1,), (), None),
+        DataCase((OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), None),
         ["The lane has 0 jobs (none) where it must have one, belonging to new", "The instance old runs beside the active one"],
     ),
     "the new job not yet up as long as it must stay up": (
-        DataCase((JUST_MADE,), "new", (D1,), (), None, (job_of(NEW_ON_D1, 1.0),)),
+        DataCase((NEW_ON_D1,), "new", (D1,), (), None, (job_of(NEW_ON_D1, 1.0),)),
         ["The job new-job has run 1.0 s of the 3 s it must stay up"],
     ),
     "the new job made and not yet started, or the old one stopped and not yet removed": (
-        DataCase((JUST_MADE,), "new", (D1,), (), None, (job_of(NEW_ON_D1, running_for=None),)),
+        DataCase((NEW_ON_D1,), "new", (D1,), (), None, (job_of(NEW_ON_D1, running_for=None),)),
         ["The job new-job is stopped"],
     ),
     "a lane being brought up, its database not yet accepting connections": (
-        DataCase((JUST_MADE,), None, (data_set("d1", accepts=False),), (), None),
+        DataCase((NEW_ON_D1,), None, (data_set("d1", accepts=False),), (), None),
         ["No instance receives visitors", "The database database-d1 does not accept connections"],
     ),
 }
 
 
-def verdict_on(case: DataCase) -> Verdict:
-    return lane_verdict(lane_seen_of(case), WITH_DATA)
+def verdict_on(case: DataCase, *, moving: bool) -> Verdict:
+    return lane_verdict(lane_seen_of(case), WITH_DATA, a_move_is_at_work=moving)
 
 
 @pytest.mark.parametrize(("case", "states"), STATES_OF_A_RELEASE.values(), ids=STATES_OF_A_RELEASE.keys())
-def test_a_state_a_release_passes_through_is_told_as_a_release_under_way_and_not_as_something_wrong(
+def test_while_a_move_is_at_work_what_is_read_is_a_release_under_way_and_none_of_it_is_wrong(
     case: DataCase, states: list[str]
 ) -> None:
-    verdict = verdict_on(case)
-    assert (verdict.problems, verdict.release_under_way, verdict.seconds_since_anything_was_made) == ([], states, 5)
+    assert verdict_on(case, moving=True) == Verdict(problems=[], release_under_way=states, left_unfinished=[])
 
 
-def test_a_lane_at_rest_and_as_it_must_be_has_nothing_wrong_and_no_release_under_way() -> None:
-    verdict = verdict_on(DataCase((LONG_SERVING,), "old", (D1,), (), None, (OLD_JOB,)))
-    assert (verdict.problems, verdict.release_under_way) == ([], [])
-
-
-def test_something_wrong_during_a_release_is_still_told_as_wrong_beside_the_release() -> None:
-    reaching_out = aged(on_data(NEW, "d1", "bridge"), 5)
-    verdict = verdict_on(DataCase((LONG_SERVING, reaching_out), "new", (D1,), (), None, (OLD_JOB,)))
-    assert verdict.problems == [
-        "The instance new is attached to bridge, which it must not be",
-        "The instance new can reach out through bridge",
-    ]
-    assert verdict.release_under_way == ["The job old-job belongs to old, not new", "The instance old runs beside the active one"]
-
-
-def test_a_job_that_keeps_restarting_is_wrong_not_a_release_under_way_however_new_it_is() -> None:
-    restarting = job_of(NEW_ON_D1).model_copy(update={"state": InstanceState.RESTARTING, "running_for_seconds": None})
-    verdict = verdict_on(DataCase((JUST_MADE,), "new", (D1,), (), None, (restarting,)))
-    assert (verdict.problems, verdict.release_under_way) == (["The job new-job is restarting"], [])
-
-
-@pytest.mark.parametrize("newest_made_seconds_ago", [181, None])
-def test_a_release_no_move_can_still_be_at_work_on_is_told_as_left_unfinished_and_wrong(
-    newest_made_seconds_ago: float | None,
+@pytest.mark.parametrize(("case", "states"), STATES_OF_A_RELEASE.values(), ids=STATES_OF_A_RELEASE.keys())
+def test_with_no_move_at_work_the_same_state_is_a_release_left_unfinished_however_lately_it_was_made(
+    case: DataCase, states: list[str]
 ) -> None:
-    beside = aged(NEW_ON_D1, newest_made_seconds_ago)
-    serving = aged(OLD_ON_D1, None if newest_made_seconds_ago is None else 4000)
-    verdict = verdict_on(DataCase((serving, beside), "old", (D1,), (), None, (OLD_JOB,)))
-    assert verdict.release_under_way == []
-    assert verdict.problems[0] == "The instance new runs beside the active one"
-    assert "left unfinished" in verdict.problems[1]
+    assert verdict_on(case, moving=False) == Verdict(problems=[], release_under_way=[], left_unfinished=states)
+
+
+def test_a_lane_at_rest_and_as_it_must_be_has_nothing_wrong_nothing_under_way_and_nothing_unfinished() -> None:
+    assert verdict_on(DataCase((OLD_ON_D1,), "old", (D1,), (), None, (OLD_JOB,)), moving=False) == Verdict([], [], [])
+
+
+NEVER_ACCEPTABLE = {
+    "the instance being prepared can reach out": (
+        DataCase((OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (), None, (OLD_JOB,)),
+        "The instance new can reach out through bridge",
+    ),
+    "the instance being prepared is attached to another data set": (
+        DataCase((OLD_ON_D1, on_data(NEW, "d1", "network-d2")), "old", (D1, data_set("d2")), (), None, (OLD_JOB,)),
+        "The instance new is attached to network-d2, which it must not be",
+    ),
+    "the old instance's job can reach out": (
+        DataCase((OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), None, (job_of(OLD_ON_D1, networks=("network-d1", "bridge")),)),
+        "The job old-job can reach out through bridge",
+    ),
+    "the database is attached to an outside network": (
+        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (with_database_on(D1, "network-d1", "bridge"),), (), None, (OLD_JOB,)),
+        "The database database-d1 can reach out through bridge",
+    ),
+    "the database has another data set's volume mounted": (
+        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (with_database_mounting(D1, "volume-d1", "volume-d2"),), (), None, (OLD_JOB,)),
+        "The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have",
+    ),
+}
+
+
+@pytest.mark.parametrize(("case", "fault"), NEVER_ACCEPTABLE.values(), ids=NEVER_ACCEPTABLE.keys())
+def test_what_is_never_acceptable_is_wrong_even_while_a_move_is_at_work_and_is_not_told_as_part_of_the_release(
+    case: DataCase, fault: str
+) -> None:
+    verdict = verdict_on(case, moving=True)
+    assert fault in verdict.problems
+    assert fault not in verdict.release_under_way
+    assert "The instance new runs beside the active one" in verdict.release_under_way or case.receiving == "new"
+
+
+def test_a_job_that_keeps_restarting_with_no_move_at_work_is_wrong_not_something_left_unfinished() -> None:
+    restarting = job_of(NEW_ON_D1).model_copy(update={"state": InstanceState.RESTARTING, "running_for_seconds": None})
+    verdict = verdict_on(DataCase((NEW_ON_D1,), "new", (D1,), (), None, (restarting,)), moving=False)
+    assert verdict == Verdict(["The job new-job is restarting"], [], [])
 
 
 def test_a_lane_as_it_must_be_has_no_problems() -> None:

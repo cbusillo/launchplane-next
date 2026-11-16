@@ -1,5 +1,6 @@
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -70,7 +71,8 @@ class LaneVerdict(BaseModel):
     lane: str
     problems: list[str]
     release_under_way: list[str] = []
-    seconds_since_anything_was_made: float | None = None
+    left_unfinished: list[str] = []
+    a_move_is_at_work: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,24 +128,24 @@ def lane_seen(on_host: OnHost, product: str, lane: str, route: ProxyNotRunning |
         jobs=tuple(job for job in on_host.jobs if is_of_lane(product, lane, job)),
         data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
         network_quiet={network.name: network.is_quiet for network in on_host.networks},
-        host_time=on_host.host_time,
     )
 
 
 def verdict_on(
-    on_host: OnHost, product: str, lane: str, routes: Mapping[str, str], description: Product | ProductError
+    on_host: OnHost, product: str, lane: str, routes: Mapping[str, str], description: Product | ProductError, a_move_is_at_work: bool
 ) -> LaneVerdict:
     if isinstance(description, ProductError):
-        return LaneVerdict(product=product, lane=lane, problems=[str(description)])
+        return LaneVerdict(product=product, lane=lane, problems=[str(description)], a_move_is_at_work=a_move_is_at_work)
     receiving = routes.get(decide.web_address_of(product, lane))
     route = LaneRoute(None if receiving is None else LoadedRoute(receiving, RouteStatus.ENABLED), receiving)
-    verdict = decide.lane_verdict(lane_seen(on_host, product, lane, route), description)
+    verdict = decide.lane_verdict(lane_seen(on_host, product, lane, route), description, a_move_is_at_work=a_move_is_at_work)
     return LaneVerdict(
         product=product,
         lane=lane,
         problems=verdict.problems,
         release_under_way=verdict.release_under_way,
-        seconds_since_anything_was_made=verdict.seconds_since_anything_was_made,
+        left_unfinished=verdict.left_unfinished,
+        a_move_is_at_work=a_move_is_at_work,
     )
 
 
@@ -160,6 +162,16 @@ class Lanes:
         self.read_product = read_product
         self.name_fresh = name_fresh
         self.one_at_a_time = threading.Lock()
+        self.lane_being_moved: tuple[str, str] | None = None
+
+    @contextmanager
+    def at_work_on(self, product: str, lane: str) -> Generator[None]:
+        with self.one_at_a_time:
+            self.lane_being_moved = (product, lane)
+            try:
+                yield
+            finally:
+                self.lane_being_moved = None
 
     def read(self, product: str, lane: str, database: Database | None = None) -> LaneSeen:
         route = self.proxy.read_lane_route(decide.web_address_of(product, lane))
@@ -185,12 +197,20 @@ class Lanes:
                 else postgres_server(description.database)
             )
 
+        # A move that starts or ends while the host is read is at work on what was read.
+        moved_during_the_read = {self.lane_being_moved}
         on_host = self.host.read(server_of)
-        lanes = lanes_on(on_host)
-        return Judged(on_host, [verdict_on(on_host, product, lane, routes, description_of(product)) for product, lane in lanes])
+        moved_during_the_read.add(self.lane_being_moved)
+        return Judged(
+            on_host,
+            [
+                verdict_on(on_host, product, lane, routes, description_of(product), (product, lane) in moved_during_the_read)
+                for product, lane in lanes_on(on_host)
+            ],
+        )
 
     def move(self, target: LaneBuild) -> MoveResult:
-        with self.one_at_a_time:
+        with self.at_work_on(target.product, target.lane):
             product = self.read_product(target.product)
             return self.settle(
                 lambda: self.read(target.product, target.lane, product.database),
@@ -199,7 +219,7 @@ class Lanes:
             )
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None) -> RetireResult:
-        with self.one_at_a_time:
+        with self.at_work_on(product, lane):
             return self.settle(
                 lambda: self.read(product, lane),
                 lambda seen, done: decide.decide_retire(seen, product, lane, delete_data_set, done),

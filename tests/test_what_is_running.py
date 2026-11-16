@@ -33,12 +33,9 @@ UNEXPECTED_ANSWERS: dict[str, object] = {
     "a state Docker never had": [{"Names": ["/site"], "State": "hibernating", "Labels": SITE} | NO_NETWORKS],
     "a container the filter should not have let through": [{"Names": ["/site"], "State": "running", "Labels": {}} | NO_NETWORKS],
     "a container without a name": [{"Names": [], "State": "running", "Labels": SITE} | NO_NETWORKS],
-    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE, "Mounts": [], "Created": 1}],
+    "a container without its networks": [{"Names": ["/site"], "State": "running", "Labels": SITE, "Mounts": []}],
     "a container without its mounts": [
-        {"Names": ["/site"], "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}, "Created": 1}
-    ],
-    "a container without the time it was made": [
-        {"Names": ["/site"], "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}, "Mounts": []}
+        {"Names": ["/site"], "State": "running", "Labels": SITE, "NetworkSettings": {"Networks": {}}}
     ],
 }
 
@@ -48,8 +45,7 @@ def saved_container_list() -> object:
 
 
 def instances_from_answer(answer: object) -> list[RunningInstance]:
-    answers = HostAnswers(answer, [], {"Volumes": None}, system={"SystemTime": "2026-11-15T20:00:00Z"})
-    return [instance.model_copy(update={"made_at": None}) for instance in on_host_from_answers(answers).instances]
+    return on_host_from_answers(HostAnswers(answer, [], {"Volumes": None})).instances
 
 
 def refusing_host() -> ContainerHost:

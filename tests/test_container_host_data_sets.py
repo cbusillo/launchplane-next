@@ -2,7 +2,6 @@ import itertools
 import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -35,7 +34,6 @@ DATA_SET_NETWORK = "launchplane-data-d1"
 DATABASE = "shop-testing-database-d1"
 LINK = DatabaseLink("d1", DATA_SET_NETWORK, DATABASE, SERVER)
 STARTED = "2026-11-15T20:00:00.000000001Z"
-MADE = 1794772790
 
 
 def network(
@@ -51,7 +49,6 @@ def container(name: str, part: str, networks: list[str], mounts: Sequence[object
         "Labels": DATA_SET_LABELS | {"launchplane.part": part},
         "NetworkSettings": {"Networks": {each: {} for each in networks}},
         "Mounts": list(mounts),
-        "Created": MADE,
     }
 
 
@@ -84,14 +81,7 @@ def test_a_data_set_is_read_from_its_network_volume_and_database_together() -> N
             data_set="d1",
             networks=(HostNetwork(name=DATA_SET_NETWORK, is_quiet=True),),
             volumes=("launchplane-data-d1-database",),
-            databases=(
-                DataSetDatabase(
-                    container=DATABASE,
-                    state=InstanceState.RUNNING,
-                    networks=(DATA_SET_NETWORK,),
-                    made_at=datetime(2026, 11, 15, 19, 59, 50, tzinfo=UTC),
-                ),
-            ),
+            databases=(DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,)),),
         )
     ]
 

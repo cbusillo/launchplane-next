@@ -36,11 +36,11 @@ def browser() -> Iterator[Browser]:
         launched.close()
 
 
-def page_showing(browser: Browser, judged: LaneVerdict | None) -> Page:
+def page_showing(browser: Browser, judged: LaneVerdict | None, instance: RunningInstance = SERVING) -> Page:
     def read(_routes: dict[str, str]) -> Judged:
         if judged is None:
             raise ContainerHostError("Connection refused")
-        return Judged(OnHost([SERVING], [], []), [judged])
+        return Judged(OnHost([instance], [], []), [judged])
 
     app = TestClient(
         create_app(read, lambda: {WEB_ADDRESS: SERVING.container}, lambda _web_address: None, no_move, no_retire, NO_SECRETS)
@@ -57,38 +57,46 @@ def page_showing(browser: Browser, judged: LaneVerdict | None) -> Page:
     return page
 
 
-def verdict(problems: list[str], release_under_way: list[str]) -> LaneVerdict:
-    return LaneVerdict(
-        product="site", lane="testing", problems=problems, release_under_way=release_under_way, seconds_since_anything_was_made=4.2
-    )
+def verdict(problems: list[str], under_way: list[str], unfinished: list[str]) -> LaneVerdict:
+    return LaneVerdict(product="site", lane="testing", problems=problems, release_under_way=under_way, left_unfinished=unfinished)
+
+
+def findings_shown(page: Page, kind: str) -> list[str]:
+    return page.locator(f"[data-finding={kind}]").all_inner_texts()[1:]
 
 
 def test_the_page_shows_what_the_judge_finds_wrong_with_a_lane_in_the_judges_words_as_wrong(browser: Browser) -> None:
-    page = page_showing(browser, verdict([WRONG], []))
+    page = page_showing(browser, verdict([WRONG], [], []))
     assert page.locator("[data-health=bad]").all_inner_texts() == [WRONG]
-    assert page.locator("[data-finding=release]").count() == 0
 
 
 def test_the_page_shows_a_release_under_way_as_that_and_marks_none_of_it_as_wrong(browser: Browser) -> None:
-    page = page_showing(browser, verdict([], [BESIDE]))
-    assert page.locator("[data-finding=release]").all_inner_texts() == [
-        "A release is under way. The last thing made in this lane was made 4 s ago.",
-        BESIDE,
-    ]
+    page = page_showing(browser, verdict([], [BESIDE], []))
+    assert findings_shown(page, "release") == [BESIDE]
+    assert "moving this lane now" in page.inner_text("main")
     assert page.locator("[data-health=bad]").count() == 0
+
+
+def test_the_page_shows_a_release_left_unfinished_as_wrong_and_says_asking_again_finishes_it(browser: Browser) -> None:
+    page = page_showing(browser, verdict([], [], [BESIDE]))
+    assert findings_shown(page, "unfinished") == [BESIDE]
+    assert page.locator("[data-health=bad]").count() == 2
+    assert "Asking for a build again finishes it" in page.inner_text("main")
 
 
 def test_the_page_shows_what_is_wrong_during_a_release_as_wrong_beside_the_release(browser: Browser) -> None:
-    page = page_showing(browser, verdict([WRONG], [BESIDE]))
+    page = page_showing(browser, verdict([WRONG], [BESIDE], []))
     assert page.locator("[data-health=bad]").all_inner_texts() == [WRONG]
-    assert BESIDE in page.locator("[data-finding=release]").all_inner_texts()
+    assert findings_shown(page, "release") == [BESIDE]
 
 
-def test_the_page_shows_a_lane_with_nothing_wrong_and_no_release_with_neither(browser: Browser) -> None:
-    page = page_showing(browser, verdict([], []))
+def test_the_page_colours_nothing_as_wrong_that_the_verdict_does_not_call_wrong_whatever_state_an_instance_is_in(
+    browser: Browser,
+) -> None:
+    page = page_showing(browser, verdict([], [], []), SERVING.model_copy(update={"state": InstanceState.STOPPED}))
+    assert "stopped" in page.inner_text("main")
     assert page.locator("[data-finding]").count() == 0
     assert page.locator("[data-health=bad]").count() == 0
-    assert "answering" in page.inner_text("main")
 
 
 def test_the_page_says_the_host_cannot_be_read_with_the_real_error_and_lists_nothing(browser: Browser) -> None:

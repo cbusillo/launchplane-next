@@ -252,7 +252,8 @@ def test_a_release_that_keeps_the_data_set_switches_without_failing_a_request_an
 
 def verdict_now() -> str:
     [verdict] = [lane for lane in read_running()["lanes"] if (lane["product"], lane["lane"]) == (PRODUCT, LANE)]
-    return json.dumps({"wrong": verdict["problems"], "release": verdict["release_under_way"]})
+    kinds = {"wrong": "problems", "release": "release_under_way", "unfinished": "left_unfinished"}
+    return json.dumps({kind: verdict[field] for kind, field in kinds.items()} | {"moving": verdict["a_move_is_at_work"]})
 
 
 @pytest.mark.usefixtures("lane_on_a")
@@ -261,9 +262,20 @@ def test_a_good_release_is_shown_as_a_release_under_way_and_never_as_something_w
         move(BUILD_B)
     verdicts = [json.loads(verdict) for verdict in loop.answers_in_order()]
     assert loop.failures == []
-    assert [verdict["wrong"] for verdict in verdicts if verdict["wrong"]] == []
+    at_rest: dict[str, Any] = {"wrong": [], "release": [], "unfinished": [], "moving": False}
+    assert [verdict for verdict in verdicts if verdict["wrong"] or verdict["unfinished"]] == []
     assert any("runs beside the active one" in state for verdict in verdicts for state in verdict["release"])
-    assert (verdicts[0], verdicts[-1]) == ({"wrong": [], "release": []}, {"wrong": [], "release": []})
+    assert (verdicts[0], verdicts[-1]) == (at_rest, at_rest)
+
+
+def test_a_release_killed_halfway_shows_at_once_as_left_unfinished_not_as_under_way(lane_on_a: LaneView) -> None:
+    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"])
+    left = json.loads(verdict_now())
+    assert (left["moving"], left["release"], left["wrong"]) == (False, [], [])
+    assert any("runs beside the active one" in state for state in left["unfinished"])
+    move(BUILD_B)
+    assert json.loads(verdict_now()) == {"wrong": [], "release": [], "unfinished": [], "moving": False}
+    assert lane_view().data_sets == lane_on_a.data_sets
 
 
 def test_data_left_without_its_password_is_reported_by_name_and_given_no_new_password(lane_on_a: LaneView) -> None:
