@@ -33,6 +33,12 @@ class Work(StrEnum):
     END_MAINTENANCE = "ending maintenance"
 
 
+# Launchplane's record could not be read, so whether a request is at work on a lane is not known.
+@dataclass(frozen=True)
+class WorkUnread:
+    why: str
+
+
 class Kind(StrEnum):
     UNREAD = "could not be read"
     NO_VISITORS = "no instance receives visitors"
@@ -125,6 +131,7 @@ class Judgement:
     condition: Condition
     findings: tuple[Finding, ...]
     parts: Mapping[str, Standing]
+    work_unread: bool = False
 
     def about(self, subjects: Collection[str]) -> list[Finding]:
         return [finding for finding in self.findings if finding.subject in subjects]
@@ -468,7 +475,7 @@ def serving_instance(lane: LaneReading) -> RunningInstance | None:
     return lane.instances[0]
 
 
-def everything_found(lane: LaneReading, product: Product | ProductError, work: Work | None) -> list[Found]:
+def everything_found(lane: LaneReading, product: Product | ProductError, work: Work | WorkUnread | None) -> list[Found]:
     described_product = None if isinstance(product, ProductError) else product
     stopped_is_meant = lane.route.in_maintenance and work is not Work.END_MAINTENANCE
     of = Judged(lane, described_product, stopped_is_meant, serving_instance(lane))
@@ -477,6 +484,7 @@ def everything_found(lane: LaneReading, product: Product | ProductError, work: W
     others = sorted((instance for instance in lane.instances if instance.container != served), key=lambda each: each.container)
     return [
         *([Found(Weight.UNREAD, lane.product, Kind.UNREAD, str(product))] if described_product is None else []),
+        *([Found(Weight.UNREAD, lane.web_address, Kind.UNREAD, work_unread(work))] if isinstance(work, WorkUnread) else []),
         *route_findings(lane),
         *([] if of.serving is None else instance_findings(of.serving, of)),
         *[finding for found in lane.data_sets if found.data_set == used for finding in data_set_findings(found, of)],
@@ -487,10 +495,15 @@ def everything_found(lane: LaneReading, product: Product | ProductError, work: W
     ]
 
 
-def shown_for(weight: Weight, work: Work | None) -> Shown:
+def work_unread(work: WorkUnread) -> str:
+    return f"Whether a request is at work on this lane is not known, so what it would explain shows as could not be read: {work.why}"
+
+
+# What is wrong only with no request at work is neither wrong nor under way while that is not known.
+def shown_for(weight: Weight, work: Work | WorkUnread | None) -> Shown:
     if weight == Weight.FAULT:
         return Shown.WRONG
-    if weight == Weight.UNREAD:
+    if weight == Weight.UNREAD or isinstance(work, WorkUnread):
         return Shown.UNREAD
     if work is not None:
         return Shown.UNDER_WAY
@@ -505,7 +518,7 @@ def standing_of(shown_about: set[Shown], unremarked: Standing) -> Standing:
     return Standing.ON_PURPOSE if Shown.UNDER_WAY in shown_about else unremarked
 
 
-def condition_of(lane: LaneReading, work: Work | None, shown_in_lane: set[Shown]) -> Condition:
+def condition_of(lane: LaneReading, work: Work | WorkUnread | None, shown_in_lane: set[Shown]) -> Condition:
     if Shown.WRONG in shown_in_lane:
         return Condition.WRONG
     if Shown.UNREAD in shown_in_lane:
@@ -517,7 +530,7 @@ def condition_of(lane: LaneReading, work: Work | None, shown_in_lane: set[Shown]
     return Condition.IN_MAINTENANCE if lane.route.in_maintenance else Condition.GOOD
 
 
-def judge(lane: LaneReading, product: Product | ProductError, work: Work | None) -> Judgement:
+def judge(lane: LaneReading, product: Product | ProductError, work: Work | WorkUnread | None) -> Judgement:
     findings = tuple(
         Finding(subject=each.subject, kind=each.kind, sentence=each.sentence, shown=shown_for(each.weight, work))
         for each in everything_found(lane, product, work)
@@ -529,13 +542,14 @@ def judge(lane: LaneReading, product: Product | ProductError, work: Work | None)
     parts = [*lane.instances, *lane.background_services, *lane.databases]
     return Judgement(
         lane,
-        work,
+        work if isinstance(work, Work) else None,
         condition_of(lane, work, {finding.shown for finding in findings}),
         findings,
         {
             part.container: standing_of({finding.shown for finding in findings if finding.subject == part.container}, unremarked)
             for part in parts
         },
+        isinstance(work, WorkUnread),
     )
 
 

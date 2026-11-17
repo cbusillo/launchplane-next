@@ -1,0 +1,18 @@
+#!/bin/sh
+# Run on the control container by scripts/deploy-control, as root, after the tree is in /opt/launchplane.
+set -eu
+cd /opt/launchplane
+UV_PYTHON_INSTALL_DIR=/opt/uv-python uv sync --locked --no-dev --no-editable --python 3.15 --quiet
+if ! command -v psql >/dev/null; then
+    apt-get update --quiet --quiet
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes --quiet --quiet postgresql >/dev/null
+fi
+systemctl enable --quiet --now postgresql
+runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --dbname postgres <deploy/database.sql
+runuser -u launchplane -- .venv/bin/alembic upgrade head
+install -m 644 deploy/launchplane.service /etc/systemd/system/launchplane.service
+systemctl daemon-reload
+systemctl enable --quiet launchplane
+systemctl restart launchplane
+sleep 1
+systemctl is-active launchplane

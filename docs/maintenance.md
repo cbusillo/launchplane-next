@@ -7,7 +7,7 @@ curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/maintenance/be
 curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/maintenance/end
 ```
 
-Neither takes a body. Each reads the host and the proxy again before every step, so a call killed at any point is finished by making the same call again.
+Neither takes a body. Each is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when it ends. Each reads the host and the proxy again before every step, so one interrupted at any point is finished when its request is taken up again, or by making the same call again.
 
 ## The mark
 

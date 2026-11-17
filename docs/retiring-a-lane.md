@@ -29,7 +29,9 @@ The web address goes first so that no new request reaches an instance that is st
 | `deleted` | 200 | The data set named in the body was deleted, and `deleted_data_set` names it. Anything of the lane still running was retired first and is listed as for `retired`. |
 | `unchanged` | 200 | The lane had no route, no background service and no instance, and no data set of it was named. |
 
-A `503` means the host or proxy could not be read or changed. Retiring stopped where it was and is safe to ask again. A retire waits for a move in the same process to finish, and a move waits for a retire.
+The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
+
+A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. One request works at a time, in the order they came.
 
 ## Known and not fixed
 

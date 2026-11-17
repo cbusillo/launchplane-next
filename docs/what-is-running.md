@@ -32,6 +32,8 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`, and what the page shows for it: `says` and `standing`. |
 | `lanes` | the judgement on each lane: see [the judgement on a lane](data-sets.md#the-judgement-on-a-lane). |
+| `requests` | every [request](requests.md) that has not ended, as `GET /requests` gives it. |
+| `record_error` | why Launchplane's record could not be read, or `null`. The rest of the answer is still what is on the host. |
 | `cards` | the page, ready to draw: see [the page](#the-page). |
 | `read_at` | the moment the host was asked. |
 
@@ -72,6 +74,7 @@ Anything asked is either known or could not be read, with the reason. What could
 - It draws `cards` as given and decides nothing: every word and every colour is in the answer. A card has a `title`, `pills`, `in_maintenance_since` and `rows`. A row has a `name`, a `value` in pieces drawn as text, as code or as a build, `pills`, and a `note` shown small under it. A pill has `text` and a `tone`: `good` is green, `wrong` red, `on purpose` blue and `could not be read` amber.
 - A lane's card has its condition as a pill, and `in maintenance` beside it when the lane is in maintenance and its condition is something else. Then its web address, then what the judgement found, one row each, then its background service, its instances with the active one first, and its data sets. A data set's row has the image of its database server, written as a build is, with that server's state, and the server's container name in the small line.
 - The colour of a part's state is its standing in the judgement, so a running part with something wrong about it is red.
+- A lane's requests that have not ended are rows on its card, and a record that cannot be read is a card of its own: see [requests on the page](requests.md#on-the-page).
 - A container or data set marked for Launchplane with no lane label is shown in a card of its own, as wrong.
 - A build named by digest is shown as its image name and the first 12 characters of the digest. The full value is the tooltip.
 - When Launchplane answers `503` or cannot be reached, the page shows the error. The last reading stays below it, faded, under `Not current: below is what was read at <time>.` Once a read succeeds again, one line with the last failure stays until dismissed.
@@ -82,7 +85,9 @@ Anything asked is either known or could not be read, with the reason. What could
 - **The page does not show where a route to another lane's instance goes.** `/running` answers it.
 - **No test runs the page's script.** A unit test covers the cards it is given. Chris watching the page is the check on the drawing. Comes back when the page breaks without anyone noticing, or when there is a second page.
 - **While a start is between making a login and making its container, a reading can find that login held by no container.** A call is at work then, so the page shows it as under way. The removal of logins reads the server first and the containers after, so it never takes that login.
-- **Of two background services where a lane must have one, only the first by name is shown as wrong.** The lane's condition is wrong, and a move retires that one.
+- **Of two background services where a lane must have one, only the first by name is shown as wrong.** The second shows as good, also when it belongs to another instance or runs another build. The lane's condition is wrong, and a move retires the first.
+- **A background service in a lane where no instance receives visitors shows as good.** Only where it is attached is judged then. The lane itself shows that no instance receives visitors.
+- **A container that Docker keeps refusing to describe stops every call.** Every answer is cleaned of the secrets containers hold, so each call first describes every container, and answers `503` when one cannot be described.
 
 ## Measured
 
@@ -108,7 +113,7 @@ Docker on the scratch container listens on `192.168.1.56:2376` only and refuses 
 
 ## Where it runs for now
 
-On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: `http://launchplane.shiny:8700/`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15 and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
+On the control container as the systemd service `launchplane`, user `launchplane`, port 8700: `http://launchplane.shiny:8700/`. `./scripts/deploy-control` ships the committed tree, installs it with uv on Python 3.15, sets up [its database](requests.md#the-database) and restarts the service. It is unauthenticated, answers only on the home network, and manages only the scratch container.
 
 ```
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py

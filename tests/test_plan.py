@@ -83,7 +83,7 @@ class Case:
     step: object
 
 
-def answer(outcome: Outcome, receiving: str | None, error: str | None = None) -> Done[MoveResult]:
+def answer(outcome: Outcome, receiving: str | None, error: str | None = None, did: tuple[str, ...] = ()) -> Done[MoveResult]:
     return Done(
         MoveResult(
             product="site",
@@ -92,6 +92,7 @@ def answer(outcome: Outcome, receiving: str | None, error: str | None = None) ->
             web_address=WEB_ADDRESS,
             outcome=outcome,
             container_receiving_visitors=receiving,
+            did=list(did),
             error=error,
         )
     )
@@ -117,11 +118,13 @@ MOVES = {
         (NEW,),
         ("new", "new"),
         (STARTED_NEW, Check("new"), WriteRoute(WEB_ADDRESS, "new"), Retire("old")),
-        answer(Outcome.SWITCHED, "new"),
+        answer(Outcome.SWITCHED, "new", did=("started the instance new", "wrote the route to new", "retired old")),
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Retire("stray")),
-    "a finished cleanup answers cleaned up": Case((NEW,), ("new", "new"), (Retire("stray"),), answer(Outcome.CLEANED_UP, "new")),
+    "a finished cleanup answers repaired, with what it did": Case(
+        (NEW,), ("new", "new"), (Retire("stray"),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
+    ),
     "a running instance left before the switch is checked, not started again": Case((OLD, NEW), ("old", "old"), (), Check("new")),
     "an instance neither serving nor about to be checked is retired first": Case(
         (OLD, NEW, STRAY), ("old", "old"), (), Retire("stray")
@@ -142,7 +145,7 @@ MOVES = {
         (OLD,),
         ("old", "old"),
         (STARTED_NEW, REFUSED, RemoveInstance("new")),
-        answer(Outcome.CHECK_FAILED, "old", "Connection refused"),
+        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("started the instance new", "removed new")),
     ),
 }
 

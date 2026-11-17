@@ -90,8 +90,12 @@ def change_made_by(event: Event) -> str | None:
             return maintenance_change_made_by(event)
 
 
+def changes_made(done: tuple[Event, ...]) -> list[str]:
+    return [change for change in map(change_made_by, done) if change is not None]
+
+
 def changes_so_far(done: tuple[Event, ...]) -> str:
-    changes = [change for change in map(change_made_by, done) if change is not None]
+    changes = changes_made(done)
     if not changes:
         return "Nothing was changed."
     return f"Before that, this call {', '.join(changes)}, and those changes stay."
@@ -134,9 +138,7 @@ def is_fit(judged: Judgement, instance: RunningInstance, target: LaneBuild) -> b
 def move_outcome(done: tuple[Event, ...]) -> Outcome:
     if any(isinstance(event, WriteRoute) for event in done):
         return Outcome.SWITCHED
-    if any(isinstance(event, Retire | StartBackgroundService | StartDatabase | RemoveLogins) for event in done):
-        return Outcome.CLEANED_UP
-    return Outcome.UNCHANGED
+    return Outcome.REPAIRED if changes_made(done) else Outcome.UNCHANGED
 
 
 def after_refusal(refused: CheckRefused, lane: LaneReading, answer: MoveResult) -> Action | Done[MoveResult]:
@@ -314,6 +316,7 @@ def move_step(
         outcome=move_outcome(done),
         container_receiving_visitors=route.written,
         data_set=None if receiving is None else receiving.data_set,
+        did=changes_made(done),
     )
     refused = next((event for event in done if isinstance(event, CheckRefused)), None)
     if refused is not None:

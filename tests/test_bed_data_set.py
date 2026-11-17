@@ -17,6 +17,9 @@ from tests.bed import (
     SCRATCH_ADDRESS,
     UnexpectedAnswer,
     ask,
+    ask_and_wait,
+    kill_launchplane,
+    kill_launchplane_and_end_what_was_asked,
     move_lane,
     needs_test_bed,
     on_control,
@@ -292,8 +295,8 @@ def test_a_good_release_is_shown_as_a_release_under_way_and_never_as_something_w
     assert (verdicts[0], verdicts[-1]) == (at_rest, at_rest)
 
 
-def test_a_release_killed_halfway_shows_at_once_as_left_unfinished_not_as_under_way(lane_on_a: LaneView) -> None:
-    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"])
+def test_a_release_that_failed_halfway_shows_at_once_as_left_unfinished_not_as_under_way(lane_on_a: LaneView) -> None:
+    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
     left = json.loads(verdict_now())
     assert (left["moving"], left["release"], left["wrong"]) == (False, [], [])
     assert any("runs beside the active one" in state for state in left["unfinished"])
@@ -356,8 +359,8 @@ def test_retiring_a_lane_keeps_its_data_set_until_it_is_named() -> None:
     assert data_set["data_set"] not in on_scratch("docker network ls --format '{{.Name}}'; docker volume ls --format '{{.Name}}'")
 
 
-def kill_once(build: str, seen: Callable[[LaneView], bool]) -> None:
-    kill_the_call_once(lambda: move_lane(PRODUCT, LANE, build), lambda: seen(lane_view()))
+def kill_once(build: str, seen: Callable[[LaneView], bool], kill: Callable[[], None] = kill_launchplane) -> None:
+    kill_the_call_once(lambda: move_lane(PRODUCT, LANE, build), lambda: seen(lane_view()), kill)
 
 
 def has_background_service_of(build: str) -> Callable[[LaneView], bool]:
@@ -470,7 +473,7 @@ def write_many(container: str) -> None:
 
 
 def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of_it_belongs_to_app(lane_on_a: LaneView) -> None:
-    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"])
+    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
     view = lane_view()
     old = view.receiving()["container"]
     [new] = [instance["container"] for instance in view.instances if instance["container"] != old]
@@ -514,7 +517,7 @@ def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) ->
         environment_of(lane_on_a.receiving()["container"])["PGPASSWORD"],
         environment_of(database_of(data_set))["POSTGRES_PASSWORD"],
     ]
-    status, body = ask(f"/lanes/{PRODUCT}/{LANE}/maintenance/begin", {})
+    status, body = ask_and_wait(f"/lanes/{PRODUCT}/{LANE}/maintenance/begin", {})
     assert (status, body["outcome"]) == (200, "in maintenance"), body
     assert [files_holding(volume, password) for password in passwords] == [[], []]
     assert files_holding(volume, "SCRAM-SHA-256") != []
@@ -588,7 +591,7 @@ def test_a_login_no_container_holds_shows_as_left_unfinished_and_the_next_move_a
     asked_of_server(database, "CREATE ROLE i_left_again LOGIN IN ROLE app")
     status, body = retire(PRODUCT, LANE)
     assert any("has the login i_left_by_a_kill, which no container holds" in state for state in left["unfinished"]), left
-    assert (moved["outcome"], after_the_move) == ("cleaned up", [own])
+    assert (moved["outcome"], after_the_move) == ("repaired", [own])
     assert (status, logins_on(data_set)) == (200, []), body
 
 

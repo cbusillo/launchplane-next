@@ -10,7 +10,7 @@ from launchplane.instance import DataSet, DataSetUse, LaneBuild
 class Outcome(StrEnum):
     SWITCHED = "switched"
     UNCHANGED = "unchanged"
-    CLEANED_UP = "cleaned up"
+    REPAIRED = "repaired"
     CHECK_FAILED = "check failed"
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
@@ -23,6 +23,7 @@ class MoveResult(BaseModel):
     outcome: Outcome
     container_receiving_visitors: str | None
     data_set: str | None = None
+    did: list[str] = []
     error: str | None = None
 
 

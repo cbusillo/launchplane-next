@@ -1,8 +1,6 @@
-import threading
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -26,13 +24,16 @@ from launchplane.judge import (
     Judgement,
     WebAddressJudged,
     Work,
+    WorkUnread,
     is_loaded_as_written,
     judge,
     web_addresses_judged,
 )
 from launchplane.product import Product, ProductError
-from launchplane.proxy import CheckFailed
+from launchplane.proxy import CheckFailed, ProxyError
+from launchplane.record import Kept, RecordError, Stands
 from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
+from launchplane.telling import NOBODY, Witness, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -70,7 +71,7 @@ class Proxy(Protocol):
 
 
 type ProductReader = Callable[[str], Product]
-type AtWork = tuple[Lane, Work] | None
+type KeptReader = Callable[[], list[Kept]]
 
 
 class Stopped(Exception):
@@ -95,6 +96,8 @@ class Status:
     reading: Reading
     lanes: list[Judgement]
     web_addresses: list[WebAddressJudged]
+    requests: list[Kept] = field(default_factory=list[Kept])
+    record_error: str | None = None
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -129,6 +132,40 @@ TAKE: dict[type, Take] = {
 }
 
 
+def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness) -> Event:
+    witness.hold()
+    tell = witness.tell
+    try:
+        event = take(action)
+    except (ContainerHostError, ProxyError) as error:
+        tell(named(action), str(error))
+        raise
+    tell(*told(action, event))
+    return event
+
+
+def settle[Answer](
+    read_judged: Callable[[], Judgement],
+    next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
+    take: Callable[[Action], Event],
+    witness: Witness,
+) -> Answer:
+    done: list[Event] = []
+    while True:
+        judged = read_judged()
+        step = next_step(judged, tuple(done))
+        if isinstance(step, Done):
+            return step.answer
+        if isinstance(step, Stop):
+            raise Stopped(step.reason)
+        if len(done) == MOST_STEPS:
+            raise Stopped(
+                f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
+                f"stopped before {step}. What was done stays done, and asking again goes on from there."
+            )
+        done.append(taken_and_told(step, take, witness))
+
+
 class Lanes:
     def __init__(
         self,
@@ -136,22 +173,13 @@ class Lanes:
         proxy: Proxy,
         read_product: ProductReader = lambda _product: Product(),
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
+        read_unfinished: KeptReader = lambda: [],
     ) -> None:
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
         self.name_fresh = name_fresh
-        self.one_at_a_time = threading.Lock()
-        self.at_work: AtWork = None
-
-    @contextmanager
-    def at_work_on(self, product: str, lane: str, work: Work) -> Generator[None]:
-        with self.one_at_a_time:
-            self.at_work = ((product, lane), work)
-            try:
-                yield
-            finally:
-                self.at_work = None
+        self.read_unfinished = read_unfinished
 
     # The containers are read before the proxy, so what is secret on the host is known before anything can be said of it.
     def read(self, scope: Scope) -> Reading:
@@ -179,80 +207,68 @@ class Lanes:
         except ProductError as error:
             return error
 
+    def unfinished(self) -> tuple[list[Kept], str | None]:
+        try:
+            return self.read_unfinished(), None
+        except RecordError as error:
+            return [], str(error)
+
     def read_status(self) -> Status:
-        # A call that starts or ends while the host is read is at work on what was read.
-        before = self.at_work
+        # A request taken up or ended while the host is read is at work on what was read.
+        before, unread_before = self.unfinished()
         reading = self.read(EVERY_LANE)
-        at_work = dict(each for each in (before, self.at_work) if each is not None)
+        requests, record_error = ([], unread_before) if unread_before else self.unfinished()
+        at_work = {(each.product, each.lane): each.work for each in (*before, *requests) if each.stands is Stands.WORKING}
+        # With either reading of the record missing, which lane a request is at work on is not known for any lane.
+        unread = None if record_error is None else WorkUnread(record_error)
         descriptions = {product: self.description_of(product) for product in sorted({product for product, _ in reading.lanes()})}
         judgements = [
-            judge(reading.lane(product, lane), descriptions[product], at_work.get((product, lane)))
+            judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
-        return Status(reading, judgements, web_addresses_judged(reading))
+        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error)
 
-    def move(self, target: LaneBuild) -> MoveResult:
-        with self.at_work_on(target.product, target.lane, Work.MOVE):
-            product = self.read_product(target.product)
-            return self.settle(
-                self.judging(target.product, target.lane, product, Work.MOVE),
-                lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
-            )
+    def move(self, target: LaneBuild, witness: Witness = NOBODY) -> MoveResult:
+        product = self.read_product(target.product)
+        return settle(
+            self.judging(target.product, target.lane, product, Work.MOVE),
+            lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
+            self.take,
+            witness,
+        )
 
-    def retire(self, product: str, lane: str, delete_data_set: str | None = None) -> RetireResult:
-        with self.at_work_on(product, lane, Work.RETIRE):
-            return self.settle(
-                self.judging(product, lane, self.description_of(product), Work.RETIRE),
-                lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
-            )
+    def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
+        return settle(
+            self.judging(product, lane, self.description_of(product), Work.RETIRE),
+            lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
+            self.take,
+            witness,
+        )
 
-    def begin_maintenance(self, product: str, lane: str) -> MaintenanceResult:
-        with self.at_work_on(product, lane, Work.BEGIN_MAINTENANCE):
-            return self.settle(
-                self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE), maintenance.decide_begin
-            )
+    def begin_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
+        judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)
+        return settle(judging, maintenance.decide_begin, self.take, witness)
 
-    def end_maintenance(self, product: str, lane: str) -> MaintenanceResult:
-        with self.at_work_on(product, lane, Work.END_MAINTENANCE):
-            # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
-            web_address = web_address_of(product, lane)
-            route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
-            if not route.in_maintenance:
-                if route.proxy_runs and not is_loaded_as_written(route):
-                    self.proxy.await_route(web_address, route.written)
-                return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
-            description = self.read_product(product)
-            return self.settle(
-                self.judging(product, lane, description, Work.END_MAINTENANCE),
-                lambda judged, done: maintenance.decide_end(judged, description, done),
-                self.take_behind_back_soon,
-            )
+    def end_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
+        # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
+        web_address = web_address_of(product, lane)
+        route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
+        if not route.in_maintenance:
+            if route.proxy_runs and not is_loaded_as_written(route):
+                self.proxy.await_route(web_address, route.written)
+            return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
+        description = self.read_product(product)
+        return settle(
+            self.judging(product, lane, description, Work.END_MAINTENANCE),
+            lambda judged, done: maintenance.decide_end(judged, description, done),
+            self.take_behind_back_soon,
+            witness,
+        )
 
     # A move answers from what the status call sees, so it asks its lane's web address too.
     def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
         return lambda: judge(self.read(scope).lane(product, lane), description, work)
-
-    def settle[Answer](
-        self,
-        read_judged: Callable[[], Judgement],
-        next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
-        take: Callable[[Action], Event] | None = None,
-    ) -> Answer:
-        done: list[Event] = []
-        while True:
-            judged = read_judged()
-            step = next_step(judged, tuple(done))
-            if isinstance(step, Done):
-                return step.answer
-            if isinstance(step, Stop):
-                raise Stopped(step.reason)
-            if len(done) == MOST_STEPS:
-                raise Stopped(
-                    f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
-                    f"stopped before {step}. What was done stays done, and asking again goes on from there."
-                )
-            done.append((take or self.take)(step))
 
     def take(self, action: Action) -> Event:
         if isinstance(action, steps.Check):
