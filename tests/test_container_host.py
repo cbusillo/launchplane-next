@@ -305,9 +305,9 @@ def test_a_server_whose_logins_cannot_be_read_is_read_with_why_and_the_rest_of_t
     docker = RecordingDocker()
     host = database_made(docker)
     server_of(docker).has_its_database = False
-    read = data_set_read(docker, host)
-    assert (read.accepts_connections, read.unheld_logins) == (True, None)
-    assert 'database "app" does not exist' in (read.logins_unread or "")
+    server = data_set_read(docker, host)
+    assert (server.accepts_connections, server.unheld_logins) == (True, None)
+    assert 'database "app" does not exist' in (server.logins_unread or "")
 
 
 def test_a_database_that_never_accepts_connections_is_an_error_after_its_deadline() -> None:
