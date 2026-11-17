@@ -382,7 +382,8 @@ class PostgresRecord(Record):
     def __init__(self, database_named: str, secrets: Secrets, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
         self.database = database_named
         self.gate = Gate(secrets)
-        self.seconds_to_answer = seconds_to_reach
+        # As long again as reaching it may take, so a database that cannot be reached is said to be that.
+        self.seconds_to_answer = 2 * seconds_to_reach
         # Each connection is checked as it is taken, so one the database dropped is replaced and not handed out.
         self.pool = ConnectionPool(
             database_named,

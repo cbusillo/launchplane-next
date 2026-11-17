@@ -408,7 +408,7 @@ def test_a_reading_the_record_does_not_answer_in_time_is_given_up_on_and_said_as
         with psycopg.connect(migrated_database) as holder:
             # noinspection SqlResolve
             holder.execute("lock table request in access exclusive mode")
-            with pytest.raises(RecordError, match=r"did not answer within 0.3 s while reading the requests not finished"):
+            with pytest.raises(RecordError, match=r"did not answer within 0.6 s while reading the requests not finished"):
                 record.unfinished()
             waited = time.monotonic() - began
         assert (waited < 2, record.unfinished()) == (True, [])

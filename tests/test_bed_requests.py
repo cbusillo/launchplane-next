@@ -60,12 +60,12 @@ def test_with_its_database_frozen_launchplane_still_shows_the_host_within_second
     finally:
         on_control("pkill -CONT -u postgres")
     wait_for(the_record_answers, seconds=30)
-    assert (status, "did not answer within 3 s" in running["record_error"], running["cards"][0]["title"]) == (
+    assert (status, "did not answer within 6 s" in running["record_error"], running["cards"][0]["title"]) == (
         200,
         True,
         "Launchplane's record cannot be read",
     ), running["record_error"]
-    assert (took < 10, builds_of_the_lane()) == (True, [BUILD_A]), took
+    assert (took < 12, builds_of_the_lane()) == (True, [BUILD_A]), took
 
 
 @pytest.mark.usefixtures("lane_on_a")
