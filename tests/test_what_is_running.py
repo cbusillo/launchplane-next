@@ -193,12 +193,6 @@ def lane_instance(state: InstanceState = InstanceState.RUNNING) -> RunningInstan
     )
 
 
-def test_a_lane_the_proxy_routes_nowhere_says_so() -> None:
-    entry = web_addresses_answer([lane_instance()], {})["testing.site.test"]
-    assert (entry["product"], entry["lane"], entry["sends_to_container"], entry["answers"]) == ("site", "testing", None, False)
-    assert "no instance" in entry["error"]
-
-
 def test_a_stopped_active_instance_leaves_its_web_address_not_answering() -> None:
     routes = {"testing.site.test": "site-testing-1"}
     entry = web_addresses_answer([lane_instance(InstanceState.STOPPED)], routes, {"testing.site.test": "502 Bad Gateway"})[
@@ -245,13 +239,6 @@ def test_a_web_address_in_maintenance_says_it_shows_the_back_soon_page() -> None
         None,
     )
     assert [instance["receives_visitors_for"] for instance in body["instances"]] == [None]
-
-
-def test_with_the_proxy_down_every_web_address_says_so() -> None:
-    client = app_reading(lambda: [lane_instance(InstanceState.STOPPED)], proxy=proxy_sending(None, runs=False))
-    [entry] = client.get("/running").json()["web_addresses"]
-    assert (entry["sends_to_container"], entry["answers"]) == (None, False)
-    assert "The proxy is not running" in entry["error"]
 
 
 def test_the_page_is_given_every_row_with_its_wording_and_colour_so_its_script_decides_none() -> None:

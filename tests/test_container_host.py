@@ -202,9 +202,8 @@ def test_a_background_service_is_read_with_the_data_set_it_says_it_runs_against(
 
 VOLUME = "launchplane-data-d1-database"
 SET_UP = "/docker-entrypoint-initdb.d/launchplane.sh"
-WEB, OTHER_WEB = "shop-testing-aaaaaaaaaaaa", "shop-testing-bbbbbbbbbbbb"
+WEB = "shop-testing-aaaaaaaaaaaa"
 BACKGROUND_SERVICE = f"{WEB}-background-service"
-RULES_OF_THE_IMAGE = [["local", ["all"], ["all"], None, "trust", None], ["host", ["all"], ["all"], "all", "reject", None]]
 
 
 def database_made(docker: RecordingDocker) -> ContainerHost:

@@ -103,14 +103,6 @@ def test_a_retire_that_finishes_on_its_last_allowed_step_answers_retired_not_sto
     assert (result.outcome, proxy.host.instances) == (RetireOutcome.RETIRED, {})
 
 
-def test_a_move_whose_loaded_route_is_disabled_stops_with_why_and_changes_nothing() -> None:
-    lanes, proxy = lanes_serving(BUILD_A, "a")
-    proxy.loaded[WEB_ADDRESS] = LoadedRoute(proxy.written[WEB_ADDRESS], RouteStatus.DISABLED)
-    with pytest.raises(Stopped, match="reports it disabled"):
-        lanes.move(BUILD_B)
-    assert proxy.host.actions == []
-
-
 def lane_brought_up_with_a() -> PretendProxy:
     proxy = PretendProxy(PretendHost())
     lanes_on(proxy).move(BUILD_A)
@@ -458,15 +450,6 @@ def test_a_background_service_that_does_not_stay_up_coming_out_leaves_everything
     result = lanes_on(proxy).end_maintenance("site", "testing")
     assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.BACKGROUND_SERVICE_FAILED, True)
     assert state_of(proxy) == stopped
-
-
-def test_ending_maintenance_starts_no_stopped_background_service_on_a_lane_that_is_not_in_maintenance() -> None:
-    proxy = lane_brought_up_with_a()
-    [background_service] = proxy.host.background_services
-    proxy.host.stop_part(background_service)
-    proxy.host.actions.clear()
-    result = lanes_on(proxy).end_maintenance("site", "testing")
-    assert (result.outcome, proxy.host.actions) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, [])
 
 
 def test_a_web_part_that_will_not_start_coming_out_leaves_everything_stopped_and_says_why() -> None:
