@@ -45,7 +45,7 @@ class PretendRecord(Record):
 
     def reach(self, doing: str) -> None:
         if not self.reachable:
-            raise RecordError(f"Launchplane's record could not be reached while {doing}: connection refused")
+            raise RecordError(f"Launchplane's record could not be reached while {doing}: connection refused.")
 
     def change(self, request: int, **changes: object) -> Kept:
         self.kept[request] = self.kept[request].model_copy(update=changes)

@@ -223,11 +223,15 @@ def write_new(session: Session, asked: Asked, asked_by: str, idempotency_key: st
     return Request.model_validate(session.execute(Sql.WRITE, values).fetchone())
 
 
+def unreachable(doing: str, error: psycopg.Error) -> RecordError:
+    return RecordError(f"Launchplane's record could not be reached while {doing}: {str(error).strip().rstrip('.')}.")
+
+
 def asked_once(session: Session, doing: str, query: LiteralString, values: list[Any]) -> DictRow:
     try:
         row = session.execute(query, values).fetchone()
     except psycopg.Error as error:
-        raise RecordError(f"Launchplane's record could not be reached while {doing}: {error}") from error
+        raise unreachable(doing, error) from error
     if row is None:
         raise RecordError(f"Launchplane's record gave no answer while {doing}.")
     return row
@@ -273,7 +277,7 @@ class PostgresRecord(Record):
             with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as session:
                 yield session
         except psycopg.Error as error:
-            raise RecordError(f"Launchplane's record could not be reached while {doing}: {error}") from error
+            raise unreachable(doing, error) from error
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         with self.session("writing a request") as session:
@@ -313,7 +317,7 @@ class PostgresRecord(Record):
         try:
             connection = psycopg.connect(self.database, autocommit=True)
         except psycopg.Error as error:
-            raise RecordError(f"Launchplane's record could not be reached while taking a lane's turn: {error}") from error
+            raise unreachable("taking a lane's turn", error) from error
         with closing(connection), connection.cursor(row_factory=dict_row) as session:
             yield bool(asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, [f"{product}/{lane}"])["ours"])
 
