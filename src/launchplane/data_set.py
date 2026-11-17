@@ -1,13 +1,16 @@
 import base64
+import hashlib
+import hmac
+import secrets
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-
-from scramp import ScramMechanism  # pyright: ignore[reportMissingTypeStubs]
 
 DATABASE_ADDRESS = "database"
 DATABASE_PORT = 5432
 DATABASE_NAME = "app"
 DATA_PATH = "/var/lib/postgresql"
+SALT_BYTES = 16
+SCRAM_ITERATIONS = 4096
 # The image runs what is in this folder once, where it finds no data yet.
 SET_UP_PATH = PurePosixPath("/docker-entrypoint-initdb.d/launchplane.sh")
 THROWAWAY_PASSWORD_VARIABLE = "POSTGRES_PASSWORD"  # noqa: S105 the name of the variable, not a password
@@ -114,6 +117,9 @@ def client_environment(login: str, password: str) -> dict[str, str]:
 
 
 def verifier_of(password: str) -> str:
-    made: tuple[bytes, bytes, bytes, int] = ScramMechanism("SCRAM-SHA-256").make_auth_info(password)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    salt, stored_key, server_key = (base64.b64encode(part).decode() for part in made[:3])
-    return f"SCRAM-SHA-256${made[3]}:{salt}${stored_key}:{server_key}"
+    salt = secrets.token_bytes(SALT_BYTES)
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, SCRAM_ITERATIONS)
+    stored_key = hashlib.sha256(hmac.digest(salted, b"Client Key", "sha256")).digest()
+    server_key = hmac.digest(salted, b"Server Key", "sha256")
+    encoded = [base64.b64encode(part).decode() for part in (salt, stored_key, server_key)]
+    return f"SCRAM-SHA-256${SCRAM_ITERATIONS}:{encoded[0]}${encoded[1]}:{encoded[2]}"

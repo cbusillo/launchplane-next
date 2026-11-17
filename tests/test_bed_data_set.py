@@ -499,17 +499,86 @@ def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of
     assert logins_on(finished.data_sets[0]) == [environment_of(new)["PGUSER"]]
 
 
-def files_holding(database: str, text: str) -> str:
-    return on_scratch(f"docker exec {database} grep -rlFs -e {text} /var/lib/postgresql || true")
+def files_holding(volume: str, text: str) -> list[str]:
+    search = f"docker run --rm --user 0 --volume {volume}:/data:ro postgres:18-alpine grep -rlF -e {text} /data"
+    *files, ended = on_scratch(f"{search}; echo exit=$?").split()
+    assert ended in ("exit=0", "exit=1"), f"the search could not read every file: {ended}"
+    return files
 
 
 def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) -> None:
     write_row("written before the volume is searched")
-    database = database_of(lane_on_a.data_sets[0])
-    passwords = [environment_of(lane_on_a.receiving()["container"])["PGPASSWORD"], environment_of(database)["POSTGRES_PASSWORD"]]
-    asked_of_server(database, "CHECKPOINT")
-    assert [files_holding(database, password) for password in passwords] == ["", ""]
-    assert files_holding(database, "SCRAM-SHA-256") != ""
+    [data_set] = lane_on_a.data_sets
+    [volume] = data_set["volumes"]
+    passwords = [
+        environment_of(lane_on_a.receiving()["container"])["PGPASSWORD"],
+        environment_of(database_of(data_set))["POSTGRES_PASSWORD"],
+    ]
+    status, body = ask(f"/lanes/{PRODUCT}/{LANE}/maintenance/begin", {})
+    assert (status, body["outcome"]) == (200, "in maintenance"), body
+    assert [files_holding(volume, password) for password in passwords] == [[], []]
+    assert files_holding(volume, "SCRAM-SHA-256") != []
+
+
+SESSION_HOLDER = "test-bed-session-holder"
+HOLD_A_SESSION = """
+import time, psycopg
+session = psycopg.connect("connect_timeout=3", autocommit=True)
+session.execute("SET ROLE NONE; CREATE TABLE owned_by_the_login (id int)")
+print("holding", flush=True)
+try:
+    while True:
+        session.execute("SELECT 1")
+        time.sleep(0.2)
+except psycopg.Error as error:
+    print("session ended:", error, flush=True)
+"""
+
+
+def session_holder_log() -> str:
+    return on_scratch(f"docker exec {SESSION_HOLDER} cat /hold.log")
+
+
+def hold_a_session(network: str, login: dict[str, str]) -> None:
+    given = " ".join(f"--env {name}={value}" for name, value in login.items() if name.startswith("PG"))
+    on_scratch(f"docker run --detach --name {SESSION_HOLDER} --network {network} {given} {BUILD_A} sleep 600")
+    on_scratch(f"docker exec --interactive {SESSION_HOLDER} sh -c 'cat > /hold.py'", given=HOLD_A_SESSION)
+    on_scratch(f"docker exec --detach {SESSION_HOLDER} sh -c 'python /hold.py > /hold.log 2>&1'")
+    wait_for(lambda: "holding" in session_holder_log(), seconds=15)
+
+
+def test_retiring_an_instance_ends_a_session_held_as_its_login_and_keeps_what_the_login_owned_for_app(lane_on_a: LaneView) -> None:
+    [data_set] = lane_on_a.data_sets
+    database = database_of(data_set)
+    login = environment_of(lane_on_a.receiving()["container"])
+    # noinspection SqlResolve
+    owner = "SELECT tableowner FROM pg_tables WHERE tablename = 'owned_by_the_login'"
+    try:
+        hold_a_session(data_set["networks"][0]["name"], login)
+        owned_by = asked_of_server(database, owner)
+        status, body = retire(PRODUCT, LANE)
+        assert status == 200, body
+        wait_for(lambda: "session ended" in session_holder_log(), seconds=10)
+        assert (owned_by, asked_of_server(database, owner), logins_on(data_set)) == ([login["PGUSER"]], ["app"], [])
+    finally:
+        on_scratch(f"docker rm --force {SESSION_HOLDER}")
+
+
+def test_a_login_no_container_holds_shows_as_left_unfinished_and_the_next_move_and_the_next_retire_remove_it(
+    lane_on_a: LaneView,
+) -> None:
+    [data_set] = lane_on_a.data_sets
+    database = database_of(data_set)
+    own = environment_of(lane_on_a.receiving()["container"])["PGUSER"]
+    asked_of_server(database, "CREATE ROLE i_left_by_a_kill LOGIN IN ROLE app")
+    left = json.loads(verdict_now())
+    moved = move(BUILD_A)
+    after_the_move = logins_on(data_set)
+    asked_of_server(database, "CREATE ROLE i_left_again LOGIN IN ROLE app")
+    status, body = retire(PRODUCT, LANE)
+    assert any("has the login i_left_by_a_kill, which no container holds" in state for state in left["unfinished"]), left
+    assert (moved["outcome"], after_the_move) == ("cleaned up", [own])
+    assert (status, logins_on(data_set)) == (200, []), body
 
 
 @pytest.mark.usefixtures("fresh_lane")

@@ -167,6 +167,11 @@ class DeleteDataSet:
 
 
 @dataclass(frozen=True)
+class RemoveLogins:
+    database: str
+
+
+@dataclass(frozen=True)
 class ShowBackSoon:
     web_address: str
 
@@ -241,6 +246,7 @@ type Action = (
     | StartBackgroundService
     | Retire
     | RemoveInstance
+    | RemoveLogins
     | Check
     | AwaitBackgroundService
     | ShowBackSoon

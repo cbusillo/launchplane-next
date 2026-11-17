@@ -61,11 +61,12 @@ So a password is asked for from every address, and only a login of an instance o
 
 **An instance.** Before each login is made Launchplane reads the rules back from the server. If they are not exactly the rules above, the call answers `503` saying what the server has, starts no instance on that data set and deletes nothing. Launchplane sends the server the scrambled form of the new password, never the password. The web part gets the password as `PGPASSWORD`. The background service is given the login its instance's web part holds, read from that container on the host.
 
-**When it goes.** After a web part or a background service is retired, every login of the data set that no container on the host holds is removed: closed to new sessions, its sessions ended, anything it owns given to `app`, then dropped. The same is done before each new login is made, so a login left by a crash goes then.
+**When it goes.** A move or a retire is not finished while a running database server of the lane has a login that no container on the host holds. Before it answers, it reads the logins from the server and the containers from the host, and removes each such login: closed to new sessions, its sessions ended, anything it owns given to `app`, then dropped. So a retired instance's login goes in the call that retired it, and one left by a call that was killed goes in the next move or retire. Until then the lane's verdict shows it as left unfinished.
 
 - A release that keeps the data set has two instances for a short time, each with its own login.
 - A database server removed by hand is made again on the kept volume. Its logins are in the data, so the instance still logs in.
-- While a data set's server is stopped, as in maintenance, retiring an instance leaves its login in the data. It is removed the next time an instance is started on that data set.
+- A stopped server is the one exception: its logins are not read, and wait in the data until a move or a retire finds the server running.
+- When a running server's logins cannot be read, a move or a retire that has done everything else answers `503` saying why. Ask again once the server answers, or delete the data set by name.
 - A data set made before logins were per instance does not have these rules, so no instance is started on it. Nothing is converted: delete it by name.
 
 Anyone who can run `docker inspect` on a web part or background service can read that instance's password. It opens nothing once the instance is retired.
@@ -89,7 +90,8 @@ A move takes these steps, each only when needed, reading the host again before e
 2. Make a login and start the new instance with it, on the data set of the instance receiving visitors, or on the lane's only data set, or on a new one.
 3. Check the new instance at the product's health path, then point the web address at it.
 4. Stop the old instance's background service, start the new instance's, and watch it stay up 3 s.
-5. Retire the old instance, and remove its login.
+5. Retire the old instance.
+6. Remove every login no container holds.
 
 Only one background service of a lane runs at a time. Between the old one and the new one none runs: measured at 0.50 and 0.55 s.
 
@@ -112,7 +114,7 @@ The other outcomes are those of [the move](the-move.md). `data_set` in the answe
 
 ## Retiring a lane with data
 
-Retiring removes the route, then the background services, then the instances and their logins. It keeps the lane's data sets and lists them in `kept_data_sets`. To delete one, name it:
+Retiring removes the route, then the background services, then the instances, then the logins no container holds. It keeps the lane's data sets and lists them in `kept_data_sets`. To delete one, name it:
 
 ```
 curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/retire \
@@ -135,7 +137,7 @@ The data set is deleted once the lane has no background service and no instance 
 | `in_maintenance_since` | When that route was written, or `null`. | under the lane's name |
 | `parts` | For each container of the lane, `good`, `wrong` or `on purpose`. Running is good, and anything else is wrong, or on purpose while a call is at work. In maintenance stopped is on purpose. | the colour of the part's state pill |
 
-While a move is at work, only a part attached or mounted where it must not be is a problem. After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
+While a move is at work, only a part attached or mounted where it must not be is a problem. After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too, and so does a lane whose database server has a login no container holds.
 
 How the page lays a lane out is in [the page](what-is-running.md#the-page).
 
@@ -149,7 +151,7 @@ A web part, a background service and a database server are each made with the re
 - **A release that finishes between two readings of the move flag** can show for one reading as left unfinished.
 - **A database server keeps the password it was first started with in its environment.** The set-up takes it off `postgres`, so it opens nothing. If the set-up did not finish it is still the password of `postgres`, which the rules then left in place refuse from every address but the server's own container. Launchplane cleans it from its answers like any secret.
 - **The scrambled form of a new password can be read in Docker's events on the container host,** because it is part of the command Launchplane runs in the database server. It does not open the database.
-- **If a database server refuses while a login is being removed, the retire answers `503`** with the container already gone. Asking again answers success, and the login stays until an instance is next started on that data set.
+- **Access rules changed by hand on a running server, with the file then put back and the server not told to load it, pass the read-back,** because the read-back reads the file and not what the server has loaded.
 - **A password handed to the product as a file, a login that expires, and an encrypted connection to the database are not built.**
 - **A container made before the background service was named, marked `launchplane.part=job`, makes the host unreadable.** No version has been released, so nothing is converted: the test bed's lanes are made again.
 - **Rules no test catches:** reading the host again when Docker refuses a question about a container it has just listed, asking only the databases of a product that has one whether they accept connections, leaving out a superuser when the logins are listed, and finishing a delete whose parts have already gone. Comes back when one of them breaks without a test noticing.
@@ -176,7 +178,7 @@ On the test bed, Docker 29.9.3 on the scratch container, November 15:
 - Retiring the lane: 0.97 to 1.43 s. Deleting its data set: 0.38 s.
 - Launchplane killed at four points of a bring-up and four of a release, then asked again: each reached one instance of the build with its background service running on the one data set, rows kept, and no two background services running at once.
 - `/running` with one plain lane on the host: 0.06 to 0.07 s. With a database lane too: 0.12 to 0.13 s. With the scratch container unreachable, a call answers `503` after 5 s.
-- With a login per instance, November 16, one run each: a lane brought up with a fresh data set 13.3 s, on a kept data set 10.3 s, asking again 0.11 s, a release that keeps the data set 11.3 s, retiring the lane 1.05 s, deleting its data set 0.39 s, and `/running` with a database lane 0.14 to 0.15 s.
+- With a login per instance, November 16, one run each, before logins were read on every reading of the host: a lane brought up with a fresh data set 13.3 s, on a kept data set 10.3 s, asking again 0.11 s, a release that keeps the data set 11.3 s, retiring the lane 1.05 s, deleting its data set 0.39 s, and `/running` with a database lane 0.14 to 0.15 s.
 - Making a login takes 44 to 50 ms and removing one 39 to 45 ms. A stored password looks like `SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>`.
 - From a container on the data set's network: the instance's login with no password was answered `no password supplied`, with a wrong password `password authentication failed`, and `postgres`, the instance's login on the `postgres` database, and a retired instance's login and password `pg_hba.conf rejects connection`. From a container outside that network the right login and password timed out.
 - Two instances at once each altered a table the other had made and wrote to it together. Every table, sequence and index, and the database, belonged to `app`.

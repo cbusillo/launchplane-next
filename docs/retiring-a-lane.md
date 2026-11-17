@@ -16,9 +16,10 @@ It reads the host and the proxy again before every step. The next step is the fi
 2. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file. A route the proxy reports as disabled still counts as loaded.
 3. If the lane's routes file sends the web address to an instance, delete that file. No other lane's file is touched.
 4. Retire a background service of the lane.
-5. Retire an instance of the lane: Docker sends the stop signal, waits up to 30 s, then removes it. Its [database login](data-sets.md#logins) is removed with it.
+5. Retire an instance of the lane: Docker sends the stop signal, waits up to 30 s, then removes it.
 6. If the body names one of the lane's data sets, delete it.
-7. Answer.
+7. If a running database server of the lane has a [login](data-sets.md#logins) no container holds, remove it. If its logins cannot be read, stop with `503`.
+8. Answer.
 
 The web address goes first so that no new request reaches an instance that is stopping. A request the instance already holds gets its answer only if the product finishes it within 30 s of the stop signal.
 

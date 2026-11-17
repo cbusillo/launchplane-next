@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from launchplane.container_host import ContainerHost, PartStopped
-from launchplane.data_set import REMOVE_LOGIN, RULES_FILE, login_of
+from launchplane.data_set import RULES_FILE, login_of
 from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, secrets_held
 from launchplane.instance import LANE_NETWORK, DataSet, DataSetDatabase, DataSetUse, HostNetwork, InstanceState, LaneBuild, Mount
@@ -272,52 +272,42 @@ def test_a_background_service_whose_instance_holds_no_login_is_not_started() -> 
     assert BACKGROUND_SERVICE not in docker.containers.by_name
 
 
-def test_a_login_goes_when_the_last_container_holding_it_is_retired_and_not_before() -> None:
+def test_only_a_login_no_container_holds_is_removed_and_one_goes_when_its_last_container_has() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
     host.start_instance(TARGET, WEB, LINK)
     host.start_background_service(TARGET, WEB, LINK, ["work"])
     host.start_instance(TARGET, OTHER_WEB, LINK)
     host.retire_instance(BACKGROUND_SERVICE)
+    host.remove_unheld_logins(DATABASE)
     while_the_web_part_holds_it = set(server_of(docker).logins)
     host.retire_instance(WEB)
+    host.remove_unheld_logins(DATABASE)
     assert (while_the_web_part_holds_it, server_of(docker).logins) == ({"i_aaaaaaaaaaaa", "i_bbbbbbbbbbbb"}, {"i_bbbbbbbbbbbb"})
 
 
-def test_an_instance_removed_after_a_failed_check_loses_its_login() -> None:
+def data_set_read(docker: RecordingDocker, host: ContainerHost) -> DataSetDatabase:
+    server_of(docker).ready = True
+    listed = DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,))
+    found = DataSet(product="shop", lane="testing", data_set="d1", networks=(), volumes=(), databases=(listed,))
+    return host.probed(found).databases[0]
+
+
+def test_a_running_server_is_read_with_the_logins_no_container_holds_and_not_the_ones_one_does() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
     host.start_instance(TARGET, WEB, LINK)
-    host.remove_instance(WEB)
-    assert server_of(docker).logins == set()
-
-
-def test_a_login_no_container_holds_is_removed_when_the_next_login_is_made() -> None:
-    docker = RecordingDocker()
-    host = database_made(docker)
     server_of(docker).logins.add("i_left_by_a_crash")
-    host.start_instance(TARGET, WEB, LINK)
-    assert server_of(docker).logins == {"i_aaaaaaaaaaaa"}
+    assert data_set_read(docker, host).unheld_logins == ("i_left_by_a_crash",)
 
 
-def test_an_instance_retired_while_its_database_is_stopped_is_retired_and_its_login_goes_when_the_next_is_made() -> None:
+def test_a_server_whose_logins_cannot_be_read_is_read_with_why_and_the_rest_of_the_host_is_still_read() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
-    host.start_instance(TARGET, WEB, LINK)
-    host.stop_database(DATABASE)
-    host.retire_instance(WEB)
-    left = set(server_of(docker).logins)
-    host.start_database(DATABASE)
-    host.start_instance(TARGET, OTHER_WEB, LINK)
-    assert (docker.containers.by_name[WEB].removed, left, server_of(docker).logins) == (True, {"i_aaaaaaaaaaaa"}, {"i_bbbbbbbbbbbb"})
-
-
-def test_a_login_is_closed_before_its_sessions_are_ended_and_owns_nothing_before_it_is_dropped() -> None:
-    order = [
-        REMOVE_LOGIN.statements.index(word)
-        for word in ("NOLOGIN", "pg_terminate_backend", "REASSIGN OWNED", "DROP OWNED", "DROP ROLE")
-    ]
-    assert order == sorted(order)
+    server_of(docker).has_its_database = False
+    read = data_set_read(docker, host)
+    assert (read.accepts_connections, read.unheld_logins) == (True, None)
+    assert 'database "app" does not exist' in (read.logins_unread or "")
 
 
 def test_a_database_that_never_accepts_connections_is_an_error_after_its_deadline() -> None:

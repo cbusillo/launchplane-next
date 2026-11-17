@@ -70,6 +70,8 @@ class DataSetDatabase(BaseModel):
     mounts: tuple[Mount, ...] = ()
     exit_code: int | None = None
     image: str | None = None
+    unheld_logins: tuple[str, ...] | None = None
+    logins_unread: str | None = None
 
 
 class DataSet(BaseModel):

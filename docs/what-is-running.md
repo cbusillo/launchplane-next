@@ -26,7 +26,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | --- | --- |
 | `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
 | `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
-| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`). An empty list is a missing part and two are two. |
+| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`, `logins_unread`). An empty list is a missing part and two are two. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`. |
 | `lanes` | the verdict on each lane: see [the verdict on a lane](data-sets.md#the-verdict-on-a-lane). |
@@ -35,6 +35,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 - `mounts` lists everything a container has mounted, each with `source` (a volume's name, or a folder of the host) and `path`.
 - `receives_visitors_for` is the web address whose visitors the proxy sends to the instance, or `null`.
 - `accepts_connections` is asked at that moment of a running server whose product's description names a database, and is `null` otherwise.
+- `unheld_logins` lists the [logins](data-sets.md#logins) on a server that accepts connections which no container on the host holds, and is `null` when they were not read. `logins_unread` then says why, if the server was asked and could not tell.
 - `exit_code` is the code a stopped database server exited with, and `null` while it is not stopped. `0` is a clean stop. `image` is the image the server runs.
 - `web_addresses` are every one the proxy routes, and the one of every lane on the host, so a route to an instance that is gone is shown. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, and `error` is why not. A web address the proxy routes nowhere is not requested.
 - A web address of a lane in [maintenance](maintenance.md) has `sends_to_container` `launchplane-back-soon` and `answers` `false`. `shows_back_soon_page` is `true` while the back soon page's container runs.

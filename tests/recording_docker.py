@@ -7,12 +7,13 @@ from typing import Any, cast
 import docker
 from docker.errors import NotFound
 
-from launchplane.data_set import MAKE_LOGIN, READ_LOGINS, READ_RULES, REMOVE_LOGIN, RULES_AS_READ
+from launchplane.data_set import MAKE_LOGIN, READ_LOGINS, READ_RULES, READY_COMMAND, REMOVE_LOGIN, RULES_AS_READ
 from launchplane.docker_answers import files_in, tar_of
 
 STARTED = "2026-11-15T20:00:00Z"
 NOT_READY = 2
 NO_SUCH_LOGIN = 3
+NO_SUCH_DATABASE = 2
 
 
 def as_docker_client(fake: object) -> docker.DockerClient:
@@ -29,11 +30,15 @@ class ExecResult:
 class RecordingServer:
     rules: object = field(default_factory=lambda: RULES_AS_READ)
     logins: set[str] = field(default_factory=set[str])
+    ready: bool = False
+    has_its_database: bool = True
     asked: list[tuple[str, dict[str, str]]] = field(default_factory=list[tuple[str, dict[str, str]]])
 
     def answer(self, script: str, variables: dict[str, str]) -> ExecResult:
         if READ_RULES.statements in script:
             return ExecResult(0, json.dumps(self.rules).encode())
+        if READ_LOGINS.statements in script and not self.has_its_database:
+            return ExecResult(NO_SUCH_DATABASE, b'FATAL:  database "app" does not exist')
         if READ_LOGINS.statements in script:
             return ExecResult(0, json.dumps(sorted(self.logins)).encode())
         if MAKE_LOGIN.statements in script:
@@ -94,6 +99,8 @@ class RecordingContainer:
 
     def exec_run(self, command: list[str]) -> ExecResult:
         self.calls.append(" ".join(command))
+        if command == READY_COMMAND:
+            return ExecResult(0 if self.server.ready else NOT_READY, b"")
         if command[:2] != ["sh", "-c"] or len(command) < 4:
             return ExecResult(NOT_READY, b"")
         variables = dict(option.removeprefix("--set=").split("=", 1) for option in command[4:])

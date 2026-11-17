@@ -57,6 +57,7 @@ from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
+    DataSetDatabase,
     DataSetUse,
     InstanceState,
     LaneBuild,
@@ -226,13 +227,18 @@ class ContainerHost:
             raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
     def probed(self, found: DataSet) -> DataSet:
-        databases = tuple(
-            each.model_copy(update={"accepts_connections": self.accepts_connections(each.container)})
-            if each.state == InstanceState.RUNNING
-            else each
-            for each in found.databases
-        )
+        databases = tuple(self.asked(found, each) if each.state == InstanceState.RUNNING else each for each in found.databases)
         return found.model_copy(update={"databases": databases})
+
+    def asked(self, found: DataSet, database: DataSetDatabase) -> DataSetDatabase:
+        if not self.accepts_connections(database.container):
+            return database.model_copy(update={"accepts_connections": False})
+        try:
+            with attempting(f"Reading the logins of the database {database.container}", self.address):
+                unheld = self.logins.unheld(database.container, found.product, found.data_set)
+        except ContainerHostError as error:
+            return database.model_copy(update={"accepts_connections": True, "logins_unread": str(error)})
+        return database.model_copy(update={"accepts_connections": True, "unheld_logins": tuple(unheld)})
 
     def accepts_connections(self, container: str) -> bool:
         with attempting(f"Asking the database {container} whether it accepts connections", self.address):
@@ -305,7 +311,7 @@ class ContainerHost:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
-            self.run_part(options, use, lambda on: self.logins.make(target.product, container, on))
+            self.run_part(options, use, lambda on: self.logins.make(container, on))
 
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
         networks = [LANE_NETWORK] if use is None else [use.network]
@@ -389,25 +395,25 @@ class ContainerHost:
                 with suppress(NotFound):
                     self.client.networks.get(network.name).remove()
 
-    def retire_container(self, container: str) -> Container | None:
+    def retire_container(self, container: str) -> None:
         found = self.find_container(container)
         if found is not None:
             found.stop(timeout=RETIRE_GRACE_SECONDS)
             found.remove()
-        return found
 
     def remove_instance(self, container: str) -> None:
         with attempting(f"Removing the instance {container}", self.address):
             found = self.find_container(container)
             if found is not None:
                 found.remove(force=True)
-                self.logins.remove_left_by(found.labels)
 
     def retire_instance(self, container: str) -> None:
         with attempting(f"Stopping and removing {container}", self.address):
-            found = self.retire_container(container)
-            if found is not None:
-                self.logins.remove_left_by(found.labels)
+            self.retire_container(container)
+
+    def remove_unheld_logins(self, database: str) -> None:
+        with attempting(f"Removing the logins no container holds from the database {database}", self.address):
+            self.logins.remove_unheld(database)
 
     def read_log_tail(self, container: str) -> str:
         with attempting(f"Reading the log of {container}", self.address):

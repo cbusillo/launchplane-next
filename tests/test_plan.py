@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pytest
@@ -39,6 +40,7 @@ from launchplane.steps import (
     MoveResult,
     Outcome,
     RemoveInstance,
+    RemoveLogins,
     RemoveRoute,
     Retire,
     RetireOutcome,
@@ -236,6 +238,7 @@ def data_set(
     volume: bool = True,
     databases: tuple[str, ...] | None = None,
     accepts: bool | None = True,
+    unheld: Sequence[str] = (),
 ) -> DataSet:
     servers = databases if databases is not None else (() if state is None else (f"database-{name}",))
     return DataSet(
@@ -250,6 +253,7 @@ def data_set(
                 state=state or InstanceState.RUNNING,
                 networks=(f"network-{name}",),
                 accepts_connections=accepts if state == InstanceState.RUNNING else None,
+                unheld_logins=tuple(unheld) if accepts and state == InstanceState.RUNNING else None,
                 mounts=(Mount(source=f"volume-{name}", path="/var/lib/postgresql"),),
             )
             for server in servers
@@ -462,6 +466,50 @@ def next_data_move_step(case: DataCase) -> Action | Done[MoveResult] | Stop:
 @pytest.mark.parametrize("case", DATA_MOVES.values(), ids=DATA_MOVES.keys())
 def test_a_move_with_data_takes_this_step_next(case: DataCase) -> None:
     assert next_data_move_step(case) == case.step
+
+
+LEFT_ON_D1 = data_set("d1", unheld=("i_left",))
+AT_REST_WITH_A_LOGIN_LEFT = DataCase((NEW_ON_D1,), "new", (LEFT_ON_D1,), (), None, (NEW_BACKGROUND_SERVICE,))
+
+
+def test_a_move_does_not_answer_while_a_running_server_has_a_login_no_container_holds() -> None:
+    assert next_data_move_step(AT_REST_WITH_A_LOGIN_LEFT) == RemoveLogins("database-d1")
+
+
+def test_a_failed_check_is_not_answered_until_the_login_of_the_instance_it_removed_is_gone() -> None:
+    refused = (StartInstance(TARGET, "new", USE_D1), CheckRefused("new", "Connection refused"), RemoveInstance("new"))
+    case = DataCase((on_data(OLD, "d1"),), "old", (LEFT_ON_D1,), refused, None, (background_service_of(on_data(OLD, "d1")),))
+    assert next_data_move_step(case) == RemoveLogins("database-d1")
+
+
+def test_a_login_left_in_the_data_shows_on_the_page_as_left_unfinished() -> None:
+    verdict = lane_verdict(lane_seen_of(AT_REST_WITH_A_LOGIN_LEFT), WITH_DATA, "site", "testing", a_move_is_at_work=False)
+    assert (verdict.problems, verdict.left_unfinished) == (
+        [],
+        ["The database database-d1 has the login i_left, which no container holds"],
+    )
+
+
+def retire_step_with(found: DataSet, delete: str | None = None) -> object:
+    return decide_retire(LaneSeen((), LaneRoute(None, None), data_sets=(found,), network_quiet=QUIET), "site", "testing", delete, ())
+
+
+def test_a_retire_does_not_answer_while_a_running_server_has_a_login_no_container_holds() -> None:
+    assert retire_step_with(LEFT_ON_D1) == RemoveLogins("database-d1")
+
+
+def test_a_retire_answers_with_a_stopped_server_whose_logins_wait_for_its_next_start() -> None:
+    assert isinstance(retire_step_with(data_set("d1", InstanceState.STOPPED)), Done)
+
+
+def test_a_retire_does_not_answer_success_while_a_running_servers_logins_cannot_be_read() -> None:
+    step = retire_step_with(data_set("d1", accepts=False))
+    assert isinstance(step, Stop)
+    assert "its logins could not be read" in step.reason
+
+
+def test_a_data_set_named_for_deleting_is_deleted_without_its_logins_being_removed_first() -> None:
+    assert retire_step_with(LEFT_ON_D1, delete="d1") == DeleteDataSet(LEFT_ON_D1)
 
 
 def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:

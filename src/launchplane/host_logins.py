@@ -1,5 +1,3 @@
-from collections.abc import Mapping
-
 import docker
 from pydantic import TypeAdapter, ValidationError
 
@@ -23,7 +21,6 @@ from launchplane.data_set import (
 from launchplane.docker_answers import (
     DATA_SET_LABEL,
     DOCKER_CONTAINER_DETAILS,
-    PART_LABEL,
     PRODUCT_LABEL,
     ContainerHostError,
     checked,
@@ -85,14 +82,24 @@ class HostLogins:
                 held.add(login)
         return held
 
-    def remove_unheld(self, database: str, product: str, data_set: str) -> None:
+    # The logins are read before the containers, so one made between the two reads is not taken for one nothing holds.
+    def unheld(self, database: str, product: str, data_set: str) -> list[str]:
         logins = self.read(database, "Reading the logins", READ_LOGINS, LOGINS_READ)
-        for login in sorted(set(logins) - self.held(product, data_set)):
+        return sorted(set(logins) - self.held(product, data_set))
+
+    def remove_unheld(self, database: str) -> None:
+        labels = self.client.containers.get(database).labels
+        product, data_set = labels.get(PRODUCT_LABEL), labels.get(DATA_SET_LABEL)
+        if product is None or data_set is None:
+            raise ContainerHostError(
+                f"The database {database} does not say which product and data set it is, so Launchplane cannot tell "
+                "which containers hold its logins. No login was removed."
+            )
+        for login in self.unheld(database, product, data_set):
             self.answer(database, f"Removing the login {login}", REMOVE_LOGIN, login=login)
 
-    def make(self, product: str, instance: str, use: DataSetUse) -> dict[str, str]:
+    def make(self, instance: str, use: DataSetUse) -> dict[str, str]:
         self.require_rules(use)
-        self.remove_unheld(use.database_container, product, use.data_set)
         login, password = login_of(instance), new_password()
         self.secrets.note([password])
         # A statement that fails is written whole into the server's log, so the server is never sent the password.
@@ -111,12 +118,3 @@ class HostLogins:
             )
         self.secrets.note([password])
         return client_environment(login, password)
-
-    # A stopped server keeps its logins until an instance is next started on its data set.
-    def remove_left_by(self, labels: Mapping[str, str]) -> None:
-        product, data_set = labels.get(PRODUCT_LABEL), labels.get(DATA_SET_LABEL)
-        if product is None or data_set is None:
-            return
-        filters: Filters = {"label": [*of_data_set(product, data_set), f"{PART_LABEL}=database"], "status": "running"}
-        for database in self.client.containers.list(filters=filters, ignore_removed=True):
-            self.remove_unheld(str(database.name), product, data_set)
