@@ -13,6 +13,7 @@ from launchplane.record import (
     Asked,
     Attempt,
     Event,
+    Gate,
     Held,
     Interrupted,
     Kept,
@@ -22,10 +23,14 @@ from launchplane.record import (
     Request,
     Stands,
     Unconfirmed,
+    key_digest,
     key_reused,
     lane_waits_on_a_person,
     needs_a_person,
+    said,
 )
+from launchplane.secret_boundary import JsonValue
+from tests.given_secrets import GivenSecrets
 
 UNFINISHED = (Stands.WAITING, Stands.WORKING, Stands.NEEDS_A_PERSON)
 
@@ -41,6 +46,7 @@ class PretendRecord(Record):
     turns: dict[tuple[str, str], object] = field(default_factory=dict[tuple[str, str], object])
     attempts_begun: int = 0
     reachable: bool = True
+    gate: Gate = field(default_factory=lambda: Gate(GivenSecrets()))
     confirms_writes: bool = True
     keys: dict[str, int] = field(default_factory=dict[str, int])
     writing: threading.RLock = field(default_factory=threading.RLock)
@@ -52,6 +58,9 @@ class PretendRecord(Record):
         if not self.reachable:
             raise RecordError(f"Launchplane's record could not be reached while {doing}: connection refused.")
 
+    def cleaned(self, **values: JsonValue) -> dict[str, Any]:
+        return {name: self.gate.clean(value) for name, value in values.items()}
+
     def change(self, request: int, **changes: object) -> Kept:
         self.kept[request] = self.kept[request].model_copy(update=changes)
         return self.kept[request]
@@ -59,12 +68,13 @@ class PretendRecord(Record):
     def same_as_written(self, asked: Asked, idempotency_key: str | None) -> Request | None:
         if idempotency_key is None:
             return next((each for each in self.kept.values() if each.asked() == asked and each.stands in UNFINISHED[:2]), None)
-        same_key = self.kept.get(self.keys.get(idempotency_key, 0))
+        same_key = self.kept.get(self.keys.get(key_digest(idempotency_key) or "", 0))
         if same_key is not None and same_key.asked() != asked:
             raise key_reused(same_key)
         return same_key
 
     def write_new(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
+        self.gate.refuse(*said(asked), asked_by)
         new = Kept(
             **asked.model_dump(),
             id=len(self.kept) + 1,
@@ -79,13 +89,14 @@ class PretendRecord(Record):
         )
         self.kept[new.id] = new
         if idempotency_key is not None:
-            self.keys[idempotency_key] = new.id
+            self.keys[key_digest(idempotency_key) or ""] = new.id
         if not self.confirms_writes:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")
         return new
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         self.reach("writing a request")
+        self.gate.refuse(*said(asked), asked_by)
         with self.writing:
             same = self.same_as_written(asked, idempotency_key)
             if same is not None:
@@ -144,7 +155,7 @@ class PretendRecord(Record):
             ]
             self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
             if len(interrupted) >= MOST_ATTEMPTS:
-                self.change(request, attempts=interrupted, stands=Stands.NEEDS_A_PERSON, error=needs_a_person(found))
+                self.change(request, attempts=interrupted, stands=Stands.NEEDS_A_PERSON, **self.cleaned(error=needs_a_person(found)))
                 return None
             began = Attempt(number=len(interrupted) + 1, began_at=now(), ended_at=None, ended=None)
             self.change(request, attempts=[*interrupted, began], stands=Stands.WORKING)
@@ -159,7 +170,7 @@ class PretendRecord(Record):
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
             found = self.kept[request]
-            event = Event(at=now(), attempt=len(found.attempts), did=did, error=error)
+            event = Event(at=now(), attempt=len(found.attempts), **self.cleaned(did=did, error=error))
             self.change(request, events=[*found.events, event])
 
     def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
@@ -170,7 +181,8 @@ class PretendRecord(Record):
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
             attempts = self.kept[request].attempts
             ended = attempts[-1].model_copy(update={"ended": stands.value, "ended_at": now()})
-            self.change(request, attempts=[*attempts[:-1], ended], stands=stands, ended_at=now(), answer=answer, error=error)
+            kept = self.cleaned(answer=answer, error=error)
+            self.change(request, attempts=[*attempts[:-1], ended], stands=stands, ended_at=now(), **kept)
 
     def answered_by_a_person(self, request: int, how: str) -> Request | None:
         found = self.kept.get(request)

@@ -4,6 +4,7 @@ from collections.abc import Callable
 import pytest
 
 from launchplane.act import EVERY_LANE, MOST_STEPS, Lanes, Stopped
+from launchplane.api import lane_answer
 from launchplane.container_host import Lane
 from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import (
@@ -13,9 +14,9 @@ from launchplane.instance import (
     OnHost,
     background_service_container_of,
 )
-from launchplane.judge import Work
+from launchplane.judge import Condition, Kind, Shown, Work
 from launchplane.product import Product, ProductError
-from launchplane.record import Asked, Kept, Stands
+from launchplane.record import Asked, Kept, RecordError, Stands
 from launchplane.steps import MaintenanceOutcome, Outcome, RetireOutcome
 from tests.pretend_host import (
     SINCE,
@@ -263,6 +264,42 @@ def test_a_request_taken_up_or_ended_while_the_host_is_read_is_at_work_on_what_w
     for reads in ([[working], []], [[], [working]]):
         lanes = Lanes(proxy.host, proxy, read_unfinished=iter(reads).__next__)
         assert [judged.work for judged in lanes.read_status().lanes] == [Work.MOVE]
+
+
+UNREADABLE_AT = {"the first reading": 0, "the second reading": 1}
+
+
+@pytest.mark.parametrize("failing", UNREADABLE_AT.values(), ids=UNREADABLE_AT.keys())
+def test_a_record_unread_on_either_reading_leaves_what_a_request_would_explain_not_known_never_under_way(failing: int) -> None:
+    proxy = PretendProxy(PretendHost())
+    proxy.host.place(BUILD_A, "a")
+    proxy.host.place(BUILD_B, "b")
+    proxy.route(WEB_ADDRESS, "a")
+    working = Kept(
+        **MOVE_B.model_dump(),
+        id=1,
+        asked_by="the address 192.0.2.1",
+        asked_at=SINCE,
+        stands=Stands.WORKING,
+        ended_at=None,
+        answer=None,
+        error=None,
+        attempts=[],
+        events=[],
+    )
+    readings = iter(range(2))
+
+    def read_unfinished() -> list[Kept]:
+        if next(readings) == failing:
+            raise RecordError("Launchplane's record could not be reached while reading the requests not finished: refused.")
+        return [working]
+
+    status = Lanes(proxy.host, proxy, read_unfinished=read_unfinished).read_status()
+    [judged] = status.lanes
+    beside = [finding.shown for finding in judged.findings if finding.kind == Kind.BESIDE]
+    assert (judged.work, judged.work_unread, judged.condition, beside) == (None, True, Condition.UNREAD, [Shown.UNREAD])
+    assert (status.requests, status.record_error is not None, lane_answer(judged).a_move_is_at_work) == ([], True, None)
+    assert any("is not known" in sentence for sentence in judged.shown_as(Shown.UNREAD))
 
 
 def web_addresses_read(proxy: PretendProxy) -> dict[str, tuple[str | None, bool, str | None]]:

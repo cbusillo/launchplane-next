@@ -167,9 +167,11 @@ def test_a_failure_launchplane_does_not_know_fails_its_request_and_the_next_requ
     assert (kept_of(record, broken.id).stands, kept_of(record, after.id).stands) == (Stands.FAILED, Stands.DONE)
 
 
-def test_a_secret_in_an_error_or_an_answer_is_removed_before_it_is_written_to_the_record(record: Record) -> None:
+def test_a_secret_in_an_error_or_an_answer_is_removed_before_it_is_written_to_the_record(
+    record: Record, secrets: GivenSecrets
+) -> None:
     worker, _, proxy = serving_a(record)
-    worker.secrets = GivenSecrets(seen=frozenset({SECRET}))
+    secrets.seen = frozenset({SECRET})
     proxy.failing = {"site-testing-0"}
     proxy.host.read_log_tail = lambda container: f"{container} PGPASSWORD={SECRET}"
     request = record.write(MOVE_B, CALLER, None)
@@ -223,7 +225,10 @@ def test_with_the_record_unreachable_the_host_is_still_shown_and_the_page_says_t
     worker, lanes, proxy = serving_a(record)
     status = lanes.read_status()
     assert status.record_error is not None and "could not be reached" in status.record_error
-    assert ([card.title for card in cards(status)], status.lanes[0].condition) == ([RECORD_UNREAD, "site · testing"], Condition.GOOD)
+    assert ([card.title for card in cards(status)], status.lanes[0].condition) == (
+        [RECORD_UNREAD, "site · testing"],
+        Condition.UNREAD,
+    )
     assert (worker.worked_one(), proxy.host.actions) == (False, [])
 
 

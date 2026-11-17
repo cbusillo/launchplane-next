@@ -131,7 +131,7 @@ One judgement is made of a lane from one reading of it, what the product's descr
 | Field | Meaning |
 | --- | --- |
 | `condition` | `good`, `in maintenance`, `work under way`, `unfinished`, `wrong` or `could not be read`. The worst that applies: wrong, then could not be read, then work under way, then unfinished. |
-| `work` | What the [request](requests.md) being worked on the lane is doing: `moving`, `retiring`, `beginning maintenance`, `ending maintenance`, or `null`. It is read from the record with the host, and is `null` when the record cannot be read. `a_move_is_at_work` is whether it is not `null`. |
+| `work` | What the [request](requests.md) being worked on the lane is doing: `moving`, `retiring`, `beginning maintenance`, `ending maintenance`, or `null`. It is read from the record with the host. When the record cannot be read it is `null`, `a_move_is_at_work` is `null` too, the lane has a finding saying so, and what would be under way or left unfinished is shown as `could not be read`. `a_move_is_at_work` is whether it is not `null`. |
 | `findings` | Everything found, each with `subject` (a container, a data set or the web address), `kind`, `sentence` and `shown`. |
 | `parts` | For each container of the lane, its standing: `good`, `wrong`, `on purpose` or `could not be read`. It is the worst of what was found about that container. With nothing found it is good, or on purpose when it is stopped in a lane in maintenance. |
 | `in_maintenance` | The lane's route points at the back soon page: see [a lane in maintenance](maintenance.md). |
@@ -145,13 +145,13 @@ A finding is `shown` one of four ways:
 | `wrong` | Never acceptable, whatever a call is doing: a part attached or mounted where it must not be, a database server in maintenance that did not stop cleanly, the back soon page not running for a lane in maintenance. Or wrong with no call at work: a part that keeps restarting, a data set with a part twice or a network that is not quiet, a part not stopped in a lane in maintenance, a route the proxy reports as not enabled, a web address that does not answer with success. |
 | `under way` | A call is at work on the lane, and the finding is one of those wrong only with no call at work, or one a call passes through. |
 | `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, a routes file the proxy has not loaded yet, an instance beside the active one, a stopped or missing part, a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
-| `could not be read` | Something asked of the host has no answer: the product's description, a server's logins, a server not asked whether it accepts connections, a network a part is attached to that was not among the networks read. Never shown as under way. |
+| `could not be read` | Something asked has no answer: Launchplane's record of requests, the product's description, a server's logins, a server not asked whether it accepts connections, a network a part is attached to that was not among the networks read. Never shown as under way. |
 
 Whether the web address answers is asked by the status call and by a move, and is a finding about the instance the web address is sent to. So a move to the build a lane already serves answers `503`, in the status call's words, while that web address does not answer with success. It starts no other instance for it. A retire and the maintenance calls do not ask.
 
 While a call is ending maintenance the lane is judged as it must be once it is back: a part still stopped is under way, and a running one is good.
 
-After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
+After Launchplane is killed mid-release and starts again, its [request](requests.md) still stands as working, so the lane shows as work under way, and the worker takes the request up and finishes the release with nobody asking. A lane shows as left unfinished when a request failed halfway or was given up: then asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
 
 A move and the end of maintenance answer for the instance they serve from and that instance's data set. A fault in another data set of the lane is in the judgement and on the page, and does not stop them.
 

@@ -1,7 +1,8 @@
 import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, LiteralString
+from contextlib import AbstractContextManager
+from typing import Any, LiteralString, get_args, get_origin, get_type_hints
 
 import psycopg
 import pytest
@@ -13,6 +14,7 @@ from launchplane.judge import Work
 from launchplane.record import (
     MOST_ATTEMPTS,
     Asked,
+    CarriesASecret,
     Interrupted,
     PostgresRecord,
     Record,
@@ -22,7 +24,8 @@ from launchplane.record import (
     Unconfirmed,
 )
 from tests.conftest import ALEMBIC
-from tests.pretend_record import lose_every_turn
+from tests.given_secrets import NO_SECRETS, GivenSecrets
+from tests.pretend_record import PretendRecord, lose_every_turn
 
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
 MOVE_C = Asked(product="site", lane="testing", work=Work.MOVE, build="site:c")
@@ -197,7 +200,7 @@ def test_a_turn_is_a_session_lock_on_a_connection_of_its_own_with_no_transaction
 
 
 def test_a_database_that_cannot_be_reached_is_said_as_such_and_not_waited_for_long() -> None:
-    unreachable = PostgresRecord("postgresql://launchplane@127.0.0.1:1/launchplane", seconds_to_reach=0.2)
+    unreachable = PostgresRecord("postgresql://launchplane@127.0.0.1:1/launchplane", NO_SECRETS, seconds_to_reach=0.2)
     done = threading.Event()
     try:
         with pytest.raises(RecordError, match="could not be reached while writing a request") as refused:
@@ -230,8 +233,10 @@ def test_a_write_lost_after_the_request_was_sent_is_said_to_be_unconfirmed_not_u
 ) -> None:
     write_new = record_module.write_new
 
-    def write_then_lose_the_connection(session: record_module.Session, asked: Asked, asked_by: str, key: str | None) -> None:
-        write_new(session, asked, asked_by, key)
+    def write_then_lose_the_connection(
+        session: record_module.Session, gate: record_module.Gate, asked: Asked, asked_by: str, key: str | None
+    ) -> None:
+        write_new(session, gate, asked, asked_by, key)
         raise psycopg.OperationalError("server closed the connection unexpectedly")
 
     monkeypatch.setattr(record_module, "write_new", write_then_lose_the_connection)
@@ -245,7 +250,7 @@ def test_an_attempt_and_its_event_written_while_a_request_is_being_read_do_not_b
     request = postgres_record.write(MOVE_B, CALLER, None)
     assert postgres_record.take_up(request.id) is not None
     execute = psycopg.Cursor[Any].execute
-    worker = PostgresRecord(postgres_record.database)
+    worker = PostgresRecord(postgres_record.database, NO_SECRETS)
     assert worker.read(request.id) is not None
     written_meanwhile: list[int] = []
 
@@ -275,3 +280,92 @@ def test_the_migration_to_key_digests_refuses_to_be_undone_and_leaves_a_repeated
     with pytest.raises(NotImplementedError, match="cannot be given back"):
         command.downgrade(Config(ALEMBIC), "0001")
     assert postgres_record.write(MOVE_B, CALLER, "one-release").id == first.id
+
+
+HELD = "Zx3-a-secret-a-container-holds-0123456789"
+ASKED_WITH_IT = Asked(product="site", lane="other", work=Work.MOVE, build=f"site:{HELD}", delete_data_set=HELD)
+
+
+EVERY_ROW_OF_EVERY_TABLE = """
+select string_agg(query_to_xml(format('select * from %I', table_name), true, true, '')::text, '')
+from information_schema.tables where table_schema = 'public'
+"""
+
+
+# Every table and column there is, so one a later step adds is looked through too.
+def everything_kept(record: Record) -> str:
+    if not isinstance(record, PostgresRecord):
+        return repr(record)
+    with psycopg.connect(record.database) as connection:
+        return repr(connection.execute(EVERY_ROW_OF_EVERY_TABLE).fetchall())
+
+
+def emptied(record: Record) -> None:
+    if isinstance(record, PretendRecord):
+        record.kept.clear()
+        record.keys.clear()
+        record.open_attempts.clear()
+        record.attempts_begun = 0
+    if isinstance(record, PostgresRecord):
+        with psycopg.connect(record.database, autocommit=True) as connection:
+            # noinspection SqlResolve
+            connection.execute("truncate request, attempt, event restart identity")
+
+
+# Every kind of value a call of the record takes. One the test cannot fill fails it, so a new kind is given the secret too.
+def filled(method: str, parameter: str, hint: object, number: int) -> object:
+    kinds = {hint, *get_args(hint)}
+    if hint is Asked:
+        return ASKED_WITH_IT
+    if hint is Stands:
+        return Stands.DONE
+    if hint is int:
+        return number
+    if str in kinds:
+        return f"said with {HELD} in it"
+    if any(get_origin(kind) is dict for kind in kinds):
+        return {f"named {HELD}": [HELD, {"deep": f"within {HELD}"}]}
+    raise AssertionError(f"This test does not know how to fill {parameter} of {method}, so it could not give it the secret.")
+
+
+def called_with_the_secret_everywhere(record: Record, method: str) -> None:
+    emptied(record)
+    stuck = record.write(MOVE_B, CALLER, None)
+    taken_up_until_it_needs_a_person(record, stuck.id)
+    assert record.take_up(record.write(RETIRE_OTHER, CALLER, None).id) is not None
+    hints = get_type_hints(getattr(Record, method))
+    for number in range(1, 5):
+        given = {name: filled(method, name, hint, number) for name, hint in hints.items() if name != "return"}
+        try:
+            answer = getattr(record, method)(**given)
+            if isinstance(answer, AbstractContextManager):
+                with answer:
+                    pass
+        except CarriesASecret, Refused, Interrupted:
+            pass
+
+
+def calls_that_keep_the_secret(record: Record) -> set[str]:
+    calls = [name for name, member in vars(Record).items() if callable(member) and not name.startswith("_")]
+    kept: set[str] = set()
+    for call in calls:
+        called_with_the_secret_everywhere(record, call)
+        if HELD in everything_kept(record):
+            kept.add(call)
+    return kept
+
+
+def test_no_call_of_the_record_keeps_a_secret_a_container_holds_in_any_table_whatever_argument_carries_it(
+    record: Record, secrets: GivenSecrets
+) -> None:
+    while_nobody_holds_it = calls_that_keep_the_secret(record)
+    secrets.seen = frozenset({HELD})
+    while_a_container_holds_it = calls_that_keep_the_secret(record)
+    assert while_nobody_holds_it >= {"write", "retry", "note", "end"}
+    assert while_a_container_holds_it == set()
+
+
+def test_a_statement_given_values_the_gate_has_not_judged_is_not_run(postgres_record: PostgresRecord) -> None:
+    unjudged: Any = [HELD]
+    with pytest.raises(AttributeError, match="values"), postgres_record.session("writing around the gate") as session:
+        session.execute(record_module.Sql.SAME_KEY, unjudged)

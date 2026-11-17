@@ -11,7 +11,7 @@ from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands
-from launchplane.secret_boundary import Secrets, cleaned, cleaned_value
+from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 from launchplane.telling import Witness
 
@@ -101,7 +101,7 @@ class Worker:
 
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         def tell(did: str, refusal: str | None) -> None:
-            self.record.note(attempt, self.cleaned(did), None if refusal is None else self.cleaned(refusal))
+            self.record.note(attempt, did, refusal)
 
         # Another Launchplane may hold the turn by now and have changed the lane, so what was decided is not acted on.
         def hold() -> None:
@@ -109,7 +109,7 @@ class Worker:
                 raise Interrupted(f"The turn of {request.lane} of {request.product} is no longer held, so nothing more was done.")
 
         try:
-            # Every secret a container holds is known before anything about this request is written.
+            # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
             answer = carried_out(self.lanes, request, Witness(tell, hold))
         except STOPPED as error:
@@ -130,10 +130,4 @@ class Worker:
         self.end(attempt, Stands.FAILED if failed else Stands.DONE, answer, error if failed else None)
 
     def end(self, attempt: int, stands: Stands, answer: BaseModel | None, error: str | None) -> None:
-        seen = self.secrets.secrets_seen()
-        given = {} if answer is None else answer.model_dump(mode="json")
-        body = None if answer is None else {name: cleaned_value(value, seen) for name, value in given.items()}
-        self.record.end(attempt, stands, body, None if error is None else cleaned(error, seen))
-
-    def cleaned(self, text: str) -> str:
-        return cleaned(text, self.secrets.secrets_seen())
+        self.record.end(attempt, stands, None if answer is None else answer.model_dump(mode="json"), error)

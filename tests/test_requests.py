@@ -1,12 +1,17 @@
+import json
+import socket
 import threading
+import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pytest
+import uvicorn
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from launchplane.act import Lanes
-from launchplane.api import create_app
+from launchplane.api import create_app, server_config
 from launchplane.instance import LaneBuild
 from launchplane.record import MOST_ATTEMPTS, Record
 from launchplane.worker import Worker
@@ -26,6 +31,7 @@ class Bed:
     proxy: PretendProxy
     record: Record
     worker: Worker
+    app: FastAPI
 
 
 def bed_on(record: Record) -> Bed:
@@ -34,7 +40,8 @@ def bed_on(record: Record) -> Bed:
     proxy.route(WEB_ADDRESS, "a")
     lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
     worker = Worker(record, lanes, NO_SECRETS)
-    return Bed(TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS)), proxy, record, worker)
+    app = create_app(lanes.read_status, record, worker.wake, NO_SECRETS)
+    return Bed(TestClient(app), proxy, record, worker, app)
 
 
 @pytest.fixture
@@ -173,11 +180,14 @@ def app_on(record: Record, secrets: GivenSecrets) -> TestClient:
     return TestClient(create_app(lanes.read_status, record, lambda: None, secrets))
 
 
-def test_a_secret_sent_as_the_key_is_not_shown_once_its_container_is_gone_and_launchplane_has_restarted(record: Record) -> None:
+def test_a_secret_sent_as_the_key_is_not_shown_once_its_container_is_gone_and_launchplane_has_restarted(
+    record: Record, secrets: GivenSecrets
+) -> None:
     key = {"Idempotency-Key": SECRET}
-    while_held = app_on(record, GivenSecrets(on_host=frozenset({SECRET})))
-    first = while_held.post(MOVE, json=TO_B, headers=key)
-    after_a_restart = app_on(record, GivenSecrets())
+    secrets.on_host = frozenset({SECRET})
+    first = app_on(record, secrets).post(MOVE, json=TO_B, headers=key)
+    secrets.on_host = secrets.seen = frozenset()
+    after_a_restart = app_on(record, secrets)
     shown = after_a_restart.get(first.headers["location"]).text + after_a_restart.get("/requests").text
     again = after_a_restart.post(MOVE, json=TO_B, headers=key)
     assert (first.status_code, SECRET in shown, again.headers["location"]) == (202, False, first.headers["location"])
@@ -190,14 +200,17 @@ SECRETS = {
 
 
 @pytest.mark.parametrize("secret", SECRETS.values(), ids=SECRETS.keys())
-def test_a_call_that_carries_a_secret_a_container_holds_is_refused_and_nothing_of_it_is_written(record: Record, secret: str) -> None:
-    client = app_on(record, GivenSecrets(on_host=frozenset({secret})))
+def test_a_call_that_carries_a_secret_a_container_holds_is_refused_and_nothing_of_it_is_written(
+    record: Record, secrets: GivenSecrets, secret: str
+) -> None:
+    secrets.on_host = frozenset({secret})
+    client = app_on(record, secrets)
     refused = [
         client.post(MOVE, json={"build": f"registry.test/site:{secret}"}),
         client.post("/lanes/site/testing/retire", json={"delete_data_set": secret}),
     ]
     assert [each.status_code for each in refused] == [422, 422]
-    assert all("was not written" in each.json()["error"] for each in refused)
+    assert all("nothing was written" in each.json()["error"] for each in refused)
     assert (record.unfinished(), record.recently_ended()) == ([], [])
 
 
@@ -209,3 +222,26 @@ def test_an_answer_says_nothing_was_changed_only_when_the_request_is_known_not_t
     assert (unconfirmed.status_code, "nothing was changed" in unconfirmed.json()["error"]) == (503, False)
     assert "is not known" in unconfirmed.json()["error"] and "GET /requests" in unconfirmed.json()["error"]
     assert len(unconfirmed_record.unfinished()) == 1
+
+
+def test_who_asked_is_the_address_the_connection_came_from_whatever_a_forwarding_header_says() -> None:
+    bed = bed_on(PretendRecord())
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    server = uvicorn.Server(server_config(bed.app, "127.0.0.1", port, NO_SECRETS))
+    thread = threading.Thread(target=server.run)
+    thread.start()
+    try:
+        wait_until(lambda: server.started)
+        asked = urllib.request.Request(
+            f"http://127.0.0.1:{port}{MOVE}",
+            data=json.dumps(TO_B).encode(),
+            headers={"Content-Type": "application/json", "X-Forwarded-For": "a-caller-chose-this-text"},
+        )
+        with urllib.request.urlopen(asked, timeout=5) as answer:  # noqa: S310
+            written = json.loads(answer.read())
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+    assert written["asked_by"] == "the address 127.0.0.1"

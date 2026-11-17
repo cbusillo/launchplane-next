@@ -24,6 +24,7 @@ from launchplane.judge import (
     Judgement,
     WebAddressJudged,
     Work,
+    WorkUnread,
     is_loaded_as_written,
     judge,
     web_addresses_judged,
@@ -214,13 +215,15 @@ class Lanes:
 
     def read_status(self) -> Status:
         # A request taken up or ended while the host is read is at work on what was read.
-        before, record_error = self.unfinished()
+        before, unread_before = self.unfinished()
         reading = self.read(EVERY_LANE)
-        requests, record_error = (before, record_error) if record_error else self.unfinished()
+        requests, record_error = ([], unread_before) if unread_before else self.unfinished()
         at_work = {(each.product, each.lane): each.work for each in (*before, *requests) if each.stands is Stands.WORKING}
+        # With either reading of the record missing, which lane a request is at work on is not known for any lane.
+        unread = None if record_error is None else WorkUnread(record_error)
         descriptions = {product: self.description_of(product) for product in sorted({product for product, _ in reading.lanes()})}
         judgements = [
-            judge(reading.lane(product, lane), descriptions[product], at_work.get((product, lane)))
+            judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
         return Status(reading, judgements, web_addresses_judged(reading), requests, record_error)

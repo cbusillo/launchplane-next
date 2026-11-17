@@ -2,6 +2,7 @@ import hashlib
 import os
 from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final, LiteralString, Protocol
@@ -13,12 +14,12 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict
 
 from launchplane.judge import Work
+from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
 
 MOST_ATTEMPTS = 3
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
 
-type Session = psycopg.Cursor[DictRow]
 # Asked before each action on the host: whether the lane's turn is still held.
 type Held = Callable[[], bool]
 
@@ -36,9 +37,53 @@ class Refused(Exception):
     pass
 
 
+class CarriesASecret(Exception):
+    pass
+
+
 # Another Launchplane has taken the request up since this attempt began, so this attempt writes nothing more.
 class Interrupted(Exception):
     pass
+
+
+# Values the gate has judged. A statement takes nothing else.
+@dataclass(frozen=True)
+class Passed:
+    values: tuple[JsonValue, ...]
+
+
+# The one place every value passes on its way into the record, which outlives the container that holds a secret. What a
+# caller sent is refused when it carries a secret a container holds; what Launchplane writes itself is cleaned of it.
+class Gate:
+    def __init__(self, secrets: Secrets) -> None:
+        self.secrets = secrets
+
+    def refuse(self, *values: JsonValue) -> None:
+        if carries_a_secret(list(values), self.secrets.secrets_seen()):
+            raise CarriesASecret(
+                "What was sent carries a secret Launchplane gave a lane, and the record keeps what was sent, so nothing was "
+                "written. Nothing was changed."
+            )
+
+    def clean(self, value: JsonValue) -> JsonValue:
+        return cleaned_value(value, self.secrets.secrets_seen())
+
+    def sent(self, *values: JsonValue) -> Passed:
+        self.refuse(*values)
+        return Passed(values)
+
+    def made(self, *values: JsonValue) -> Passed:
+        return Passed(tuple(self.clean(value) for value in values))
+
+
+class Session:
+    def __init__(self, cursor: psycopg.Cursor[DictRow]) -> None:
+        self.cursor = cursor
+
+    def execute(self, query: LiteralString, passed: Passed | None = None) -> psycopg.Cursor[DictRow]:
+        if passed is None:
+            return self.cursor.execute(query)
+        return self.cursor.execute(query, [Jsonb(value) if isinstance(value, dict) else value for value in passed.values])
 
 
 class Stands(StrEnum):
@@ -212,12 +257,15 @@ def lane_waits_on_a_person(asked: Asked, stuck: int) -> Refused:
     )
 
 
-def same_as_written(session: Session, asked: Asked, idempotency_key: str | None) -> Request | None:
+def said(asked: Asked) -> list[JsonValue]:
+    return [asked.product, asked.lane, asked.work.value, asked.build, asked.delete_data_set]
+
+
+def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
     if idempotency_key is None:
-        values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set]
-        row = session.execute(Sql.SAME_UNFINISHED, values).fetchone()
+        row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
         return None if row is None else Request.model_validate(row)
-    row = session.execute(Sql.SAME_KEY, [key_digest(idempotency_key)]).fetchone()
+    row = session.execute(Sql.SAME_KEY, gate.made(key_digest(idempotency_key))).fetchone()
     if row is None:
         return None
     same_key = Request.model_validate(row)
@@ -226,24 +274,24 @@ def same_as_written(session: Session, asked: Asked, idempotency_key: str | None)
     return same_key
 
 
-def refuse_while_a_person_is_awaited(session: Session, asked: Asked) -> None:
-    stuck = session.execute(Sql.WAITS_ON_A_PERSON, [asked.product, asked.lane]).fetchone()
+def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked) -> None:
+    stuck = session.execute(Sql.WAITS_ON_A_PERSON, gate.sent(asked.product, asked.lane)).fetchone()
     if stuck is not None:
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
-def write_new(session: Session, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-    values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set, asked_by, key_digest(idempotency_key)]
-    return Request.model_validate(session.execute(Sql.WRITE, values).fetchone())
+def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
+    passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key))
+    return Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
 
 
 def unreachable(doing: str, error: psycopg.Error) -> RecordError:
     return RecordError(f"Launchplane's record could not be reached while {doing}: {str(error).strip().rstrip('.')}.")
 
 
-def asked_once(session: Session, doing: str, query: LiteralString, values: list[Any]) -> DictRow:
+def asked_once(session: Session, doing: str, query: LiteralString, passed: Passed | None) -> DictRow:
     try:
-        row = session.execute(query, values).fetchone()
+        row = session.execute(query, passed).fetchone()
     except psycopg.Error as error:
         raise unreachable(doing, error) from error
     if row is None:
@@ -252,12 +300,12 @@ def asked_once(session: Session, doing: str, query: LiteralString, values: list[
 
 
 # The caller has made the transaction one reading, so no attempt or event is seen that began after the requests were read.
-def with_history(session: Session, rows: Sequence[DictRow]) -> list[Kept]:
-    ids = [row["id"] for row in rows]
-    attempts = session.execute(Sql.ATTEMPTS, [ids]).fetchall()
-    events = session.execute(Sql.EVENTS, [ids]).fetchall()
+def with_history(session: Session, gate: Gate, rows: Sequence[DictRow]) -> list[Kept]:
+    ids = gate.made([row["id"] for row in rows])
+    attempts = session.execute(Sql.ATTEMPTS, ids).fetchall()
+    events = session.execute(Sql.EVENTS, ids).fetchall()
     numbers: dict[int, int] = {}
-    of: dict[int, list[Attempt]] = {each: [] for each in ids}
+    of: dict[int, list[Attempt]] = {row["id"]: [] for row in rows}
     for attempt in attempts:
         numbers[attempt["id"]] = len(of[attempt["request"]]) + 1
         of[attempt["request"]].append(Attempt.model_validate({**attempt, "number": numbers[attempt["id"]]}))
@@ -274,8 +322,9 @@ def with_history(session: Session, rows: Sequence[DictRow]) -> list[Kept]:
 
 
 class PostgresRecord(Record):
-    def __init__(self, database_named: str, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
+    def __init__(self, database_named: str, secrets: Secrets, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
         self.database = database_named
+        self.gate = Gate(secrets)
         # Each connection is checked as it is taken, so one the database dropped is replaced and not handed out.
         self.pool = ConnectionPool(
             database_named, min_size=1, max_size=4, timeout=seconds_to_reach, check=ConnectionPool.check_connection, open=False
@@ -289,8 +338,8 @@ class PostgresRecord(Record):
     @contextmanager
     def session(self, doing: str) -> Generator[Session]:
         try:
-            with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as session:
-                yield session
+            with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+                yield Session(cursor)
         except psycopg.Error as error:
             raise unreachable(doing, error) from error
 
@@ -300,12 +349,12 @@ class PostgresRecord(Record):
             with self.session("writing a request") as session:
                 # Two calls asking the same thing at once write one request: the second waits here and finds the first.
                 session.execute(Sql.LOCK_WRITERS)
-                same = same_as_written(session, asked, idempotency_key)
+                same = same_as_written(session, self.gate, asked, idempotency_key)
                 if same is not None:
                     return same
-                refuse_while_a_person_is_awaited(session, asked)
+                refuse_while_a_person_is_awaited(session, self.gate, asked)
                 sent = True
-                return write_new(session, asked, asked_by, idempotency_key)
+                return write_new(session, self.gate, asked, asked_by, idempotency_key)
         except RecordError as error:
             if sent:
                 raise Unconfirmed(str(error)) from error
@@ -314,13 +363,13 @@ class PostgresRecord(Record):
     def read(self, request: int) -> Kept | None:
         with self.session("reading a request") as session:
             session.execute(Sql.ONE_READING)
-            rows = session.execute(Sql.READ, [request]).fetchall()
-            return with_history(session, rows)[0] if rows else None
+            rows = session.execute(Sql.READ, self.gate.made(request)).fetchall()
+            return with_history(session, self.gate, rows)[0] if rows else None
 
     def unfinished(self) -> list[Kept]:
         with self.session("reading the requests not finished") as session:
             session.execute(Sql.ONE_READING)
-            return with_history(session, session.execute(Sql.UNFINISHED).fetchall())
+            return with_history(session, self.gate, session.execute(Sql.UNFINISHED).fetchall())
 
     def recently_ended(self) -> list[Request]:
         with self.session("reading the requests that ended") as session:
@@ -342,51 +391,53 @@ class PostgresRecord(Record):
             connection = psycopg.connect(self.database, autocommit=True)
         except psycopg.Error as error:
             raise unreachable("taking a lane's turn", error) from error
-        with closing(connection), connection.cursor(row_factory=dict_row) as session:
+        with closing(connection), connection.cursor(row_factory=dict_row) as cursor:
+            session = Session(cursor)
 
             def held() -> bool:
                 try:
-                    return asked_once(session, "asking whether a lane's turn is held", Sql.TURN_HELD, [])["held"] > 0
+                    return asked_once(session, "asking whether a lane's turn is held", Sql.TURN_HELD, None)["held"] > 0
                 except RecordError:
                     return False
 
-            ours = asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, [f"{product}/{lane}"])["ours"]
+            ours = asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, self.gate.made(f"{product}/{lane}"))["ours"]
             yield held if ours else None
 
     # A request found working with nobody holding its lane was interrupted. That is counted, never taken for waiting.
     def take_up(self, request: int) -> int | None:
         with self.session("taking up a request") as session:
-            row = session.execute(Sql.READ_TO_TAKE_UP, [request]).fetchone()
+            taken = self.gate.made(request)
+            row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
             found = None if row is None else Request.model_validate(row)
             if found is None or found.stands not in (Stands.WAITING, Stands.WORKING):
                 return None
-            session.execute(Sql.INTERRUPT, [request])
-            if asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, [request])["count"] >= MOST_ATTEMPTS:
-                session.execute(Sql.STOP_FOR_A_PERSON, [needs_a_person(found), request])
+            session.execute(Sql.INTERRUPT, taken)
+            if asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)["count"] >= MOST_ATTEMPTS:
+                session.execute(Sql.STOP_FOR_A_PERSON, self.gate.made(needs_a_person(found), request))
                 return None
-            return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, [request, request])["id"]
+            return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, self.gate.made(request, request))["id"]
 
     def note(self, attempt: int, did: str, error: str | None) -> None:
         with self.session("writing what was done") as session:
-            if session.execute(Sql.NOTE, [did, error, attempt]).fetchone() is None:
+            if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
     def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
         with self.session("writing how a request ended") as session:
-            values = [stands, attempt, stands, None if answer is None else Jsonb(answer), error]
-            if session.execute(Sql.END, values).fetchone() is None:
+            passed = self.gate.made(stands.value, attempt, stands.value, answer, error)
+            if session.execute(Sql.END, passed).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
 
     def give_up(self, request: int) -> Request | None:
         with self.session("giving a request up") as session:
-            row = session.execute(Sql.GIVE_UP, [GIVEN_UP, request]).fetchone()
+            row = session.execute(Sql.GIVE_UP, self.gate.made(GIVEN_UP, request)).fetchone()
             return None if row is None else Request.model_validate(row)
 
     def retry(self, request: int, asked_by: str) -> Request | None:
         with self.session("asking for a request again") as session:
-            row = session.execute(Sql.STUCK, [request]).fetchone()
+            row = session.execute(Sql.STUCK, self.gate.made(request)).fetchone()
             if row is None:
                 return None
-            again = write_new(session, Request.model_validate(row).asked(), asked_by, None)
-            session.execute(Sql.GIVE_UP, [ASKED_AGAIN.format(again=again.id), request])
+            again = write_new(session, self.gate, Request.model_validate(row).asked(), asked_by, None)
+            session.execute(Sql.GIVE_UP, self.gate.made(ASKED_AGAIN.format(again=again.id), request))
             return again

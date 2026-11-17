@@ -21,8 +21,8 @@ TONE = {
 STANDS_TONE = {Stands.WAITING: Standing.ON_PURPOSE, Stands.WORKING: Standing.ON_PURPOSE, Stands.NEEDS_A_PERSON: Standing.WRONG}
 RECORD_UNREAD = "Launchplane's record cannot be read"
 NOT_KNOWN_AT_WORK = (
-    "What is below is read from the host. Whether a request is at work on a lane is not known, so what shows as left "
-    "unfinished may be under way. A call that changes something is refused until the record can be read."
+    "What is below is read from the host. Whether a request is at work on a lane is not known, so what would be under way "
+    "or left unfinished shows as could not be read. A call that changes something is refused until the record can be read."
 )
 NOTHING_ON_THE_HOST = "The host answered, and nothing marked for Launchplane is on it."
 NO_LANE = "Marked for Launchplane, and in no lane"

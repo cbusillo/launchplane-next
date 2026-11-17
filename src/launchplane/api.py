@@ -24,9 +24,21 @@ from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, We
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
-from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, Unconfirmed, database
+from launchplane.record import (
+    ENDED,
+    Asked,
+    CarriesASecret,
+    Kept,
+    PostgresRecord,
+    Record,
+    RecordError,
+    Refused,
+    Stands,
+    Unconfirmed,
+    database,
+)
 from launchplane.record import Request as KeptRequest
-from launchplane.secret_boundary import CleanedStream, Secrets, carries_a_secret, cleaned, cleaned_body
+from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from launchplane.worker import Worker
 
@@ -48,7 +60,7 @@ class LaneAnswer(BaseModel):
     lane: str
     condition: Condition
     work: Work | None
-    a_move_is_at_work: bool
+    a_move_is_at_work: bool | None
     in_maintenance: bool
     in_maintenance_since: datetime | None
     findings: list[Finding]
@@ -115,7 +127,7 @@ def lane_answer(judged: Judgement) -> LaneAnswer:
         lane=judged.lane.lane,
         condition=judged.condition,
         work=judged.work,
-        a_move_is_at_work=judged.work is not None,
+        a_move_is_at_work=None if judged.work_unread else judged.work is not None,
         in_maintenance=judged.lane.route.in_maintenance,
         in_maintenance_since=judged.lane.route.back_soon_since,
         findings=list(judged.findings),
@@ -225,10 +237,6 @@ def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: 
     return answer.model_validate(kept.answer)
 
 
-REFUSED_AS_ASKED = (
-    "What was asked carries a secret Launchplane gave a lane, and the record keeps what was asked, so the request was not "
-    "written. Nothing was changed."
-)
 NOT_CONFIRMED = (
     "Whether the request was written is not known. If it was, it will be worked. Asking again with the same "
     "Idempotency-Key answers with it if it was; without a key, GET /requests lists it."
@@ -236,19 +244,17 @@ NOT_CONFIRMED = (
 
 
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object], secrets: Secrets) -> None:
+    def __init__(self, record: Record, wake: Callable[[], object]) -> None:
         self.record = record
         self.wake = wake
-        self.secrets = secrets
 
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
     ) -> Answer | NotFinished | Kept:
-        # The record outlives the container that holds a secret, so a secret is kept out of it, not cleaned on the way out.
-        if carries_a_secret(asked.model_dump(mode="json"), self.secrets.secrets_seen()):
-            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, REFUSED_AS_ASKED)
         try:
             request = self.record.write(asked, asker(http), http.headers.get("idempotency-key"))
+        except CarriesASecret as error:
+            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
         except Refused as error:
             return not_finished(response, HTTPStatus.CONFLICT, str(error))
         except Unconfirmed as error:
@@ -362,6 +368,8 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
     def retry_request(request: int, http: Request, response: Response) -> KeptRequest | NotFinished:
         try:
             again = calls.record.retry(request, asker(http))
+        except CarriesASecret as error:
+            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
         except RecordError as error:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, calls.not_known(request, error))
         if again is not None:
@@ -397,10 +405,15 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    calls = Calls(record, wake, secrets)
+    calls = Calls(record, wake)
     add_lane_calls(app, calls)
     add_request_calls(app, calls)
     return app
+
+
+# A caller is the address its connection came from. A forwarding header is text the caller chose, so it is not read.
+def server_config(app: FastAPI, address: str, port: int, secrets: Secrets) -> uvicorn.Config:
+    return uvicorn.Config(app, host=address, port=port, log_config=cleaned_log_config(secrets), proxy_headers=False)
 
 
 def serve() -> None:
@@ -409,9 +422,9 @@ def serve() -> None:
     host = ContainerHost.from_environment()
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
-    record = PostgresRecord(database())
+    record = PostgresRecord(database(), host)
     lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished)
     worker = Worker(record, lanes, host)
     worker.start()
     app = create_app(lanes.read_status, record, worker.wake, host)
-    uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host))
+    uvicorn.Server(server_config(app, address, port, host)).run()

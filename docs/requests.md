@@ -19,7 +19,7 @@ Each of the four calls writes a request and answers `202` with the request and a
 - **Asking the same thing of a lane while a request for it is waiting or working** writes nothing and answers with that request. The same thing is the same call, lane, build and data set named for deleting.
 - **`Idempotency-Key: <text>`**. The same key with the same call and body answers with the request already written, whether or not it has ended. The same key with anything else answers `409` and writes nothing. A key is never forgotten and never shown: the record keeps only its SHA-256 digest. A call with a key always writes its own request, even when the same thing is already waiting.
 - **`409`** also answers a call for a lane that has a request needing a person, and says which.
-- **`422`** with `error` also answers a call whose build or data set name carries a secret a container holds. Nothing is written.
+- **`422`** with `error` also answers a call that carries a secret a container holds, in any part of it. Nothing is written.
 - **`503`** with `error` means the record could not be reached. The answer says the request was not written and nothing was changed only when that is known. When the record was lost after the request was sent to it, the answer says that whether it was written is not known: if it was, it will be worked. Asking again with the same key answers with it if it was, and `GET /requests` lists it.
 
 ## Reading
@@ -58,11 +58,12 @@ Three tables in a PostgreSQL database of Launchplane's own: a request, an attemp
 
 No secret is written to the record, because the record outlives the container that holds a secret and nothing could then know to remove it on the way out.
 
+Every value on its way into the database passes one gate, whatever call it comes from: a new request, a retry, a give-up, an attempt, an event, the final answer, and who asked. A statement runs only with values the gate has passed. The gate judges a value as an answer is judged: on the value itself, whatever characters the secret has, against every secret a container holds.
+
+- **What a caller sent** is refused with `422` when it carries one, and nothing is written: the product, lane, build and data set name of a call, and who asked, also when a request is asked for again.
+- **What Launchplane writes itself** is cleaned of it: every event, error and answer. The worker reads every container's secrets when it takes a request up, and a secret it makes while working is known from the moment it is made.
 - The caller's key is kept as a digest only.
-- A call whose build or data set name carries a secret a container holds is refused. Every secret on the host is read just before, as for every answer. Whether a value carries a secret is judged as it is for an answer: on the value itself, whatever characters the secret has.
-- A product or lane name is at most 31 lowercase letters, digits and hyphens. A password Launchplane makes is 43 characters, so a name cannot be one.
-- `asked_by` is the address the connection came from, not text the caller chose.
-- Every event, error and answer is cleaned of every secret a container holds before it is written. The worker reads every container's secrets when it takes a request up, and a secret it makes while working is known from the moment it is made.
+- `asked_by` is the address the connection came from. Launchplane does not read a forwarding header, which is text a caller chooses.
 
 ## On the page
 
@@ -70,7 +71,7 @@ No secret is written to the record, because the record outlives the container th
 - A request that needs a person is red, with the reason and the two calls under it, and its card has a red `needs a person` pill.
 - A request for a lane with nothing on the host yet has a card of its own.
 - A lane is `work under way` while a request for it stands as working in the record. `work` and `a_move_is_at_work` in `/running` come from there too.
-- When the record cannot be read, the first card says so with the error. The host is still shown. Whether a request is at work is then unknown, so a finding that would be under way shows as left unfinished. `/running` has the same in `record_error`, and the unfinished requests in `requests`.
+- When the record cannot be read, the first card says so with the error. The host is still shown, and no request is. Whether a request is at work on a lane is then not known, on either of the two readings of the record a status makes: each lane says so, its condition is `could not be read` unless something in it is wrong whatever a request is doing, and a finding that would be under way or left unfinished shows as `could not be read`. `/running` has the error in `record_error`, an empty `requests`, and `a_move_is_at_work` as `null` for every lane.
 
 ## The database
 

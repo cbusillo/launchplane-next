@@ -7,7 +7,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from launchplane.record import PostgresRecord, Record
+from launchplane.record import Gate, PostgresRecord, Record
+from tests.given_secrets import GivenSecrets
 from tests.pretend_record import PretendRecord
 
 TEST_DATABASE = os.environ.get("LAUNCHPLANE_TEST_DATABASE", "")
@@ -25,18 +26,24 @@ def migrated_database() -> str:
     return TEST_DATABASE
 
 
+# The secrets the record's gate knows. A test changes what is seen to say what containers hold at that moment.
 @pytest.fixture
-def postgres_record(migrated_database: str) -> Iterator[PostgresRecord]:
+def secrets() -> GivenSecrets:
+    return GivenSecrets()
+
+
+@pytest.fixture
+def postgres_record(migrated_database: str, secrets: GivenSecrets) -> Iterator[PostgresRecord]:
     with psycopg.connect(migrated_database, autocommit=True) as connection:
         connection.execute("truncate request, attempt, event restart identity")
-    record = PostgresRecord(migrated_database)
+    record = PostgresRecord(migrated_database, secrets)
     yield record
     record.close()
 
 
 # Each test of what the record does is run against the pretend one and against PostgreSQL, so the two cannot drift apart.
 @pytest.fixture(params=["pretend", "postgres"])
-def record(request: pytest.FixtureRequest) -> Record:
+def record(request: pytest.FixtureRequest, secrets: GivenSecrets) -> Record:
     if request.param == "pretend":
-        return PretendRecord()
+        return PretendRecord(gate=Gate(secrets))
     return request.getfixturevalue("postgres_record")
