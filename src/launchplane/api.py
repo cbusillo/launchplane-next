@@ -1,7 +1,6 @@
 import copy
 import os
 from collections.abc import Awaitable, Callable, Collection, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.resources import files
@@ -16,31 +15,21 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from launchplane.act import Judged, Lanes, Stopped, lanes_on
+from launchplane.act import Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
-from launchplane.docker_answers import ContainerHostError, OnHost
-from launchplane.instance import (
-    BACK_SOON,
-    DataSet,
-    HostNetwork,
-    LaneBuild,
-    ProxySeen,
-    RunningBackgroundService,
-    RunningInstance,
-    web_address_of,
-)
-from launchplane.judge import LaneVerdict
+from launchplane.docker_answers import ContainerHostError
+from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningBackgroundService, RunningInstance
+from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
+from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 
-type HostReader = Callable[[], Judged]
-type WebAddressChecker = Callable[[str], str | None]
+type StatusReader = Callable[[], Status]
 type MoveRequester = Callable[[LaneBuild], MoveResult]
 type RetireRequester = Callable[[str, str, str | None], RetireResult]
 type MaintenanceRequester = Callable[[str, str], MaintenanceResult]
-type Lane = tuple[str, str | None]
 
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
 UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
@@ -51,14 +40,19 @@ class InstanceAnswer(RunningInstance):
     receives_visitors_for: str | None
 
 
-class WebAddressAnswer(BaseModel):
-    web_address: str
-    product: str | None
-    lane: str | None
-    sends_to_container: str | None
-    answers: bool
-    shows_back_soon_page: bool
-    error: str | None
+class LaneAnswer(BaseModel):
+    product: str
+    lane: str
+    condition: Condition
+    work: Work | None
+    a_move_is_at_work: bool
+    in_maintenance: bool
+    in_maintenance_since: datetime | None
+    findings: list[Finding]
+    problems: list[str]
+    release_under_way: list[str]
+    left_unfinished: list[str]
+    parts: dict[str, Standing]
 
 
 class RunningAnswer(BaseModel):
@@ -67,8 +61,9 @@ class RunningAnswer(BaseModel):
     background_services: list[RunningBackgroundService]
     data_sets: list[DataSet]
     networks: list[HostNetwork]
-    web_addresses: list[WebAddressAnswer]
-    lanes: list[LaneVerdict]
+    web_addresses: list[WebAddressJudged]
+    lanes: list[LaneAnswer]
+    cards: list[Card]
 
 
 class HostUnreadable(BaseModel):
@@ -108,58 +103,39 @@ NOT_A_SUCCESS = {
 }
 
 
-def instance_answers(instances: list[RunningInstance], routes: dict[str, str]) -> list[InstanceAnswer]:
-    web_address_of_container = {container: web_address for web_address, container in routes.items()}
-    return [
-        InstanceAnswer(**instance.model_dump(), receives_visitors_for=web_address_of_container.get(instance.container))
-        for instance in instances
-    ]
-
-
-def lane_owners(on_host: OnHost, routes: dict[str, str]) -> dict[str, Lane | None]:
-    by_container = {instance.container: instance for instance in on_host.instances}
-    owners: dict[str, Lane | None] = {
-        web_address: None if (instance := by_container.get(container)) is None else (instance.product, instance.lane)
-        for web_address, container in routes.items()
-    }
-    for product, lane in lanes_on(on_host):
-        owners[web_address_of(product, lane)] = (product, lane)
-    return owners
-
-
-def web_address_answer(web_address: str, owner: Lane | None, proxy: ProxySeen, failure: str | None) -> WebAddressAnswer:
-    sends_to = proxy.sends_visitors_to().get(web_address)
-    if not proxy.runs:
-        error = f"The proxy is not running, so {web_address} answers nothing."
-    else:
-        error = f"The proxy sends {web_address} to no instance." if sends_to is None else failure
-    return WebAddressAnswer(
-        web_address=web_address,
-        product=None if owner is None else owner[0],
-        lane=None if owner is None else owner[1],
-        sends_to_container=sends_to,
-        answers=error is None and sends_to != BACK_SOON,
-        shows_back_soon_page=sends_to == BACK_SOON and proxy.back_soon_runs,
-        error=error,
+def lane_answer(judged: Judgement) -> LaneAnswer:
+    return LaneAnswer(
+        product=judged.lane.product,
+        lane=judged.lane.lane,
+        condition=judged.condition,
+        work=judged.work,
+        a_move_is_at_work=judged.work is not None,
+        in_maintenance=judged.lane.route.in_maintenance,
+        in_maintenance_since=judged.lane.route.back_soon_since,
+        findings=list(judged.findings),
+        problems=judged.shown_as(Shown.WRONG, Shown.UNREAD),
+        release_under_way=judged.shown_as(Shown.UNDER_WAY),
+        left_unfinished=judged.shown_as(Shown.LEFT_UNFINISHED),
+        parts=dict(judged.parts),
     )
 
 
-def failures_at_once(web_addresses: list[str], why_web_address_fails: WebAddressChecker) -> dict[str, str | None]:
-    if not web_addresses:
-        return {}
-    with ThreadPoolExecutor(max_workers=len(web_addresses)) as pool:
-        return dict(zip(web_addresses, pool.map(why_web_address_fails, web_addresses), strict=True))
-
-
-def web_address_answers(judged: Judged, why_web_address_fails: WebAddressChecker) -> list[WebAddressAnswer]:
-    routes = judged.proxy.sends_visitors_to()
-    owners = lane_owners(judged.on_host, routes)
-    to_a_product = sorted(web_address for web_address, container in routes.items() if container != BACK_SOON)
-    failures = failures_at_once(to_a_product, why_web_address_fails)
-    return [
-        web_address_answer(web_address, owners[web_address], judged.proxy, failures.get(web_address))
-        for web_address in sorted(owners)
-    ]
+def running_answer(status: Status) -> RunningAnswer:
+    on_host = status.reading.parts
+    receives = {entry.sends_to_container: entry.web_address for entry in status.web_addresses}
+    return RunningAnswer(
+        read_at=status.reading.read_at,
+        instances=[
+            InstanceAnswer(**instance.model_dump(), receives_visitors_for=receives.get(instance.container))
+            for instance in on_host.instances
+        ],
+        background_services=on_host.background_services,
+        data_sets=on_host.data_sets,
+        networks=on_host.networks,
+        web_addresses=status.web_addresses,
+        lanes=[lane_answer(judged) for judged in status.lanes],
+        cards=cards(status),
+    )
 
 
 def not_answered(error: Exception, secrets: Secrets) -> Response:
@@ -237,8 +213,7 @@ def add_maintenance_calls(app: FastAPI, begin: MaintenanceRequester, end: Mainte
 
 
 def create_app(
-    read: HostReader,
-    why_web_address_fails: WebAddressChecker,
+    read: StatusReader,
     move: MoveRequester,
     retire: RetireRequester,
     secrets: Secrets,
@@ -256,23 +231,11 @@ def create_app(
 
     @app.get("/running", responses=RUNNING_ERROR_RESPONSES)
     def running(response: Response) -> RunningAnswer | HostUnreadable:
-        read_at = datetime.now(UTC)
         try:
-            judged = read()
-            on_host = judged.on_host
-            web_addresses = web_address_answers(judged, why_web_address_fails)
+            return running_answer(read())
         except UNREADABLE as error:
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
-            return HostUnreadable(read_at=read_at, error=str(error))
-        return RunningAnswer(
-            read_at=read_at,
-            instances=instance_answers(on_host.instances, judged.proxy.sends_visitors_to()),
-            background_services=on_host.background_services,
-            data_sets=on_host.data_sets,
-            networks=on_host.networks,
-            web_addresses=web_addresses,
-            lanes=judged.lanes,
-        )
+            return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
     @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
     def move_lane(
@@ -310,13 +273,5 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     lanes = Lanes(host, proxy, products.read)
-    app = create_app(
-        lanes.read_judged,
-        proxy.why_web_address_fails,
-        lanes.move,
-        lanes.retire,
-        host.secrets,
-        lanes.begin_maintenance,
-        lanes.end_maintenance,
-    )
-    uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host.secrets))
+    app = create_app(lanes.read_status, lanes.move, lanes.retire, host, lanes.begin_maintenance, lanes.end_maintenance)
+    uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host))

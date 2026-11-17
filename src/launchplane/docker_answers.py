@@ -18,6 +18,7 @@ from launchplane.instance import (
     HostNetwork,
     InstanceState,
     Mount,
+    OnHost,
     RunningBackgroundService,
     RunningInstance,
 )
@@ -73,14 +74,6 @@ def read_whole[Read](read_once: Callable[[], Read], address: str) -> Read:
         f"What is on {address} changed, or Docker refused to say, during each of {MOST_READS} reads in a row, "
         f"so nothing was read. The last time: {torn}"
     ) from torn
-
-
-@dataclass(frozen=True)
-class OnHost:
-    instances: list[RunningInstance]
-    background_services: list[RunningBackgroundService]
-    data_sets: list[DataSet]
-    networks: list[HostNetwork] = field(default_factory=list[HostNetwork])
 
 
 class DockerAttachedNetworks(BaseModel):
@@ -273,7 +266,7 @@ def grouped[Part](parts: Iterable[tuple[DataSetKey, Part]]) -> dict[DataSetKey, 
 def described(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails], part: str) -> DockerContainerDetails:
     if summary.name not in details:
         raise ContainerHostError(
-            f"Docker listed the {part} {summary.name} but did not describe it, so how it runs or stopped is unknown."
+            f"Docker listed the {part} {summary.name} but did not describe it, so how it runs and what it holds is unknown."
         )
     return details[summary.name]
 
@@ -353,9 +346,8 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
     )
 
 
-def names_of(containers: object, part: Part) -> list[str]:
-    summaries = checked(DOCKER_CONTAINER_LIST, containers, "container list")
-    return [summary.name for summary in summaries if part_of(summary) == part]
+def parts_by_name(containers: object) -> dict[str, Part]:
+    return {summary.name: part_of(summary) for summary in checked(DOCKER_CONTAINER_LIST, containers, "container list")}
 
 
 def tar_of(file_name: str, content: bytes) -> bytes:

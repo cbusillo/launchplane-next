@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -60,18 +61,24 @@ class HostNetwork(BaseModel):
     is_quiet: bool
 
 
+class Unread(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    why: str
+
+
 class DataSetDatabase(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     container: str
     state: InstanceState
     networks: tuple[str, ...]
+    # Asked only of a running server; while nothing was asked it is unknown, never no.
     accepts_connections: bool | None = None
     mounts: tuple[Mount, ...] = ()
     exit_code: int | None = None
     image: str | None = None
-    unheld_logins: tuple[str, ...] | None = None
-    logins_unread: str | None = None
+    unheld_logins: tuple[str, ...] | Unread | None = None
 
 
 class DataSet(BaseModel):
@@ -160,17 +167,83 @@ class ProxySeen:
         return {web_address: route.container for web_address, route in self.loaded.items() if route.status == RouteStatus.ENABLED}
 
 
+def web_address_of(product: str, lane: str) -> str:
+    return f"{lane}.{product}.{LANE_DOMAIN}"
+
+
 @dataclass(frozen=True)
-class LaneSeen:
-    instances: tuple[RunningInstance, ...]
+class OnHost:
+    instances: list[RunningInstance]
+    background_services: list[RunningBackgroundService]
+    data_sets: list[DataSet]
+    networks: list[HostNetwork] = field(default_factory=list[HostNetwork])
+
+
+@dataclass(frozen=True)
+class LaneReading:
+    product: str
+    lane: str
     route: LaneRoute
+    instances: tuple[RunningInstance, ...] = ()
     background_services: tuple[RunningBackgroundService, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
 
+    @property
+    def web_address(self) -> str:
+        return web_address_of(self.product, self.lane)
 
-def web_address_of(product: str, lane: str) -> str:
-    return f"{lane}.{product}.{LANE_DOMAIN}"
+    @property
+    def active(self) -> RunningInstance | None:
+        return next((instance for instance in self.instances if instance.container == self.route.sends_visitors_to), None)
+
+    @property
+    def databases(self) -> list[DataSetDatabase]:
+        return [database for found in self.data_sets for database in found.databases]
+
+    def data_set(self, name: str | None) -> DataSet | None:
+        return next((found for found in self.data_sets if found.data_set == name), None)
+
+
+class PartOfLane(Protocol):
+    @property
+    def product(self) -> str: ...
+    @property
+    def lane(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class Reading:
+    read_at: datetime
+    proxy: ProxySeen
+    # Absent when only the routes were asked for.
+    on_host: OnHost | None = None
+    # Why each web address asked through the proxy did not answer, or None where it did.
+    web_address_failures: Mapping[str, str | None] = field(default_factory=dict[str, str | None])
+
+    @property
+    def parts(self) -> OnHost:
+        if self.on_host is None:
+            raise ValueError("Only the routes were read, and the parts of a lane were asked of that reading.")
+        return self.on_host
+
+    def lanes(self) -> list[tuple[str, str]]:
+        parts: list[PartOfLane] = [*self.parts.instances, *self.parts.background_services, *self.parts.data_sets]
+        return sorted({(part.product, part.lane) for part in parts if part.lane is not None})
+
+    def lane(self, product: str, lane: str) -> LaneReading:
+        def of_lane[Part: PartOfLane](parts: list[Part]) -> tuple[Part, ...]:
+            return tuple(part for part in parts if (part.product, part.lane) == (product, lane))
+
+        return LaneReading(
+            product,
+            lane,
+            self.proxy.route_of(web_address_of(product, lane)),
+            of_lane(self.parts.instances),
+            of_lane(self.parts.background_services),
+            of_lane(self.parts.data_sets),
+            {network.name: network.is_quiet for network in self.parts.networks},
+        )
 
 
 def new_container_name(target: LaneBuild) -> str:

@@ -1,11 +1,9 @@
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
-from enum import StrEnum
-from typing import Protocol
+from enum import Enum, StrEnum, auto
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from launchplane.data_set import DATA_PATH
 from launchplane.instance import (
@@ -14,86 +12,169 @@ from launchplane.instance import (
     DataSet,
     DataSetDatabase,
     InstanceState,
-    LaneBuild,
-    LaneSeen,
+    LaneReading,
     Mount,
+    Reading,
     RunningBackgroundService,
     RunningInstance,
+    web_address_of,
 )
 from launchplane.product import Product, ProductError
 
 BACKGROUND_SERVICE_STEADY_SECONDS = 3.0
 
 
-@dataclass(frozen=True)
-class DataSetProblem:
-    text: str
-    fixable: bool = False
+class Work(StrEnum):
+    MOVE = "moving"
+    RETIRE = "retiring"
+    BEGIN_MAINTENANCE = "beginning maintenance"
+    END_MAINTENANCE = "ending maintenance"
 
 
-class Fix(StrEnum):
-    START = "start one"
-    REPLACE = "retire it, and start one if the product has a background service"
-    REPLACE_OR_WATCH = "retire it, unless this move started it and is about to watch it"
-    WATCH = "watch it until it has stayed up"
+class Kind(StrEnum):
+    UNREAD = "could not be read"
+    NO_VISITORS = "no instance receives visitors"
+    PROXY_STOPPED = "the proxy is not running"
+    BACK_SOON_STOPPED = "the back soon page is not running"
+    NO_BUILD = "no build label"
+    STOPPED = "stopped"
+    NOT_RUNNING = "neither running nor stopped"
+    STILL_UP = "not stopped in maintenance"
+    KILLED = "did not stop cleanly"
+    WRONG_DATA_SET = "labelled for a data set it cannot have"
+    MISPLACED = "attached or mounted where it must not be"
+    BESIDE = "beside the active instance"
+    UNWANTED = "a background service the product has none of"
+    NO_BACKGROUND_SERVICE = "no background service"
+    DOUBLED = "more than one"
+    OF_ANOTHER_INSTANCE = "of another instance"
+    OF_ANOTHER_BUILD = "of another build"
+    UNSTEADY = "not yet up as long as it must stay up"
+    NO_NETWORK = "no network"
+    NO_VOLUME = "no volume"
+    NO_DATABASE = "no database server"
+    NOT_QUIET = "network not quiet"
+    NOT_ACCEPTING = "does not accept connections"
+    NOT_ASKED = "not asked whether it accepts connections"
+    LOGINS_UNREAD = "logins could not be read"
+    LOGIN_UNHELD = "a login no container holds"
 
 
-@dataclass(frozen=True)
-class BackgroundServiceProblem:
-    text: str
-    fix: Fix
-    container: str | None = None
-    of_a_release: bool = False
+LOGIN_KINDS = {Kind.LOGINS_UNREAD, Kind.LOGIN_UNHELD}
 
 
-@dataclass(frozen=True)
-class Finding:
-    text: str
-    # A state a release passes through: wrong only when no move is at work to finish it.
-    of_a_release: bool = False
+class Weight(Enum):
+    # Wrong whatever a call is doing.
+    FAULT = auto()
+    # Wrong, and under way while a call is at work on the lane.
+    WRONG = auto()
+    # A state a call passes through: under way while one is at work, left unfinished when none is.
+    UNFINISHED = auto()
+    UNREAD = auto()
+
+
+class Shown(StrEnum):
+    WRONG = "wrong"
+    UNDER_WAY = "under way"
+    LEFT_UNFINISHED = "left unfinished"
+    UNREAD = "could not be read"
 
 
 class Standing(StrEnum):
     GOOD = "good"
     WRONG = "wrong"
     ON_PURPOSE = "on purpose"
+    UNREAD = "could not be read"
 
 
-class LaneVerdict(BaseModel):
-    product: str
-    lane: str
-    a_move_is_at_work: bool
-    problems: list[str]
-    release_under_way: list[str] = []
-    left_unfinished: list[str] = []
-    in_maintenance: bool = False
-    in_maintenance_since: datetime | None = None
-    parts: dict[str, Standing] = {}
+class Condition(StrEnum):
+    GOOD = "good"
+    IN_MAINTENANCE = "in maintenance"
+    UNDER_WAY = "work under way"
+    UNFINISHED = "unfinished"
+    WRONG = "wrong"
+    UNREAD = "could not be read"
 
 
 @dataclass(frozen=True)
-class StillUp:
-    container: str
-    text: str
-    is_database: bool = False
+class Found:
+    weight: Weight
+    subject: str
+    kind: Kind
+    sentence: str
 
 
-def data_set_of(seen: LaneSeen, name: str | None) -> DataSet | None:
-    return next((found for found in seen.data_sets if found.data_set == name), None)
+class Finding(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    subject: str
+    kind: Kind
+    sentence: str
+    shown: Shown
 
 
-def network_names(found: DataSet | None) -> set[str]:
-    return set() if found is None else {network.name for network in found.networks}
+@dataclass(frozen=True)
+class Judgement:
+    lane: LaneReading
+    work: Work | None
+    condition: Condition
+    findings: tuple[Finding, ...]
+    parts: Mapping[str, Standing]
+
+    def about(self, subjects: Collection[str]) -> list[Finding]:
+        return [finding for finding in self.findings if finding.subject in subjects]
+
+    def of_kind(self, *kinds: Kind) -> list[Finding]:
+        return [finding for finding in self.findings if finding.kind in kinds]
+
+    def about_instance(self, instance: RunningInstance) -> list[Finding]:
+        return [finding for finding in self.about({instance.container}) if finding.kind != Kind.BESIDE]
+
+    # Its logins are settled last, so they do not stand in the way of using it.
+    def about_data_set(self, found: DataSet | None) -> list[Finding]:
+        return [finding for finding in self.about(subjects_of(found)) if finding.kind not in LOGIN_KINDS]
+
+    def about_background_services(self) -> list[Finding]:
+        containers = {running.container for running in self.lane.background_services}
+        return [finding for finding in self.findings if finding.subject in containers or finding.kind == Kind.NO_BACKGROUND_SERVICE]
+
+    def shown_as(self, *shown: Shown) -> list[str]:
+        return [finding.sentence for finding in self.findings if finding.shown in shown]
 
 
-def attachment_problems(part: str, attached: tuple[str, ...], expected: set[str], seen: LaneSeen) -> list[str]:
+def subjects_of(found: DataSet | None) -> set[str]:
+    return set() if found is None else {found.data_set, *(database.container for database in found.databases)}
+
+
+@dataclass(frozen=True)
+class Judged:
+    lane: LaneReading
+    product: Product | None
+    stopped_is_meant: bool
+    serving: RunningInstance | None
+
+    def network_names(self, data_set: str | None) -> set[str]:
+        found = self.lane.data_set(data_set)
+        return set() if found is None else {network.name for network in found.networks}
+
+
+type Part = RunningInstance | RunningBackgroundService | DataSetDatabase
+
+
+def attachment_findings(part: str, subject: str, attached: tuple[str, ...], expected: set[str], lane: LaneReading) -> list[Found]:
     extra = sorted(set(attached) - expected)
     missing = sorted(expected - set(attached))
-    reaching_out = sorted(name for name in attached if not seen.network_quiet.get(name, False))
-    return [
+    reaching_out = sorted(name for name in attached if lane.network_quiet.get(name) is False)
+    unread = sorted(name for name in attached if name not in lane.network_quiet)
+    sentences = [
         *([f"{part} is attached to {', '.join(extra)}, which it must not be"] if extra else []),
         *([f"{part} is not attached to {', '.join(missing)}"] if missing else []),
         *([f"{part} can reach out through {', '.join(reaching_out)}"] if reaching_out else []),
+    ]
+    why = f"{part} is attached to {', '.join(unread)}, which was not among the networks read, so whether it can reach out is unknown"
+    return [
+        *[Found(Weight.FAULT, subject, Kind.MISPLACED, sentence) for sentence in sentences],
+        *([Found(Weight.UNREAD, subject, Kind.UNREAD, why)] if unread else []),
     ]
 
 
@@ -104,39 +185,55 @@ def described(mounts: Counter[Mount]) -> str:
     )
 
 
-def mount_problems(part: str, mounts: tuple[Mount, ...], expected: tuple[Mount, ...]) -> list[str]:
+def mount_findings(part: str, subject: str, mounts: tuple[Mount, ...], expected: tuple[Mount, ...]) -> list[Found]:
     extra = Counter(mounts) - Counter(expected)
     missing = Counter(expected) - Counter(mounts)
-    return [
+    sentences = [
         *([f"{part} has {described(extra)}, which it must not have"] if extra else []),
         *([f"{part} does not have {described(missing)}"] if missing else []),
     ]
+    return [Found(Weight.FAULT, subject, Kind.MISPLACED, sentence) for sentence in sentences]
 
 
-def data_set_label_problems(instance: RunningInstance, product: Product, seen: LaneSeen) -> list[str]:
-    part = f"The instance {instance.container}"
-    if product.database is None:
-        return [] if instance.data_set is None else [f"{part} runs against the data set {instance.data_set}; the product has none"]
-    if instance.data_set is None:
-        return [f"{part} runs against no data set"]
-    if data_set_of(seen, instance.data_set) is None:
-        return [f"{part} runs against the data set {instance.data_set}, which is not on the host"]
-    return []
+def state_findings(part: str, each: Part, of: Judged, when_stopped: Weight) -> list[Found]:
+    if of.stopped_is_meant:
+        if each.state == InstanceState.STOPPED:
+            return []
+        return [Found(Weight.WRONG, each.container, Kind.STILL_UP, f"{part} is {each.state}, in a lane in maintenance")]
+    if each.state == InstanceState.RUNNING:
+        return []
+    kind, weight = (Kind.STOPPED, when_stopped) if each.state == InstanceState.STOPPED else (Kind.NOT_RUNNING, Weight.WRONG)
+    return [Found(weight, each.container, kind, f"{part} is {each.state}")]
 
 
-def instance_connection_problems(instance: RunningInstance, seen: LaneSeen) -> list[str]:
-    part = f"The instance {instance.container}"
-    expected = {LANE_NETWORK} | network_names(data_set_of(seen, instance.data_set))
-    return [*attachment_problems(part, instance.networks, expected, seen), *mount_problems(part, instance.mounts, ())]
+def data_set_label_findings(part: str, instance: RunningInstance, of: Judged) -> list[Found]:
+    if of.product is None:
+        return []
+    if of.product.database is None:
+        sentence = (
+            None if instance.data_set is None else f"{part} runs against the data set {instance.data_set}; the product has none"
+        )
+    elif instance.data_set is None:
+        sentence = f"{part} runs against no data set"
+    elif of.lane.data_set(instance.data_set) is None:
+        sentence = f"{part} runs against the data set {instance.data_set}, which is not on the host"
+    else:
+        sentence = None
+    return [] if sentence is None else [Found(Weight.WRONG, instance.container, Kind.WRONG_DATA_SET, sentence)]
 
 
-def instance_problems(instance: RunningInstance, target: LaneBuild, product: Product, seen: LaneSeen) -> list[str]:
-    part = f"The instance {instance.container}"
+def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
+    part, subject = f"The instance {instance.container}", instance.container
+    serves = of.serving is not None and of.serving.container == subject
+    active = of.lane.active
+    beside = active is not None and active.container != subject
     return [
-        *([f"{part} runs {instance.build}, not {target.build}"] if instance.build != target.build else []),
-        *([f"{part} is {instance.state}"] if instance.state != InstanceState.RUNNING else []),
-        *data_set_label_problems(instance, product, seen),
-        *instance_connection_problems(instance, seen),
+        *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
+        *state_findings(part, instance, of, Weight.WRONG if serves else Weight.UNFINISHED),
+        *data_set_label_findings(part, instance, of),
+        *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
+        *mount_findings(part, subject, instance.mounts, ()),
+        *([Found(Weight.UNFINISHED, subject, Kind.BESIDE, f"{part} runs beside the active one")] if beside else []),
     ]
 
 
@@ -149,307 +246,306 @@ def doubled_parts(found: DataSet) -> list[str]:
     return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
 
 
-def database_mounts(found: DataSet, has_database: bool) -> tuple[Mount, ...]:
-    return tuple(Mount(source=volume, path=DATA_PATH) for volume in found.volumes) if has_database else ()
-
-
-def database_connection_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen, has_database: bool) -> list[str]:
-    part = f"The database {database.container}"
-    return [
-        *attachment_problems(part, database.networks, network_names(found), seen),
-        *mount_problems(part, database.mounts, database_mounts(found, has_database)),
-    ]
-
-
-def database_problems(found: DataSet, database: DataSetDatabase, seen: LaneSeen, has_database: bool) -> list[DataSetProblem]:
-    part = f"The database {database.container}"
-    connected = database_connection_problems(found, database, seen, has_database)
-    if database.state == InstanceState.STOPPED:
-        state = [DataSetProblem(f"{part} is {database.state}", fixable=True)]
-    elif database.state != InstanceState.RUNNING:
-        state = [DataSetProblem(f"{part} is {database.state}")]
-    elif not database.accepts_connections:
-        state = [DataSetProblem(f"{part} does not accept connections", fixable=True)]
-    else:
-        state = []
-    return [*state, *[DataSetProblem(problem) for problem in connected]]
-
-
-def data_set_problems(found: DataSet, seen: LaneSeen, has_database: bool) -> list[DataSetProblem]:
-    part = f"The data set {found.data_set}"
-    missing = [
-        kind for kind, parts in (("network", found.networks), ("volume", found.volumes), ("database", found.databases)) if not parts
-    ]
-    return [
-        *[DataSetProblem(f"{part} has {doubled} where it must have one") for doubled in doubled_parts(found)],
-        *[DataSetProblem(f"{part} has no {kind}", fixable=True) for kind in missing],
-        *[DataSetProblem(f"{part}'s network {network.name} is not quiet") for network in found.networks if not network.is_quiet],
-        *[problem for database in found.databases for problem in database_problems(found, database, seen, has_database)],
-    ]
-
-
-def background_service_state_problems(running: RunningBackgroundService) -> list[BackgroundServiceProblem]:
-    part = f"The background service {running.container}"
-    if running.state != InstanceState.RUNNING or running.running_for_seconds is None:
-        stopped = running.state == InstanceState.STOPPED
-        return [
-            BackgroundServiceProblem(f"{part} is {running.state}", Fix.REPLACE_OR_WATCH, running.container, of_a_release=stopped)
-        ]
-    if running.running_for_seconds < BACKGROUND_SERVICE_STEADY_SECONDS:
-        text = f"{part} has run {running.running_for_seconds:.1f} s of the {BACKGROUND_SERVICE_STEADY_SECONDS:g} s it must stay up"
-        return [BackgroundServiceProblem(text, Fix.WATCH, running.container, of_a_release=True)]
+def database_state_findings(part: str, database: DataSetDatabase, of: Judged) -> list[Found]:
+    subject = database.container
+    if of.stopped_is_meant and database.state == InstanceState.STOPPED and database.exit_code != 0:
+        sentence = f"{part} did not stop cleanly: it exited with code {database.exit_code}, so it was killed or it crashed"
+        return [Found(Weight.FAULT, subject, Kind.KILLED, sentence)]
+    if of.stopped_is_meant or database.state != InstanceState.RUNNING:
+        return state_findings(part, database, of, Weight.UNFINISHED)
+    if database.accepts_connections is None:
+        return [Found(Weight.UNREAD, subject, Kind.NOT_ASKED, f"{part} was not asked whether it accepts connections")]
+    if not database.accepts_connections:
+        return [Found(Weight.UNFINISHED, subject, Kind.NOT_ACCEPTING, f"{part} does not accept connections")]
     return []
 
 
-def background_service_connection_problems(running: RunningBackgroundService, active: RunningInstance, seen: LaneSeen) -> list[str]:
-    part = f"The background service {running.container}"
-    found = data_set_of(seen, active.data_set)
-    expected = network_names(found) if found is not None else {LANE_NETWORK}
-    labelled = (
-        []
-        if running.data_set == active.data_set
-        else [f"{part} says it runs against the data set {running.data_set}, not {active.data_set}"]
-    )
-    return [*labelled, *attachment_problems(part, running.networks, expected, seen), *mount_problems(part, running.mounts, ())]
-
-
-def one_background_service_problems(
-    running: RunningBackgroundService, active: RunningInstance, seen: LaneSeen
-) -> list[BackgroundServiceProblem]:
-    part = f"The background service {running.container}"
-    connected = [
-        BackgroundServiceProblem(text, Fix.REPLACE, running.container)
-        for text in background_service_connection_problems(running, active, seen)
-    ]
-    if running.instance != active.container:
-        beside = any(instance.container == running.instance for instance in seen.instances)
-        text = f"{part} belongs to {running.instance}, not {active.container}"
-        return [BackgroundServiceProblem(text, Fix.REPLACE, running.container, of_a_release=beside), *connected]
-    build = (
-        []
-        if running.build == active.build
-        else [BackgroundServiceProblem(f"{part} runs {running.build}, not {active.build}", Fix.REPLACE, running.container)]
-    )
-    return [*build, *connected, *background_service_state_problems(running)]
-
-
-def background_service_problems(seen: LaneSeen, active: RunningInstance, product: Product) -> list[BackgroundServiceProblem]:
-    containers = sorted(running.container for running in seen.background_services)
-    if product.background_service is None:
-        return [
-            BackgroundServiceProblem(f"The background service {container} runs; the product has none", Fix.REPLACE, container)
-            for container in containers
-        ]
-    if len(containers) == 1:
-        return one_background_service_problems(seen.background_services[0], active, seen)
-    names = ", ".join(containers) or "none"
-    text = f"The lane has {len(containers)} background services ({names}) where it must have one, belonging to {active.container}"
-    if not containers:
-        return [BackgroundServiceProblem(text, Fix.START, of_a_release=True)]
-    return [BackgroundServiceProblem(text, Fix.REPLACE, containers[0])]
-
-
-def active_instance(seen: LaneSeen) -> RunningInstance | None:
-    return next((instance for instance in seen.instances if instance.container == seen.route.sends_visitors_to), None)
-
-
-def data_set_change_problems(seen: LaneSeen, switching_to: RunningInstance) -> list[str]:
-    receiving = active_instance(seen)
-    if receiving is None or receiving.data_set in (None, switching_to.data_set):
-        return []
+def database_findings(found: DataSet, database: DataSetDatabase, of: Judged) -> list[Found]:
+    part, subject = f"The database {database.container}", database.container
+    names = {network.name for network in found.networks}
+    if of.product is None:
+        mounted: list[Found] = []
+    else:
+        own = tuple(Mount(source=volume, path=DATA_PATH) for volume in found.volumes) if of.product.database is not None else ()
+        mounted = mount_findings(part, subject, database.mounts, own)
     return [
-        f"The instance {switching_to.container} runs against the data set {switching_to.data_set}, "
-        f"not {receiving.data_set}, which the instance receiving visitors runs against"
+        *database_state_findings(part, database, of),
+        *attachment_findings(part, subject, database.networks, names, of.lane),
+        *mounted,
     ]
 
 
-def databases_of(seen: LaneSeen) -> list[DataSetDatabase]:
-    return [database for found in seen.data_sets for database in found.databases]
-
-
-def unheld_login_findings(seen: LaneSeen) -> list[Finding]:
+def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
+    part, subject = f"The data set {found.data_set}", found.data_set
+    missing = [
+        (kind, word)
+        for kind, word, parts in (
+            (Kind.NO_NETWORK, "network", found.networks),
+            (Kind.NO_VOLUME, "volume", found.volumes),
+            (Kind.NO_DATABASE, "database", found.databases),
+        )
+        if not parts
+    ]
     return [
-        Finding(f"The database {database.container} has the login {login}, which no container holds", of_a_release=True)
-        for database in databases_of(seen)
-        for login in database.unheld_logins or ()
-    ]
-
-
-def unread_logins_problem(database: DataSetDatabase) -> str | None:
-    if database.logins_unread is None:
-        return None
-    return (
-        f"The logins of the database {database.container} could not be read, so whether one is left that no container "
-        f"holds is unknown: {database.logins_unread}"
-    )
-
-
-def login_findings(seen: LaneSeen) -> list[Finding]:
-    unread = [Finding(problem) for problem in map(unread_logins_problem, databases_of(seen)) if problem is not None]
-    return [*unread, *unheld_login_findings(seen)]
-
-
-def data_set_findings(found: DataSet | None, seen: LaneSeen, product: Product) -> list[Finding]:
-    if found is None:
-        return []
-    return [Finding(problem.text, problem.fixable) for problem in data_set_problems(found, seen, product.database is not None)]
-
-
-def no_visitors(seen: LaneSeen) -> Finding:
-    why = "" if seen.route.proxy_runs else ": the proxy is not running"
-    return Finding(f"No instance receives visitors{why}", of_a_release=True)
-
-
-def lane_findings(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[Finding]:
-    active = switching_to or active_instance(seen)
-    if active is None:
-        return [no_visitors(seen)]
-    to_receive_visitors = [
-        *[Finding(problem) for problem in instance_problems(active, target, product, seen)],
-        *data_set_findings(data_set_of(seen, active.data_set), seen, product),
-    ]
-    if switching_to is not None:
-        return [*to_receive_visitors, *[Finding(problem) for problem in data_set_change_problems(seen, switching_to)]]
-    others = sorted(instance.container for instance in seen.instances if instance.container != active.container)
-    return [
-        *to_receive_visitors,
-        *[Finding(problem.text, problem.of_a_release) for problem in background_service_problems(seen, active, product)],
-        *[Finding(f"The instance {other} runs beside the active one", of_a_release=True) for other in others],
-    ]
-
-
-def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product, switching_to: RunningInstance | None = None) -> list[str]:
-    return [finding.text for finding in lane_findings(seen, target, product, switching_to)]
-
-
-def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
-    with_owner = [
-        (running, owner) for running in seen.background_services for owner in seen.instances if owner.container == running.instance
-    ]
-    databases = [(found, database) for found in seen.data_sets for database in found.databases]
-    return [
-        *[fault for instance in seen.instances for fault in instance_connection_problems(instance, seen)],
-        *[fault for running, owner in with_owner for fault in background_service_connection_problems(running, owner, seen)],
         *[
-            fault
-            for found, each in databases
-            for fault in database_connection_problems(found, each, seen, product.database is not None)
+            Found(Weight.WRONG, subject, Kind.DOUBLED, f"{part} has {doubled} where it must have one")
+            for doubled in doubled_parts(found)
         ],
+        *[Found(Weight.UNFINISHED, subject, kind, f"{part} has no {word}") for kind, word in missing],
+        *[
+            Found(Weight.WRONG, subject, Kind.NOT_QUIET, f"{part}'s network {network.name} is not quiet")
+            for network in found.networks
+            if not network.is_quiet
+        ],
+        *[finding for database in found.databases for finding in database_findings(found, database, of)],
     ]
 
 
-def faults_not_among(findings: list[Finding], seen: LaneSeen, product: Product) -> list[Finding]:
-    found = {finding.text for finding in findings}
-    return [Finding(fault) for fault in connection_faults(seen, product) if fault not in found]
-
-
-def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
-    active = active_instance(seen)
-    used = None if active is None else active.data_set
-    of_other_data_sets = [
-        finding for found in seen.data_sets if found.data_set != used for finding in data_set_findings(found, seen, product)
-    ]
-    if active is None:
-        return [
-            no_visitors(seen),
-            *of_other_data_sets,
-            *faults_not_among(of_other_data_sets, seen, product),
-            *login_findings(seen),
-        ]
-    if active.lane is None or active.build is None:
-        return [Finding(f"The instance {active.container} does not say which lane and build it is"), *of_other_data_sets]
-    running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
-    return [*lane_findings(seen, running, product), *of_other_data_sets, *login_findings(seen)]
-
-
-class Stoppable(Protocol):
-    @property
-    def container(self) -> str: ...
-    @property
-    def state(self) -> InstanceState: ...
-
-
-def up_among(part: str, found: Iterable[Stoppable], *, is_database: bool = False) -> list[StillUp]:
+def connection_findings(running: RunningBackgroundService, beside: RunningInstance, of: Judged) -> list[Found]:
+    part, subject = f"The background service {running.container}", running.container
+    expected = of.network_names(beside.data_set) if of.lane.data_set(beside.data_set) is not None else {LANE_NETWORK}
+    labelled = f"{part} says it runs against the data set {running.data_set}, not {beside.data_set}"
     return [
-        StillUp(each.container, f"The {part} {each.container} is {each.state}, in a lane in maintenance", is_database)
-        for each in sorted(found, key=lambda one: one.container)
-        if each.state != InstanceState.STOPPED
+        *([] if running.data_set == beside.data_set else [Found(Weight.FAULT, subject, Kind.MISPLACED, labelled)]),
+        *attachment_findings(part, subject, running.networks, expected, of.lane),
+        *mount_findings(part, subject, running.mounts, ()),
     ]
 
 
-# In the order maintenance stops them: what writes stops before the web part, and the database stops last.
-def still_up(seen: LaneSeen) -> list[StillUp]:
-    return [
-        *up_among("background service", seen.background_services),
-        *up_among("instance", seen.instances),
-        *up_among("database", databases_of(seen), is_database=True),
-    ]
-
-
-def killed_databases(seen: LaneSeen) -> list[str]:
-    return [
-        f"The database {database.container} did not stop cleanly: it exited with code {database.exit_code}, "
-        "so it was killed or it crashed"
-        for database in databases_of(seen)
-        if database.state == InstanceState.STOPPED and database.exit_code != 0
-    ]
-
-
-def back_soon_faults(seen: LaneSeen) -> list[str]:
-    if seen.route.back_soon_runs:
+def steadiness_findings(part: str, running: RunningBackgroundService, of: Judged) -> list[Found]:
+    if of.stopped_is_meant:
         return []
-    return [f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"]
+    if running.state != InstanceState.RUNNING or running.running_for_seconds is None:
+        stopped = running.state == InstanceState.STOPPED
+        kind, weight = (Kind.STOPPED, Weight.UNFINISHED) if stopped else (Kind.NOT_RUNNING, Weight.WRONG)
+        return [Found(weight, running.container, kind, f"{part} is {running.state}")]
+    if running.running_for_seconds < BACKGROUND_SERVICE_STEADY_SECONDS:
+        sentence = (
+            f"{part} has run {running.running_for_seconds:.1f} s of the {BACKGROUND_SERVICE_STEADY_SECONDS:g} s it must stay up"
+        )
+        return [Found(Weight.UNFINISHED, running.container, Kind.UNSTEADY, sentence)]
+    return []
 
 
-def findings_in_maintenance(seen: LaneSeen, product: Product) -> list[Finding]:
-    return [Finding(text) for text in [*[each.text for each in still_up(seen)], *never_acceptable(seen, product)]]
+# Two of them, or one the product has none of, are judged as a count; then only where each is attached is judged.
+def one_background_service_findings(running: RunningBackgroundService, of: Judged, *, counted: bool) -> list[Found]:
+    part, subject = f"The background service {running.container}", running.container
+    owner = next((instance for instance in of.lane.instances if instance.container == running.instance), None)
+    still_up = state_findings(part, running, of, Weight.UNFINISHED) if of.stopped_is_meant else []
+    beside = owner or of.serving
+    connected = [] if beside is None else connection_findings(running, beside, of)
+    if of.serving is None or counted:
+        return [*still_up, *connected]
+    if running.instance != of.serving.container:
+        weight = Weight.WRONG if owner is None else Weight.UNFINISHED
+        sentence = f"{part} belongs to {running.instance}, not {of.serving.container}"
+        return [Found(weight, subject, Kind.OF_ANOTHER_INSTANCE, sentence), *still_up, *connected]
+    build = f"{part} runs {running.build}, not {of.serving.build}"
+    return [
+        *([] if of.serving.build in (None, running.build) else [Found(Weight.WRONG, subject, Kind.OF_ANOTHER_BUILD, build)]),
+        *still_up,
+        *connected,
+        *steadiness_findings(part, running, of),
+    ]
 
 
-# What is wrong whatever a call is doing, so it is never shown as a call under way.
-def never_acceptable(seen: LaneSeen, product: Product) -> list[str]:
-    if not seen.route.in_maintenance:
-        return connection_faults(seen, product)
-    return [*killed_databases(seen), *back_soon_faults(seen), *connection_faults(seen, product)]
+def background_service_count_findings(containers: list[str], of: Judged) -> list[Found]:
+    if of.serving is None or of.product is None:
+        return []
+    if of.product.background_service is None:
+        sentences = [(container, f"The background service {container} runs; the product has none") for container in containers]
+        return [Found(Weight.WRONG, container, Kind.UNWANTED, sentence) for container, sentence in sentences]
+    if len(containers) == 1:
+        return []
+    names = ", ".join(containers) or "none"
+    sentence = (
+        f"The lane has {len(containers)} background services ({names}) where it must have one, belonging to {of.serving.container}"
+    )
+    if not containers:
+        return [Found(Weight.UNFINISHED, of.lane.web_address, Kind.NO_BACKGROUND_SERVICE, sentence)]
+    return [Found(Weight.WRONG, containers[0], Kind.DOUBLED, sentence)]
 
 
-def findings_as_read(seen: LaneSeen, product: Product) -> list[Finding]:
-    return findings_in_maintenance(seen, product) if seen.route.in_maintenance else findings_at_rest(seen, product)
+def background_service_findings(of: Judged) -> list[Found]:
+    running = sorted(of.lane.background_services, key=lambda each: each.container)
+    counted = background_service_count_findings([each.container for each in running], of)
+    as_a_count = bool(counted) or of.product is None
+    return [
+        *counted,
+        *[finding for each in running for finding in one_background_service_findings(each, of, counted=as_a_count)],
+    ]
 
 
-def part_standings(seen: LaneSeen, *, a_move_is_at_work: bool) -> dict[str, Standing]:
-    meant = InstanceState.STOPPED if seen.route.in_maintenance else InstanceState.RUNNING
-    as_meant = Standing.ON_PURPOSE if seen.route.in_maintenance else Standing.GOOD
-    otherwise = Standing.ON_PURPOSE if a_move_is_at_work else Standing.WRONG
-    parts = [*seen.instances, *seen.background_services, *databases_of(seen)]
-    return {part.container: as_meant if part.state == meant else otherwise for part in parts}
+def login_findings(lane: LaneReading) -> list[Found]:
+    findings: list[Found] = []
+    for database in lane.databases:
+        subject, unheld = database.container, database.unheld_logins
+        if database.state != InstanceState.RUNNING or not database.accepts_connections:
+            continue
+        if isinstance(unheld, tuple):
+            findings += [
+                Found(
+                    Weight.UNFINISHED,
+                    subject,
+                    Kind.LOGIN_UNHELD,
+                    f"The database {subject} has the login {login}, which no container holds",
+                )
+                for login in unheld
+            ]
+        else:
+            why = "they were not read" if unheld is None else unheld.why
+            sentence = (
+                f"The logins of the database {subject} could not be read, so whether one is left that no container holds is "
+                f"unknown: {why}"
+            )
+            findings.append(Found(Weight.UNREAD, subject, Kind.LOGINS_UNREAD, sentence))
+    return findings
 
 
-def sorted_findings(
-    seen: LaneSeen, product: Product | ProductError, a_move_is_at_work: bool
-) -> tuple[list[str], list[str], list[str]]:
+def route_findings(lane: LaneReading) -> list[Found]:
+    route, web_address = lane.route, lane.web_address
+    if not route.in_maintenance:
+        why = "" if route.proxy_runs else ": the proxy is not running"
+        visitors = Found(Weight.UNFINISHED, web_address, Kind.NO_VISITORS, f"No instance receives visitors{why}")
+        return [] if lane.active is not None else [visitors]
+    down = f"The proxy is not running, so {web_address} answers nothing, not the back soon page"
+    page = f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"
+    return [
+        *([] if route.proxy_runs else [Found(Weight.UNFINISHED, web_address, Kind.PROXY_STOPPED, down)]),
+        *([] if route.back_soon_runs else [Found(Weight.FAULT, BACK_SOON, Kind.BACK_SOON_STOPPED, page)]),
+    ]
+
+
+# In maintenance no instance receives visitors, and a lane's one instance is the one that will again.
+def serving_instance(lane: LaneReading) -> RunningInstance | None:
+    if lane.active is not None or not lane.route.in_maintenance or len(lane.instances) != 1:
+        return lane.active
+    return lane.instances[0]
+
+
+def everything_found(lane: LaneReading, product: Product | ProductError, work: Work | None) -> list[Found]:
+    described_product = None if isinstance(product, ProductError) else product
+    stopped_is_meant = lane.route.in_maintenance and work is not Work.END_MAINTENANCE
+    of = Judged(lane, described_product, stopped_is_meant, serving_instance(lane))
+    served = None if of.serving is None else of.serving.container
+    used = None if of.serving is None else of.serving.data_set
+    others = sorted((instance for instance in lane.instances if instance.container != served), key=lambda each: each.container)
+    return [
+        *([Found(Weight.UNREAD, lane.product, Kind.UNREAD, str(product))] if described_product is None else []),
+        *route_findings(lane),
+        *([] if of.serving is None else instance_findings(of.serving, of)),
+        *[finding for found in lane.data_sets if found.data_set == used for finding in data_set_findings(found, of)],
+        *background_service_findings(of),
+        *[finding for instance in others for finding in instance_findings(instance, of)],
+        *[finding for found in lane.data_sets if found.data_set != used for finding in data_set_findings(found, of)],
+        *login_findings(lane),
+    ]
+
+
+def shown(weight: Weight, work: Work | None) -> Shown:
+    if weight == Weight.FAULT:
+        return Shown.WRONG
+    if weight == Weight.UNREAD:
+        return Shown.UNREAD
+    if work is not None:
+        return Shown.UNDER_WAY
+    return Shown.WRONG if weight == Weight.WRONG else Shown.LEFT_UNFINISHED
+
+
+def standing_of(shown_about: set[Shown], unremarked: Standing) -> Standing:
+    if shown_about & {Shown.WRONG, Shown.LEFT_UNFINISHED}:
+        return Standing.WRONG
+    if Shown.UNREAD in shown_about:
+        return Standing.UNREAD
+    return Standing.ON_PURPOSE if Shown.UNDER_WAY in shown_about else unremarked
+
+
+def condition_of(lane: LaneReading, work: Work | None, shown_in_lane: set[Shown]) -> Condition:
+    if Shown.WRONG in shown_in_lane:
+        return Condition.WRONG
+    if Shown.UNREAD in shown_in_lane:
+        return Condition.UNREAD
+    if work is not None:
+        return Condition.UNDER_WAY
+    if Shown.LEFT_UNFINISHED in shown_in_lane:
+        return Condition.UNFINISHED
+    return Condition.IN_MAINTENANCE if lane.route.in_maintenance else Condition.GOOD
+
+
+def judge(lane: LaneReading, product: Product | ProductError, work: Work | None) -> Judgement:
+    findings = tuple(
+        Finding(subject=each.subject, kind=each.kind, sentence=each.sentence, shown=shown(each.weight, work))
+        for each in everything_found(lane, product, work)
+    )
     if isinstance(product, ProductError):
-        return [str(product)], [], []
-    findings = findings_as_read(seen, product)
-    if a_move_is_at_work:
-        wrong = never_acceptable(seen, product)
-        return wrong, [finding.text for finding in findings if finding.text not in wrong], []
-    return (
-        [finding.text for finding in findings if not finding.of_a_release],
-        [],
-        [finding.text for finding in findings if finding.of_a_release],
+        unremarked = Standing.UNREAD
+    else:
+        unremarked = Standing.ON_PURPOSE if lane.route.in_maintenance and work is not Work.END_MAINTENANCE else Standing.GOOD
+    parts = [*lane.instances, *lane.background_services, *lane.databases]
+    return Judgement(
+        lane,
+        work,
+        condition_of(lane, work, {finding.shown for finding in findings}),
+        findings,
+        {
+            part.container: standing_of({finding.shown for finding in findings if finding.subject == part.container}, unremarked)
+            for part in parts
+        },
     )
 
 
-def lane_verdict(seen: LaneSeen, product: Product | ProductError, name: str, lane: str, *, a_move_is_at_work: bool) -> LaneVerdict:
-    wrong, under_way, unfinished = sorted_findings(seen, product, a_move_is_at_work)
-    return LaneVerdict(
-        product=name,
-        lane=lane,
-        a_move_is_at_work=a_move_is_at_work,
-        problems=wrong,
-        release_under_way=under_way,
-        left_unfinished=unfinished,
-        in_maintenance=seen.route.in_maintenance,
-        in_maintenance_since=seen.route.back_soon_since,
-        parts=part_standings(seen, a_move_is_at_work=a_move_is_at_work),
+class WebAddressJudged(BaseModel):
+    web_address: str
+    product: str | None
+    lane: str | None
+    sends_to_container: str | None
+    answers: bool
+    shows_back_soon_page: bool
+    error: str | None
+    says: str
+    standing: Standing
+
+
+def why_not_answering(web_address: str, reading: Reading, sends_to: str | None) -> str | None:
+    if not reading.proxy.runs:
+        return f"The proxy is not running, so {web_address} answers nothing."
+    if sends_to is None:
+        return f"The proxy sends {web_address} to no instance."
+    if sends_to == BACK_SOON:
+        return None if reading.proxy.back_soon_runs else f"The back soon page's container {BACK_SOON} is not running."
+    if web_address not in reading.web_address_failures:
+        return f"{web_address} was not asked, so whether it answers is unknown."
+    failure = reading.web_address_failures[web_address]
+    runs = any(each.container == sends_to and each.state == InstanceState.RUNNING for each in reading.parts.instances)
+    return f"The instance it is sent to is running, and does not answer with success: {failure}" if failure and runs else failure
+
+
+def web_address_judged(web_address: str, owner: tuple[str, str | None] | None, reading: Reading) -> WebAddressJudged:
+    sends_to = reading.proxy.sends_visitors_to().get(web_address) if reading.proxy.runs else None
+    error = why_not_answering(web_address, reading, sends_to)
+    if sends_to == BACK_SOON and error is None:
+        says, standing = "shows the back soon page", Standing.ON_PURPOSE
+    else:
+        says, standing = ("answering", Standing.GOOD) if error is None else ("not answering", Standing.WRONG)
+    return WebAddressJudged(
+        web_address=web_address,
+        product=None if owner is None else owner[0],
+        lane=None if owner is None else owner[1],
+        sends_to_container=sends_to,
+        answers=says == "answering",
+        shows_back_soon_page=says == "shows the back soon page",
+        error=error,
+        says=says,
+        standing=standing,
     )
+
+
+def web_addresses_judged(reading: Reading) -> list[WebAddressJudged]:
+    by_container = {instance.container: instance for instance in reading.parts.instances}
+    owners: dict[str, tuple[str, str | None] | None] = {
+        web_address: None if (instance := by_container.get(container)) is None else (instance.product, instance.lane)
+        for web_address, container in reading.proxy.sends_visitors_to().items()
+    }
+    for product, lane in reading.lanes():
+        owners[web_address_of(product, lane)] = (product, lane)
+    return [web_address_judged(web_address, owners[web_address], reading) for web_address in sorted(owners)]

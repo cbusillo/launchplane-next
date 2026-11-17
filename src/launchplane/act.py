@@ -1,24 +1,34 @@
 import threading
 from collections.abc import Callable, Generator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from launchplane import maintenance, plan, steps
-from launchplane.container_host import HasDatabase, PartStopped
-from launchplane.docker_answers import ContainerHostError, OnHost
+from launchplane.container_host import Asks, PartStopped
+from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import (
+    BACK_SOON,
     DataSet,
     DataSetUse,
     LaneBuild,
-    LaneRoute,
-    LaneSeen,
+    OnHost,
     ProxySeen,
+    Reading,
     new_container_name,
     new_data_set_name,
     web_address_of,
 )
-from launchplane.judge import BACKGROUND_SERVICE_STEADY_SECONDS, LaneVerdict, lane_verdict
+from launchplane.judge import (
+    BACKGROUND_SERVICE_STEADY_SECONDS,
+    Judgement,
+    WebAddressJudged,
+    Work,
+    judge,
+    web_addresses_judged,
+)
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed
 from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
@@ -27,7 +37,7 @@ MOST_STEPS = 50
 
 
 class InstanceHost(Protocol):
-    def read(self, has_database: HasDatabase | None = None) -> OnHost: ...
+    def read(self, asks: Asks = ...) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None: ...
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
@@ -54,58 +64,40 @@ class Proxy(Protocol):
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
     def show_back_soon(self, web_address: str) -> None: ...
+    def why_web_address_fails(self, web_address: str) -> str | None: ...
 
 
 type ProductReader = Callable[[str], Product]
+type Lane = tuple[str, str]
+type AtWork = tuple[Lane, Work] | None
 
 
 class Stopped(Exception):
     pass
 
 
+# What a caller needs read. A reading never holds more than was asked for, and never stands for what was not.
 @dataclass(frozen=True)
-class Judged:
-    on_host: OnHost
-    proxy: ProxySeen
-    lanes: list[LaneVerdict]
+class Scope:
+    parts: bool = True
+    # The lane whose running database servers are asked, or every lane's.
+    databases_of: Lane | None = None
+    web_addresses: bool = False
+
+
+ROUTES_ONLY = Scope(parts=False)
+EVERY_LANE = Scope(web_addresses=True)
+
+
+@dataclass(frozen=True)
+class Status:
+    reading: Reading
+    lanes: list[Judgement]
+    web_addresses: list[WebAddressJudged]
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
-
-
-class PartOfLane(Protocol):
-    @property
-    def product(self) -> str: ...
-    @property
-    def lane(self) -> str | None: ...
-
-
-def is_of_lane(product: str, lane: str, part: PartOfLane) -> bool:
-    return (part.product, part.lane) == (product, lane)
-
-
-def parts_of(on_host: OnHost) -> list[PartOfLane]:
-    return [*on_host.instances, *on_host.background_services, *on_host.data_sets]
-
-
-def lanes_on(on_host: OnHost) -> list[tuple[str, str]]:
-    lanes: set[tuple[str, str]] = set()
-    for part in parts_of(on_host):
-        lane = part.lane
-        if lane is not None:
-            lanes.add((part.product, lane))
-    return sorted(lanes)
-
-
-def lane_seen(on_host: OnHost, product: str, lane: str, route: LaneRoute) -> LaneSeen:
-    return LaneSeen(
-        instances=tuple(instance for instance in on_host.instances if is_of_lane(product, lane, instance)),
-        route=route,
-        background_services=tuple(running for running in on_host.background_services if is_of_lane(product, lane, running)),
-        data_sets=tuple(data_set for data_set in on_host.data_sets if is_of_lane(product, lane, data_set)),
-        network_quiet={network.name: network.is_quiet for network in on_host.networks},
-    )
 
 
 type Take = Callable[[InstanceHost, Proxy, Any], None]
@@ -149,117 +141,109 @@ class Lanes:
         self.read_product = read_product
         self.name_fresh = name_fresh
         self.one_at_a_time = threading.Lock()
-        self.lane_being_moved: tuple[str, str] | None = None
+        self.at_work: AtWork = None
 
     @contextmanager
-    def at_work_on(self, product: str, lane: str) -> Generator[None]:
+    def at_work_on(self, product: str, lane: str, work: Work) -> Generator[None]:
         with self.one_at_a_time:
-            self.lane_being_moved = (product, lane)
+            self.at_work = ((product, lane), work)
             try:
                 yield
             finally:
-                self.lane_being_moved = None
+                self.at_work = None
 
-    def read(self, product: str, lane: str, *, has_database: bool = False) -> LaneSeen:
-        route = self.proxy.read().route_of(web_address_of(product, lane))
-        return lane_seen(self.host.read(lambda asked: has_database and asked == product), product, lane, route)
-
-    def read_judged(self) -> Judged:
-        descriptions: dict[str, Product | ProductError] = {}
-
-        def description_of(product: str) -> Product | ProductError:
-            if product not in descriptions:
-                try:
-                    descriptions[product] = self.read_product(product)
-                except ProductError as error:
-                    descriptions[product] = error
-            return descriptions[product]
-
-        def has_database(product: str) -> bool:
-            description = description_of(product)
-            return not isinstance(description, ProductError) and description.database is not None
-
-        # A move that starts or ends while the host is read is at work on what was read.
-        moving = {self.lane_being_moved}
+    def read(self, scope: Scope) -> Reading:
+        read_at = datetime.now(UTC)
         proxy = self.proxy.read()
-        on_host = self.host.read(has_database)
-        moving.add(self.lane_being_moved)
-        return Judged(
-            on_host,
-            proxy,
-            [
-                lane_verdict(
-                    lane_seen(on_host, product, lane, proxy.route_of(web_address_of(product, lane))),
-                    description_of(product),
-                    product,
-                    lane,
-                    a_move_is_at_work=(product, lane) in moving,
-                )
-                for product, lane in lanes_on(on_host)
-            ],
-        )
+        if not scope.parts:
+            return Reading(read_at, proxy)
+        on_host = self.host.read(lambda found: scope.databases_of in (None, (found.product, found.lane)))
+        return Reading(read_at, proxy, on_host, self.web_address_failures(proxy) if scope.web_addresses else {})
+
+    # Asked at once, so ones that hang cost one limit and not one each. One the proxy sends to no product is not asked.
+    def web_address_failures(self, proxy: ProxySeen) -> dict[str, str | None]:
+        to_a_product = sorted(web_address for web_address, container in proxy.sends_visitors_to().items() if container != BACK_SOON)
+        if not (proxy.runs and to_a_product):
+            return {}
+        with ThreadPoolExecutor(max_workers=len(to_a_product)) as pool:
+            return dict(zip(to_a_product, pool.map(self.proxy.why_web_address_fails, to_a_product), strict=True))
+
+    def description_of(self, product: str) -> Product | ProductError:
+        try:
+            return self.read_product(product)
+        except ProductError as error:
+            return error
+
+    def read_status(self) -> Status:
+        # A call that starts or ends while the host is read is at work on what was read.
+        before = self.at_work
+        reading = self.read(EVERY_LANE)
+        at_work = dict(each for each in (before, self.at_work) if each is not None)
+        descriptions = {product: self.description_of(product) for product in sorted({product for product, _ in reading.lanes()})}
+        judgements = [
+            judge(reading.lane(product, lane), descriptions[product], at_work.get((product, lane)))
+            for product, lane in reading.lanes()
+        ]
+        return Status(reading, judgements, web_addresses_judged(reading))
 
     def move(self, target: LaneBuild) -> MoveResult:
-        with self.at_work_on(target.product, target.lane):
+        with self.at_work_on(target.product, target.lane, Work.MOVE):
             product = self.read_product(target.product)
             return self.settle(
-                lambda: self.read(target.product, target.lane, has_database=product.database is not None),
-                lambda seen, done: plan.decide_move(seen, target, product, self.name_fresh(target), done),
-                f"{target.lane} of {target.product}",
+                self.judging(target.product, target.lane, product, Work.MOVE),
+                lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
             )
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None) -> RetireResult:
-        with self.at_work_on(product, lane):
+        with self.at_work_on(product, lane, Work.RETIRE):
             return self.settle(
-                lambda: self.read(product, lane, has_database=True),
-                lambda seen, done: plan.decide_retire(seen, product, lane, delete_data_set, done),
-                f"{lane} of {product}",
+                self.judging(product, lane, self.description_of(product), Work.RETIRE),
+                lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
             )
 
     def begin_maintenance(self, product: str, lane: str) -> MaintenanceResult:
-        with self.at_work_on(product, lane):
-            description = self.read_product(product)
+        with self.at_work_on(product, lane, Work.BEGIN_MAINTENANCE):
             return self.settle(
-                lambda: self.read(product, lane),
-                lambda seen, done: maintenance.decide_begin(seen, product, lane, description, done),
-                f"{lane} of {product}",
+                self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE), maintenance.decide_begin
             )
 
     def end_maintenance(self, product: str, lane: str) -> MaintenanceResult:
-        with self.at_work_on(product, lane):
+        with self.at_work_on(product, lane, Work.END_MAINTENANCE):
             # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
             web_address = web_address_of(product, lane)
-            route = self.proxy.read().route_of(web_address)
+            route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
             if not route.in_maintenance:
                 if route.proxy_runs and not plan.is_loaded_as_written(route):
                     self.proxy.await_route(web_address, route.written)
                 return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
             description = self.read_product(product)
             return self.settle(
-                lambda: self.read(product, lane, has_database=description.database is not None),
-                lambda seen, done: maintenance.decide_end(seen, product, lane, description, done),
-                f"{lane} of {product}",
+                self.judging(product, lane, description, Work.END_MAINTENANCE),
+                lambda judged, done: maintenance.decide_end(judged, description, done),
                 self.take_behind_back_soon,
             )
 
+    def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
+        return lambda: judge(self.read(Scope(databases_of=(product, lane))).lane(product, lane), description, work)
+
     def settle[Answer](
         self,
-        read: Callable[[], LaneSeen],
-        next_step: Callable[[LaneSeen, tuple[Event, ...]], Action | Done[Answer] | Stop],
-        lane_name: str,
+        read_judged: Callable[[], Judgement],
+        next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
         take: Callable[[Action], Event] | None = None,
     ) -> Answer:
         done: list[Event] = []
         while True:
-            step = next_step(read(), tuple(done))
+            judged = read_judged()
+            step = next_step(judged, tuple(done))
             if isinstance(step, Done):
                 return step.answer
             if isinstance(step, Stop):
                 raise Stopped(step.reason)
             if len(done) == MOST_STEPS:
                 raise Stopped(
-                    f"{lane_name} was not finished after {MOST_STEPS} steps, so Launchplane stopped before {step}. "
-                    "What was done stays done, and asking again goes on from there."
+                    f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
+                    f"stopped before {step}. What was done stays done, and asking again goes on from there."
                 )
             done.append((take or self.take)(step))
 

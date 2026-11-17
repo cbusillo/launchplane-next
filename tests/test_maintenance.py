@@ -1,20 +1,9 @@
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
 
 import pytest
 
-from launchplane.instance import (
-    BACK_SOON,
-    DataSet,
-    InstanceState,
-    LaneRoute,
-    LaneSeen,
-    LoadedRoute,
-    RouteStatus,
-    RunningBackgroundService,
-    RunningInstance,
-)
-from launchplane.judge import LaneVerdict, Standing, lane_verdict
+from launchplane.instance import BACK_SOON, DataSet, InstanceState, RunningBackgroundService, RunningInstance
+from launchplane.judge import Work
 from launchplane.maintenance import decide_begin, decide_end
 from launchplane.plan import decide_move, decide_retire
 from launchplane.steps import (
@@ -31,6 +20,7 @@ from launchplane.steps import (
     MaintenanceOutcome,
     MaintenanceResult,
     ReadLog,
+    RemoveLogins,
     RemoveRoute,
     Retire,
     ShowBackSoon,
@@ -43,10 +33,21 @@ from launchplane.steps import (
     StopPart,
     WriteRoute,
 )
-from tests.test_plan import QUIET, TARGET, WEB_ADDRESS, WITH_DATA, background_service_of, data_set, lane_instance, on_data
+from tests.pretend_host import (
+    SINCE,
+    WEB_ADDRESS,
+    WITH_DATA,
+    Given,
+    background_service_of,
+    changed,
+    data_set,
+    lane_instance,
+    on_data,
+    with_database,
+)
+from tests.test_plan import TARGET
 
 RUNNING, STOPPED = InstanceState.RUNNING, InstanceState.STOPPED
-SINCE = datetime(2026, 11, 16, 14, 2, tzinfo=UTC)
 WEB = "web"
 BACKGROUND_SERVICE = "web-background-service"
 DATABASE = "database-d1"
@@ -58,13 +59,11 @@ def web(state: InstanceState, container: str = WEB) -> RunningInstance:
 
 
 def background_service(state: InstanceState, ran: float = 10.0) -> RunningBackgroundService:
-    return background_service_of(web(RUNNING), running_for=ran if state == RUNNING else None).model_copy(update={"state": state})
+    return changed(background_service_of(web(RUNNING), running_for=ran if state == RUNNING else None), state=state)
 
 
 def database(state: InstanceState, *, accepts: bool = True, exit_code: int = 0) -> DataSet:
-    found = data_set("d1", state, accepts=accepts)
-    stopped_with = exit_code if state == STOPPED else None
-    return found.model_copy(update={"databases": (found.databases[0].model_copy(update={"exit_code": stopped_with}),)})
+    return data_set("d1", state, accepts=accepts, exit_code=exit_code)
 
 
 STOPPED_DATABASE = database(STOPPED)
@@ -79,21 +78,13 @@ class Lane:
     database: DataSet | None = STOPPED_DATABASE
     background_service_ran: float = 10.0
 
-    def seen(self) -> LaneSeen:
-        if self.route is None:
-            return LaneSeen((), LaneRoute(None, None, proxy_runs=False))
-        loaded, written = self.route
-        route = LaneRoute(
-            None if loaded is None else LoadedRoute(loaded, RouteStatus.ENABLED),
-            written,
-            SINCE if written == BACK_SOON else None,
-        )
-        return LaneSeen(
+    def given(self) -> Given:
+        return Given(
             () if self.web is None else (web(self.web),),
-            route,
+            self.route or (None, None),
             () if self.background_service is None else (background_service(self.background_service, self.background_service_ran),),
             () if self.database is None else (self.database,),
-            QUIET,
+            proxy_runs=self.route is not None,
         )
 
 
@@ -157,11 +148,11 @@ BEGINS: dict[str, tuple[Lane, object]] = {
 
 @pytest.mark.parametrize(("lane", "step"), BEGINS.values(), ids=BEGINS.keys())
 def test_beginning_maintenance_takes_this_step_next_whatever_was_done_before(lane: Lane, step: object) -> None:
-    assert decide_begin(lane.seen(), "site", "testing", WITH_DATA, ()) == step
+    assert decide_begin(lane.given().judged(Work.BEGIN_MAINTENANCE), ()) == step
 
 
 def test_a_lane_with_nothing_on_the_host_is_not_given_a_back_soon_page() -> None:
-    step = decide_begin(Lane((None, None), None, None, None).seen(), "site", "testing", WITH_DATA, ())
+    step = decide_begin(Lane((None, None), None, None, None).given().judged(Work.BEGIN_MAINTENANCE), ())
     assert isinstance(step, Stop)
     assert "nothing to put in maintenance" in step.reason
 
@@ -216,6 +207,11 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
         ALL_UP_BEHIND_BACK_SOON,
         (CHECKED,),
         WriteRoute(WEB_ADDRESS, WEB),
+    ),
+    "a login no container holds is removed while the back soon page still shows, before the web address is switched back": (
+        Lane(IN_MAINTENANCE, RUNNING, RUNNING, data_set("d1", unheld=("i_left",))),
+        (CHECKED,),
+        RemoveLogins(DATABASE),
     ),
     "killed after the route was written back: the proxy is waited on": (
         Lane((BACK_SOON, WEB), RUNNING, RUNNING, STARTED_DATABASE),
@@ -280,31 +276,41 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
 
 @pytest.mark.parametrize(("lane", "done", "step"), ENDS.values(), ids=ENDS.keys())
 def test_ending_maintenance_takes_this_step_next(lane: Lane, done: tuple[Event, ...], step: object) -> None:
-    assert decide_end(lane.seen(), "site", "testing", WITH_DATA, done) == step
+    assert decide_end(lane.given().judged(Work.END_MAINTENANCE), WITH_DATA, done) == step
 
 
 END_STOPS = {
     "a lane with two instances, so which one received visitors cannot be told": (
-        LaneSeen((web(STOPPED), web(STOPPED, "other")), Lane(IN_MAINTENANCE).seen().route, network_quiet=QUIET),
+        Given((web(STOPPED), web(STOPPED, "other")), IN_MAINTENANCE),
         (),
         "cannot tell which to start",
     ),
-    "a lane with no instance to start": (Lane(IN_MAINTENANCE, None).seen(), (), "has 0 instances (none)"),
+    "a lane with no instance to start": (Lane(IN_MAINTENANCE, None).given(), (), "has 0 instances (none)"),
     "a web part that passed its check and can reach out": (
-        LaneSeen(
-            (on_data(lane_instance(WEB, "b"), "d1", "bridge"),), Lane(IN_MAINTENANCE).seen().route, (), (database(RUNNING),), QUIET
-        ),
+        Given((on_data(lane_instance(WEB, "b"), "d1", "bridge"),), IN_MAINTENANCE, data_sets=(STARTED_DATABASE,)),
         (STARTED_WEB, CHECKED),
         "still shows the back soon page: The instance web is attached to bridge",
+    ),
+    "a lane with no background service where the product has one": (
+        Lane(IN_MAINTENANCE, RUNNING, None, STARTED_DATABASE).given(),
+        (CHECKED,),
+        "not one ending maintenance can start: The lane has 0 background services",
+    ),
+    "logins that could not be read, said while the back soon page still shows and not after the lane is back": (
+        Given(
+            (web(RUNNING),), IN_MAINTENANCE, (background_service(RUNNING),), (with_database(STARTED_DATABASE, unheld_logins=None),)
+        ),
+        (CHECKED,),
+        "so the web address still shows the back soon page: The logins of the database database-d1 could not be read",
     ),
 }
 
 
-@pytest.mark.parametrize(("seen", "done", "reason"), END_STOPS.values(), ids=END_STOPS.keys())
+@pytest.mark.parametrize(("given", "done", "reason"), END_STOPS.values(), ids=END_STOPS.keys())
 def test_ending_maintenance_stops_with_why_and_leaves_the_back_soon_page_for(
-    seen: LaneSeen, done: tuple[Event, ...], reason: str
+    given: Given, done: tuple[Event, ...], reason: str
 ) -> None:
-    step = decide_end(seen, "site", "testing", WITH_DATA, done)
+    step = decide_end(given.judged(Work.END_MAINTENANCE), WITH_DATA, done)
     assert isinstance(step, Stop)
     assert reason in step.reason
 
@@ -317,98 +323,39 @@ BACK_SOON_ROUTES = {
 
 @pytest.mark.parametrize("route", BACK_SOON_ROUTES.values(), ids=BACK_SOON_ROUTES.keys())
 def test_a_move_refuses_a_lane_whose_route_points_at_the_back_soon_page_and_starts_nothing(route: tuple[str, str]) -> None:
-    step = decide_move(Lane(route).seen(), TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), ())
+    step = decide_move(Lane(route).given().judged(Work.MOVE), TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), ())
     assert isinstance(step, Stop)
     assert "End maintenance first, with POST /lanes/site/testing/maintenance/end. Nothing was changed." in step.reason
 
 
-def test_a_lane_in_maintenance_is_retired_as_any_other_route_first_then_its_stopped_parts() -> None:
-    assert decide_retire(Lane(IN_MAINTENANCE).seen(), "site", "testing", None, ()) == RemoveRoute(WEB_ADDRESS, BACK_SOON)
-    assert decide_retire(Lane((None, None)).seen(), "site", "testing", None, ()) == Retire(BACKGROUND_SERVICE)
-
-
-def verdict_on(lane: Lane, *, at_work: bool = False) -> LaneVerdict:
-    return lane_verdict(lane.seen(), WITH_DATA, "site", "testing", a_move_is_at_work=at_work)
-
-
-def test_a_lane_in_maintenance_reads_as_in_maintenance_while_the_proxy_is_down_and_nothing_about_it_is_wrong() -> None:
-    seen = Lane(IN_MAINTENANCE).seen()
-    down = LaneSeen(
-        seen.instances, LaneRoute(None, BACK_SOON, SINCE, proxy_runs=False), seen.background_services, seen.data_sets, QUIET
-    )
-    verdict = lane_verdict(down, WITH_DATA, "site", "testing", a_move_is_at_work=False)
-    assert (verdict.in_maintenance, verdict.in_maintenance_since, verdict.problems) == (True, SINCE, [])
-
-
-def test_a_back_soon_page_that_is_not_running_is_wrong_for_a_lane_in_maintenance_and_begin_does_not_answer_success() -> None:
-    seen = Lane(IN_MAINTENANCE).seen()
-    route = LaneRoute(seen.route.loaded, BACK_SOON, SINCE, back_soon_runs=False)
-    without_page = LaneSeen(seen.instances, route, seen.background_services, seen.data_sets, QUIET)
-    [problem] = lane_verdict(without_page, WITH_DATA, "site", "testing", a_move_is_at_work=True).problems
-    step = decide_begin(without_page, "site", "testing", WITH_DATA, ())
-    assert isinstance(step, Stop)
-    assert "launchplane-back-soon is not running" in problem
-    assert problem in step.reason
-
-
-def test_a_lane_in_maintenance_with_every_part_stopped_is_as_intended_and_nothing_about_it_is_wrong() -> None:
-    verdict = verdict_on(Lane(IN_MAINTENANCE))
-    assert (verdict.in_maintenance, verdict.problems, verdict.release_under_way, verdict.left_unfinished) == (True, [], [], [])
-    assert set(verdict.parts.values()) == {Standing.ON_PURPOSE}
-
-
-def test_a_part_still_running_in_a_lane_in_maintenance_is_wrong() -> None:
-    verdict = verdict_on(Lane(IN_MAINTENANCE, RUNNING, STOPPED, database(RUNNING)))
-    assert verdict.problems == [
-        "The instance web is running, in a lane in maintenance",
-        f"The database {DATABASE} is running, in a lane in maintenance",
-    ]
-    assert verdict.parts == {WEB: Standing.WRONG, BACKGROUND_SERVICE: Standing.ON_PURPOSE, DATABASE: Standing.WRONG}
-
-
-def test_while_a_call_is_at_work_a_part_still_running_in_a_lane_in_maintenance_is_under_way_not_wrong() -> None:
-    verdict = verdict_on(Lane(IN_MAINTENANCE, RUNNING, STOPPED, database(RUNNING)), at_work=True)
-    assert (verdict.problems, len(verdict.release_under_way)) == ([], 2)
-    assert set(verdict.parts.values()) == {Standing.ON_PURPOSE}
-
-
-def test_a_killed_database_in_a_lane_in_maintenance_is_wrong_even_while_a_call_is_at_work() -> None:
-    verdict = verdict_on(Lane(IN_MAINTENANCE, database=database(STOPPED, exit_code=KILLED)), at_work=True)
-    assert verdict.problems == [KILLED_REPORT]
-
-
-def test_outside_maintenance_a_running_part_is_good_and_a_stopped_one_is_wrong() -> None:
-    verdict = verdict_on(Lane(SERVING, RUNNING, STOPPED, database(RUNNING)))
-    assert (verdict.in_maintenance, verdict.parts) == (
-        False,
-        {WEB: Standing.GOOD, BACKGROUND_SERVICE: Standing.WRONG, DATABASE: Standing.GOOD},
-    )
-
-
-def test_with_the_proxy_down_a_lane_says_no_instance_receives_visitors_though_its_file_names_one() -> None:
-    seen = UP.seen()
-    down = LaneSeen(seen.instances, LaneRoute(None, WEB, proxy_runs=False), seen.background_services, seen.data_sets, QUIET)
-    verdict = lane_verdict(down, WITH_DATA, "site", "testing", a_move_is_at_work=False)
-    assert verdict.left_unfinished == ["No instance receives visitors: the proxy is not running"]
-
-
-def test_with_the_proxy_down_a_part_attached_where_it_must_not_be_is_still_reported_as_wrong() -> None:
-    seen = UP.seen()
-    attached_outside = seen.instances[0].model_copy(update={"networks": (*seen.instances[0].networks, "bridge")})
-    down = LaneSeen((attached_outside,), LaneRoute(None, WEB, proxy_runs=False), seen.background_services, seen.data_sets, QUIET)
-    verdict = lane_verdict(down, WITH_DATA, "site", "testing", a_move_is_at_work=False)
-    assert verdict.left_unfinished == ["No instance receives visitors: the proxy is not running"]
-    assert verdict.problems == [
-        "The instance web is attached to bridge, which it must not be",
-        "The instance web can reach out through bridge",
-    ]
-
-
 def test_a_move_refuses_a_lane_in_maintenance_before_it_starts_the_proxy() -> None:
-    seen = Lane(IN_MAINTENANCE).seen()
-    down = LaneSeen(
-        seen.instances, LaneRoute(None, BACK_SOON, SINCE, proxy_runs=False), seen.background_services, seen.data_sets, QUIET
-    )
-    step = decide_move(down, TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), ())
+    down = replace(Lane(IN_MAINTENANCE).given(), route=(None, BACK_SOON), proxy_runs=False)
+    step = decide_move(down.judged(Work.MOVE), TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), ())
     assert isinstance(step, Stop)
     assert "Nothing was changed." in step.reason
+
+
+def test_a_lane_in_maintenance_is_retired_as_any_other_route_first_then_its_stopped_parts() -> None:
+    assert decide_retire(Lane(IN_MAINTENANCE).given().judged(Work.RETIRE), None, ()) == RemoveRoute(WEB_ADDRESS, BACK_SOON)
+    assert decide_retire(Lane((None, None)).given().judged(Work.RETIRE), None, ()) == Retire(BACKGROUND_SERVICE)
+
+
+def test_beginning_maintenance_does_not_answer_success_with_the_back_soon_page_not_running_and_says_so_as_the_status_call_does() -> (
+    None
+):
+    without_page = replace(Lane(IN_MAINTENANCE).given(), back_soon_runs=False)
+    [problem] = without_page.judged(None).findings
+    step = decide_begin(without_page.judged(Work.BEGIN_MAINTENANCE), ())
+    assert isinstance(step, Stop)
+    assert "launchplane-back-soon is not running" in problem.sentence
+    assert problem.sentence in step.reason
+
+
+def test_ending_maintenance_switches_away_from_a_back_soon_page_that_is_not_running() -> None:
+    without_page = replace(ALL_UP_BEHIND_BACK_SOON.given(), back_soon_runs=False)
+    assert decide_end(without_page.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)
+
+
+def test_ending_maintenance_starts_the_stopped_database_of_another_data_set_of_the_lane_before_switching_back() -> None:
+    spare = replace(ALL_UP_BEHIND_BACK_SOON.given(), data_sets=(STARTED_DATABASE, data_set("d2", STOPPED)))
+    assert decide_end(spare.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == StartDatabase("database-d2")

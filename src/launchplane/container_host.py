@@ -1,6 +1,6 @@
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -38,7 +38,6 @@ from launchplane.docker_answers import (
     CommandResult,
     ContainerHostError,
     HostAnswers,
-    OnHost,
     Part,
     TornRead,
     attempting,
@@ -46,14 +45,14 @@ from launchplane.docker_answers import (
     command_result,
     files_in,
     is_quiet,
-    names_of,
     on_host_from_answers,
+    parts_by_name,
     read_whole,
     running_for,
     tar_of,
 )
 from launchplane.host_logins import HostLogins
-from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets
+from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, held_from_answers
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
@@ -61,6 +60,8 @@ from launchplane.instance import (
     DataSetUse,
     InstanceState,
     LaneBuild,
+    OnHost,
+    Unread,
     background_service_container_of,
     new_password,
 )
@@ -79,7 +80,11 @@ type RestartPolicy = Literal["always", "unless-stopped"]
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
 ALWAYS_RUNS: RestartPolicy = "always"
 
-type HasDatabase = Callable[[str], bool]
+type Asks = Callable[[DataSet], bool]
+
+
+def asks_no_database(_found: DataSet) -> bool:
+    return False
 
 
 class PartStopped(Exception):
@@ -174,7 +179,7 @@ class ContainerHost:
         self.address = address
         self.sleep = sleep
         self.clock = clock
-        self.secrets = HostSecrets(client, address)
+        self.secrets = HostSecrets()
         self.logins = HostLogins(client, address, self.secrets)
 
     @classmethod
@@ -203,21 +208,31 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    def read(self, has_database: HasDatabase | None = None) -> OnHost:
-        return read_whole(lambda: self.read_once(has_database), self.address)
+    # One pass: every marked container is listed once and described, and what each holds comes from that list.
+    def read(self, asks: Asks = asks_no_database) -> OnHost:
+        return read_whole(lambda: self.read_once(asks), self.address)
 
-    def read_once(self, has_database: HasDatabase | None) -> OnHost:
+    def read_once(self, asks: Asks) -> OnHost:
         with attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks", self.address):
             containers, networks, volumes = self.list_marked("containers"), self.list_networks(), self.list_marked("volumes")
-            background_services = names_of(containers, "background-service")
-            details = [self.describe_listed(name) for name in [*background_services, *names_of(containers, "database")]]
-            system = self.system_information() if background_services else None
-        on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, details, system))
-        if has_database is None:
-            return on_host
-        return replace(
-            on_host, data_sets=[self.probed(found) if has_database(found.product) else found for found in on_host.data_sets]
-        )
+            parts = parts_by_name(containers)
+            details = [self.describe_listed(name) for name in parts]
+            system = self.system_information() if "background-service" in parts.values() else None
+        answers = HostAnswers(containers, networks, volumes, details, system)
+        on_host, held = on_host_from_answers(answers), held_from_answers(answers)
+        self.secrets.note(held.secrets)
+        data_sets = [
+            self.probed(found, held.logins.get((found.product, found.data_set), set())) if asks(found) else found
+            for found in on_host.data_sets
+        ]
+        return replace(on_host, data_sets=data_sets)
+
+    def read_secrets(self) -> frozenset[str]:
+        self.read()
+        return self.secrets.seen
+
+    def secrets_seen(self) -> frozenset[str]:
+        return self.secrets.seen
 
     # A refusal about one container Docker has just listed means the host changed during the read.
     def describe_listed(self, container: str) -> object:
@@ -226,18 +241,18 @@ class ContainerHost:
         except APIError as error:
             raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
-    def probed(self, found: DataSet) -> DataSet:
-        databases = tuple(self.asked(found, each) if each.state == InstanceState.RUNNING else each for each in found.databases)
+    def probed(self, found: DataSet, held: Set[str]) -> DataSet:
+        databases = tuple(self.asked(each, held) if each.state == InstanceState.RUNNING else each for each in found.databases)
         return found.model_copy(update={"databases": databases})
 
-    def asked(self, found: DataSet, database: DataSetDatabase) -> DataSetDatabase:
+    def asked(self, database: DataSetDatabase, held: Set[str]) -> DataSetDatabase:
         if not self.accepts_connections(database.container):
             return database.model_copy(update={"accepts_connections": False})
         try:
             with attempting(f"Reading the logins of the database {database.container}", self.address):
-                unheld = self.logins.unheld(database.container, found.product, found.data_set)
+                unheld = sorted(set(self.logins.read_logins(database.container)) - held)
         except ContainerHostError as error:
-            return database.model_copy(update={"accepts_connections": True, "logins_unread": str(error)})
+            return database.model_copy(update={"accepts_connections": True, "unheld_logins": Unread(why=str(error))})
         return database.model_copy(update={"accepts_connections": True, "unheld_logins": tuple(unheld)})
 
     def accepts_connections(self, container: str) -> bool:

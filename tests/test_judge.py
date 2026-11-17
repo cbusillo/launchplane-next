@@ -1,76 +1,52 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from launchplane.instance import BACK_SOON, InstanceState, LaneRoute, LaneSeen, Mount
-from launchplane.judge import lane_verdict
+from launchplane.api import lane_answer
+from launchplane.instance import BACK_SOON, LANE_NETWORK, InstanceState, Mount, Unread
+from launchplane.judge import Work
 from launchplane.product import Product, ProductError
-from tests.test_maintenance import BACKGROUND_SERVICE, IN_MAINTENANCE, KILLED, SERVING, SINCE, UP, WEB, Lane, database
-from tests.test_plan import (
-    D1,
-    LEFT_ON_D1,
-    NEW,
-    NEW_BACKGROUND_SERVICE,
-    NEW_ON_D1,
-    OLD,
-    OLD_BACKGROUND_SERVICE,
-    OLD_ON_D1,
-    QUIET,
-    STOPPED_NEW,
-    STRAY,
-    WITH_DATA,
-    DataCase,
-    background_service_of,
-    data_set,
-    lane_instance,
-    lane_seen_of,
-    on_data,
-    with_database_mounting,
-    with_database_on,
-)
+from tests.pretend_host import WITH_DATA, Given, background_service_of, changed, data_set, lane_instance, on_data, with_database
 
 PINNED = Path(__file__).parent / "answers" / "judgements.json"
 RUNNING, STOPPED, RESTARTING = InstanceState.RUNNING, InstanceState.STOPPED, InstanceState.RESTARTING
 PLAIN = Product()
 UNREADABLE = ProductError("The description of site is not one Launchplane reads.")
+OLD, NEW, STRAY = lane_instance("old", "a"), lane_instance("new", "b"), lane_instance("stray", "c")
+OLD_ON_D1, NEW_ON_D1 = on_data(OLD, "d1"), on_data(NEW, "d1")
+D1 = data_set("d1")
+OLD_BACKGROUND_SERVICE, NEW_BACKGROUND_SERVICE = background_service_of(OLD_ON_D1), background_service_of(NEW_ON_D1)
 GONE_BACKGROUND_SERVICE = background_service_of(on_data(lane_instance("gone", "a"), "d1"))
-UNREAD_LOGINS = D1.model_copy(
-    update={"databases": (D1.databases[0].model_copy(update={"unheld_logins": None, "logins_unread": "psql: no such database"}),)}
-)
+DATA_MOUNT = "/var/lib/postgresql"
+KILLED = 137
 
 
-def serving(*instances: object, data_sets: tuple[object, ...] = (D1,), background_services: tuple[object, ...] | None = None) -> LaneSeen:
-    first = instances[0]
-    assert hasattr(first, "container")
-    return lane_seen_of(
-        DataCase(
-            instances,  # type: ignore[arg-type]
-            first.container,  # type: ignore[attr-defined]
-            data_sets,  # type: ignore[arg-type]
-            (),
-            None,
-            (NEW_BACKGROUND_SERVICE,) if background_services is None else background_services,  # type: ignore[arg-type]
-        )
+def serving(
+    *instances: object, data_sets: tuple[object, ...] = (D1,), background_services: tuple[object, ...] | None = None
+) -> Given:
+    active = instances[0].container  # type: ignore[attr-defined]
+    return Given(
+        instances,  # type: ignore[arg-type]
+        (active, active),
+        (NEW_BACKGROUND_SERVICE,) if background_services is None else background_services,  # type: ignore[arg-type]
+        data_sets,  # type: ignore[arg-type]
     )
 
 
-def unrouted(*instances: object, data_sets: tuple[object, ...] = (D1,), background_services: tuple[object, ...] = ()) -> LaneSeen:
-    return lane_seen_of(DataCase(instances, None, data_sets, (), None, background_services))  # type: ignore[arg-type]
+def mounted(*sources: str) -> tuple[Mount, ...]:
+    return tuple(Mount(source=source, path=DATA_MOUNT) for source in sources)
 
 
-def with_route(seen: LaneSeen, route: LaneRoute) -> LaneSeen:
-    return LaneSeen(seen.instances, route, seen.background_services, seen.data_sets, QUIET)
+WEB = on_data(lane_instance("web", "b"), "d1")
+UP = Given((WEB,), ("web", "web"), (background_service_of(WEB),), (D1,))
+IN_MAINTENANCE = Given(
+    (changed(WEB, state=STOPPED),), (BACK_SOON, BACK_SOON), (background_service_of(WEB, None),), (data_set("d1", STOPPED),)
+)
+ATTACHED_OUTSIDE = on_data(lane_instance("web", "b"), "d1", "bridge")
 
-
-def changed(part: object, **change: object) -> object:
-    return part.model_copy(update=change)  # type: ignore[attr-defined]
-
-
-IN_MAINTENANCE_SEEN = Lane(IN_MAINTENANCE).seen()
-ATTACHED_OUTSIDE = changed(UP.seen().instances[0], networks=(*UP.seen().instances[0].networks, "bridge"))
-
-WITH_A_DATABASE: dict[str, LaneSeen] = {
+WITH_A_DATABASE: dict[str, Given] = {
     "at rest and as it must be": serving(NEW_ON_D1),
     "a new instance being prepared beside the active one": serving(
         OLD_ON_D1, NEW_ON_D1, background_services=(OLD_BACKGROUND_SERVICE,)
@@ -83,8 +59,8 @@ WITH_A_DATABASE: dict[str, LaneSeen] = {
         NEW_ON_D1, background_services=(background_service_of(NEW_ON_D1, 1.0),)
     ),
     "a background service that is stopped": serving(NEW_ON_D1, background_services=(background_service_of(NEW_ON_D1, None),)),
-    "a lane being brought up, its database not yet accepting connections": unrouted(
-        NEW_ON_D1, data_sets=(data_set("d1", accepts=False),)
+    "a lane being brought up, its database not yet accepting connections": Given(
+        (NEW_ON_D1,), data_sets=(data_set("d1", accepts=False),)
     ),
     "an instance being prepared that can reach out": serving(
         OLD_ON_D1, on_data(NEW, "d1", "bridge"), background_services=(OLD_BACKGROUND_SERVICE,)
@@ -95,11 +71,13 @@ WITH_A_DATABASE: dict[str, LaneSeen] = {
     "the old instance's background service can reach out": serving(
         NEW_ON_D1, OLD_ON_D1, background_services=(background_service_of(OLD_ON_D1, networks=("network-d1", "bridge")),)
     ),
-    "a database attached to an outside network": serving(NEW_ON_D1, data_sets=(with_database_on(D1, "network-d1", "bridge"),)),
-    "a database with another data set's volume mounted too": serving(
-        NEW_ON_D1, data_sets=(with_database_mounting(D1, "volume-d1", "volume-d2"),)
+    "a database attached to an outside network": serving(
+        NEW_ON_D1, data_sets=(with_database(D1, networks=("network-d1", "bridge")),)
     ),
-    "a database with nothing mounted": serving(NEW_ON_D1, data_sets=(with_database_mounting(D1),)),
+    "a database with another data set's volume mounted too": serving(
+        NEW_ON_D1, data_sets=(with_database(D1, mounts=mounted("volume-d1", "volume-d2")),)
+    ),
+    "a database with nothing mounted": serving(NEW_ON_D1, data_sets=(with_database(D1, mounts=()),)),
     "a background service that keeps restarting": serving(
         NEW_ON_D1, background_services=(changed(NEW_BACKGROUND_SERVICE, state=RESTARTING, running_for_seconds=None),)
     ),
@@ -121,66 +99,73 @@ WITH_A_DATABASE: dict[str, LaneSeen] = {
     "a background service of another build": serving(NEW_ON_D1, background_services=(changed(NEW_BACKGROUND_SERVICE, build="a"),)),
     "a background service whose instance is gone": serving(NEW_ON_D1, background_services=(GONE_BACKGROUND_SERVICE,)),
     "a stopped instance left beside the active one": serving(
-        OLD_ON_D1, on_data(STOPPED_NEW, "d1"), background_services=(OLD_BACKGROUND_SERVICE,)
+        OLD_ON_D1, changed(NEW_ON_D1, state=STOPPED), background_services=(OLD_BACKGROUND_SERVICE,)
     ),
     "a database that does not accept connections": serving(NEW_ON_D1, data_sets=(data_set("d1", accepts=False),)),
+    "a database that was not asked whether it accepts connections": serving(
+        NEW_ON_D1, data_sets=(with_database(D1, accepts_connections=None, unheld_logins=None),)
+    ),
     "a database that is stopped": serving(NEW_ON_D1, data_sets=(data_set("d1", STOPPED),)),
     "a database that keeps restarting": serving(NEW_ON_D1, data_sets=(data_set("d1", RESTARTING),)),
     "a data set whose network is not quiet": serving(NEW_ON_D1, data_sets=(data_set("d1", quiet=False),)),
     "a data set with two database servers": serving(NEW_ON_D1, data_sets=(data_set("d1", databases=("database-a", "database-b")),)),
     "a data set with no volume and no database": serving(NEW_ON_D1, data_sets=(data_set("d1", None, volume=False),)),
     "a second data set whose database is stopped": serving(NEW_ON_D1, data_sets=(D1, data_set("d2", STOPPED))),
-    "a login no container holds": serving(NEW_ON_D1, data_sets=(LEFT_ON_D1,)),
-    "logins that could not be read": serving(NEW_ON_D1, data_sets=(UNREAD_LOGINS,)),
-    "a lane retired with its data set kept": unrouted(),
-    "a route removed by hand": unrouted(NEW_ON_D1, background_services=(NEW_BACKGROUND_SERVICE,)),
-    "a route removed by hand from an instance that can reach out": unrouted(
-        on_data(NEW, "d1", "bridge"), background_services=(NEW_BACKGROUND_SERVICE,)
+    "a login no container holds": serving(NEW_ON_D1, data_sets=(data_set("d1", unheld=("i_left",)),)),
+    "logins that could not be read": serving(
+        NEW_ON_D1, data_sets=(with_database(D1, unheld_logins=Unread(why="psql: no such database")),)
     ),
-    "the proxy down": with_route(UP.seen(), LaneRoute(None, WEB, proxy_runs=False)),
-    "the proxy down and a part attached where it must not be": with_route(
-        LaneSeen((ATTACHED_OUTSIDE,), UP.seen().route, UP.seen().background_services, UP.seen().data_sets),  # type: ignore[arg-type]
-        LaneRoute(None, WEB, proxy_runs=False),
+    "a lane retired with its data set kept": Given(data_sets=(D1,)),
+    "a route removed by hand": Given((NEW_ON_D1,), background_services=(NEW_BACKGROUND_SERVICE,), data_sets=(D1,)),
+    "a route removed by hand from an instance that can reach out": Given(
+        (on_data(NEW, "d1", "bridge"),), background_services=(NEW_BACKGROUND_SERVICE,), data_sets=(D1,)
     ),
-    "in maintenance with every part stopped": IN_MAINTENANCE_SEEN,
-    "in maintenance with the web part and the database still running": Lane(IN_MAINTENANCE, RUNNING, STOPPED, database(RUNNING)).seen(),
-    "in maintenance with a database that was killed": Lane(IN_MAINTENANCE, database=database(STOPPED, exit_code=KILLED)).seen(),
-    "in maintenance with the back soon page not running": with_route(
-        IN_MAINTENANCE_SEEN, LaneRoute(IN_MAINTENANCE_SEEN.route.loaded, BACK_SOON, SINCE, back_soon_runs=False)
+    "the proxy down": replace(UP, route=(None, "web"), proxy_runs=False),
+    "the proxy down and a part attached where it must not be": replace(
+        UP, instances=(ATTACHED_OUTSIDE,), route=(None, "web"), proxy_runs=False
     ),
-    "in maintenance with the proxy down": with_route(IN_MAINTENANCE_SEEN, LaneRoute(None, BACK_SOON, SINCE, proxy_runs=False)),
-    "in maintenance with a part attached where it must not be": Lane(IN_MAINTENANCE).seen().__class__(
-        (changed(IN_MAINTENANCE_SEEN.instances[0], networks=(*IN_MAINTENANCE_SEEN.instances[0].networks, "bridge")),),  # type: ignore[arg-type]
-        IN_MAINTENANCE_SEEN.route,
-        IN_MAINTENANCE_SEEN.background_services,
-        IN_MAINTENANCE_SEEN.data_sets,
-        QUIET,
+    "in maintenance with every part stopped": IN_MAINTENANCE,
+    "in maintenance with the web part and the database still running": replace(IN_MAINTENANCE, instances=(WEB,), data_sets=(D1,)),
+    "in maintenance with a database that was killed": replace(
+        IN_MAINTENANCE, data_sets=(data_set("d1", STOPPED, exit_code=KILLED),)
     ),
-    "out of maintenance with the background service stopped": Lane(SERVING, RUNNING, STOPPED, database(RUNNING)).seen(),
+    "in maintenance with the back soon page not running": replace(IN_MAINTENANCE, back_soon_runs=False),
+    "in maintenance with the proxy down": replace(IN_MAINTENANCE, route=(None, BACK_SOON), proxy_runs=False),
+    "in maintenance with a part attached where it must not be": replace(
+        IN_MAINTENANCE, instances=(changed(ATTACHED_OUTSIDE, state=STOPPED),)
+    ),
+    "in maintenance with a login no container holds on a server still running": replace(
+        IN_MAINTENANCE, data_sets=(data_set("d1", unheld=("i_left",)),)
+    ),
+    "out of maintenance with the background service stopped": replace(UP, background_services=(background_service_of(WEB, None),)),
 }
-assert BACKGROUND_SERVICE
-PLAIN_LANES: dict[str, LaneSeen] = {
+PLAIN_LANES: dict[str, Given] = {
     "a plain lane as it must be": serving(NEW, data_sets=(), background_services=()),
     "a plain lane with an instance beside the active one": serving(NEW, STRAY, data_sets=(), background_services=()),
-    "a plain lane whose active instance is stopped": serving(STOPPED_NEW, data_sets=(), background_services=()),
+    "a plain lane whose active instance is stopped": serving(changed(NEW, state=STOPPED), data_sets=(), background_services=()),
     "a plain lane with a background service the product has none of": serving(
-        NEW, data_sets=(), background_services=(changed(NEW_BACKGROUND_SERVICE, data_set=None, networks=("launchplane-lanes",)),)
+        NEW, data_sets=(), background_services=(changed(NEW_BACKGROUND_SERVICE, data_set=None, networks=(LANE_NETWORK,)),)
     ),
-    "a plain lane whose instance says it runs against a data set": serving(changed(OLD, data_set="d1"), data_sets=(), background_services=()),
+    "a plain lane whose instance says it runs against a data set": serving(
+        changed(OLD, data_set="d1"), data_sets=(), background_services=()
+    ),
 }
-CASES = (
-    {name: (seen, WITH_DATA) for name, seen in WITH_A_DATABASE.items()}
-    | {name: (seen, PLAIN) for name, seen in PLAIN_LANES.items()}
+CASES: dict[str, tuple[Given, Product | ProductError]] = (
+    {name: (given, WITH_DATA) for name, given in WITH_A_DATABASE.items()}
+    | {name: (given, PLAIN) for name, given in PLAIN_LANES.items()}
     | {"a lane whose description cannot be read": (serving(NEW_ON_D1), UNREADABLE)}
 )
 
 
+def work_done_on(name: str) -> dict[str, Work | None]:
+    if name.startswith("in maintenance"):
+        return {"at rest": None, "at work": Work.BEGIN_MAINTENANCE, "ending maintenance": Work.END_MAINTENANCE}
+    return {"at rest": None, "at work": Work.MOVE}
+
+
 def answered(name: str) -> dict[str, object]:
-    seen, product = CASES[name]
-    return {
-        mode: lane_verdict(seen, product, "site", "testing", a_move_is_at_work=at_work).model_dump(mode="json")
-        for mode, at_work in (("at rest", False), ("at work", True))
-    }
+    given, product = CASES[name]
+    return {mode: lane_answer(given.judged(work, product)).model_dump(mode="json") for mode, work in work_done_on(name).items()}
 
 
 @pytest.mark.parametrize("name", CASES)

@@ -9,14 +9,26 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.act import Judged, Stopped
+from launchplane.act import Status, Stopped
 from launchplane.api import cleaned_log_config, create_app
-from launchplane.docker_answers import ContainerHostError, OnHost
-from launchplane.instance import InstanceState, LaneBuild, LoadedRoute, ProxySeen, RouteStatus, RunningInstance
-from launchplane.judge import LaneVerdict
+from launchplane.docker_answers import ContainerHostError
+from launchplane.instance import (
+    InstanceState,
+    LaneBuild,
+    LoadedRoute,
+    Mount,
+    OnHost,
+    ProxySeen,
+    Reading,
+    RouteStatus,
+    RunningInstance,
+)
+from launchplane.judge import judge, web_addresses_judged
+from launchplane.product import Product
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
 from tests.given_secrets import GivenSecrets
+from tests.pretend_host import SINCE
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
 LEAK = f"wget: server returned error: HTTP/1.1 503 password={SECRET}"
@@ -25,20 +37,22 @@ PROXY = ProxySeen(runs=True, back_soon_runs=True, loaded={"testing.site.test": L
 
 def leaking_instance() -> RunningInstance:
     return RunningInstance(
-        product="site", lane="testing", build=f"site:{SECRET}", container="site-testing-1", state=InstanceState.RUNNING, networks=()
+        product="site",
+        lane="testing",
+        build=f"site:{SECRET}",
+        container="site-testing-1",
+        state=InstanceState.RUNNING,
+        networks=(),
+        mounts=(Mount(source=SECRET, path="/data"),),
     )
 
 
-def running_with_leaks() -> Judged:
-    problems = [f"The instance site-testing-1 has {SECRET} mounted, which it must not have"]
-    return Judged(
-        OnHost([leaking_instance()], [], []),
-        PROXY,
-        [LaneVerdict(product="site", lane="testing", a_move_is_at_work=False, problems=problems)],
-    )
+def running_with_leaks() -> Status:
+    reading = Reading(SINCE, PROXY, OnHost([leaking_instance()], [], []), {"testing.site.test": LEAK})
+    return Status(reading, [judge(reading.lane("site", "testing"), Product(), None)], web_addresses_judged(reading))
 
 
-def unreadable_host() -> Judged:
+def unreadable_host() -> Status:
     raise ContainerHostError(f"Docker refused: {SECRET}")
 
 
@@ -97,7 +111,7 @@ class Asked:
     path: str
     status: int
     body: dict[str, Any] | None = None
-    read: Callable[[], Judged] = running_with_leaks
+    read: Callable[[], Status] = running_with_leaks
     move: Callable[[LaneBuild], MoveResult] = move_stopped
     retire: Callable[[str, str, str | None], RetireResult] = retire_stopped
     maintenance: Callable[[str, str], MaintenanceResult] = maintenance_stopped
@@ -129,7 +143,6 @@ ANSWERS = {
 def answer_to(asked: Asked, secrets: Secrets) -> tuple[int, str]:
     app = create_app(
         asked.read,
-        lambda _web_address: LEAK,
         asked.move,
         asked.retire,
         secrets,
@@ -178,7 +191,7 @@ def test_the_reason_no_answer_was_made_is_cleaned_of_the_secrets_already_seen() 
 def test_a_secret_that_json_writes_differently_is_still_removed() -> None:
     awkward = 'pass"word\\with ünicode\n'
 
-    def read() -> Judged:
+    def read() -> Status:
         raise ContainerHostError(f"Docker refused: {awkward}")
 
     status, text = answer_to(Asked("GET", "/running", 503, read=read), GivenSecrets(on_host=frozenset({awkward})))
@@ -207,13 +220,12 @@ def test_the_secrets_are_read_before_the_answer_is_made() -> None:
     secrets = GivenSecrets(on_host=frozenset({SECRET}))
     seen_when_the_host_was_read: list[frozenset[str]] = []
 
-    def read() -> Judged:
+    def read() -> Status:
         seen_when_the_host_was_read.append(secrets.secrets_seen())
         raise RuntimeError(f"not an error Launchplane expects: {SECRET}")
 
     app = create_app(
         read,
-        lambda _web_address: LEAK,
         move_stopped,
         retire_stopped,
         secrets,
