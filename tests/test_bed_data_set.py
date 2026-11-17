@@ -500,8 +500,7 @@ def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of
 
 
 def files_holding(database: str, text: str) -> str:
-    grep = "grep --recursive --files-with-matches --fixed-strings --no-messages"
-    return on_scratch(f"docker exec {database} {grep} -e {text} /var/lib/postgresql || true")
+    return on_scratch(f"docker exec {database} grep -rlFs -e {text} /var/lib/postgresql || true")
 
 
 def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) -> None:
