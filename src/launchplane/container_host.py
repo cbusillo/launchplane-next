@@ -37,22 +37,23 @@ from launchplane.docker_answers import (
     QUIET_GATEWAY_MODE,
     CommandResult,
     ContainerHostError,
-    HostAnswers,
+    Listed,
     Part,
     TornRead,
     attempting,
     checked,
     command_result,
+    container_summaries,
+    details_by_name,
     files_in,
     is_quiet,
-    on_host_from_answers,
-    parts_by_name,
+    on_host_from,
     read_whole,
     running_for,
     tar_of,
 )
 from launchplane.host_logins import HostLogins
-from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, held_from_answers
+from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_held
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
@@ -66,7 +67,6 @@ from launchplane.instance import (
     new_password,
 )
 
-MARKED = {"label": PRODUCT_LABEL}
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
 RETIRE_GRACE_SECONDS = 30
@@ -80,11 +80,7 @@ type RestartPolicy = Literal["always", "unless-stopped"]
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
 ALWAYS_RUNS: RestartPolicy = "always"
 
-type Asks = Callable[[DataSet], bool]
-
-
-def asks_no_database(_found: DataSet) -> bool:
-    return False
+type Lane = tuple[str, str]
 
 
 class PartStopped(Exception):
@@ -194,10 +190,11 @@ class ContainerHost:
         client = docker.DockerClient(base_url=address, tls=tls, version=DOCKER_API_VERSION, timeout=ANSWER_TIMEOUT_SECONDS)
         return cls(client, address)
 
-    def list_marked(self, kind: Literal["containers", "volumes"]) -> object:
+    def list_marked(self, kind: Literal["containers", "volumes"], lane: Lane | None) -> object:
+        marks = PRODUCT_LABEL if lane is None else [f"{PRODUCT_LABEL}={lane[0]}", f"{LANE_LABEL}={lane[1]}"]
         if kind == "containers":
-            return self.client.api.containers(all=True, filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        return self.client.api.volumes(filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            return self.client.api.containers(all=True, filters={"label": marks})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        return self.client.api.volumes(filters={"label": marks})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
     def list_networks(self) -> object:
         return self.client.api.networks()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -208,28 +205,25 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    # One pass: every marked container is listed once and described, and that list says what each one holds.
-    def read(self, asks: Asks = asks_no_database) -> OnHost:
-        return read_whole(lambda: self.read_once(asks), self.address)
+    # One pass over one lane, or over every lane: each container is listed once and described, and that list says what
+    # each one holds. What is secret in it is noted before anything else is made of it.
+    def read(self, lane: Lane | None = None) -> OnHost:
+        return read_whole(lambda: self.read_once(lane), self.address)
 
-    def read_once(self, asks: Asks) -> OnHost:
+    def read_once(self, lane: Lane | None) -> OnHost:
         with attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks", self.address):
-            containers, networks, volumes = self.list_marked("containers"), self.list_networks(), self.list_marked("volumes")
-            parts = parts_by_name(containers)
-            details = [self.describe_listed(name) for name in parts]
-            system = self.system_information() if "background-service" in parts.values() else None
-        answers = HostAnswers(containers, networks, volumes, details, system)
-        on_host, held = on_host_from_answers(answers), held_from_answers(answers)
-        self.secrets.note(held.secrets)
-        data_sets = [
-            self.probed(found, held.logins.get((found.product, found.data_set), set())) if asks(found) else found
-            for found in on_host.data_sets
-        ]
+            containers, networks, volumes = (
+                self.list_marked("containers", lane),
+                self.list_networks(),
+                self.list_marked("volumes", lane),
+            )
+            summaries = container_summaries(containers)
+            found = Listed(summaries, details_by_name([self.describe_listed(summary.name) for summary in summaries]))
+            self.secrets.note(secrets_held(found))
+            system = self.system_information() if found.has_part("background-service") else None
+        on_host, held = on_host_from(found, networks, volumes, system), logins_held(found)
+        data_sets = [self.probed(each, held.get((each.product, each.data_set), set())) for each in on_host.data_sets]
         return replace(on_host, data_sets=data_sets)
-
-    def read_secrets(self) -> frozenset[str]:
-        self.read()
-        return self.secrets.seen
 
     def secrets_seen(self) -> frozenset[str]:
         return self.secrets.seen

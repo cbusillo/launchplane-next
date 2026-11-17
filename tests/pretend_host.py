@@ -1,9 +1,9 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from launchplane.act import Lanes
-from launchplane.container_host import Asks, PartStopped, asks_no_database
+from launchplane.container_host import Lane, PartStopped
 from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import (
     BACK_SOON,
@@ -18,6 +18,7 @@ from launchplane.instance import (
     LoadedRoute,
     Mount,
     OnHost,
+    PartOfLane,
     ProxySeen,
     Reading,
     RouteStatus,
@@ -45,11 +46,6 @@ class LaunchplaneKilled(Exception):
     pass
 
 
-def unasked(found: DataSet) -> DataSet:
-    databases = tuple(each.model_copy(update={"accepts_connections": None, "unheld_logins": None}) for each in found.databases)
-    return found.model_copy(update={"databases": databases})
-
-
 class PretendHost:
     def __init__(self) -> None:
         self.instances: dict[str, RunningInstance] = {}
@@ -57,6 +53,7 @@ class PretendHost:
         self.data_sets: dict[str, DataSet] = {}
         self.networks: dict[str, bool] = {LANE_NETWORK: True}
         self.actions: list[str] = []
+        self.lanes_read: list[Lane | None] = []
         self.most_background_services_running = 0
         self.background_services_that_stop: set[str] = set()
         self.killed_after: int | None = None
@@ -92,10 +89,15 @@ class PretendHost:
         found = self.instances[container]
         self.instances[container] = found.model_copy(update={"networks": (*found.networks, network)})
 
-    def read(self, asks: Asks = asks_no_database) -> OnHost:
+    def read(self, lane: Lane | None = None) -> OnHost:
+        def of_lane[Part: PartOfLane](parts: Iterable[Part]) -> list[Part]:
+            return [part for part in parts if lane in (None, (part.product, part.lane))]
+
+        self.lanes_read.append(lane)
         networks = [HostNetwork(name=name, is_quiet=quiet) for name, quiet in self.networks.items()]
-        data_sets = [found if asks(found) else unasked(found) for found in self.data_sets.values()]
-        return OnHost(list(self.instances.values()), list(self.background_services.values()), data_sets, networks)
+        return OnHost(
+            of_lane(self.instances.values()), of_lane(self.background_services.values()), of_lane(self.data_sets.values()), networks
+        )
 
     def remove_unheld_logins(self, database: str) -> None:
         self.logins_left_in.pop(database, None)
@@ -365,6 +367,7 @@ class Given:
     data_sets: tuple[DataSet, ...] = ()
     proxy_runs: bool = True
     back_soon_runs: bool = True
+    web_address_fails: str | None = None
 
     def proxy(self) -> PretendProxy:
         host = PretendHost()
@@ -381,9 +384,12 @@ class Given:
             proxy.written[WEB_ADDRESS] = written
         return proxy
 
+    # Read as the status call reads: every lane, and the web address asked where the proxy sends it to a product.
     def reading(self) -> LaneReading:
         proxy = self.proxy()
-        return Reading(SINCE, proxy.read(), proxy.host.read(lambda _found: True)).lane("site", "testing")
+        seen = proxy.read()
+        asked = {each: self.web_address_fails for each, to in seen.sends_visitors_to().items() if to != BACK_SOON}
+        return Reading(SINCE, seen, proxy.host.read(), asked).lane("site", "testing")
 
     def judged(self, work: Work | None, product: Product | ProductError = WITH_DATA) -> Judgement:
         return judge(self.reading(), product, work)

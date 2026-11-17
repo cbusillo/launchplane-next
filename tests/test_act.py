@@ -4,7 +4,7 @@ from collections.abc import Callable
 import pytest
 
 from launchplane.act import EVERY_LANE, MOST_STEPS, Lanes, Stopped
-from launchplane.container_host import Asks, asks_no_database
+from launchplane.container_host import Lane
 from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import (
     BACK_SOON,
@@ -246,20 +246,20 @@ def test_every_lane_is_judged_for_the_status_call_even_one_whose_description_can
     }
 
 
-def test_the_status_call_asks_every_lanes_database_and_a_call_only_its_own_lanes() -> None:
+def test_the_status_call_reads_every_lane_once_and_a_call_reads_only_its_own_lane() -> None:
     proxy = lane_brought_up_with_a()
-    lanes_on(proxy).move(LaneBuild(product="site", lane="other", build="site:a"))
-    asked_by_a_move: list[set[str]] = []
-    read_as_before = proxy.host.read
-
-    def read_noting_who_is_asked(asks: Asks = asks_no_database) -> OnHost:
-        asked_by_a_move.append({found.lane or "" for found in proxy.host.data_sets.values() if asks(found)})
-        return read_as_before(asks)
-
-    assert problems_by_lane(lanes_on(proxy)) == {("site", "other"): [], ("site", "testing"): []}
-    proxy.host.read = read_noting_who_is_asked
+    proxy.host.place(LaneBuild(product="broken", lane="other", build="broken:a"), "broken-1")
+    proxy.host.lanes_read.clear()
+    lanes_on(proxy).read_status()
     lanes_on(proxy).move(BUILD_A)
-    assert asked_by_a_move == [{"testing"}]
+    assert proxy.host.lanes_read == [None, ("site", "testing")]
+
+
+def test_ending_maintenance_on_a_lane_not_in_maintenance_reads_no_container_at_all() -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.lanes_read.clear()
+    result = lanes_on(proxy).end_maintenance("site", "testing")
+    assert (result.outcome, proxy.host.lanes_read) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, [])
 
 
 def test_only_the_lane_being_moved_is_said_to_be_at_work_and_only_meanwhile() -> None:
@@ -284,8 +284,8 @@ def test_a_move_that_ends_during_a_read_is_still_at_work_on_what_was_read() -> N
     lanes, proxy = lanes_serving(BUILD_A, "a")
     read_as_before = proxy.host.read
 
-    def read_while_the_move_ends(asks: Asks = asks_no_database) -> OnHost:
-        on_host = read_as_before(asks)
+    def read_while_the_move_ends(lane: Lane | None = None) -> OnHost:
+        on_host = read_as_before(lane)
         lanes.at_work = None
         return on_host
 
@@ -306,11 +306,7 @@ def test_only_a_web_address_the_running_proxy_sends_to_a_product_is_asked_and_wh
     proxy.not_answering[WEB_ADDRESS] = "502 Bad Gateway"
     answers = web_addresses_read(proxy)
     assert proxy.asked == [WEB_ADDRESS]
-    assert answers[WEB_ADDRESS] == (
-        "a",
-        False,
-        "The instance it is sent to is running, and does not answer with success: 502 Bad Gateway",
-    )
+    assert answers[WEB_ADDRESS] == ("a", False, f"{WEB_ADDRESS} does not answer with success: 502 Bad Gateway")
     assert answers["maintenance.site.test"] == (BACK_SOON, False, None)
     assert answers["routed-nowhere.site.test"] == (None, False, "The proxy sends routed-nowhere.site.test to no instance.")
     proxy.running = False
@@ -404,8 +400,8 @@ def test_ending_maintenance_removes_a_login_no_container_holds_before_the_lane_c
 def test_ending_maintenance_on_a_lane_that_is_not_in_it_answers_from_the_mark_alone_with_nothing_else_readable() -> None:
     proxy = lane_brought_up_with_a()
 
-    def unreadable(asks: Asks = asks_no_database) -> OnHost:
-        raise ContainerHostError(f"Listing the containers on test failed: timed out, asked with {asks}")
+    def unreadable(lane: Lane | None = None) -> OnHost:
+        raise ContainerHostError(f"Listing the containers of {lane} on test failed: timed out")
 
     def no_description(product: str) -> Product:
         raise ProductError(f"The description of {product} is not one Launchplane reads.")

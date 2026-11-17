@@ -1,11 +1,19 @@
 from launchplane.instance import DataSetUse, InstanceState, LaneReading, LaneRoute, RunningInstance, web_address_of
 from launchplane.judge import Judgement, Kind
-from launchplane.plan import Step, changes_so_far, check_or_problems, failure_report, prepared, route_step, sentences
+from launchplane.plan import (
+    Step,
+    changes_so_far,
+    check_or_problems,
+    failure_report,
+    left_for_a_move,
+    prepared,
+    route_step,
+    sentences,
+)
 from launchplane.product import Product
 from launchplane.steps import (
     Action,
     AwaitBackgroundService,
-    AwaitDatabase,
     BackgroundServiceRefused,
     Check,
     CheckRefused,
@@ -17,7 +25,6 @@ from launchplane.steps import (
     ReadLog,
     RemoveLogins,
     ShowBackSoon,
-    StartDatabase,
     StartRefused,
     StartStopped,
     Stop,
@@ -72,7 +79,7 @@ def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None
 def decide_begin(judged: Judgement, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
     lane = judged.lane
     route = lane.route
-    if (step := route_step(route, lane.web_address, done)) is not None:
+    if (step := route_step(judged, done)) is not None:
         return step
     if not route.in_maintenance:
         if route.written is None and has_nothing(lane):
@@ -143,18 +150,15 @@ def background_service_step(judged: Judgement, done: tuple[Event, ...]) -> Actio
     return AwaitBackgroundService(first.subject)
 
 
-# What is left is put right or said while the back soon page still shows, so the lane never comes back with it unsaid.
-def rest_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | None:
-    databases = {database.container for database in judged.lane.databases}
-    for finding in judged.about(databases):
-        if finding.kind == Kind.LOGIN_UNHELD:
-            return RemoveLogins(finding.subject)
-        if finding.kind == Kind.STOPPED:
-            return StartDatabase(finding.subject)
-        if finding.kind == Kind.NOT_ACCEPTING:
-            return AwaitDatabase(finding.subject)
+# A login nobody holds goes, and what else is found is said, while the back soon page still shows, so the lane never comes
+# back with it unsaid. Like a move, ending maintenance answers for the instance and its data set, not for another data set.
+def rest_step(judged: Judgement, instance: RunningInstance, done: tuple[Event, ...]) -> Action | Stop | None:
+    unheld = judged.of_kind(Kind.LOGIN_UNHELD)
+    if unheld:
+        return RemoveLogins(unheld[0].subject)
     # Switching back is what takes visitors off a back soon page that is not running.
-    left = [finding for finding in judged.findings if finding.kind != Kind.BACK_SOON_STOPPED]
+    found = [*left_for_a_move(judged, instance), *judged.of_kind(Kind.LOGINS_UNREAD)]
+    left = [finding for finding in found if finding.kind != Kind.BACK_SOON_STOPPED]
     if not left:
         return None
     return Stop(
@@ -186,13 +190,13 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
             f"the web address still shows the back soon page: {'; '.join(problems)}. {changes_so_far(done)} "
             "Beginning maintenance again stops what was started."
         )
-    step = background_service_step(judged, done) or rest_step(judged, done)
+    step = background_service_step(judged, done) or rest_step(judged, instance, done)
     return step or WriteRoute(answer.web_address, instance.container)
 
 
 def decide_end(judged: Judgement, product: Product, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
     lane = judged.lane
-    if (step := route_step(lane.route, lane.web_address, done)) is not None:
+    if (step := route_step(judged, done)) is not None:
         return step
     answer = answer_for(lane.product, lane.lane, lane.route, MaintenanceOutcome.ENDED)
     if lane.route.in_maintenance:

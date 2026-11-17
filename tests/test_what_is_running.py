@@ -22,6 +22,7 @@ from launchplane.instance import (
     Reading,
     RouteStatus,
     RunningInstance,
+    WrittenRoute,
 )
 from launchplane.judge import Standing, judge, web_addresses_judged
 from launchplane.product import Product
@@ -79,7 +80,8 @@ type InstanceReader = Callable[[], list[RunningInstance]]
 
 def proxy_sending(routes: dict[str, str] | None, *, runs: bool = True, back_soon_runs: bool = True) -> ProxySeen:
     loaded = {web_address: LoadedRoute(container, RouteStatus.ENABLED) for web_address, container in (routes or {}).items()}
-    return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, loaded=loaded if runs else {})
+    written = {web_address: WrittenRoute(route.container, SINCE) for web_address, route in loaded.items()}
+    return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, written=written, loaded=loaded if runs else {})
 
 
 def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: Mapping[str, str | None] | None = None) -> Status:
@@ -198,7 +200,11 @@ def test_a_stopped_active_instance_leaves_its_web_address_not_answering() -> Non
     entry = web_addresses_answer([lane_instance(InstanceState.STOPPED)], routes, {"testing.site.test": "502 Bad Gateway"})[
         "testing.site.test"
     ]
-    assert (entry["sends_to_container"], entry["answers"], entry["error"]) == ("site-testing-1", False, "502 Bad Gateway")
+    assert (entry["sends_to_container"], entry["answers"], entry["error"]) == (
+        "site-testing-1",
+        False,
+        "testing.site.test does not answer with success: 502 Bad Gateway",
+    )
 
 
 def test_a_web_address_that_was_routed_and_not_asked_is_not_said_to_answer() -> None:

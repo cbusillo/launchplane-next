@@ -75,9 +75,10 @@ Anyone who can run `docker inspect` on a web part or background service can read
 
 Every answer of the API, headers and body, and every line of Launchplane's own log has each secret replaced with `[a secret Launchplane gave this lane, removed]`. Only the secret is replaced; the explanation around it stays.
 
-- The secrets are read from the host before each answer is made: the environment of every web part, background service and database server.
-- Launchplane also keeps, in memory only, every secret it has read or given out since it started. A log line is cleaned with those.
-- When the secrets cannot be read, no answer is made and nothing is moved: the call answers `503` with the reason. The page itself still opens.
+- A call's own reading of the host notes the secrets first: the environment of every web part, background service and database server it lists, before anything else is made of that list. The answer is cleaned after it is made, so an error about the read itself is cleaned too.
+- Launchplane keeps, in memory only, every secret it has read or given out since it started. Answers and log lines are cleaned with those.
+- No separate read of the secrets is made before a call. An answer made from the routes alone, such as ending maintenance on a lane that is not in maintenance, and an error from before any container was listed, are cleaned with what is in memory. After Launchplane restarts that is nothing until the first reading. Such an answer says nothing read from a product's containers.
+- A call for one lane notes that lane's secrets. The status call notes every lane's.
 - A secret a product has changed before printing it, such as encoding it, is not recognised.
 
 ## A move with data
@@ -141,16 +142,18 @@ A finding is `shown` one of four ways:
 
 | `shown` | When |
 | --- | --- |
-| `wrong` | Never acceptable, whatever a call is doing: a part attached or mounted where it must not be, a database server in maintenance that did not stop cleanly, the back soon page not running for a lane in maintenance. Or wrong with no call at work: a part that keeps restarting, a data set with a part twice or a network that is not quiet, a part not stopped in a lane in maintenance. |
+| `wrong` | Never acceptable, whatever a call is doing: a part attached or mounted where it must not be, a database server in maintenance that did not stop cleanly, the back soon page not running for a lane in maintenance. Or wrong with no call at work: a part that keeps restarting, a data set with a part twice or a network that is not quiet, a part not stopped in a lane in maintenance, a route the proxy reports as not enabled, a web address that does not answer with success. |
 | `under way` | A call is at work on the lane, and the finding is one of those wrong only with no call at work, or one a call passes through. |
-| `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, an instance beside the active one, a stopped or missing part, a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
+| `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, a routes file the proxy has not loaded yet, an instance beside the active one, a stopped or missing part, a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
 | `could not be read` | Something asked of the host has no answer: the product's description, a server's logins, a server not asked whether it accepts connections, a network a part is attached to that was not among the networks read. Never shown as under way. |
+
+Whether the web address answers is asked only by the status call, so it is in the judgement the status call and the page show, about the instance the web address is sent to, and in no call's.
 
 While a call is ending maintenance the lane is judged as it must be once it is back: a part still stopped is under way, and a running one is good.
 
 After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
 
-A move answers for the instance it serves from and that instance's data set. A fault in another data set of the lane is in the judgement and on the page, and does not stop the move.
+A move and the end of maintenance answer for the instance they serve from and that instance's data set. A fault in another data set of the lane is in the judgement and on the page, and does not stop them.
 
 How the page lays a lane out is in [the page](what-is-running.md#the-page).
 

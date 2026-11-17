@@ -1,39 +1,31 @@
 import threading
 from collections.abc import Iterable
-from dataclasses import dataclass, field
 
 from launchplane.data_set import LOGIN_VARIABLE, variable_value
-from launchplane.docker_answers import (
-    DATA_SET_LABEL,
-    DOCKER_CONTAINER_LIST,
-    PRODUCT_LABEL,
-    HostAnswers,
-    checked,
-    described,
-    details_by_name,
-    part_of,
-)
+from launchplane.docker_answers import DATA_SET_LABEL, PRODUCT_LABEL, DockerContainerSummary, Listed, described
 
 SECRET_VARIABLES_LABEL = "launchplane.secret-variables"  # noqa: S105 the name of a label, not a secret
 
 
-@dataclass(frozen=True)
-class Held:
-    secrets: set[str] = field(default_factory=set[str])
-    logins: dict[tuple[str | None, str], set[str]] = field(default_factory=dict[tuple[str | None, str], set[str]])
+def environment_of(summary: DockerContainerSummary, found: Listed) -> list[str]:
+    return described(summary, found.details, "container").config.environment or []
 
 
-# What every listed container holds comes from the one list a reading is made from, so none is taken to hold nothing.
-def held_from_answers(answers: HostAnswers) -> Held:
-    held = Held()
-    details = details_by_name(answers.details)
-    for summary in checked(DOCKER_CONTAINER_LIST, answers.containers, "container list"):
-        environment = described(summary, details, part_of(summary)).config.environment or []
+# Asked before anything else is made of a listing, so an error about what was listed can be cleaned of what it holds.
+def secrets_held(found: Listed) -> set[str]:
+    held: set[str] = set()
+    for summary in found.summaries:
         variables = [variable for variable in summary.labels.get(SECRET_VARIABLES_LABEL, "").split(",") if variable]
-        held.secrets.update(value for variable in variables if (value := variable_value(environment, variable)))
-        login, data_set = variable_value(environment, LOGIN_VARIABLE), summary.labels.get(DATA_SET_LABEL)
+        held.update(value for variable in variables if (value := variable_value(environment_of(summary, found), variable)))
+    return held
+
+
+def logins_held(found: Listed) -> dict[tuple[str | None, str], set[str]]:
+    held: dict[tuple[str | None, str], set[str]] = {}
+    for summary in found.summaries:
+        login, data_set = variable_value(environment_of(summary, found), LOGIN_VARIABLE), summary.labels.get(DATA_SET_LABEL)
         if login and data_set:
-            held.logins.setdefault((summary.labels.get(PRODUCT_LABEL), data_set), set()).add(login)
+            held.setdefault((summary.labels.get(PRODUCT_LABEL), data_set), set()).add(login)
     return held
 
 

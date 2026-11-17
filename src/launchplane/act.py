@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from launchplane import maintenance, plan, steps
-from launchplane.container_host import Asks, PartStopped
+from launchplane.container_host import PartStopped
 from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import (
     BACK_SOON,
@@ -26,6 +26,7 @@ from launchplane.judge import (
     Judgement,
     WebAddressJudged,
     Work,
+    is_loaded_as_written,
     judge,
     web_addresses_judged,
 )
@@ -34,10 +35,11 @@ from launchplane.proxy import CheckFailed
 from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
 
 MOST_STEPS = 50
+type Lane = tuple[str, str]
 
 
 class InstanceHost(Protocol):
-    def read(self, asks: Asks = ...) -> OnHost: ...
+    def read(self, lane: Lane | None = None) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None: ...
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
@@ -68,7 +70,6 @@ class Proxy(Protocol):
 
 
 type ProductReader = Callable[[str], Product]
-type Lane = tuple[str, str]
 type AtWork = tuple[Lane, Work] | None
 
 
@@ -80,8 +81,8 @@ class Stopped(Exception):
 @dataclass(frozen=True)
 class Scope:
     parts: bool = True
-    # The lane whose running database servers are asked, or every lane's.
-    databases_of: Lane | None = None
+    # The one lane whose containers, volumes and database servers are read, or every lane's.
+    lane: Lane | None = None
     web_addresses: bool = False
 
 
@@ -152,12 +153,11 @@ class Lanes:
             finally:
                 self.at_work = None
 
+    # The containers are read before the proxy, so what is secret on the host is known before anything can be said of it.
     def read(self, scope: Scope) -> Reading:
         read_at = datetime.now(UTC)
+        on_host = self.host.read(scope.lane) if scope.parts else None
         proxy = self.proxy.read()
-        if not scope.parts:
-            return Reading(read_at, proxy)
-        on_host = self.host.read(lambda found: scope.databases_of in (None, (found.product, found.lane)))
         return Reading(read_at, proxy, on_host, self.web_address_failures(proxy) if scope.web_addresses else {})
 
     # Asked at once, so ones that hang cost one limit and not one each. One the proxy sends to no product is not asked.
@@ -213,7 +213,7 @@ class Lanes:
             web_address = web_address_of(product, lane)
             route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
             if not route.in_maintenance:
-                if route.proxy_runs and not plan.is_loaded_as_written(route):
+                if route.proxy_runs and not is_loaded_as_written(route):
                     self.proxy.await_route(web_address, route.written)
                 return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
             description = self.read_product(product)
@@ -224,7 +224,7 @@ class Lanes:
             )
 
     def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
-        return lambda: judge(self.read(Scope(databases_of=(product, lane))).lane(product, lane), description, work)
+        return lambda: judge(self.read(Scope(lane=(product, lane))).lane(product, lane), description, work)
 
     def settle[Answer](
         self,

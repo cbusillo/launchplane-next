@@ -11,7 +11,6 @@ type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValu
 
 
 class Secrets(Protocol):
-    def read_secrets(self) -> frozenset[str]: ...
     def secrets_seen(self) -> frozenset[str]: ...
 
 

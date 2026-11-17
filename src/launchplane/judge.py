@@ -13,8 +13,10 @@ from launchplane.instance import (
     DataSetDatabase,
     InstanceState,
     LaneReading,
+    LaneRoute,
     Mount,
     Reading,
+    RouteStatus,
     RunningBackgroundService,
     RunningInstance,
     web_address_of,
@@ -35,6 +37,9 @@ class Kind(StrEnum):
     UNREAD = "could not be read"
     NO_VISITORS = "no instance receives visitors"
     PROXY_STOPPED = "the proxy is not running"
+    ROUTE_NOT_LOADED = "the proxy has not loaded the routes file"
+    ROUTE_DISABLED = "the proxy reports the route not enabled"
+    NOT_ANSWERING = "the web address does not answer"
     BACK_SOON_STOPPED = "the back soon page is not running"
     NO_BUILD = "no build label"
     STOPPED = "stopped"
@@ -395,17 +400,63 @@ def login_findings(lane: LaneReading) -> list[Found]:
     return findings
 
 
-def route_findings(lane: LaneReading) -> list[Found]:
+def is_loaded_as_written(route: LaneRoute) -> bool:
+    return (None if route.loaded is None else route.loaded.container) == route.written
+
+
+def does_not_answer(web_address: str, failure: str) -> str:
+    return f"{web_address} does not answer with success: {failure}"
+
+
+def proxy_findings(lane: LaneReading) -> list[Found]:
     route, web_address = lane.route, lane.web_address
-    if not route.in_maintenance:
-        why = "" if route.proxy_runs else ": the proxy is not running"
-        visitors = Found(Weight.UNFINISHED, web_address, Kind.NO_VISITORS, f"No instance receives visitors{why}")
-        return [] if lane.active is not None else [visitors]
-    down = f"The proxy is not running, so {web_address} answers nothing, not the back soon page"
-    page = f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"
+    if not route.proxy_runs:
+        down = (
+            f"The proxy is not running, so {web_address} answers nothing, not the back soon page"
+            if route.in_maintenance
+            else "No instance receives visitors: the proxy is not running"
+        )
+        return [Found(Weight.UNFINISHED, web_address, Kind.PROXY_STOPPED, down)]
+    loaded = route.loaded
+    unloaded = (
+        f"The proxy has not loaded the routes file of {web_address}: the file sends it to {route.written or 'no instance'} "
+        f"and the proxy to {'no instance' if loaded is None else loaded.container}"
+    )
     return [
-        *([] if route.proxy_runs else [Found(Weight.UNFINISHED, web_address, Kind.PROXY_STOPPED, down)]),
-        *([] if route.back_soon_runs else [Found(Weight.FAULT, BACK_SOON, Kind.BACK_SOON_STOPPED, page)]),
+        *(
+            []
+            if route.in_maintenance or lane.active is not None
+            else [Found(Weight.UNFINISHED, web_address, Kind.NO_VISITORS, "No instance receives visitors")]
+        ),
+        *([] if is_loaded_as_written(route) else [Found(Weight.UNFINISHED, web_address, Kind.ROUTE_NOT_LOADED, unloaded)]),
+        *(
+            []
+            if loaded is None or loaded.status == RouteStatus.ENABLED
+            else [
+                Found(
+                    Weight.WRONG,
+                    web_address,
+                    Kind.ROUTE_DISABLED,
+                    f"The proxy has loaded the route of {web_address} to {loaded.container} and reports it {loaded.status}, "
+                    "so the web address reaches no instance",
+                )
+            ]
+        ),
+    ]
+
+
+def route_findings(lane: LaneReading) -> list[Found]:
+    page = f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"
+    page_down = lane.route.in_maintenance and not lane.route.back_soon_runs
+    active, failure = lane.active, lane.web_address_failure
+    return [
+        *proxy_findings(lane),
+        *([Found(Weight.FAULT, BACK_SOON, Kind.BACK_SOON_STOPPED, page)] if page_down else []),
+        *(
+            []
+            if active is None or failure is None
+            else [Found(Weight.WRONG, active.container, Kind.NOT_ANSWERING, does_not_answer(lane.web_address, failure))]
+        ),
     ]
 
 
@@ -510,8 +561,7 @@ def why_not_answering(web_address: str, reading: Reading, sends_to: str | None) 
     if sends_to == BACK_SOON:
         return None if reading.proxy.back_soon_runs else f"The back soon page's container {BACK_SOON} is not running."
     failure = reading.web_address_failures[web_address]
-    runs = any(each.container == sends_to and each.state == InstanceState.RUNNING for each in reading.parts.instances)
-    return f"The instance it is sent to is running, and does not answer with success: {failure}" if failure and runs else failure
+    return None if failure is None else does_not_answer(web_address, failure)
 
 
 def web_address_judged(web_address: str, owner: tuple[str, str | None] | None, reading: Reading) -> WebAddressJudged:

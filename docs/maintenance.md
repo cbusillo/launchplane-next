@@ -43,14 +43,14 @@ Docker sends each container its image's stop signal and kills it after 30 s, or 
 
 ## Out of maintenance
 
-`POST /lanes/{product}/{lane}/maintenance/end` on a lane in maintenance takes the first of these that applies:
+On a lane that is not in maintenance the call reads the routes and no container. `POST /lanes/{product}/{lane}/maintenance/end` on a lane in maintenance takes the first of these that applies:
 
 1. Start the proxy, or wait for it to load the routes file, as above.
 2. Start the database server and wait up to 60 s until it accepts connections. A missing part of the data set is made again as a [move](data-sets.md#a-move-with-data) makes it.
 3. Start the web part.
 4. Check the web part as a move checks a new instance, while the web address still shows the back soon page.
 5. Start the background service and watch it stay up 3 s. One read as running for less is watched too, whoever started it.
-6. Remove every [login](data-sets.md#logins) no container holds, and start any other stopped database server of the lane.
+6. Remove every [login](data-sets.md#logins) no container holds.
 7. Write the route back to the web part, and wait until the proxy has loaded it.
 8. Answer.
 
@@ -73,7 +73,9 @@ It stops with `503`, leaving the back soon page, when:
 - the data set has a fault a move would also stop for;
 - the web part passed its check and is attached or mounted where it must not be;
 - the background service is missing, doubled, of another build, or attached or mounted where it must not be;
-- anything else is found once everything runs: logins that could not be read, or a fault in another data set of the lane.
+- anything else is found about the instance or its data set once everything runs, or logins could not be read.
+
+A database server of a data set the instance does not use is left as it is. If it is stopped, the lane comes back and the call then answers `503` naming it; asked again it answers `not in maintenance`.
 
 A back soon page that is not running does not stop it: switching back is what takes visitors off it.
 

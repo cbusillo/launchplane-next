@@ -4,9 +4,6 @@ from launchplane.instance import (
     InstanceState,
     LaneBuild,
     LaneReading,
-    LaneRoute,
-    LoadedRoute,
-    RouteStatus,
     RunningInstance,
 )
 from launchplane.judge import LOGIN_KINDS, Finding, Judgement, Kind, subjects_of
@@ -57,10 +54,6 @@ def failure_report(why: str, log_tail: str) -> str:
     return f"{why}\nIts last log lines:\n{log_tail}"
 
 
-def is_loaded_as_written(route: LaneRoute) -> bool:
-    return (None if route.loaded is None else route.loaded.container) == route.written
-
-
 def maintenance_change_made_by(event: Event) -> str | None:
     match event:
         case ShowBackSoon(web_address=web_address):
@@ -104,26 +97,19 @@ def changes_so_far(done: tuple[Event, ...]) -> str:
     return f"Before that, this call {', '.join(changes)}, and those changes stay."
 
 
-def disabled_route_stop(web_address: str, loaded: LoadedRoute, done: tuple[Event, ...]) -> Stop:
-    return Stop(
-        f"The proxy has loaded the route of {web_address} to {loaded.container} and reports it {loaded.status}, "
-        f"so the web address reaches no instance. {changes_so_far(done)} "
-        "The proxy's log says why; retiring the lane removes the route."
-    )
-
-
-def route_step(route: LaneRoute, web_address: str, done: tuple[Event, ...]) -> Action | Stop | None:
-    if not route.proxy_runs:
-        return StartProxy()
-    if not is_loaded_as_written(route):
-        return AwaitRoute(web_address, route.written)
-    if route.loaded is not None and route.loaded.status != RouteStatus.ENABLED:
-        return disabled_route_stop(web_address, route.loaded, done)
-    return None
-
-
 def sentences(findings: list[Finding]) -> str:
     return "; ".join(finding.sentence for finding in findings)
+
+
+def route_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | None:
+    if judged.of_kind(Kind.PROXY_STOPPED):
+        return StartProxy()
+    if judged.of_kind(Kind.ROUTE_NOT_LOADED):
+        return AwaitRoute(judged.lane.web_address, judged.lane.route.written)
+    disabled = judged.of_kind(Kind.ROUTE_DISABLED)
+    if disabled:
+        return Stop(f"{sentences(disabled)}. {changes_so_far(done)} The proxy's log says why; retiring the lane removes the route.")
+    return None
 
 
 # The instance this call started is taken before one left over: which it started, the host cannot show.
@@ -317,7 +303,7 @@ def move_step(
             f"{target.lane} of {target.product} is in maintenance: the routes file of {web_address} points at the back soon "
             f"page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was changed."
         )
-    if (step := route_step(route, web_address, done)) is not None:
+    if (step := route_step(judged, done)) is not None:
         return step
     receiving = next((instance for instance in lane.instances if instance.container == route.written), None)
     answer = MoveResult(
@@ -374,14 +360,15 @@ def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
 
 
 def decide_retire(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
-    return with_logins_settled(retire_step(judged.lane, delete_data_set, done), judged, done)
+    return with_logins_settled(retire_step(judged, delete_data_set, done), judged, done)
 
 
-def retire_step(lane: LaneReading, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
+def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
+    lane = judged.lane
     route, web_address = lane.route, lane.web_address
-    if not route.proxy_runs:
+    if judged.of_kind(Kind.PROXY_STOPPED):
         return StartProxy()
-    if not is_loaded_as_written(route):
+    if judged.of_kind(Kind.ROUTE_NOT_LOADED):
         return AwaitRoute(web_address, route.written)
     if route.written is not None:
         return RemoveRoute(web_address, route.written)

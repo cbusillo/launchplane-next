@@ -146,8 +146,8 @@ class RecordingApi:
     made: RecordingContainers
     system_times: Iterator[str] = field(default_factory=lambda: iter(()))
 
-    def containers(self, **_options: object) -> list[dict[str, Any]]:
-        return [found.listed for found in self.made.list()]
+    def containers(self, **options: object) -> list[dict[str, Any]]:
+        return [found.listed for found in self.made.list(filters=options.get("filters"))]
 
     @staticmethod
     def networks() -> list[object]:

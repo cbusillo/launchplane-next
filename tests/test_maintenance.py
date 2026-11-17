@@ -356,6 +356,6 @@ def test_ending_maintenance_switches_away_from_a_back_soon_page_that_is_not_runn
     assert decide_end(without_page.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)
 
 
-def test_ending_maintenance_starts_the_stopped_database_of_another_data_set_of_the_lane_before_switching_back() -> None:
+def test_ending_maintenance_starts_nothing_of_a_data_set_its_instance_does_not_use_and_switches_back() -> None:
     spare = replace(ALL_UP_BEHIND_BACK_SOON.given(), data_sets=(STARTED_DATABASE, data_set_named("d2", STOPPED)))
-    assert decide_end(spare.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == StartDatabase("database-d2")
+    assert decide_end(spare.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)

@@ -40,23 +40,27 @@ Data set networks and volumes carry the product, lane and data set labels too.
 - `accepts_connections` is asked at that moment of every running database server, and is `null` for one that is not running.
 - `unheld_logins` lists the [logins](data-sets.md#logins) on a server that accepts connections which no container on the host holds. It is `{"why": "…"}` when the server was asked and could not tell, and `null` for a server that does not accept connections.
 - `exit_code` is the code a stopped database server exited with, and `null` while it is not stopped. `0` is a clean stop. `image` is the image the server runs.
-- `web_addresses` are every one the proxy routes, and the one of every lane on the host, so a route to an instance that is gone is shown. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, and `error` is why not. When the instance it is sent to is running, `error` says so before the reason. A web address the proxy routes nowhere is not requested.
+- `web_addresses` are every one the proxy routes, and the one of every lane on the host, so a route to an instance that is gone is shown. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, and `error` is why not. The lane's judgement has the same sentence, about the instance the web address is sent to. A web address the proxy routes nowhere is not requested.
 - A web address of a lane in [maintenance](maintenance.md) has `sends_to_container` `launchplane-back-soon` and `answers` `false`. `shows_back_soon_page` is `true` while the back soon page's container runs.
 - While the proxy is not running every web address has `sends_to_container` `null`, and `error` says the proxy is not running. Each lane's judgement agrees: no instance receives visitors, because the proxy is not running. A lane in maintenance still reads as in maintenance, from its routes file, and its judgement says the proxy is not running too.
 - `state` is Launchplane's word: `running`, `paused`, `restarting`, or `stopped` for Docker's `created`, `exited`, `dead` and `removing`.
 
-`503` with `error` means the host or the proxy could not be read, an answer did not have the expected shape, or Docker refused a question about a container it had just listed during three reads in a row. The error carries the real cause. It never answers "nothing is running". A `503` without `read_at` means Launchplane could not read which secrets it has given out and made no answer (see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane)).
+`503` with `error` means the host or the proxy could not be read, an answer did not have the expected shape, or Docker refused a question about a container it had just listed during three reads in a row. The error carries the real cause. It never answers "nothing is running".
 
 ## One reading
 
-Every call gets what it knows of the host from one pass, and takes only what it needs of it.
+Every call gets what it knows of the host from one pass, made once for each step it takes, and takes only what it needs of it. The status call makes one pass for its answer.
 
 | What is read | Who asks for it |
 | --- | --- |
 | The routes files, the routes the proxy has loaded, and whether the proxy and the back soon page run. | every call |
-| Every marked container, described once, every network and every marked volume. The secrets and the database login each container holds come from that same list. | every call but ending maintenance on a lane that is not in maintenance |
-| Whether each running database server accepts connections, and its logins. | a move, a retire and a maintenance call for their own lane's servers, the status call for every lane's |
+| The marked containers, each described once, the marked volumes and every network. The secrets and the database login each container holds come from that same list. | a move, a retire and a maintenance call for their own lane only; the status call for every lane. Ending maintenance on a lane that is not in maintenance reads no container. |
+| Whether each running database server that was listed accepts connections, and its logins. | the same calls, for the same lanes |
 | Whether each web address the proxy sends to a product answers. | the status call |
+
+A call for one lane lists only that lane's containers, so a container of another lane that Launchplane cannot read does not stop it. The status call reads every lane and answers `503` over it.
+
+What is secret in the containers a call lists is noted before anything else is made of that list, and the answer is cleaned after it is made. So an error about the read itself is cleaned of what that read found: see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane).
 
 Anything asked is either known or could not be read, with the reason. What could not be read is never taken for no, for nothing or for fine: it is shown as `could not be read` on the lane, on the part and on the page, and a call that needs it stops with `503` and the reason.
 

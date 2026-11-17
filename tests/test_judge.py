@@ -1,7 +1,6 @@
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -11,7 +10,9 @@ from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
     InstanceState,
+    LoadedRoute,
     Mount,
+    RouteStatus,
     RunningBackgroundService,
     RunningInstance,
     Unread,
@@ -158,6 +159,11 @@ WITH_A_DATABASE: dict[str, Given] = {
     "a route removed by hand from an instance that can reach out": Given(
         (on_data(NEW, "d1", "bridge"),), background_services=(NEW_BACKGROUND_SERVICE,), data_sets=(D1,)
     ),
+    "a route written and not yet loaded": Given((OLD_ON_D1, NEW_ON_D1), ("old", "new"), (OLD_BACKGROUND_SERVICE,), (D1,)),
+    "a route the proxy reports as disabled": replace(serving(NEW_ON_D1), route=(LoadedRoute("new", RouteStatus.DISABLED), "new")),
+    "a web address that answers with an error though its instance runs": replace(
+        serving(NEW_ON_D1), web_address_fails="HTTP/1.1 500 Internal Server Error"
+    ),
     "the proxy down": replace(UP, route=(None, "web"), proxy_runs=False),
     "the proxy down and a part attached where it must not be": replace(
         UP, instances=(ATTACHED_OUTSIDE,), route=(None, "web"), proxy_runs=False
@@ -168,6 +174,7 @@ WITH_A_DATABASE: dict[str, Given] = {
         IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED, exit_code=KILLED),)
     ),
     "in maintenance with the back soon page not running": replace(IN_MAINTENANCE, back_soon_runs=False),
+    "in maintenance with the route to the back soon page not yet loaded": replace(IN_MAINTENANCE, route=("web", BACK_SOON)),
     "in maintenance with the proxy down": replace(IN_MAINTENANCE, route=(None, BACK_SOON), proxy_runs=False),
     "in maintenance with a part attached where it must not be": replace(
         IN_MAINTENANCE, instances=(changed(ATTACHED_OUTSIDE, state=STOPPED),)
@@ -201,11 +208,28 @@ def work_done_on(name: str) -> dict[str, Work | None]:
     return {"at rest": None, "at work": Work.MOVE}
 
 
-def answered(name: str) -> dict[str, dict[str, Any]]:
+# What the status call answers for the lane, a line each: its condition, each finding as shown, kind and sentence, its parts.
+def answered(name: str) -> dict[str, list[str]]:
     given, product = CASES[name]
-    return {mode: lane_answer(given.judged(work, product)).model_dump(mode="json") for mode, work in work_done_on(name).items()}
+    return {
+        mode: [
+            answer.condition,
+            *[f"{finding.shown} | {finding.kind} | {finding.sentence}" for finding in answer.findings],
+            "parts: " + ", ".join(f"{container} {standing}" for container, standing in answer.parts.items()),
+        ]
+        for mode, work in work_done_on(name).items()
+        for answer in [lane_answer(given.judged(work, product))]
+    }
 
 
 @pytest.mark.parametrize("name", CASES)
 def test_the_status_call_answers_this_for_the_lane_as_read(name: str) -> None:
     assert answered(name) == json.loads(PINNED.read_text())[name]
+
+
+def test_the_three_lists_of_sentences_are_the_findings_by_how_each_is_shown() -> None:
+    given = serving(NEW_ON_D1, OLD_ON_D1, data_sets=(with_database(D1, unheld_logins=Unread(why="no answer")),))
+    at_rest, moving = lane_answer(given.judged(None)), lane_answer(given.judged(Work.MOVE))
+    beside, unread = (finding.sentence for finding in at_rest.findings)
+    assert (at_rest.problems, at_rest.left_unfinished, at_rest.release_under_way) == ([unread], [beside], [])
+    assert (moving.problems, moving.left_unfinished, moving.release_under_way) == ([unread], [], [beside])

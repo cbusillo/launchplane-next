@@ -324,18 +324,35 @@ def details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
     return {details.name.removeprefix("/"): details for details in each}
 
 
+@dataclass(frozen=True)
+class Listed:
+    summaries: list[DockerContainerSummary]
+    details: dict[str, DockerContainerDetails]
+
+    def has_part(self, part: Part) -> bool:
+        return any(summary.labels.get(PART_LABEL) == part for summary in self.summaries)
+
+
+def container_summaries(containers: object) -> list[DockerContainerSummary]:
+    return checked(DOCKER_CONTAINER_LIST, containers, "container list")
+
+
 def on_host_from_answers(answers: HostAnswers) -> OnHost:
-    summaries = checked(DOCKER_CONTAINER_LIST, answers.containers, "container list")
-    every_network = checked(DOCKER_NETWORK_LIST, answers.networks, "network list")
-    volume_list = checked(DOCKER_VOLUME_LIST, answers.volumes, "volume list").volumes or []
+    found = Listed(container_summaries(answers.containers), details_by_name(answers.details))
+    return on_host_from(found, answers.networks, answers.volumes, answers.system)
+
+
+def on_host_from(found: Listed, networks: object, volumes: object, system: object) -> OnHost:
+    every_network = checked(DOCKER_NETWORK_LIST, networks, "network list")
+    volume_list = checked(DOCKER_VOLUME_LIST, volumes, "volume list").volumes or []
     marked_networks = [network for network in every_network if PRODUCT_LABEL in (network.labels or {})]
     by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "background-service": [], "database": []}
-    for summary in summaries:
+    for summary in found.summaries:
         by_part[part_of(summary)].append(summary)
-    details = details_by_name(answers.details)
+    details = found.details
     background_services: list[RunningBackgroundService] = []
     if by_part["background-service"]:
-        now = checked(DOCKER_SYSTEM_TIME, answers.system, "system information").system_time
+        now = checked(DOCKER_SYSTEM_TIME, system, "system information").system_time
         background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
     databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
     return OnHost(
@@ -344,10 +361,6 @@ def on_host_from_answers(answers: HostAnswers) -> OnHost:
         data_sets=data_sets_from(databases, marked_networks, volume_list),
         networks=[network_from(network) for network in every_network],
     )
-
-
-def parts_by_name(containers: object) -> dict[str, Part]:
-    return {summary.name: part_of(summary) for summary in checked(DOCKER_CONTAINER_LIST, containers, "container list")}
 
 
 def tar_of(file_name: str, content: bytes) -> bytes:
