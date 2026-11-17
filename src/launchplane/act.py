@@ -158,11 +158,16 @@ class Lanes:
         read_at = datetime.now(UTC)
         on_host = self.host.read(scope.lane) if scope.parts else None
         proxy = self.proxy.read()
-        return Reading(read_at, proxy, on_host, self.web_address_failures(proxy) if scope.web_addresses else {})
+        return Reading(read_at, proxy, on_host, self.web_address_failures(proxy, scope) if scope.web_addresses else {})
 
     # Asked at once, so ones that hang cost one limit and not one each. One the proxy sends to no product is not asked.
-    def web_address_failures(self, proxy: ProxySeen) -> dict[str, str | None]:
-        to_a_product = sorted(web_address for web_address, container in proxy.sends_visitors_to().items() if container != BACK_SOON)
+    def web_address_failures(self, proxy: ProxySeen, scope: Scope) -> dict[str, str | None]:
+        only = None if scope.lane is None else web_address_of(*scope.lane)
+        to_a_product = sorted(
+            web_address
+            for web_address, container in proxy.sends_visitors_to().items()
+            if container != BACK_SOON and only in (None, web_address)
+        )
         if not (proxy.runs and to_a_product):
             return {}
         with ThreadPoolExecutor(max_workers=len(to_a_product)) as pool:
@@ -223,8 +228,10 @@ class Lanes:
                 self.take_behind_back_soon,
             )
 
+    # A move answers from what the status call sees, so it asks its lane's web address too.
     def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
-        return lambda: judge(self.read(Scope(lane=(product, lane))).lane(product, lane), description, work)
+        scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
+        return lambda: judge(self.read(scope).lane(product, lane), description, work)
 
     def settle[Answer](
         self,

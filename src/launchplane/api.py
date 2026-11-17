@@ -11,7 +11,8 @@ import uvicorn
 import uvicorn.config
 from fastapi import FastAPI, Request, Response
 from fastapi import Path as PathParameter
-from fastapi.responses import HTMLResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from launchplane.act import Lanes, Status, Stopped
@@ -137,14 +138,31 @@ def running_answer(status: Status) -> RunningAnswer:
     )
 
 
+def not_answered(error: Exception, secrets: Secrets) -> Response:
+    why = cleaned(str(error), secrets.secrets_seen())
+    return JSONResponse(
+        NotFinished(
+            error="Launchplane could not read which secrets it has given out, so it made no answer: it could not have "
+            f"cleaned one of them. Nothing was changed, and asking again is safe: {why}"
+        ).model_dump(),
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+    )
+
+
 def cleaned_headers(headers: Mapping[str, str], secrets: Collection[str]) -> dict[str, str]:
     return {cleaned(name, secrets): cleaned(value, secrets) for name, value in headers.items() if name.lower() != "content-length"}
 
 
-# A call's own reading of the host notes what is secret there before the call says anything, so the answer is cleaned after.
-def clean_answers(app: FastAPI, secrets: Secrets) -> None:
+# Every secret a container holds is read before the answer is made, so an answer that reads nothing itself is cleaned too.
+def clean_answers(app: FastAPI, secrets: Secrets, static_path: str) -> None:
     @app.middleware("http")
     async def clean_the_answer(request: Request, answer: Callable[[Request], Awaitable[Any]]) -> Response:
+        try:
+            await run_in_threadpool(secrets.read_secrets)
+        except UNREADABLE as error:
+            # The page is a file of Launchplane's own, so it can open and say the host cannot be read.
+            if request.url.path != static_path:
+                return not_answered(error, secrets)
         response = await answer(request)
         body = b"".join([chunk async for chunk in response.body_iterator])
         given_out = secrets.secrets_seen()
@@ -210,7 +228,7 @@ def create_app(
     def show_running() -> str:
         return page
 
-    clean_answers(app, secrets)
+    clean_answers(app, secrets, static_path=app.url_path_for(show_running.__name__))
 
     @app.get("/running", responses=RUNNING_ERROR_RESPONSES)
     def running(response: Response) -> RunningAnswer | HostUnreadable:

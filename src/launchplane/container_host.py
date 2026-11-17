@@ -37,6 +37,7 @@ from launchplane.docker_answers import (
     QUIET_GATEWAY_MODE,
     CommandResult,
     ContainerHostError,
+    DockerContainerDetails,
     Listed,
     Part,
     TornRead,
@@ -44,7 +45,6 @@ from launchplane.docker_answers import (
     checked,
     command_result,
     container_summaries,
-    details_by_name,
     files_in,
     is_quiet,
     on_host_from,
@@ -53,7 +53,7 @@ from launchplane.docker_answers import (
     tar_of,
 )
 from launchplane.host_logins import HostLogins
-from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_held
+from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_of
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
@@ -206,24 +206,37 @@ class ContainerHost:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
     # One pass over one lane, or over every lane: each container is listed once and described, and that list says what
-    # each one holds. What is secret in it is noted before anything else is made of it.
+    # each one holds.
     def read(self, lane: Lane | None = None) -> OnHost:
         return read_whole(lambda: self.read_once(lane), self.address)
 
     def read_once(self, lane: Lane | None) -> OnHost:
         with attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks", self.address):
-            containers, networks, volumes = (
-                self.list_marked("containers", lane),
-                self.list_networks(),
-                self.list_marked("volumes", lane),
-            )
-            summaries = container_summaries(containers)
-            found = Listed(summaries, details_by_name([self.describe_listed(summary.name) for summary in summaries]))
-            self.secrets.note(secrets_held(found))
+            found = self.described(lane)
+            networks, volumes = self.list_networks(), self.list_marked("volumes", lane)
             system = self.system_information() if found.has_part("background-service") else None
         on_host, held = on_host_from(found, networks, volumes, system), logins_held(found)
         data_sets = [self.probed(each, held.get((each.product, each.data_set), set())) for each in on_host.data_sets]
         return replace(on_host, data_sets=data_sets)
+
+    # A container's secrets are noted as it is described, before any later work that can fail and say something of it.
+    def described(self, lane: Lane | None) -> Listed:
+        summaries = container_summaries(self.list_marked("containers", lane))
+        details: dict[str, DockerContainerDetails] = {}
+        for summary in summaries:
+            answer = self.describe_listed(summary.name)
+            details[summary.name] = checked(DOCKER_CONTAINER_DETAILS, answer, f"description of {summary.name}")
+            self.secrets.note(secrets_of(summary, details[summary.name]))
+        return Listed(summaries, details)
+
+    # Asked before an answer is made that reads nothing else, so that answer too is cleaned of what every container holds.
+    def read_secrets(self) -> frozenset[str]:
+        def describe_every_container() -> None:
+            with attempting("Reading the secrets Launchplane has given to what is", self.address):
+                self.described(None)
+
+        read_whole(describe_every_container, self.address)
+        return self.secrets.seen
 
     def secrets_seen(self) -> frozenset[str]:
         return self.secrets.seen

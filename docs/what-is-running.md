@@ -49,18 +49,18 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 ## One reading
 
-Every call gets what it knows of the host from one pass, made once for each step it takes, and takes only what it needs of it. The status call makes one pass for its answer.
+Every call gets what it knows of the host from one pass, made once for each step it takes, and takes only what it needs of it. The status call makes one pass for its answer. Before every answer but the page, the containers are also listed and described once more for the secrets they hold: see below.
 
 | What is read | Who asks for it |
 | --- | --- |
 | The routes files, the routes the proxy has loaded, and whether the proxy and the back soon page run. | every call |
-| The marked containers, each described once, the marked volumes and every network. The secrets and the database login each container holds come from that same list. | a move, a retire and a maintenance call for their own lane only; the status call for every lane. Ending maintenance on a lane that is not in maintenance reads no container. |
+| The marked containers, each described once, the marked volumes and every network. The secrets and the database login each container holds come from that same list. | a move, a retire and a maintenance call for their own lane only; the status call for every lane. Ending maintenance on a lane that is not in maintenance reads no part of the lane. |
 | Whether each running database server that was listed accepts connections, and its logins. | the same calls, for the same lanes |
-| Whether each web address the proxy sends to a product answers. | the status call |
+| Whether each web address the proxy sends to a product answers. | the status call for every one, and a move for its own lane's |
 
 A call for one lane lists only that lane's containers, so a container of another lane that Launchplane cannot read does not stop it. The status call reads every lane and answers `503` over it.
 
-What is secret in the containers a call lists is noted before anything else is made of that list, and the answer is cleaned after it is made. So an error about the read itself is cleaned of what that read found: see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane).
+No answer and no log line repeats a secret a container holds: see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane). A `503` without `read_at` means Launchplane could not read the secrets and made no answer.
 
 Anything asked is either known or could not be read, with the reason. What could not be read is never taken for no, for nothing or for fine: it is shown as `could not be read` on the lane, on the part and on the page, and a call that needs it stops with `503` and the reason.
 

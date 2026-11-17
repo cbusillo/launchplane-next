@@ -2,7 +2,14 @@ import threading
 from collections.abc import Iterable
 
 from launchplane.data_set import LOGIN_VARIABLE, variable_value
-from launchplane.docker_answers import DATA_SET_LABEL, PRODUCT_LABEL, DockerContainerSummary, Listed, described
+from launchplane.docker_answers import (
+    DATA_SET_LABEL,
+    PRODUCT_LABEL,
+    DockerContainerDetails,
+    DockerContainerSummary,
+    Listed,
+    described,
+)
 
 SECRET_VARIABLES_LABEL = "launchplane.secret-variables"  # noqa: S105 the name of a label, not a secret
 
@@ -11,12 +18,14 @@ def environment_of(summary: DockerContainerSummary, found: Listed) -> list[str]:
     return described(summary, found.details, "container").config.environment or []
 
 
-# Asked before anything else is made of a listing, so an error about what was listed can be cleaned of what it holds.
-def secrets_held(found: Listed) -> set[str]:
+def secrets_of(summary: DockerContainerSummary, details: DockerContainerDetails) -> set[str]:
+    variables = [variable for variable in summary.labels.get(SECRET_VARIABLES_LABEL, "").split(",") if variable]
+    environment = details.config.environment or []
     held: set[str] = set()
-    for summary in found.summaries:
-        variables = [variable for variable in summary.labels.get(SECRET_VARIABLES_LABEL, "").split(",") if variable]
-        held.update(value for variable in variables if (value := variable_value(environment_of(summary, found), variable)))
+    for variable in variables:
+        value = variable_value(environment, variable)
+        if value:
+            held.add(value)
     return held
 
 

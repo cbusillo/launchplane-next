@@ -7,7 +7,7 @@ import pytest
 from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.data_set import RULES_AS_READ, RULES_FILE, login_of
 from launchplane.docker_answers import ContainerHostError, HostAnswers, Listed, container_summaries, on_host_from_answers
-from launchplane.host_secrets import SECRET_VARIABLES_LABEL, secrets_held
+from launchplane.host_secrets import SECRET_VARIABLES_LABEL, logins_held
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
@@ -212,11 +212,6 @@ def database_made(docker: RecordingDocker) -> ContainerHost:
     return host
 
 
-def secrets_read(host: ContainerHost) -> frozenset[str]:
-    host.read()
-    return host.secrets_seen()
-
-
 def given_to(docker: RecordingDocker, holder: str) -> dict[str, str]:
     return dict(entry.split("=", 1) for entry in docker.containers.by_name[holder].environment)
 
@@ -341,14 +336,14 @@ def test_a_secret_is_read_from_whatever_still_holds_it_whichever_containers_are_
     holding_a_login(docker, BACKGROUND_SERVICE)
     for name, holder in docker.containers.by_name.items():
         holder.removed = name != left
-    assert secrets_read(ContainerHost(docker.as_client(), "test")) == {LOGIN["PGPASSWORD"]}
+    assert ContainerHost(docker.as_client(), "test").read_secrets() == {LOGIN["PGPASSWORD"]}
 
 
 def test_the_password_a_database_was_first_started_with_is_read_as_a_secret_though_its_set_up_removes_it() -> None:
     docker = RecordingDocker()
     database_made(docker)
     restarted_launchplane = ContainerHost(docker.as_client(), "test")
-    assert secrets_read(restarted_launchplane) == {given_to(docker, DATABASE)["POSTGRES_PASSWORD"]}
+    assert restarted_launchplane.read_secrets() == {given_to(docker, DATABASE)["POSTGRES_PASSWORD"]}
 
 
 def test_a_secret_this_launchplane_gave_out_stays_one_after_everything_holding_it_is_gone() -> None:
@@ -356,7 +351,7 @@ def test_a_secret_this_launchplane_gave_out_stays_one_after_everything_holding_i
     host = database_made(docker)
     password = given_to(docker, DATABASE)["POSTGRES_PASSWORD"]
     host.retire_instance(DATABASE)
-    assert (docker.containers.by_name[DATABASE].removed, secrets_read(host)) == (True, {password})
+    assert (docker.containers.by_name[DATABASE].removed, host.read_secrets()) == (True, {password})
 
 
 def test_a_reading_of_one_lane_lists_and_notes_only_that_lane() -> None:
@@ -396,10 +391,9 @@ def test_a_description_of_unexpected_shape_is_an_error_that_repeats_nothing_dock
     assert "hunter2" not in str(refused.value)
 
 
-def test_a_container_listed_and_not_described_is_an_error_not_one_that_holds_no_secret() -> None:
-    listed = container("shop-testing-1", "web", []) | {"Labels": DATA_SET_LABELS | {SECRET_VARIABLES_LABEL: "PGPASSWORD"}}
+def test_a_container_listed_and_not_described_is_an_error_not_one_that_holds_no_login() -> None:
     with pytest.raises(ContainerHostError, match="did not describe it"):
-        secrets_held(Listed(container_summaries([listed]), {}))
+        logins_held(Listed(container_summaries([container("shop-testing-1", "web", [])]), {}))
 
 
 def test_a_product_with_no_description_is_a_web_product_with_no_data(tmp_path: Path) -> None:

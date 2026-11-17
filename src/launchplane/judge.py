@@ -132,8 +132,9 @@ class Judgement:
     def of_kind(self, *kinds: Kind) -> list[Finding]:
         return [finding for finding in self.findings if finding.kind in kinds]
 
+    # What is wrong with the instance itself. Starting another in its place does not make a web address answer.
     def about_instance(self, instance: RunningInstance) -> list[Finding]:
-        return [finding for finding in self.about({instance.container}) if finding.kind != Kind.BESIDE]
+        return [finding for finding in self.about({instance.container}) if finding.kind not in {Kind.BESIDE, Kind.NOT_ANSWERING}]
 
     # Its logins are settled last, so they do not stand in the way of using it.
     def about_data_set(self, found: DataSet | None) -> list[Finding]:

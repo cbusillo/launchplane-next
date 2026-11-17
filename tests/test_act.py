@@ -73,6 +73,16 @@ def test_a_failed_check_is_answered_as_check_failed_with_the_log_and_the_instanc
     assert proxy.written == {WEB_ADDRESS: "a"}
 
 
+def test_a_move_to_the_serving_build_does_not_answer_success_over_a_web_address_the_status_call_finds_not_answering() -> None:
+    lanes, proxy = lanes_serving(BUILD_A, "a")
+    proxy.not_answering[WEB_ADDRESS] = "HTTP/1.1 500 Internal Server Error"
+    [said_by_the_status_call] = [finding.sentence for judged in lanes.read_status().lanes for finding in judged.findings]
+    with pytest.raises(Stopped) as stopped:
+        lanes.move(BUILD_A)
+    assert said_by_the_status_call in str(stopped.value)
+    assert proxy.host.actions == []
+
+
 def test_the_first_move_starts_the_proxy_then_moves() -> None:
     proxy = PretendProxy(PretendHost(), running=False)
     result = Lanes(proxy.host, proxy, name_fresh=numbered_names()).move(BUILD_B)

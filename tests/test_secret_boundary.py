@@ -158,10 +158,36 @@ def answer_to(asked: Asked, secrets: Secrets) -> tuple[int, str]:
 
 @pytest.mark.parametrize("asked", ANSWERS.values(), ids=ANSWERS.keys())
 def test_no_answer_of_any_kind_carries_a_secret_out(asked: Asked) -> None:
-    status, text = answer_to(asked, GivenSecrets(seen=frozenset({SECRET})))
+    status, text = answer_to(asked, GivenSecrets(on_host=frozenset({SECRET})))
     assert status == asked.status
     assert SECRET not in text
     assert SECRET_REMOVED in text
+
+
+@pytest.mark.parametrize("asked", ANSWERS.values(), ids=ANSWERS.keys())
+def test_no_answer_is_made_when_the_secrets_to_clean_it_of_cannot_be_read(asked: Asked) -> None:
+    status, text = answer_to(asked, GivenSecrets(on_host=frozenset({SECRET}), readable=False))
+    assert status == 503
+    assert SECRET not in text
+    assert "made no answer" in text
+    assert "Connection refused" in text
+
+
+def test_nothing_is_moved_when_the_secrets_cannot_be_read() -> None:
+    def move(target: LaneBuild) -> MoveResult:
+        raise AssertionError(f"Moved to {target.build} with no way to clean the answer")
+
+    asked = Asked("POST", MOVE, 503, {"build": "site:b"}, move=move)
+    assert answer_to(asked, GivenSecrets(readable=False))[0] == 503
+
+
+def test_the_reason_no_answer_was_made_is_cleaned_of_the_secrets_already_seen() -> None:
+    class SecretsWhoseReadFailsCarryingOne(GivenSecrets):
+        def read_secrets(self) -> frozenset[str]:
+            raise ContainerHostError(f"Docker answered {SECRET}")
+
+    status, text = answer_to(ANSWERS["a retirement"], SecretsWhoseReadFailsCarryingOne(seen=frozenset({SECRET})))
+    assert (status, SECRET in text, SECRET_REMOVED in text) == (503, False, True)
 
 
 def test_a_secret_that_json_writes_differently_is_still_removed() -> None:
@@ -170,7 +196,7 @@ def test_a_secret_that_json_writes_differently_is_still_removed() -> None:
     def read() -> Status:
         raise ContainerHostError(f"Docker refused: {awkward}")
 
-    status, text = answer_to(Asked("GET", "/running", 503, read=read), GivenSecrets(seen=frozenset({awkward})))
+    status, text = answer_to(Asked("GET", "/running", 503, read=read), GivenSecrets(on_host=frozenset({awkward})))
     assert (status, "ünicode" in text or "\\u00fcnicode" in text, SECRET_REMOVED in text) == (503, False, True)
 
 
@@ -182,9 +208,34 @@ def test_a_secret_in_the_name_of_a_json_value_is_removed_like_one_in_the_value()
 
 
 def test_cleaning_replaces_only_the_secret_and_keeps_the_explanation_around_it() -> None:
-    status, text = answer_to(ANSWERS["a move that stopped"], GivenSecrets(seen=frozenset({SECRET})))
+    status, text = answer_to(ANSWERS["a move that stopped"], GivenSecrets(on_host=frozenset({SECRET})))
     explanation = "The move of testing of site to site:b stopped, and is safe to ask again: The lane is not as it must be: "
     assert (status, json.loads(text.split("\n")[-1])) == (503, {"error": explanation + SECRET_REMOVED})
+
+
+def test_the_page_opens_when_the_secrets_cannot_be_read() -> None:
+    status, text = answer_to(Asked("GET", "/", 200), GivenSecrets(readable=False))
+    assert (status, "<html" in text) == (200, True)
+
+
+def test_the_secrets_are_read_before_the_answer_is_made() -> None:
+    secrets = GivenSecrets(on_host=frozenset({SECRET}))
+    seen_when_the_host_was_read: list[frozenset[str]] = []
+
+    def read() -> Status:
+        seen_when_the_host_was_read.append(secrets.secrets_seen())
+        raise RuntimeError(f"not an error Launchplane expects: {SECRET}")
+
+    app = create_app(
+        read,
+        move_stopped,
+        retire_stopped,
+        secrets,
+        maintenance_stopped,
+        maintenance_stopped,
+    )
+    assert TestClient(app, raise_server_exceptions=False).get("/running").status_code == 500
+    assert seen_when_the_host_was_read == [{SECRET}]
 
 
 def failure_carrying_the_secret() -> RuntimeError:
@@ -244,14 +295,40 @@ def test_every_log_launchplane_writes_as_a_service_is_cleaned_whichever_library_
     assert written_by_the_service_log.getvalue().count(SECRET_REMOVED) == 3
 
 
-def test_an_error_about_the_read_itself_is_cleaned_of_a_secret_that_same_read_found() -> None:
-    docker = RecordingDocker()
-    labels = {"launchplane.product": "site", "launchplane.secret-variables": "PGPASSWORD", "launchplane.part": SECRET}
+def holding_the_secret(docker: RecordingDocker, **labels: str) -> None:
+    marks = {"launchplane.product": "site", "launchplane.secret-variables": "PGPASSWORD"} | labels
     docker.containers.create(
-        "site:a", name="site-1", labels=labels, environment={"PGPASSWORD": SECRET}, volumes={}, restart_policy={"Name": ""}
+        "site:a", name="site-1", labels=marks, environment={"PGPASSWORD": SECRET}, volumes={}, restart_policy={"Name": ""}
     )
+
+
+def just_restarted(docker: RecordingDocker) -> TestClient:
     host = ContainerHost(docker.as_client(), "test")
     lanes = Lanes(host, PretendProxy(PretendHost()))
-    app = create_app(lanes.read_status, move_stopped, retire_stopped, host, maintenance_stopped, maintenance_stopped)
-    response = TestClient(app).get("/running")
+    return TestClient(create_app(lanes.read_status, move_stopped, retire_stopped, host, maintenance_stopped, maintenance_stopped))
+
+
+def test_an_error_about_the_read_itself_is_cleaned_of_a_secret_that_same_read_found() -> None:
+    docker = RecordingDocker()
+    holding_the_secret(docker, **{"launchplane.part": SECRET})
+    response = just_restarted(docker).get("/running")
+    assert (response.status_code, SECRET in response.text, SECRET_REMOVED in response.text) == (503, False, True)
+
+
+def test_a_request_refused_before_any_reading_is_cleaned_of_a_secret_a_container_holds_just_after_a_restart() -> None:
+    docker = RecordingDocker()
+    holding_the_secret(docker)
+    response = just_restarted(docker).post(MOVE, json={"build": [SECRET]})
+    assert (response.status_code, SECRET in response.text, SECRET_REMOVED in response.text) == (422, False, True)
+
+
+def test_a_secret_is_noted_from_each_container_as_it_is_described_before_a_later_one_refuses() -> None:
+    docker = RecordingDocker()
+    holding_the_secret(docker)
+    later = f"site-{SECRET}"
+    docker.containers.create(
+        "site:a", name=later, labels={"launchplane.product": "site"}, environment={}, volumes={}, restart_policy={"Name": ""}
+    )
+    docker.api.refuses_to_describe.add(later)
+    response = just_restarted(docker).get("/running")
     assert (response.status_code, SECRET in response.text, SECRET_REMOVED in response.text) == (503, False, True)

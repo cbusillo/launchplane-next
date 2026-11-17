@@ -65,7 +65,7 @@ So a password is asked for from every address, and only a login of an instance o
 
 - A release that keeps the data set has two instances for a short time, each with its own login.
 - A database server removed by hand is made again on the kept volume. Its logins are in the data, so the instance still logs in.
-- A stopped server is the one exception: its logins are not read, and wait in the data until a move or a retire finds the server running.
+- A stopped server is the one exception: its logins are not read, and wait in the data until a move, a retire or the end of maintenance finds the server running.
 - When a running server's logins cannot be read, the lane's judgement has it as `could not be read` with the reason, whether or not a call is at work on the lane, and a move or a retire that has done everything else answers `503` with the same words. Ask again once the server answers, or delete the data set by name.
 - A data set made before logins were per instance does not have these rules, so no instance is started on it. Nothing is converted: delete it by name.
 
@@ -75,10 +75,10 @@ Anyone who can run `docker inspect` on a web part or background service can read
 
 Every answer of the API, headers and body, and every line of Launchplane's own log has each secret replaced with `[a secret Launchplane gave this lane, removed]`. Only the secret is replaced; the explanation around it stays.
 
-- A call's own reading of the host notes the secrets first: the environment of every web part, background service and database server it lists, before anything else is made of that list. The answer is cleaned after it is made, so an error about the read itself is cleaned too.
-- Launchplane keeps, in memory only, every secret it has read or given out since it started. Answers and log lines are cleaned with those.
-- No separate read of the secrets is made before a call. An answer made from the routes alone, such as ending maintenance on a lane that is not in maintenance, and an error from before any container was listed, are cleaned with what is in memory. After Launchplane restarts that is nothing until the first reading. Such an answer says nothing read from a product's containers.
-- A call for one lane notes that lane's secrets. The status call notes every lane's.
+- Before every answer is made, Launchplane lists every marked container and describes it, and notes the secrets in its environment: every web part, background service and database server. So an answer that reads nothing else, such as a refusal of what was sent, is cleaned too, also just after Launchplane starts.
+- A container's secrets are noted as it is described, before the next one is and before anything else is made of the list. So an error about the read itself, from that read or a later one, is cleaned of what was already found.
+- Launchplane also keeps, in memory only, every secret it has read or given out since it started. A log line is cleaned with those.
+- When the secrets cannot be read, no answer is made and nothing is moved: the call answers `503` with the reason. The page itself still opens. A container Launchplane cannot make sense of does not stop this read; only Docker not answering does.
 - A secret a product has changed before printing it, such as encoding it, is not recognised.
 
 ## A move with data
@@ -147,7 +147,7 @@ A finding is `shown` one of four ways:
 | `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, a routes file the proxy has not loaded yet, an instance beside the active one, a stopped or missing part, a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
 | `could not be read` | Something asked of the host has no answer: the product's description, a server's logins, a server not asked whether it accepts connections, a network a part is attached to that was not among the networks read. Never shown as under way. |
 
-Whether the web address answers is asked only by the status call, so it is in the judgement the status call and the page show, about the instance the web address is sent to, and in no call's.
+Whether the web address answers is asked by the status call and by a move, and is a finding about the instance the web address is sent to. So a move to the build a lane already serves answers `503`, in the status call's words, while that web address does not answer with success. It starts no other instance for it. A retire and the maintenance calls do not ask.
 
 While a call is ending maintenance the lane is judged as it must be once it is back: a part still stopped is under way, and a running one is good.
 
@@ -167,7 +167,6 @@ A web part, a background service and a database server are each made with the re
 - **A database server keeps the password it was first started with in its environment.** The set-up takes it off `postgres`, so it opens nothing. If the set-up did not finish it is still the password of `postgres`, which the rules then left in place refuse from every address but the server's own container. Launchplane cleans it from its answers like any secret.
 - **The scrambled form of a new password can be read in Docker's events on the container host,** because it is part of the command Launchplane runs in the database server. It does not open the database.
 - **Access rules changed by hand on a running server, with the file then put back and the server not told to load it, pass the read-back,** because the read-back reads the file and not what the server has loaded.
-- **A login of an instance retired while its database server is stopped stays in the data** until a move, a retire or the end of maintenance next finds that server running.
 - **A password handed to the product as a file, a login that expires, and an encrypted connection to the database are not built.**
 - **Where a call decides from what it has itself done, because the host cannot show it:** which instance it started, whether a check passed, whether a check or a watch on a background service refused, and whether it has already started a part that reads stopped again. A second call cannot know these, so it checks again and starts again.
 - **A container made before the background service was named, marked `launchplane.part=job`, makes the host unreadable.** No version has been released, so nothing is converted: the test bed's lanes are made again.

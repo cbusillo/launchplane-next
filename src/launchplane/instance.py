@@ -188,8 +188,7 @@ class LaneReading:
     background_services: tuple[RunningBackgroundService, ...] = ()
     data_sets: tuple[DataSet, ...] = ()
     network_quiet: Mapping[str, bool] = field(default_factory=dict[str, bool])
-    # Only the status call asks the web address; why it did not answer is None where it did.
-    web_address_asked: bool = False
+    # Why the web address did not answer, where it was asked and did not.
     web_address_failure: str | None = None
 
     @property
@@ -251,7 +250,6 @@ class Reading:
             of_lane(self.parts.background_services),
             of_lane(self.parts.data_sets),
             {network.name: network.is_quiet for network in self.parts.networks},
-            web_address_of(product, lane) in self.web_address_failures,
             self.web_address_failures.get(web_address_of(product, lane)),
         )
 

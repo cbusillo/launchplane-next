@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import docker
-from docker.errors import NotFound
+from docker.errors import APIError, NotFound
 
 from launchplane.docker_answers import files_in, tar_of
 
@@ -145,6 +145,7 @@ class RecordingImages:
 class RecordingApi:
     made: RecordingContainers
     system_times: Iterator[str] = field(default_factory=lambda: iter(()))
+    refuses_to_describe: set[str] = field(default_factory=set[str])
 
     def containers(self, **options: object) -> list[dict[str, Any]]:
         return [found.listed for found in self.made.list(filters=options.get("filters"))]
@@ -158,6 +159,8 @@ class RecordingApi:
         return {"Volumes": []}
 
     def inspect_container(self, container: str) -> dict[str, Any]:
+        if container in self.refuses_to_describe:
+            raise APIError(f"No such container: {container}")
         if container in self.made.by_name:
             return self.made.by_name[container].attrs
         state = {"Running": True, "Restarting": False, "Paused": False, "StartedAt": STARTED, "ExitCode": 0}
