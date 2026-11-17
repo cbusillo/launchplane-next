@@ -127,25 +127,14 @@ def data_set_labels(product: str, lane: str, data_set: str) -> dict[str, str]:
     return {PRODUCT_LABEL: product, LANE_LABEL: lane, DATA_SET_LABEL: data_set}
 
 
-@dataclass(frozen=True)
-class NewDatabase:
-    product: str
-    lane: str
-    data_set: str
-    network: str
-    volume: str
-    image: str
-
-
-def database_options(new: NewDatabase, throwaway_password: str) -> RunOptions:
+def database_options(product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> RunOptions:
     marks = {PART_LABEL: "database", SECRET_VARIABLES_LABEL: THROWAWAY_PASSWORD_VARIABLE}
     return RunOptions(
-        image=new.image,
-        container=f"{new.product}-{new.lane}-database-{new.data_set}",
-        labels=data_set_labels(new.product, new.lane, new.data_set) | marks,
-        networks={new.network: [DATABASE_ADDRESS]},
-        environment=server_environment(throwaway_password),
-        volumes={new.volume: DATA_PATH},
+        image=image,
+        container=f"{product}-{lane}-database-{data_set}",
+        labels=data_set_labels(product, lane, data_set) | marks,
+        networks={network: [DATABASE_ADDRESS]},
+        volumes={volume: DATA_PATH},
     )
 
 
@@ -346,11 +335,12 @@ class ContainerHost:
         with attempting(f"Making the volume of the data set {data_set}", self.address):
             self.client.volumes.create(f"launchplane-data-{data_set}-database", labels=data_set_labels(product, lane, data_set))
 
-    def create_database(self, new: NewDatabase) -> None:
-        with attempting(f"Making the database of the data set {new.data_set}", self.address):
+    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
+        with attempting(f"Making the database of the data set {data_set}", self.address):
             throwaway_password = new_password()
             self.secrets.note([throwaway_password])
-            self.start_set_up(self.create(database_options(new, throwaway_password)))
+            options = database_options(product, lane, data_set, network, volume, image)
+            self.start_set_up(self.create(replace(options, environment=server_environment(throwaway_password))))
 
     def start_database(self, container: str) -> None:
         with attempting(f"Starting the database {container}", self.address):

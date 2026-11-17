@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from launchplane.container_host import ContainerHost, NewDatabase, PartStopped
+from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.data_set import REMOVE_LOGIN, RULES_FILE, login_of
 from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, secrets_held
@@ -197,7 +197,7 @@ RULES_OF_THE_IMAGE = [["local", ["all"], ["all"], None, "trust", None], ["host",
 
 def database_made(docker: RecordingDocker) -> ContainerHost:
     host = ContainerHost(docker.as_client(), "test")
-    host.create_database(NewDatabase("shop", "testing", "d1", DATA_SET_NETWORK, VOLUME, "postgres:18-alpine"))
+    host.create_database("shop", "testing", "d1", DATA_SET_NETWORK, VOLUME, "postgres:18-alpine")
     return host
 
 

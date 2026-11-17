@@ -457,7 +457,7 @@ def test_after_a_release_the_retired_instances_login_is_gone_and_its_password_op
     instance = view.receiving()["container"]
     new = environment_of(instance)
     opened, said = login_attempt(instance, PGUSER=old["PGUSER"], PGPASSWORD=old["PGPASSWORD"])
-    assert (opened, "password authentication failed" in said) == (False, True), said
+    assert (opened, "pg_hba.conf rejects connection" in said) == (False, True), said
     assert login_attempt(instance)[0]
     assert logins_on(view.data_sets[0]) == [new["PGUSER"]] != [old["PGUSER"]]
     assert new["PGPASSWORD"] != old["PGPASSWORD"]

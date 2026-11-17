@@ -14,8 +14,7 @@ Only containers carrying `launchplane.product` are Launchplane's. Any other cont
 | `launchplane.part` | `web`, `background-service` or `database`; a container without it is `web` |
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a background service, the container of its instance's web part |
-| `launchplane.secret-variables` | on a web part or background service given a secret, the environment variables that hold one, separated by commas |
-| `launchplane.password-file` | on a database server, where on its volume the data set's password is kept |
+| `launchplane.secret-variables` | on a web part, background service or database server given a secret, the environment variables that hold one, separated by commas |
 
 Data set networks and volumes carry the product, lane and data set labels too.
 
@@ -58,7 +57,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 ## Known and not fixed
 
-- **A refusal from Docker inside the read of the secrets that comes from the Docker client's own follow-up question is not read again.** It answers `503`, and asking again works.
+- **A refusal from Docker while the secrets are read, about a container removed at that moment, is not read again.** It answers `503`, and asking again works.
 - **The page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
 - **The page does not show where a route to another lane's instance goes.** `/running` answers it.
 - **No test loads the page or runs its script.** Chris watching the page is the check. Comes back when the page breaks without anyone noticing, or when there is a second page.

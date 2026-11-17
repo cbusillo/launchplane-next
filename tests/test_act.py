@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from launchplane.act import MOST_STEPS, Lanes, Stopped
-from launchplane.container_host import HasDatabase, NewDatabase, PartStopped
+from launchplane.container_host import HasDatabase, PartStopped
 from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import (
     BACK_SOON,
@@ -143,15 +143,15 @@ class FakeHost:
         self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",))
         self.record(f"volume {data_set}")
 
-    def create_database(self, new: NewDatabase) -> None:
+    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         database = DataSetDatabase(
-            container=f"database-{new.data_set}",
+            container=f"database-{data_set}",
             state=InstanceState.RUNNING,
-            networks=(new.network,),
-            mounts=(Mount(source=new.volume, path="/var/lib/postgresql"),),
+            networks=(network,),
+            mounts=(Mount(source=volume, path="/var/lib/postgresql"),),
         )
-        self.change_data_set(new.product, new.lane, new.data_set, databases=(database,))
-        self.record(f"database {new.data_set} on {new.network} and {new.volume} from {new.image}")
+        self.change_data_set(product, lane, data_set, databases=(database,))
+        self.record(f"database {data_set} on {network} and {volume} from {image}")
 
     def start_database(self, container: str) -> None:
         self.change_database(container, state=InstanceState.RUNNING, exit_code=None)
