@@ -92,7 +92,7 @@ On the test bed on November 17, PostgreSQL 17, one nginx lane.
 - A call answered `202` in 20 to 25 ms. The worker took the request up 4 to 6 ms after it was asked.
 - A move from one build to another, with `?wait=`: 6.2 to 6.4 s, as before requests were kept. Asking again for a finished move: 0.12 s, where it was 0.07 s; the wait reads the record every 0.1 s.
 - Killed with `kill -9` while the new instance was being checked: systemd started Launchplane again, the request was taken up 1.2 s after the kill with nobody calling, and it ended `done` and `switched` 7.5 s after it was asked, with two attempts, the first `interrupted`.
-- The 56 test-bed tests passed in 20 minutes.
+- The 58 test-bed tests passed in 21 minutes.
 
 ## On the test bed
 
