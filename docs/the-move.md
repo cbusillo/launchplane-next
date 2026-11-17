@@ -33,7 +33,7 @@ A move does not answer success while the lane's web address does not answer a re
 
 `did` lists every change the move made, whatever the outcome.
 
-A `503` means the host or proxy could not be read or changed. The move stopped where it was, its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, and a newer one [cancels](requests.md#cancelling) a move that has not switched yet: its new instance is removed and the web address never moves.
+A `503` means the host or proxy could not be read or changed. The move stopped where it was, its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move that has not switched yet: the instance it started is removed and the web address never moves.
 
 **The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error.
 

@@ -37,6 +37,8 @@ class RunningInstance(BaseModel):
     networks: tuple[str, ...]
     data_set: str | None = None
     mounts: tuple[Mount, ...] = ()
+    # The request that made it, where one did.
+    request: int | None = None
 
 
 class RunningBackgroundService(BaseModel):

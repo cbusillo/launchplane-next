@@ -252,6 +252,14 @@ def test_a_password_made_for_a_lane_is_known_as_a_secret_before_docker_is_given_
     assert known_when_given == [True, True]
 
 
+def test_an_instance_is_stamped_with_the_request_that_made_it_and_read_back_with_it() -> None:
+    docker = RecordingDocker()
+    host = ContainerHost(docker.as_client(), "test")
+    host.start_instance(TARGET, WEB, None, 41)
+    host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None)
+    assert {each.container: each.request for each in host.read().instances} == {WEB: 41, "shop-testing-bbbbbbbbbbbb": None}
+
+
 def test_two_lanes_that_find_the_proxy_missing_at_the_same_moment_make_it_once() -> None:
     docker = RecordingDocker()
     host = ContainerHost(docker.as_client(), "test")

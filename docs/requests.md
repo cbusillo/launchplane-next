@@ -17,9 +17,9 @@ curl -X POST http://launchplane.shiny:8700/requests/<id>/cancel
 Each of the four calls writes a request and answers `202` with the request and a `Location` header, `/requests/<id>`. Nothing on the host has changed yet.
 
 - **`?wait=<seconds>`**, up to 3600. The call answers when the request ends, with the status and body the call had before requests were kept: `200` with the result, `422` with the result for an outcome that is not a success, or `503` with `error` when it stopped. A request that was cancelled answers `409` with `error`, saying by what and what was put back. If the request has not ended in that time, or needs a person, the answer is `202` with the request. The `Location` header is there either way.
-- **Asking the same thing of a lane while a request for it is waiting or working** writes nothing, cancels nothing and answers with that request. The same thing is the same call, lane, build and data set named for deleting. A request that is being cancelled is not answered with: the call writes a new one.
-- **Asking anything else of a lane** writes a new request, and that cancels every request for the lane that was waiting or working before it: see [cancelling](#cancelling). The new request is worked in its turn, once those before it have ended.
-- **`Idempotency-Key: <text>`**. The same key with the same call and body answers with the request already written, whether or not it has ended. The same key with anything else answers `409` and writes nothing. A key is never forgotten and never shown: the record keeps only its SHA-256 digest. A call with a key always writes its own request, even when the same thing is already waiting, and so cancels the one that waits.
+- **Asking the same thing of a lane while a request for it is waiting or working** cancels nothing, with a key or without. The same thing is the same call, lane, build and data set named for deleting. Without a key the call writes nothing and answers with that request; if that request is being cancelled, it writes a new one. With a key it is answered with a request of its own, worked after the first.
+- **Asking anything else of a lane** writes a new request, and that cancels every request for the lane that was waiting or working before it and asks something else: see [cancelling](#cancelling). The new request is worked in its turn, once those before it have ended.
+- **`Idempotency-Key: <text>`**. The same key with the same call and body answers with the request already written, whether or not it has ended. The same key with anything else answers `409` and writes nothing. A key is never forgotten and never shown: the record keeps only its SHA-256 digest. A call with a key always writes its own request, even when the same thing is already waiting.
 - **`409`** also answers a call for a lane that has a request needing a person, and says which. That request is not cancelled.
 - **`422`** with `error` also answers a call that carries a secret a container holds, in any part of it. Nothing is written.
 - **`503`** with `error` means the record could not be reached. The answer says the request was not written and nothing was changed only when the record had answered that it holds nothing like it. When the record could not be asked, the call may repeat a request already written, with a key or without one; and when the record was lost after the request was sent, it may be written. Either way the answer says that whether it was written is not known: if it was, it will be worked. Asking again with the same key answers with it if it was, and `GET /requests` lists it.
@@ -50,20 +50,20 @@ A request is `done` when its call would have answered `200`, `failed` when it wo
 `POST /requests/<id>/cancel` cancels one request, and a newer request for a lane cancels the older ones the same way. What it means depends only on where the request is:
 
 - **Waiting:** it ends as `cancelled`. Nothing was done.
-- **Working, before its point of no return:** the request is marked in the record. Its worker is never killed: it reads the mark after its next reading of the host, before its next action, puts the lane back, and the request ends as `cancelled`. `answer.put_back` lists what it did to put the lane back.
+- **Working, before its point of no return:** the request is marked in the record. Its worker is never killed: it reads the mark before its next action and puts the lane back, by the same judged and checked steps as the call itself. The request ends as `cancelled` only when the judgement then finds the lane as it must be, and `answer.put_back` lists what was done. If something is left wrong or unfinished, the request ends as `failed` and `error` says what.
 - **Working, past that point:** it is too late. The request is finished as asked and ends as it would have. `cancel_refused` says why.
 - **Ended, or needing a person:** nothing changes.
 
-Where the point is, is read from the host each time, never from the events:
+Where the point is, and what the request started, are read from the host each time, never from the events. An instance carries the label `launchplane.request` with the id of the request that made it, so nothing an earlier request left is touched. A routes file the proxy has not loaded yet is waited for first, so the instance the proxy sends visitors to is known before anything is removed.
 
 | Request | Too late once | Put back before that |
 | --- | --- | --- |
-| A move | The lane's routes file names an instance of the build asked for: visitors have been switched. | Every instance of that build beside the one receiving visitors is removed, as after a failed check, and then the logins no container holds. In a lane in maintenance a move starts nothing, so nothing is removed. |
-| A retire | The lane's routes file is gone. Removing it is the first thing a retire changes, and nothing after it can be put back: the containers are removed, and Launchplane does not make a removed instance again by itself. | Nothing: nothing was changed. |
+| A move | The proxy sends the web address to an instance of the build asked for: visitors have been switched. | Each instance this request started is removed, as after a failed check, and then the logins no container holds. In a lane in maintenance a move starts nothing, so nothing is removed. |
+| A retire | The lane's routes file is gone. Removing it is the first thing a retire changes, and nothing after it can be put back: the containers are removed, and Launchplane does not make a removed instance again by itself. The rest is finished as asked, except that a data set named for deleting is kept when the cancel came before it was deleted: `cancel_refused` says so, and the answer lists it in `kept_data_sets`. | Nothing: nothing was changed. |
 | Beginning maintenance | The routes file points at the back soon page. That is its first change too. Ending maintenance brings the lane back. | Nothing: nothing was changed. |
 | Ending maintenance | The routes file points at the instance again. | What it started is stopped again, the database server last, as after a failed check. |
 
-Putting a lane back never deletes data: a data set the request made, and a database server it started, stay, as retiring leaves them.
+Putting a lane back never deletes data: a data set the request made, and a database server it started, stay, as retiring leaves them. A lane left with a data set and no instance is not as it must be, so a first move with data that is cancelled ends as `failed` and says so.
 
 | Status | Body | Meaning |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ Putting a lane back never deletes data: a data set the request made, and a datab
 | `409` | `error` | It is not cancelled and will not be: the worker found it too late and says why, or it had ended as `done` or `failed`, or it needs a person. Nothing was changed by this call. |
 | `404` | `error` | The record holds no such request. |
 
-With `?wait=<seconds>` the call answers once the request has ended or its cancel was refused. The mark is kept in the record, so after a restart the worker that takes the request up still puts its lane back.
+With `?wait=<seconds>` the call answers as soon as the answer is known: the request is cancelled, its cancel was refused, it has ended, or it needs a person. The mark is kept in the record, so after a restart the worker that takes the request up still puts its lane back.
 
 ## The workers
 
@@ -135,10 +135,10 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **`asked_by` is an address, not a person.** Who may ask is not settled yet.
 - **Who may cancel is not settled.** Any caller can, as any caller can ask.
 - **A cancel waits for the action under way.** The mark is read between actions, and one action can take as long as a check, 20 s, or a stop, 30 s.
-- **A retire that names a data set for deleting, cancelled after its route is gone, still deletes the data set.** It is finished as asked, and the answer to the cancel says so. Whether a cancel should instead stop a retire before it deletes is Chris's to decide.
-- **A cancelled move removes every instance of its build that receives no visitors**, also one an earlier request left on the lane. Which of them this request started, the host cannot show.
-- **An instance of another build that a move retired before it was cancelled is not brought back.** It was left over from an earlier request and received no visitors.
-- **A request that fails while it is being put back ends as `failed`,** with the real error, not as `cancelled`. Asking again goes on from what is there.
+- **A cancel asked of a retire keeps the data set it named, also when the rest was too late to cancel.** The direction session chose this as the safe side; Chris may reverse it.
+- **A cancelled request over a lane that was already unfinished ends as `failed`,** though the request changed nothing: the judgement is of the lane, not of what the request did.
+- **Only an instance is stamped with its request.** A background service and the parts of a data set are not: putting back removes neither.
+- **An instance left by an earlier request that a move retired before it was cancelled is not brought back.** It received no visitors.
 - **A request that ends between the cancel and its worker's next reading ends as it would have.** The cancel call then answers `409` and says how it ended.
 - **The locks on what lanes share are in the process.** A second Launchplane on the same host is held off each lane by the lane's turn, and not off the proxy or the routes folder.
 - **A reading given up on keeps its connection until the record answers.** At most 4 readings wait at once, so the workers keep connections.

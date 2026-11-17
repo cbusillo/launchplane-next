@@ -173,7 +173,7 @@ class Record(Protocol):
     def give_up(self, request: int) -> Request | None: ...
     def retry(self, request: int, asked_by: str) -> Request | None: ...
     def cancel(self, request: int, by: str) -> Request | None: ...
-    def cancel_wanted(self, request: int) -> bool: ...
+    def cancel_asked(self, request: int) -> bool: ...
     def refuse_cancel(self, attempt: int, why: str) -> None: ...
 
 
@@ -241,8 +241,12 @@ class Sql:
         order by product, lane, id
     ) oldest_of_each_lane order by id
     """
+    # One that asks exactly what the new request asks is left: asking for the same again cancels nothing.
     UNFINISHED_BEFORE: Final = """
-    select id from request where (product, lane) = (%s, %s) and id < %s and stands in ('waiting', 'working')
+    select older.id from request older, request new
+    where new.id = %s and (older.product, older.lane) = (new.product, new.lane) and older.id < new.id
+        and older.stands in ('waiting', 'working')
+        and (older.work, older.build, older.delete_data_set) is distinct from (new.work, new.build, new.delete_data_set)
     """
     # One statement, so a request taken up during its cancel is either ended or marked, never neither.
     CANCEL: Final = """
@@ -254,7 +258,7 @@ class Sql:
         cancel_asked_by = %s
     where id = any(%s) and stands in ('waiting', 'working') and cancel_asked_at is null
     """
-    CANCEL_WANTED: Final = "select cancel_asked_at is not null and cancel_refused is null as wanted from request where id = %s"
+    CANCEL_ASKED: Final = "select cancel_asked_at is not null as asked from request where id = %s"
     REFUSE_CANCEL: Final = """
     update request set cancel_refused = %s from attempt
     where attempt.id = %s and attempt.ended is null and request.id = attempt.request returning request.id
@@ -332,12 +336,12 @@ def cancel_each(session: Session, gate: Gate, requests: list[int], by: str) -> N
     session.execute(Sql.CANCEL, gate.sent(PutBack().model_dump(), by, list[JsonValue](requests)))
 
 
-# A newer request for a lane cancels every unfinished one that came before it. One that needs a person is never among
-# them: its lane takes no request at all.
+# A newer request for a lane cancels every unfinished one that came before it and asks something else. One that needs a
+# person is never among them: its lane takes no request at all.
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
     passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key))
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
-    before = session.execute(Sql.UNFINISHED_BEFORE, gate.made(new.product, new.lane, new.id)).fetchall()
+    before = session.execute(Sql.UNFINISHED_BEFORE, gate.made(new.id)).fetchall()
     cancel_each(session, gate, [row["id"] for row in before], f"request {new.id}")
     return new
 
@@ -543,10 +547,10 @@ class PostgresRecord(Record):
             row = session.execute(Sql.READ, self.gate.made(request)).fetchone()
             return None if row is None else Request.model_validate(row)
 
-    def cancel_wanted(self, request: int) -> bool:
-        with self.session("reading whether a request is to be cancelled") as session:
-            row = session.execute(Sql.CANCEL_WANTED, self.gate.made(request)).fetchone()
-            return row is not None and row["wanted"]
+    def cancel_asked(self, request: int) -> bool:
+        with self.session("reading whether a cancel was asked of a request") as session:
+            row = session.execute(Sql.CANCEL_ASKED, self.gate.made(request)).fetchone()
+            return row is not None and row["asked"]
 
     def refuse_cancel(self, attempt: int, why: str) -> None:
         with self.session("writing why a request was not cancelled") as session:

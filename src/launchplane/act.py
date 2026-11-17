@@ -34,6 +34,7 @@ from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.record import Kept, RecordError, Request, Stands
 from launchplane.steps import (
     Action,
+    Cancel,
     Done,
     Event,
     FreshNames,
@@ -53,7 +54,7 @@ type Lane = tuple[str, str]
 
 class InstanceHost(Protocol):
     def read(self, lane: Lane | None = None) -> OnHost: ...
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None: ...
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None: ...
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
@@ -140,7 +141,7 @@ TAKE: dict[type, Take] = {
     steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
     steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),
     steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
-    steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use),
+    steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use, step.request),
     steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
         step.target, step.instance, step.use, list(step.command)
     ),
@@ -165,31 +166,31 @@ def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Wit
     return event
 
 
-type Decide[Answer] = Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop]
-type DecideBack = Callable[[Judgement, tuple[Event, ...]], plan.StepBack]
+type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], Action | Done[Answer] | Done[PutBack] | Stop | TooLate]
 
 
-# A cancel is read between actions, after the host. From then on the call takes the steps back and ends by saying so,
-# unless the host shows it is too late: then the cancel is refused, once, and the call goes on as asked.
+# A cancel is read between actions. From then on the same planner takes the steps back, with the lane read and judged
+# for that, and the call ends by saying so; unless the host shows it is too late: then the cancel is refused and the
+# call goes on as asked.
 def settle[Answer](
-    read_judged: Callable[[], Judgement],
+    read_judged: Callable[[bool], Judgement],
     next_step: Decide[Answer],
-    step_back: DecideBack,
     take: Callable[[Action], Event],
     witness: Witness,
 ) -> Answer:
     done: list[Event] = []
-    decide: Decide[Answer] | DecideBack = next_step
-    turned_at = 0
+    turned_at: int | None = None
+    refused = False
     while True:
-        judged = read_judged()
-        if decide is next_step and witness.cancel_asked():
-            decide, turned_at = step_back, len(done)
-        step = decide(judged, tuple(done[turned_at:]))
+        if turned_at is None and witness.cancel_asked():
+            turned_at = len(done)
+        cancel = None if turned_at is None else Cancel(tuple(done[turned_at:]), refused)
+        judged = read_judged(plan.is_turned_back(cancel))
+        step = next_step(judged, tuple(done), cancel)
         if isinstance(step, TooLate):
             witness.refuse_cancel(step.reason)
-            decide, turned_at = next_step, 0
-            step = next_step(judged, tuple(done))
+            refused = True
+            continue
         if isinstance(step, Done):
             if isinstance(step.answer, PutBack):
                 raise Cancelled(step.answer)
@@ -277,8 +278,9 @@ class Lanes:
         product = self.read_product(target.product)
         return settle(
             self.judging(target.product, target.lane, product, Work.MOVE),
-            lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
-            lambda judged, done: plan.move_step_back(judged, target, done),
+            lambda judged, done, cancel: plan.decide_move(
+                judged, target, product, self.name_fresh(target), done, cancel, witness.request
+            ),
             self.take,
             witness,
         )
@@ -286,15 +288,14 @@ class Lanes:
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
         return settle(
             self.judging(product, lane, self.description_of(product), Work.RETIRE),
-            lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
-            plan.retire_step_back,
+            lambda judged, done, cancel: plan.decide_retire(judged, delete_data_set, done, cancel),
             self.take,
             witness,
         )
 
     def begin_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)
-        return settle(judging, maintenance.decide_begin, maintenance.begin_step_back, self.take, witness)
+        return settle(judging, maintenance.decide_begin, self.take, witness)
 
     def end_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
@@ -306,17 +307,19 @@ class Lanes:
             return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
         description = self.read_product(product)
         return settle(
-            self.judging(product, lane, description, Work.END_MAINTENANCE),
-            lambda judged, done: maintenance.decide_end(judged, description, done),
-            maintenance.end_step_back,
+            # Turned back, it is stopping the lane again, and the lane is judged as one going into maintenance.
+            self.judging(product, lane, description, Work.END_MAINTENANCE, Work.BEGIN_MAINTENANCE),
+            lambda judged, done, cancel: maintenance.decide_end(judged, description, done, cancel),
             self.take_behind_back_soon,
             witness,
         )
 
     # A move answers from what the status call sees, so it asks its lane's web address too.
-    def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
+    def judging(
+        self, product: str, lane: str, description: Product | ProductError, work: Work, turned_back: Work | None = None
+    ) -> Callable[[bool], Judgement]:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
-        return lambda: judge(self.read(scope).lane(product, lane), description, work)
+        return lambda back: judge(self.read(scope).lane(product, lane), description, (turned_back or work) if back else work)
 
     def take(self, action: Action) -> Event:
         if isinstance(action, steps.Check):

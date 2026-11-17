@@ -124,6 +124,7 @@ class StartInstance:
     target: LaneBuild
     container: str
     use: DataSetUse | None = None
+    request: int | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,14 @@ class Stop:
 @dataclass(frozen=True)
 class TooLate:
     reason: str
+
+
+# A cancel was asked of the call. `back` is what the call has done since it read that, and `refused` is whether the
+# host showed it was too late.
+@dataclass(frozen=True)
+class Cancel:
+    back: tuple[Event, ...] = ()
+    refused: bool = False
 
 
 type Action = (

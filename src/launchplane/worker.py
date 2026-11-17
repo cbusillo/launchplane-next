@@ -146,12 +146,12 @@ class Worker:
                 raise Interrupted(f"The turn of {request.lane} of {request.product} is no longer held, so nothing more was done.")
 
         def cancel_asked() -> bool:
-            return self.record.cancel_wanted(request.id)
+            return self.record.cancel_asked(request.id)
 
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(attempt, why)
 
-        return Witness(tell, hold, cancel_asked, refuse_cancel)
+        return Witness(tell, hold, cancel_asked, refuse_cancel, request.id)
 
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         try:

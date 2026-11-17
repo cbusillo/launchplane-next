@@ -29,6 +29,7 @@ BUILD_LABEL = "launchplane.build"
 PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
+REQUEST_LABEL = "launchplane.request"
 GATEWAY_MODE_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
 QUIET_GATEWAY_MODE = "isolated"
 MOST_READS = 3
@@ -219,7 +220,13 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
         mounts=mounts_of(summary),
+        request=request_in(summary.labels),
     )
+
+
+def request_in(labels: dict[str, str]) -> int | None:
+    stamped = labels.get(REQUEST_LABEL, "")
+    return int(stamped) if stamped.isdecimal() else None
 
 
 def running_for(details: DockerContainerDetails, now: datetime) -> float | None:

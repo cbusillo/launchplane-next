@@ -1,17 +1,19 @@
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from launchplane.act import Lanes
-from launchplane.instance import BACK_SOON, InstanceState, LaneBuild
+from launchplane.instance import BACK_SOON, InstanceState, LaneBuild, LoadedRoute, RouteStatus
 from launchplane.judge import Work
 from launchplane.record import Asked, Record, Refused, Stands
 from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, WITH_DATA, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
+from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_record import taken_up_until_it_needs_a_person
 from tests.test_requests import MOVE, TO_B, Bed, bed_on
 from tests.test_worker import CALLER, MOVE_B, delete_every_event, kept_of, killed_while_checking, serving_a, stopped, wait_until
@@ -107,7 +109,7 @@ def test_a_move_killed_just_after_the_switch_is_too_late_to_cancel_though_no_eve
     request = taken_up_and_left(record, MOVE_B)
     proxy.host.killed_after = len(["start", "check", "route"])
     with pytest.raises(LaunchplaneKilled):
-        lanes.move(TO_BUILD_B, Witness())
+        lanes.move(TO_BUILD_B, Witness(request=request))
     proxy.host.killed_after = None
     record.cancel(request, BY_HAND)
     assert worker.work_next() is True
@@ -258,15 +260,100 @@ def test_a_move_in_a_lane_in_maintenance_that_is_cancelled_leaves_the_lanes_stop
     assert (kept_of(record, request).stands, list(proxy.host.instances)) == (Stands.CANCELLED, ["a"])
 
 
-def test_putting_a_lane_back_leaves_the_data_set_the_cancelled_move_made(record: Record) -> None:
+def test_putting_a_lane_back_keeps_the_data_set_the_move_made_and_the_request_says_the_lane_is_left_with_it(
+    record: Record,
+) -> None:
     proxy = PretendProxy(PretendHost())
     lanes = Lanes(proxy.host, proxy, read_product=lambda _product: WITH_DATA, name_fresh=numbered_names())
     request = record.write(MOVE_B, CALLER, None)
     proxy.while_checking = cancelling(record, request.id)
     assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
     deleted = [action for action in proxy.host.actions if action.startswith("delete")]
-    assert (kept_of(record, request.id).stands, proxy.host.instances, deleted) == (Stands.CANCELLED, {}, [])
-    assert len(proxy.host.data_sets) == 1
+    assert kept.error is not None and "does not end as cancelled: No instance receives visitors" in kept.error
+    assert (kept.stands, proxy.host.instances, deleted, len(proxy.host.data_sets)) == (Stands.FAILED, {}, [], 1)
+
+
+def test_cancelling_never_removes_the_instance_the_proxy_still_sends_visitors_to_though_the_routes_file_names_another(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    proxy.host.place(TO_BUILD_B, "b")
+    proxy.written[WEB_ADDRESS] = "b"
+    request = taken_up_and_left(record, Asked(product="site", lane="testing", work=Work.MOVE, build="site:a"))
+    record.cancel(request, BY_HAND)
+    assert worker.work_next() is True
+    kept = kept_of(record, request)
+    assert kept.error is not None and "The instance a runs beside the active one" in kept.error
+    assert (kept.stands, sorted(proxy.host.instances), proxy.loaded[WEB_ADDRESS]) == (
+        Stands.FAILED,
+        ["a", "b"],
+        LoadedRoute("b", RouteStatus.ENABLED),
+    )
+
+
+def test_cancelling_a_move_leaves_an_instance_of_its_build_that_an_earlier_request_started(record: Record) -> None:
+    worker, lanes, proxy = serving_a(record)
+    request = killed_while_checking(record, lanes, proxy)
+    proxy.host.instances[NEW] = proxy.host.instances[NEW].model_copy(update={"request": request - 1})
+    record.cancel(request, BY_HAND)
+    assert worker.work_next() is True
+    kept = kept_of(record, request)
+    assert kept.error is not None and f"The instance {NEW} runs beside the active one" in kept.error
+    assert (kept.stands, sorted(proxy.host.instances), proxy.host.actions) == (Stands.FAILED, ["a", NEW], [])
+
+
+def test_ending_maintenance_cancelled_over_a_database_that_had_to_be_killed_does_not_end_as_cancelled_and_says_why(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    proxy.host.databases_that_must_be_killed.add("database-data-1")
+    request = record.write(END, CALLER, None)
+    proxy.while_checking = cancelling(record, request.id)
+    assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.error is not None and "does not end as cancelled" in kept.error and "exited with code 137" in kept.error
+    assert (kept.stands, proxy.written) == (Stands.FAILED, {WEB_ADDRESS: BACK_SOON})
+
+
+def test_a_retire_cancelled_before_it_deleted_the_named_data_set_keeps_it_and_finishes_the_rest_as_asked(record: Record) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.actions.clear()
+    request = record.write(Asked(product="site", lane="testing", work=Work.RETIRE, delete_data_set="data-1"), CALLER, None)
+    proxy.while_awaiting = cancelling(record, request.id)
+    assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None and kept.cancel_refused is not None
+    assert "The data set data-1, named for deleting, is kept" in kept.cancel_refused
+    assert (kept.stands, kept.answer["outcome"], kept.answer["kept_data_sets"], kept.answer["deleted_data_set"]) == (
+        Stands.DONE,
+        "retired",
+        ["data-1"],
+        None,
+    )
+    assert (list(proxy.host.data_sets), proxy.host.instances) == (["data-1"], {})
+
+
+def test_asking_with_a_key_for_exactly_what_an_unfinished_request_asks_cancels_nothing_and_writes_a_request_of_its_own(
+    record: Record,
+) -> None:
+    waiting, other = record.write(MOVE_B, CALLER, None), record.write(RETIRE, CALLER, None)
+    with_a_key = record.write(RETIRE, CALLER, "one-release")
+    assert (with_a_key.id != other.id, kept_of(record, other.id).stands, kept_of(record, other.id).cancel_asked_by) == (
+        True,
+        Stands.WAITING,
+        None,
+    )
+    assert kept_of(record, waiting.id).cancel_asked_by == f"request {other.id}"
+
+
+def test_a_cancel_that_waits_is_answered_at_once_for_a_request_that_needs_a_person(record: Record) -> None:
+    bed = bed_on(record)
+    stuck = bed.client.post(MOVE, json=TO_B).json()["id"]
+    taken_up_until_it_needs_a_person(record, stuck)
+    began = time.monotonic()
+    answer = bed.client.post(f"/requests/{stuck}/cancel?wait=5")
+    assert (answer.status_code, time.monotonic() - began < 1) == (409, True)
 
 
 def test_a_cancel_that_carries_a_secret_a_container_holds_is_refused_and_marks_nothing(

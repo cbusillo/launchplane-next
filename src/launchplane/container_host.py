@@ -36,6 +36,7 @@ from launchplane.docker_answers import (
     PART_LABEL,
     PRODUCT_LABEL,
     QUIET_GATEWAY_MODE,
+    REQUEST_LABEL,
     CommandResult,
     ContainerHostError,
     DockerContainerDetails,
@@ -334,11 +335,13 @@ class ContainerHost:
         ready = options if use is None else on_data_set(options, use, login_on(use))
         self.create(ready).start()
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
+    # An instance is stamped with the request that makes it, so the host shows what a request started.
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
-            self.run_part(options, use, lambda on: self.logins.make(container, on))
+            stamp = {} if request is None else {REQUEST_LABEL: str(request)}
+            self.run_part(replace(options, labels=options.labels | stamp), use, lambda on: self.logins.make(container, on))
 
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
         networks = [LANE_NETWORK] if use is None else [use.network]

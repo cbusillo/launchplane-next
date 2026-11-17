@@ -97,7 +97,11 @@ class PretendRecord(Record):
         self.kept[new.id] = new
         if idempotency_key is not None:
             self.keys[key_digest(idempotency_key) or ""] = new.id
-        before = [each.id for each in self.every() if (each.product, each.lane, each.id < new.id) == (new.product, new.lane, True)]
+        before = [
+            each.id
+            for each in self.every()
+            if (each.product, each.lane) == (new.product, new.lane) and each.id < new.id and each.asked() != asked
+        ]
         self.cancel_each(before, f"request {new.id}")
         if not self.confirms_writes:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")
@@ -243,10 +247,10 @@ class PretendRecord(Record):
             self.cancel_each([request], by)
             return self.kept.get(request)
 
-    def cancel_wanted(self, request: int) -> bool:
-        self.reach("reading whether a request is to be cancelled")
+    def cancel_asked(self, request: int) -> bool:
+        self.reach("reading whether a cancel was asked of a request")
         found = self.kept.get(request)
-        return found is not None and found.cancel_asked_at is not None and found.cancel_refused is None
+        return found is not None and found.cancel_asked_at is not None
 
     def refuse_cancel(self, attempt: int, why: str) -> None:
         self.reach("writing why a request was not cancelled")

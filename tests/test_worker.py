@@ -20,6 +20,7 @@ from tests.pretend_record import PretendRecord, lose_every_turn
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
+TO_B = LaneBuild(product="site", lane="testing", build="site:b")
 CALLER = "the address 192.0.2.1"
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
 
@@ -75,7 +76,7 @@ def killed_while_checking(record: Record, lanes: Lanes, proxy: PretendProxy) -> 
     assert attempt is not None
     proxy.while_checking = kill
     with pytest.raises(LaunchplaneKilled):
-        lanes.move(LaneBuild(product="site", lane="testing", build="site:b"), Witness(tell=partial(record.note, attempt)))
+        lanes.move(TO_B, Witness(tell=partial(record.note, attempt), request=request.id))
     proxy.while_checking = lambda _container: None
     proxy.host.actions.clear()
     return request.id

@@ -72,7 +72,12 @@ class PretendHost:
             self.data_sets[name] = found.model_copy(update={"databases": databases})
 
     def place(
-        self, target: LaneBuild, container: str, state: InstanceState = InstanceState.RUNNING, use: DataSetUse | None = None
+        self,
+        target: LaneBuild,
+        container: str,
+        state: InstanceState = InstanceState.RUNNING,
+        use: DataSetUse | None = None,
+        request: int | None = None,
     ) -> None:
         self.instances[container] = RunningInstance(
             product=target.product,
@@ -82,6 +87,7 @@ class PretendHost:
             state=state,
             networks=(LANE_NETWORK,) if use is None else (LANE_NETWORK, use.network),
             data_set=None if use is None else use.data_set,
+            request=request,
         )
 
     def attach(self, container: str, network: str, *, quiet: bool) -> None:
@@ -104,8 +110,8 @@ class PretendHost:
         self.change_database(database, unheld_logins=())
         self.record(f"remove logins from {database}")
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
-        self.place(target, container, use=use)
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
+        self.place(target, container, use=use, request=request)
         self.record(f"start {container}")
 
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:

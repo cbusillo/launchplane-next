@@ -1,3 +1,5 @@
+from typing import overload
+
 from launchplane.instance import (
     DataSet,
     DataSetUse,
@@ -14,6 +16,7 @@ from launchplane.steps import (
     AwaitDatabase,
     AwaitRoute,
     BackgroundServiceRefused,
+    Cancel,
     Check,
     CheckRefused,
     CreateDatabase,
@@ -292,14 +295,83 @@ def with_logins_settled[Answer](step: Step[Answer], judged: Judgement, done: tup
     return (login_step(judged, done) or step) if isinstance(step, Done) else step
 
 
+# Whether the call is putting its lane back: a cancel was asked of it and the host has not shown it too late.
+def is_turned_back(cancel: Cancel | None) -> bool:
+    return cancel is not None and not cancel.refused
+
+
+def has_nothing(lane: LaneReading) -> bool:
+    return not (lane.instances or lane.background_services or lane.data_sets)
+
+
+# The one end of every cancel. The lane is judged as any lane is, and a request ends as cancelled only over a lane that
+# is as it must be: what putting back left wrong or unfinished is said, and the request then fails with it.
+def put_back_or_what_is_left(judged: Judgement, back: tuple[Event, ...]) -> Done[PutBack] | Stop:
+    lane = judged.lane
+    never_there = lane.route.written is None and has_nothing(lane)
+    left = [] if never_there else [finding for finding in judged.findings if finding.kind not in LOGIN_KINDS]
+    if left:
+        return Stop(
+            f"The cancel was carried out, and {lane.lane} of {lane.product} is not as it must be, so the request does not "
+            f"end as cancelled: {sentences(left)}. {changes_so_far(back)}"
+        )
+    return Done(PutBack(put_back=changes_made(back)))
+
+
+# The same checked steps as the move: the route is waited for first, so the instance the proxy sends visitors to is
+# known before anything is removed. What this request started is read from the stamp on each instance.
+def move_step_back(
+    judged: Judgement, target: LaneBuild, request: int | None, done: tuple[Event, ...], back: tuple[Event, ...]
+) -> StepBack:
+    lane = judged.lane
+    # A move starts nothing in a lane in maintenance.
+    if lane.route.in_maintenance:
+        return put_back_or_what_is_left(judged, back)
+    if (step := route_step(judged, done)) is not None:
+        return step
+    receiving = next((instance for instance in lane.instances if instance.container == lane.route.written), None)
+    if receiving is not None and receiving.build == target.build:
+        return TooLate(
+            f"{lane.web_address} already sends its visitors to {receiving.container}, an instance of {target.build}, so the "
+            "move could not be cancelled and is finished as asked. Moving the lane to its earlier build puts that build back."
+        )
+    started = [each.container for each in lane.instances if request is not None and each.request == request]
+    if started:
+        return RemoveInstance(min(started))
+    return put_back_or_what_is_left(judged, back)
+
+
+@overload
 def decide_move(
     judged: Judgement, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
-) -> Step[MoveResult]:
-    return with_logins_settled(move_step(judged, target, product, fresh, done), judged, done)
+) -> Step[MoveResult]: ...
+@overload
+def decide_move(
+    judged: Judgement,
+    target: LaneBuild,
+    product: Product,
+    fresh: FreshNames,
+    done: tuple[Event, ...],
+    cancel: Cancel | None,
+    request: int | None,
+) -> Step[MoveResult] | StepBack: ...
+def decide_move(
+    judged: Judgement,
+    target: LaneBuild,
+    product: Product,
+    fresh: FreshNames,
+    done: tuple[Event, ...],
+    cancel: Cancel | None = None,
+    request: int | None = None,
+) -> Step[MoveResult] | StepBack:
+    if cancel is not None and is_turned_back(cancel):
+        back = move_step_back(judged, target, request, done, cancel.back)
+        return back if isinstance(back, TooLate) else with_logins_settled(back, judged, done)
+    return with_logins_settled(move_step(judged, target, product, fresh, done, request), judged, done)
 
 
 def move_step(
-    judged: Judgement, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
+    judged: Judgement, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...], request: int | None
 ) -> Step[MoveResult]:
     lane = judged.lane
     route, web_address = lane.route, lane.web_address
@@ -330,7 +402,7 @@ def move_step(
         return Retire(of_other_instances[0])
     if receiving is not None and is_fit(judged, receiving, target):
         return settle_serving(judged, receiving, target, product, answer, done)
-    return replace_receiving(judged, receiving, target, product, fresh, done)
+    return replace_receiving(judged, receiving, target, product, fresh, done, request)
 
 
 def replace_receiving(
@@ -340,6 +412,7 @@ def replace_receiving(
     product: Product,
     fresh: FreshNames,
     done: tuple[Event, ...],
+    request: int | None,
 ) -> Action | Stop:
     lane = judged.lane
     data_set = None if product.database is None else lane_data_set(lane, receiving, fresh.data_set)
@@ -356,7 +429,7 @@ def replace_receiving(
         return use
     if candidate is not None:
         return check_then_route(judged, instances[candidate], product, done)
-    return StartInstance(target, fresh.container, use)
+    return StartInstance(target, fresh.container, use, request)
 
 
 def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
@@ -365,17 +438,52 @@ def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
     return RetireOutcome.RETIRED if retired else RetireOutcome.UNCHANGED
 
 
-def decide_retire(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
-    return with_logins_settled(retire_step(judged, delete_data_set, done), judged, done)
+# Once a cancel was asked, a data set named for deleting is kept, also where the rest is too late to put back.
+@overload
+def decide_retire(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]: ...
+@overload
+def decide_retire(
+    judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...], cancel: Cancel | None
+) -> Step[RetireResult] | StepBack: ...
+def decide_retire(
+    judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...], cancel: Cancel | None = None
+) -> Step[RetireResult] | StepBack:
+    if cancel is not None and is_turned_back(cancel):
+        return retire_step_back(judged, delete_data_set, cancel.back)
+    return with_logins_settled(retire_step(judged, None if cancel else delete_data_set, done), judged, done)
+
+
+def retire_route_step(judged: Judgement) -> Action | None:
+    if judged.of_kind(Kind.PROXY_STOPPED):
+        return StartProxy()
+    if judged.of_kind(Kind.ROUTE_NOT_LOADED):
+        return AwaitRoute(judged.lane.web_address, judged.lane.route.written)
+    return None
+
+
+# The first thing a retire changes is the route, and nothing it removes after that can be put back.
+def retire_step_back(judged: Judgement, delete_data_set: str | None, back: tuple[Event, ...]) -> StepBack:
+    lane = judged.lane
+    if (step := retire_route_step(judged)) is not None:
+        return step
+    if lane.route.written is not None:
+        return put_back_or_what_is_left(judged, back)
+    kept = lane.data_set(delete_data_set)
+    saved = (
+        "" if kept is None else f" The data set {kept.data_set}, named for deleting, is kept: the cancel came before it was deleted."
+    )
+    return TooLate(
+        f"{lane.web_address} has no route, so retiring {lane.lane} of {lane.product} could not be cancelled and is finished "
+        "as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself. "
+        f"Moving the lane to a build brings it back on its data set.{saved}"
+    )
 
 
 def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
     lane = judged.lane
     route, web_address = lane.route, lane.web_address
-    if judged.of_kind(Kind.PROXY_STOPPED):
-        return StartProxy()
-    if judged.of_kind(Kind.ROUTE_NOT_LOADED):
-        return AwaitRoute(web_address, route.written)
+    if (step := retire_route_step(judged)) is not None:
+        return step
     if route.written is not None:
         return RemoveRoute(web_address, route.written)
     if lane.background_services:
@@ -400,37 +508,4 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
             deleted_data_set=deleted,
             kept_data_sets=sorted(found.data_set for found in lane.data_sets),
         )
-    )
-
-
-def put_back(done: tuple[Event, ...]) -> Done[PutBack]:
-    return Done(PutBack(put_back=changes_made(done)))
-
-
-# Whether visitors have been switched is read from the routes file, as the move reads which instance receives them.
-# What the move started is found as the move finds the instance to switch to: beside the one receiving, of its build.
-def move_step_back(judged: Judgement, target: LaneBuild, done: tuple[Event, ...]) -> StepBack:
-    lane = judged.lane
-    receiving = next((instance for instance in lane.instances if instance.container == lane.route.written), None)
-    if receiving is not None and receiving.build == target.build:
-        return TooLate(
-            f"{lane.web_address} already sends its visitors to {receiving.container}, an instance of {target.build}, so the "
-            "move could not be cancelled and is finished as asked. Moving the lane to its earlier build puts that build back."
-        )
-    # A move starts nothing in a lane in maintenance, and the instance stopped there is the lane's own.
-    started = [] if lane.route.in_maintenance else [each.container for each in lane.instances if each.build == target.build]
-    if started:
-        return RemoveInstance(min(started))
-    return with_logins_settled(put_back(done), judged, done)
-
-
-# The first thing a retire changes is the route, and nothing it does after that can be put back.
-def retire_step_back(judged: Judgement, done: tuple[Event, ...]) -> StepBack:
-    lane = judged.lane
-    if lane.route.written is not None:
-        return put_back(done)
-    return TooLate(
-        f"{lane.web_address} has no route, so retiring {lane.lane} of {lane.product} could not be cancelled and is finished "
-        "as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself. "
-        "Moving the lane to a build brings it back on its data set."
     )
