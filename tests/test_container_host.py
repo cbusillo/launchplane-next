@@ -1,17 +1,15 @@
-import itertools
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-import requests
-from docker.errors import APIError
 
-from launchplane.container_host import ContainerHost, PartStopped
+from launchplane.container_host import ContainerHost, NewDatabase, PartStopped
+from launchplane.data_set import REMOVE_LOGIN, RULES_FILE, login_of
 from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, secrets_held
 from launchplane.instance import LANE_NETWORK, DataSet, DataSetDatabase, DataSetUse, HostNetwork, InstanceState, LaneBuild, Mount
 from launchplane.product import Product, ProductError, ProductFolder
-from tests.recording_docker import RecordingDocker
+from tests.recording_docker import RecordingDocker, RecordingServer
 
 DATA_SET_LABELS = {"launchplane.product": "shop", "launchplane.lane": "testing", "launchplane.data-set": "d1"}
 QUIET_OPTIONS = {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}
@@ -190,35 +188,136 @@ def test_a_background_service_is_read_with_the_data_set_it_says_it_runs_against(
     assert [background_service.data_set for background_service in background_services] == ["d1"]
 
 
-PASSWORD_PATH = "/var/lib/postgresql/launchplane-password"  # noqa: S105 where a password is kept, not one
-DATA_MADE_PATH = "/var/lib/postgresql/18/docker/PG_VERSION"
 VOLUME = "launchplane-data-d1-database"
+SET_UP = "/docker-entrypoint-initdb.d/launchplane.sh"
+WEB, OTHER_WEB = "shop-testing-aaaaaaaaaaaa", "shop-testing-bbbbbbbbbbbb"
+BACKGROUND_SERVICE = f"{WEB}-background-service"
+RULES_OF_THE_IMAGE = [["local", ["all"], ["all"], None, "trust", None], ["host", ["all"], ["all"], "all", "reject", None]]
 
 
 def database_made(docker: RecordingDocker) -> ContainerHost:
     host = ContainerHost(docker.as_client(), "test")
-    host.create_database("shop", "testing", "d1", DATA_SET_NETWORK, VOLUME, "postgres:18-alpine")
+    host.create_database(NewDatabase("shop", "testing", "d1", DATA_SET_NETWORK, VOLUME, "postgres:18-alpine"))
     return host
 
 
-def password_kept(docker: RecordingDocker) -> str:
-    return docker.containers.files_by_volume[VOLUME][PASSWORD_PATH].decode()
+def server_of(docker: RecordingDocker) -> RecordingServer:
+    return docker.containers.servers_by_volume[VOLUME]
 
 
-def test_the_password_is_written_for_its_owner_only_before_the_database_first_starts() -> None:
+def given_to(docker: RecordingDocker, container: str) -> dict[str, str]:
+    return dict(entry.split("=", 1) for entry in docker.containers.by_name[container].environment)
+
+
+def test_a_new_database_gets_its_set_up_before_it_first_starts_and_refuses_every_address_until_it_has_run() -> None:
     docker = RecordingDocker()
     database_made(docker)
     database = docker.containers.by_name[DATABASE]
-    assert database.calls == [f"read {PASSWORD_PATH}", f"read {DATA_MADE_PATH}", f"write {PASSWORD_PATH}", "start"]
-    assert database.file_modes == {PASSWORD_PATH: 0o600}
+    assert database.calls == [f"write {SET_UP}", "start"]
+    assert RULES_FILE in database.files[SET_UP].decode()
+    assert given_to(docker, DATABASE)["POSTGRES_HOST_AUTH_METHOD"] == "reject"
 
 
-def test_a_password_file_that_is_not_text_is_a_host_error_naming_the_data_set() -> None:
+def test_no_instance_is_started_and_no_login_made_on_a_data_set_whose_access_rules_are_not_launchplanes() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
-    docker.containers.files_by_volume[VOLUME][PASSWORD_PATH] = b"\xff\xfe"
-    with pytest.raises(ContainerHostError, match="of the data set d1 is not text"):
-        host.start_instance(TARGET, "shop-testing-1", LINK)
+    server_of(docker).rules = RULES_OF_THE_IMAGE
+    with pytest.raises(ContainerHostError, match="of the data set d1 does not have Launchplane's access rules"):
+        host.start_instance(TARGET, WEB, LINK)
+    assert (WEB in docker.containers.by_name, server_of(docker).asked) == (False, [])
+
+
+def test_an_instance_gets_a_login_of_its_own_and_the_server_is_sent_a_verifier_never_the_password() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    given = given_to(docker, WEB)
+    [(_, sent)] = server_of(docker).asked
+    assert (given["PGUSER"], given["PGDATABASE"], sent["login"]) == ("i_aaaaaaaaaaaa", "app", "i_aaaaaaaaaaaa")
+    assert sent["verifier"].startswith("SCRAM-SHA-256$4096:")
+    assert given["PGPASSWORD"] not in " ".join(docker.containers.by_name[DATABASE].calls)
+
+
+def test_two_instances_on_one_data_set_each_have_their_own_login_and_password() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    host.start_instance(TARGET, OTHER_WEB, LINK)
+    first, second = given_to(docker, WEB), given_to(docker, OTHER_WEB)
+    assert server_of(docker).logins == {first["PGUSER"], second["PGUSER"]}
+    assert (first["PGUSER"] != second["PGUSER"], first["PGPASSWORD"] != second["PGPASSWORD"]) == (True, True)
+
+
+def test_the_longest_product_and_lane_names_still_give_two_instances_logins_postgresql_does_not_cut_into_one() -> None:
+    longest = f"{'p' * 31}-{'l' * 31}"
+    logins = {login_of(f"{longest}-aaaaaaaaaaaa"), login_of(f"{longest}-bbbbbbbbbbbb")}
+    assert (len(logins), max(map(len, logins)) <= 63) == (2, True)
+
+
+def test_a_background_service_is_given_the_login_its_instance_holds_not_one_of_its_own() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    host.start_background_service(TARGET, WEB, LINK, ["work"])
+    assert given_to(docker, BACKGROUND_SERVICE) == given_to(docker, WEB)
+    assert len(server_of(docker).logins) == 1
+
+
+def test_a_background_service_whose_instance_holds_no_login_is_not_started() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, None)
+    with pytest.raises(ContainerHostError, match="holds no database login"):
+        host.start_background_service(TARGET, WEB, LINK, ["work"])
+    assert BACKGROUND_SERVICE not in docker.containers.by_name
+
+
+def test_a_login_goes_when_the_last_container_holding_it_is_retired_and_not_before() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    host.start_background_service(TARGET, WEB, LINK, ["work"])
+    host.start_instance(TARGET, OTHER_WEB, LINK)
+    host.retire_instance(BACKGROUND_SERVICE)
+    while_the_web_part_holds_it = set(server_of(docker).logins)
+    host.retire_instance(WEB)
+    assert (while_the_web_part_holds_it, server_of(docker).logins) == ({"i_aaaaaaaaaaaa", "i_bbbbbbbbbbbb"}, {"i_bbbbbbbbbbbb"})
+
+
+def test_an_instance_removed_after_a_failed_check_loses_its_login() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    host.remove_instance(WEB)
+    assert server_of(docker).logins == set()
+
+
+def test_a_login_no_container_holds_is_removed_when_the_next_login_is_made() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    server_of(docker).logins.add("i_left_by_a_crash")
+    host.start_instance(TARGET, WEB, LINK)
+    assert server_of(docker).logins == {"i_aaaaaaaaaaaa"}
+
+
+def test_an_instance_retired_while_its_database_is_stopped_is_retired_and_its_login_goes_when_the_next_is_made() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    host.stop_database(DATABASE)
+    host.retire_instance(WEB)
+    left = set(server_of(docker).logins)
+    host.start_database(DATABASE)
+    host.start_instance(TARGET, OTHER_WEB, LINK)
+    assert (docker.containers.by_name[WEB].removed, left, server_of(docker).logins) == (True, {"i_aaaaaaaaaaaa"}, {"i_bbbbbbbbbbbb"})
+
+
+def test_a_login_is_closed_before_its_sessions_are_ended_and_owns_nothing_before_it_is_dropped() -> None:
+    order = [
+        REMOVE_LOGIN.statements.index(word)
+        for word in ("NOLOGIN", "pg_terminate_backend", "REASSIGN OWNED", "DROP OWNED", "DROP ROLE")
+    ]
+    assert order == sorted(order)
 
 
 def test_a_database_that_never_accepts_connections_is_an_error_after_its_deadline() -> None:
@@ -249,54 +348,41 @@ def test_nothing_is_attached_to_a_lanes_network_that_exists_and_is_not_quiet() -
     assert docker.containers.by_name == {}
 
 
-@pytest.mark.parametrize("left", [DATABASE, "shop-testing-1", "shop-testing-1-background-service"])
+@pytest.mark.parametrize("left", [WEB, BACKGROUND_SERVICE])
 def test_a_secret_is_read_from_whatever_still_holds_it_whichever_containers_are_gone(left: str) -> None:
     docker = RecordingDocker()
     host = database_made(docker)
-    password = password_kept(docker)
-    host.start_instance(TARGET, "shop-testing-1", LINK)
-    host.start_background_service(TARGET, "shop-testing-1", LINK, ["work"])
+    host.start_instance(TARGET, WEB, LINK)
+    host.start_background_service(TARGET, WEB, LINK, ["work"])
+    password = given_to(docker, WEB)["PGPASSWORD"]
     for name, holder in docker.containers.by_name.items():
         holder.removed = name != left
     restarted_launchplane = ContainerHost(docker.as_client(), "test")
     assert restarted_launchplane.secrets.read_secrets() == {password}
 
 
-def test_a_secret_this_launchplane_gave_out_stays_one_after_everything_holding_it_is_gone() -> None:
-    docker = RecordingDocker()
-    host = database_made(docker)
-    password = password_kept(docker)
-    docker.containers.by_name[DATABASE].removed = True
-    assert (host.secrets.read_secrets(), host.secrets.secrets_seen()) == ({password}, {password})
-
-
-def test_a_password_read_to_give_to_an_instance_is_a_secret_at_once() -> None:
+def test_the_password_a_database_was_first_started_with_is_read_as_a_secret_though_its_set_up_removes_it() -> None:
     docker = RecordingDocker()
     database_made(docker)
     restarted_launchplane = ContainerHost(docker.as_client(), "test")
-    restarted_launchplane.start_instance(TARGET, "shop-testing-1", LINK)
-    assert restarted_launchplane.secrets.secrets_seen() == {password_kept(docker)}
+    assert restarted_launchplane.secrets.read_secrets() == {given_to(docker, DATABASE)["POSTGRES_PASSWORD"]}
 
 
-def refused_by_docker() -> APIError:
-    response = requests.Response()
-    response.status_code = 500
-    return APIError("refused", response=response, explanation="RWLayer of container is unexpectedly nil")
-
-
-def test_a_container_removed_while_its_password_is_read_has_the_secrets_read_again() -> None:
+def test_a_secret_this_launchplane_gave_out_stays_one_after_everything_holding_it_is_gone() -> None:
     docker = RecordingDocker()
-    database_made(docker)
-    docker.containers.by_name[DATABASE].refuses_reads_with = iter([refused_by_docker()])
-    assert ContainerHost(docker.as_client(), "test").secrets.read_secrets() == {password_kept(docker)}
+    host = database_made(docker)
+    host.start_instance(TARGET, WEB, LINK)
+    password = given_to(docker, WEB)["PGPASSWORD"]
+    host.retire_instance(WEB)
+    assert password in host.secrets.read_secrets()
 
 
-def test_a_password_file_docker_refuses_three_times_in_a_row_is_an_error_not_secrets_read_without_it() -> None:
+def test_a_password_read_to_give_to_a_background_service_is_a_secret_at_once() -> None:
     docker = RecordingDocker()
-    database_made(docker)
-    docker.containers.by_name[DATABASE].refuses_reads_with = itertools.repeat(refused_by_docker())
-    with pytest.raises(ContainerHostError, match="refused to read its password file"):
-        ContainerHost(docker.as_client(), "test").secrets.read_secrets()
+    database_made(docker).start_instance(TARGET, WEB, LINK)
+    restarted_launchplane = ContainerHost(docker.as_client(), "test")
+    restarted_launchplane.start_background_service(TARGET, WEB, LINK, ["work"])
+    assert restarted_launchplane.secrets.secrets_seen() == {given_to(docker, WEB)["PGPASSWORD"]}
 
 
 def test_a_description_of_unexpected_shape_is_an_error_that_repeats_nothing_docker_answered() -> None:

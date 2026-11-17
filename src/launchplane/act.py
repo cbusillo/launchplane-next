@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from launchplane import maintenance, plan, steps
-from launchplane.container_host import HasDatabase, PartStopped
+from launchplane.container_host import HasDatabase, NewDatabase, PartStopped
 from launchplane.docker_answers import ContainerHostError, OnHost
 from launchplane.instance import (
     DataSet,
@@ -33,7 +33,7 @@ class InstanceHost(Protocol):
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
-    def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
+    def create_database(self, new: NewDatabase) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
     def start_part(self, container: str) -> None: ...
@@ -117,7 +117,7 @@ TAKE: dict[type, Take] = {
     steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(step.product, step.lane, step.data_set),
     steps.CreateDataSetVolume: lambda host, _proxy, step: host.create_data_set_volume(step.product, step.lane, step.data_set),
     steps.CreateDatabase: lambda host, _proxy, step: host.create_database(
-        step.product, step.lane, step.data_set, step.network, step.volume, step.image
+        NewDatabase(step.product, step.lane, step.data_set, step.network, step.volume, step.image)
     ),
     steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
     steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),

@@ -14,6 +14,7 @@ from tests.test_bed_data_set import (
     LANE,
     PRODUCT,
     LaneView,
+    asked_of_server,
     build_pretend_product,
     database_of,
     lane_view,
@@ -63,8 +64,8 @@ def shows_back_soon(web_address: str) -> bool:
 
 
 def ids(database: str, table: str, where: str = "true") -> list[int]:
-    query = f'psql --username=postgres --tuples-only --no-align --command="SELECT id FROM {table} WHERE {where} ORDER BY id"'  # noqa: S608 a test's own tables
-    return [int(line) for line in on_scratch(f"docker exec {database} {query}").split()]
+    found = asked_of_server(database, f"SELECT id FROM {table} WHERE {where} ORDER BY id")  # noqa: S608 a test's own tables
+    return [int(line) for line in found]
 
 
 def scratch_time() -> str:

@@ -1,6 +1,5 @@
 import builtins
-import io
-import tarfile
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -8,11 +7,12 @@ from typing import Any, cast
 import docker
 from docker.errors import NotFound
 
-from launchplane.docker_answers import only_file_in, tar_of
+from launchplane.data_set import MAKE_LOGIN, READ_LOGINS, READ_RULES, REMOVE_LOGIN, RULES_AS_READ
+from launchplane.docker_answers import files_in, tar_of
 
 STARTED = "2026-11-15T20:00:00Z"
-IMAGE_ENVIRONMENT = ("PGDATA=/var/lib/postgresql/18/docker",)
 NOT_READY = 2
+NO_SUCH_LOGIN = 3
 
 
 def as_docker_client(fake: object) -> docker.DockerClient:
@@ -26,32 +26,50 @@ class ExecResult:
 
 
 @dataclass
+class RecordingServer:
+    rules: object = field(default_factory=lambda: RULES_AS_READ)
+    logins: set[str] = field(default_factory=set[str])
+    asked: list[tuple[str, dict[str, str]]] = field(default_factory=list[tuple[str, dict[str, str]]])
+
+    def answer(self, script: str, variables: dict[str, str]) -> ExecResult:
+        if READ_RULES.statements in script:
+            return ExecResult(0, json.dumps(self.rules).encode())
+        if READ_LOGINS.statements in script:
+            return ExecResult(0, json.dumps(sorted(self.logins)).encode())
+        if MAKE_LOGIN.statements in script:
+            self.asked.append(("make", variables))
+            self.logins.add(variables["login"])
+            return ExecResult(0, b"")
+        if REMOVE_LOGIN.statements in script:
+            self.asked.append(("remove", variables))
+            if variables["login"] not in self.logins:
+                return ExecResult(NO_SUCH_LOGIN, f'ERROR:  role "{variables["login"]}" does not exist'.encode())
+            self.logins.remove(variables["login"])
+            return ExecResult(0, b"t")
+        return ExecResult(NOT_READY, b"")
+
+
+@dataclass
 class RecordingContainer:
     name: str
     labels: dict[str, str]
     environment: list[str]
     files: dict[str, bytes]
+    server: RecordingServer
     removed: bool = False
-    refuses_reads_with: Iterator[Exception] = field(default_factory=lambda: iter(()))
+    status: str = "created"
     calls: list[str] = field(default_factory=list[str])
-    file_modes: dict[str, int] = field(default_factory=dict[str, int])
     restart_policy: str = ""
 
     def get_archive(self, path: str) -> tuple[list[bytes], dict[str, Any]]:
-        self.calls.append(f"read {path}")
-        for refusal in self.refuses_reads_with:
-            raise refusal
         if path not in self.files:
             raise NotFound(f"Could not find the file {path} in container {self.name}")
         return [tar_of(path.rsplit("/", 1)[1], self.files[path])], {}
 
     def put_archive(self, folder: str, archive: bytes) -> None:
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            [member] = tar.getmembers()
-        path = f"{folder}/{member.name}"
-        self.calls.append(f"write {path}")
-        self.file_modes[path] = member.mode
-        self.files[path] = only_file_in(archive)
+        for name, (content, _changed_at) in files_in(archive).items():
+            self.calls.append(f"write {folder}/{name}")
+            self.files[f"{folder}/{name}"] = content
 
     @property
     def attrs(self) -> dict[str, Any]:
@@ -63,20 +81,36 @@ class RecordingContainer:
         return b""
 
     def start(self) -> None:
+        self.status = "running"
         self.calls.append("start")
 
     def stop(self, timeout: int) -> None:
+        self.status = "exited"
         self.calls.append(f"stop within {timeout} s")
+
+    def remove(self, force: bool = False) -> None:
+        self.removed = True
+        self.calls.append("remove by force" if force else "remove")
 
     def exec_run(self, command: list[str]) -> ExecResult:
         self.calls.append(" ".join(command))
-        return ExecResult(NOT_READY, b"")
+        if command[:2] != ["sh", "-c"] or len(command) < 4:
+            return ExecResult(NOT_READY, b"")
+        variables = dict(option.removeprefix("--set=").split("=", 1) for option in command[4:])
+        return self.server.answer(command[2], variables)
+
+
+def has_labels(found: RecordingContainer, wanted: object) -> bool:
+    labels = [wanted] if isinstance(wanted, str) else cast("list[str]", wanted or [])
+    named = [label.partition("=") for label in labels]
+    return all(found.labels.get(name) == value if separator else name in found.labels for name, separator, value in named)
 
 
 @dataclass
 class RecordingContainers:
     by_name: dict[str, RecordingContainer] = field(default_factory=dict[str, RecordingContainer])
     files_by_volume: dict[str, dict[str, bytes]] = field(default_factory=dict[str, dict[str, bytes]])
+    servers_by_volume: dict[str, RecordingServer] = field(default_factory=dict[str, RecordingServer])
 
     def create(self, _image: str, _command: builtins.list[str] | None = None, **options: object) -> RecordingContainer:
         name = cast("str", options["name"])
@@ -85,8 +119,9 @@ class RecordingContainers:
         made = RecordingContainer(
             name,
             dict(cast("dict[str, str]", options["labels"])),
-            [*(f"{key}={value}" for key, value in given.items()), *IMAGE_ENVIRONMENT],
+            [f"{key}={value}" for key, value in given.items()],
             self.files_by_volume.setdefault(volume, {}),
+            self.servers_by_volume.setdefault(volume, RecordingServer()),
             restart_policy=cast("dict[str, str]", options["restart_policy"])["Name"],
         )
         self.by_name[name] = made
@@ -97,8 +132,14 @@ class RecordingContainers:
             raise NotFound(f"No such container: {name}")
         return self.by_name[name]
 
-    def list(self, **_options: object) -> builtins.list[RecordingContainer]:
-        return [found for found in self.by_name.values() if not found.removed]
+    def list(self, **options: object) -> builtins.list[RecordingContainer]:
+        filters = cast("dict[str, object]", options.get("filters") or {})
+        status = filters.get("status")
+        return [
+            found
+            for found in self.by_name.values()
+            if not found.removed and has_labels(found, filters.get("label")) and status in (None, found.status)
+        ]
 
 
 @dataclass

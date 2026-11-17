@@ -392,6 +392,18 @@ def test_with_the_proxy_down_a_lane_says_no_instance_receives_visitors_though_it
     assert verdict.left_unfinished == ["No instance receives visitors: the proxy is not running"]
 
 
+def test_with_the_proxy_down_a_part_attached_where_it_must_not_be_is_still_reported_as_wrong() -> None:
+    seen = UP.seen()
+    attached_outside = seen.instances[0].model_copy(update={"networks": (*seen.instances[0].networks, "bridge")})
+    down = LaneSeen((attached_outside,), LaneRoute(None, WEB, proxy_runs=False), seen.background_services, seen.data_sets, QUIET)
+    verdict = lane_verdict(down, WITH_DATA, "site", "testing", a_move_is_at_work=False)
+    assert verdict.left_unfinished == ["No instance receives visitors: the proxy is not running"]
+    assert verdict.problems == [
+        "The instance web is attached to bridge, which it must not be",
+        "The instance web can reach out through bridge",
+    ]
+
+
 def test_a_move_refuses_a_lane_in_maintenance_before_it_starts_the_proxy() -> None:
     seen = Lane(IN_MAINTENANCE).seen()
     down = LaneSeen(

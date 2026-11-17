@@ -4,7 +4,8 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from launchplane.container_host import CommandResult, FileRead, HelperContainer
+from launchplane.container_host import FileRead, HelperContainer
+from launchplane.docker_answers import CommandResult
 from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, RouteStatus
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
