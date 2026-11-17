@@ -49,7 +49,7 @@ One worker runs in the Launchplane process. It takes the oldest request that is 
 - **After a restart, with nobody calling,** a request found working with nobody holding its lane's turn was interrupted. The worker ends that attempt as `interrupted`, begins a new one, reads the host and decides from what is there, as asking again always did. It does not go on from where the last attempt was.
 - **A request taken up three times without ending** is not taken up a fourth time. It stands as `needs a person` with the reason in `error`, and its lane takes no other request. `POST /requests/<id>/retry` ends it as `failed` and writes a new request for the same thing, answering `202` with it. `POST /requests/<id>/give-up` ends it as `failed` and changes nothing on the host. Either answers `409` for a request that does not need a person.
 - **Nothing is run again by itself** except this taking-up after an interruption. A request that fails stays failed until someone asks again.
-- **Losing the record while working** stops the work at the next thing to write. When the record is back the request is taken up as interrupted, which counts.
+- **Losing the record while working** stops the work at the next thing to write. The request stays working, and when the record is back it is taken up as interrupted, which counts.
 - **A restart of Launchplane while a request is working**, a deploy included, is an interruption like any other.
 
 ## What the record holds
@@ -87,15 +87,20 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 
 ## Measured
 
-On the test bed on November 17, PostgreSQL 17.
+On the test bed on November 17, PostgreSQL 17, one nginx lane.
+
+- A call answered `202` in 20 to 25 ms. The worker took the request up 4 to 6 ms after it was asked.
+- A move from one build to another, with `?wait=`: 6.2 to 6.4 s, as before requests were kept. Asking again for a finished move: 0.12 s, where it was 0.07 s; the wait reads the record every 0.1 s.
+- Killed with `kill -9` while the new instance was being checked: systemd started Launchplane again, the request was taken up 1.2 s after the kill with nobody calling, and it ended `done` and `switched` 7.5 s after it was asked, with two attempts, the first `interrupted`.
+- The 56 test-bed tests passed in 20 minutes.
 
 ## On the test bed
 
 ```
 LAUNCHPLANE_TEST_DATABASE=postgresql://postgres:test@127.0.0.1:55432/postgres uv run pytest
-LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_move.py -v
+LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_requests.py -v
 ```
 
 The tests of the record, the worker and the calls run against a pretend record in memory, and again against PostgreSQL when `LAUNCHPLANE_TEST_DATABASE` names one a test may empty. `docker run -d -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17-alpine` gives one. CI runs both.
 
-The test-bed tests wait for each request with `?wait=`. A kill test either lets Launchplane take the request up again by itself, or ends the request in the record while Launchplane is down, to leave the lane as a request that failed halfway would.
+`tests/test_bed_requests.py` stops PostgreSQL on the control container for one test and starts it again. Every test-bed test waits for each request with `?wait=`. A kill test either lets Launchplane take the request up again by itself, or ends the request in the record while Launchplane is down, to leave the lane as a request that failed halfway would.

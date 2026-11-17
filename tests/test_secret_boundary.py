@@ -136,10 +136,10 @@ def app_working_at_once(read: Callable[[], Status], lanes: Carries, secrets: Sec
 
 
 STOPPED = Asked("POST", "/", 503)
-MOVE = "/lanes/site/testing/move"
-RETIRE = "/lanes/site/testing/retire"
-MAINTENANCE_BEGIN = "/lanes/site/testing/maintenance/begin"
-MAINTENANCE_END = "/lanes/site/testing/maintenance/end"
+MOVE = "/lanes/site/testing/move?wait=1"
+RETIRE = "/lanes/site/testing/retire?wait=1"
+MAINTENANCE_BEGIN = "/lanes/site/testing/maintenance/begin?wait=1"
+MAINTENANCE_END = "/lanes/site/testing/maintenance/end?wait=1"
 ANSWERS = {
     "what is running, with a web address whose error carries it": Asked("GET", "/running", 200),
     "a host that could not be read": Asked("GET", "/running", 503, read=unreadable_host),

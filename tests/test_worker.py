@@ -226,19 +226,23 @@ def test_with_the_record_unreachable_the_host_is_still_shown_and_the_page_says_t
     assert (worker.worked_one(), proxy.host.actions) == (False, [])
 
 
-def test_losing_the_record_while_working_stops_the_work_and_it_is_taken_up_again_as_interrupted() -> None:
+def test_losing_the_record_for_one_write_stops_the_work_and_it_is_taken_up_again_as_interrupted_not_failed() -> None:
     record = PretendRecord()
     worker, _, proxy = serving_a(record)
+    note = record.note
 
     def lose_the_record(_container: str) -> None:
-        record.reachable = False
+        def unreachable_once(attempt: int, did: str, error: str | None) -> None:
+            record.note = note
+            raise RecordError(f"Launchplane's record could not be reached while writing what was done: {attempt} {did} {error}")
+
+        record.note = unreachable_once
 
     proxy.while_checking = lose_the_record
     request = record.write(MOVE_B, CALLER, None)
     with pytest.raises(RecordError):
         worker.work_next()
     done_before_the_loss = list(proxy.host.actions)
-    record.reachable = True
     proxy.while_checking = lambda _container: None
     assert worker.work_next() is True
     kept = kept_of(record, request.id)

@@ -101,8 +101,10 @@ def test_the_same_key_answers_with_the_request_already_written_and_with_another_
     first = bed.client.post(f"{MOVE}?wait=5", json=TO_B, headers=key)
     again = bed.client.post(f"{MOVE}?wait=5", json=TO_B, headers=key)
     other = bed.client.post(f"{MOVE}?wait=5", json={"build": "site:c"}, headers=key)
+    unwaited = bed.client.post(MOVE, json=TO_B, headers=key)
     listed = bed.client.get("/requests").json()
     assert (first.json(), first.headers["location"]) == (again.json(), again.headers["location"])
+    assert (unwaited.status_code, unwaited.json()["stands"], unwaited.json()["answer"]) == (202, "done", first.json())
     assert (other.status_code, "asked something else" in other.json()["error"]) == (409, True)
     assert ([each["id"] for each in listed["ended"]], listed["unfinished"], bed.proxy.host.actions.count("retire a")) == ([1], [], 1)
 

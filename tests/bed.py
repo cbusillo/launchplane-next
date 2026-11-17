@@ -37,9 +37,11 @@ def on_scratch_with_bytes(command: str, given: bytes) -> str:
     return subprocess.run([*SCRATCH_SHELL, command], input=given, capture_output=True, check=True).stdout.decode()  # noqa: S603
 
 
-def ask(path: str, body: dict[str, Any] | None = None, timeout: float = 60) -> tuple[int, dict[str, Any]]:
+def ask(
+    path: str, body: dict[str, Any] | None = None, timeout: float = 60, headers: dict[str, str] | None = None
+) -> tuple[int, dict[str, Any]]:
     data = None if body is None else json.dumps(body).encode()
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"} | (headers or {})
     request = urllib.request.Request(f"{LAUNCHPLANE_URL}{path}", data=data, headers=headers)  # noqa: S310
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310

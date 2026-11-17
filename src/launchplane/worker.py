@@ -107,7 +107,8 @@ class Worker:
             answer = carried_out(self.lanes, request, tell)
         except STOPPED as error:
             self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
-        except Interrupted:
+        # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
+        except Interrupted, RecordError:
             raise
         except Exception as error:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())

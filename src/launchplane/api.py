@@ -217,10 +217,7 @@ def read_until_ended(record: Record, request: int, seconds: float) -> Kept | Non
 
 
 # The answer a call gave before requests were kept: the final answer, with the status that goes with it.
-def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: Response) -> Answer | NotFinished | Kept:
-    if kept.stands not in ENDED:
-        response.status_code = HTTPStatus.ACCEPTED
-        return kept
+def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: Response) -> Answer | NotFinished:
     if kept.answer is None:
         return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, kept.error or f"Request {kept.id} failed and kept no error.")
     if kept.stands is Stands.FAILED:
@@ -249,7 +246,13 @@ class Calls:
         except RecordError as error:
             why = f"Request {request.id} is kept, and how it stands is not known: {error}"
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
-        return self.none_such(request.id, response) if kept is None else final_answer(kept, answer, response)
+        if kept is None:
+            return self.none_such(request.id, response)
+        # A call that does not wait is answered the same whether or not its request has already ended.
+        if wait and kept.stands in ENDED:
+            return final_answer(kept, answer, response)
+        response.status_code = HTTPStatus.ACCEPTED
+        return kept
 
     @staticmethod
     def none_such(request: int, response: Response) -> NotFinished:

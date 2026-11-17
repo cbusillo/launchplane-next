@@ -257,7 +257,10 @@ def with_history(session: Session, rows: Sequence[DictRow]) -> list[Kept]:
 class PostgresRecord(Record):
     def __init__(self, database_named: str, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
         self.database = database_named
-        self.pool = ConnectionPool(database_named, min_size=1, max_size=4, timeout=seconds_to_reach, open=False)
+        # Each connection is checked as it is taken, so one the database dropped is replaced and not handed out.
+        self.pool = ConnectionPool(
+            database_named, min_size=1, max_size=4, timeout=seconds_to_reach, check=ConnectionPool.check_connection, open=False
+        )
         self.pool.open()
 
     def close(self) -> None:
