@@ -27,7 +27,7 @@ class RecordError(Exception):
     pass
 
 
-# The write of a request may or may not have reached the record, so the request may be worked.
+# Writing a request may or may not have reached the record, so the request may be worked.
 class Unconfirmed(RecordError):
     pass
 
@@ -346,10 +346,9 @@ class PostgresRecord(Record):
 
             def held() -> bool:
                 try:
-                    row = session.execute(Sql.TURN_HELD).fetchone()
-                except psycopg.Error:
+                    return asked_once(session, "asking whether a lane's turn is held", Sql.TURN_HELD, [])["held"] > 0
+                except RecordError:
                     return False
-                return row is not None and row["held"] > 0
 
             ours = asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, [f"{product}/{lane}"])["ours"]
             yield held if ours else None

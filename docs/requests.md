@@ -91,7 +91,6 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **A request that needs a person is not told to anyone.** It shows on the page and in `GET /requests`.
 - **A worker can lose its lane's turn while one action on the host is under way.** The turn is asked before each action, not during it. An action can take as long as a check, 20 s, or a stop, 30 s. If the lock's connection ends in that time and another Launchplane takes the lane, that one action still finishes. With one worker in one process this needs a lost connection and a second Launchplane.
 - **A secret no container holds any more is not known to be one.** A caller who sends the password of a container already removed has it stored as sent, in a build or a data set name.
-- **A request written before the key was kept as a digest** had its key replaced by the digest when the database was migrated.
 - **Untried:** two Launchplane processes on one record. The lane's turn and the count of attempts are built for it and tested against PostgreSQL, not on the test bed.
 
 ## Measured
