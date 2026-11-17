@@ -336,7 +336,7 @@ class Calls:
         return kept
 
 
-# The answer to a cancel is known once the request is cancelled or it is known that it will not be.
+# The answer to a cancel is known once it has ended the request, or once it is known that it will not.
 def is_cancel_settled(kept: Kept) -> bool:
     return kept.stands is Stands.CANCELLED or why_not_cancelled(kept) is not None
 

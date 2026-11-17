@@ -304,7 +304,7 @@ def has_nothing(lane: LaneReading) -> bool:
     return not (lane.instances or lane.background_services or lane.data_sets)
 
 
-# The one end of every cancel. The lane is judged as any lane is, and a request ends as cancelled only over a lane that
+# The one end of every cancel. The lane is judged as any lane is, and the cancel is a clean one only over a lane that
 # is as it must be: what putting back left wrong or unfinished is said, and the request then fails with it.
 def put_back_or_what_is_left(judged: Judgement, back: tuple[Event, ...]) -> Done[PutBack] | Stop:
     lane = judged.lane
