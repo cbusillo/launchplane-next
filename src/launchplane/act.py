@@ -42,6 +42,7 @@ class InstanceHost(Protocol):
     def delete_data_set(self, found: DataSet) -> None: ...
     def remove_instance(self, container: str) -> None: ...
     def retire_instance(self, container: str) -> None: ...
+    def remove_unheld_logins(self, database: str) -> None: ...
     def read_log_tail(self, container: str) -> str: ...
 
 
@@ -128,6 +129,7 @@ TAKE: dict[type, Take] = {
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
+    steps.RemoveLogins: lambda host, _proxy, step: host.remove_unheld_logins(step.database),
     steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
     steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
     steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
@@ -209,7 +211,7 @@ class Lanes:
     def retire(self, product: str, lane: str, delete_data_set: str | None = None) -> RetireResult:
         with self.at_work_on(product, lane):
             return self.settle(
-                lambda: self.read(product, lane),
+                lambda: self.read(product, lane, has_database=True),
                 lambda seen, done: plan.decide_retire(seen, product, lane, delete_data_set, done),
                 f"{lane} of {product}",
             )

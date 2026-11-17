@@ -9,7 +9,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from launchplane.container_host import CommandResult, FileRead, HelperContainer
+from launchplane.container_host import FileRead, HelperContainer
+from launchplane.docker_answers import CommandResult
 from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute
 
 PROXY_NAME = "launchplane-proxy"

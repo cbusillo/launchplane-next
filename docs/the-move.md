@@ -10,8 +10,8 @@ Each call takes one step at a time and reads the host and the proxy again before
 
 The next step is the first of these that applies:
 
-1. If the proxy is not running, start it.
-2. If the lane is in [maintenance](maintenance.md), stop with `503` and say to end maintenance first.
+1. If the lane is in [maintenance](maintenance.md), stop with `503` and say to end maintenance first.
+2. If the proxy is not running, start it.
 3. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file.
 4. If the proxy reports the lane's route disabled or with a warning, stop with `503`, that status and what this call had changed. Retiring the lane removes the route.
 5. If an instance failed its check in this call, remove it and answer `check failed`. The web address never moved.

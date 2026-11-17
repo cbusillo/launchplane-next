@@ -15,8 +15,10 @@ from launchplane.judge import (
     background_service_problems,
     data_set_of,
     data_set_problems,
+    databases_of,
     instance_problems,
     lane_problems,
+    unread_logins_problem,
 )
 from launchplane.product import Product
 from launchplane.steps import (
@@ -37,6 +39,7 @@ from launchplane.steps import (
     MoveResult,
     Outcome,
     RemoveInstance,
+    RemoveLogins,
     RemoveRoute,
     Retire,
     RetireOutcome,
@@ -94,6 +97,8 @@ def change_made_by(event: Event) -> str | None:
             return f"retired {container}"
         case RemoveInstance(container=container):
             return f"removed {container}"
+        case RemoveLogins(database=database):
+            return f"removed the logins no container holds from {database}"
         case _:
             return maintenance_change_made_by(event)
 
@@ -130,7 +135,7 @@ def candidate_for(
 def move_outcome(done: tuple[Event, ...]) -> Outcome:
     if any(isinstance(event, WriteRoute) for event in done):
         return Outcome.SWITCHED
-    if any(isinstance(event, Retire | StartBackgroundService | StartDatabase) for event in done):
+    if any(isinstance(event, Retire | StartBackgroundService | StartDatabase | RemoveLogins) for event in done):
         return Outcome.CLEANED_UP
     return Outcome.UNCHANGED
 
@@ -253,7 +258,34 @@ def settle_serving(
     return Done(answer)
 
 
+# A stopped server keeps its logins until it is next started, and nothing is read from it or from one that was not asked.
+def login_step(seen: LaneSeen, done: tuple[Event, ...]) -> Action | Stop | None:
+    for database in databases_of(seen):
+        if database.state != InstanceState.RUNNING or database.accepts_connections is None:
+            continue
+        if database.unheld_logins:
+            return RemoveLogins(database.container)
+        if database.unheld_logins is None:
+            unread = unread_logins_problem(database) or (
+                f"The database {database.container} is running and does not accept connections, so its logins could not be read"
+            )
+            return Stop(f"{unread}. {changes_so_far(done)} Ask again once the server answers, or delete its data set by name.")
+    return None
+
+
+def with_logins_settled[Answer](
+    step: Action | Done[Answer] | Stop, seen: LaneSeen, done: tuple[Event, ...]
+) -> Action | Done[Answer] | Stop:
+    return (login_step(seen, done) or step) if isinstance(step, Done) else step
+
+
 def decide_move(
+    seen: LaneSeen, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
+) -> Action | Done[MoveResult] | Stop:
+    return with_logins_settled(move_step(seen, target, product, fresh, done), seen, done)
+
+
+def move_step(
     seen: LaneSeen, target: LaneBuild, product: Product, fresh: FreshNames, done: tuple[Event, ...]
 ) -> Action | Done[MoveResult] | Stop:
     web_address = web_address_of(target.product, target.lane)
@@ -325,6 +357,12 @@ def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
 def decide_retire(
     seen: LaneSeen, product: str, lane: str, delete_data_set: str | None, done: tuple[Event, ...]
 ) -> Action | Done[RetireResult] | Stop:
+    return with_logins_settled(retire_step(seen, product, lane, delete_data_set, done), seen, done)
+
+
+def retire_step(
+    seen: LaneSeen, product: str, lane: str, delete_data_set: str | None, done: tuple[Event, ...]
+) -> Action | Done[RetireResult] | Stop:
     if not seen.route.proxy_runs:
         return StartProxy()
     web_address = web_address_of(product, lane)
@@ -341,13 +379,14 @@ def decide_retire(
         return DeleteDataSet(named)
     route_removed_to = next((event.container for event in done if isinstance(event, RemoveRoute)), None)
     retired = [event.container for event in done if isinstance(event, Retire)]
+    cleaned = any(isinstance(event, RemoveLogins) for event in done)
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
     return Done(
         RetireResult(
             product=product,
             lane=lane,
             web_address=web_address,
-            outcome=retire_outcome(route_removed_to is not None or bool(retired), deleted),
+            outcome=retire_outcome(route_removed_to is not None or bool(retired) or cleaned, deleted),
             route_removed_to_container=route_removed_to,
             retired_containers=retired,
             deleted_data_set=deleted,

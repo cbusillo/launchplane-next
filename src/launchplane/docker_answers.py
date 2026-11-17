@@ -9,6 +9,7 @@ from typing import Literal
 
 import requests
 from docker.errors import DockerException
+from docker.models.containers import Container
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from launchplane.instance import (
@@ -357,12 +358,11 @@ def names_of(containers: object, part: Part) -> list[str]:
     return [summary.name for summary in summaries if part_of(summary) == part]
 
 
-def tar_of(file_name: str, content: bytes, mode: int = 0o644) -> bytes:
+def tar_of(file_name: str, content: bytes) -> bytes:
     archive = io.BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as tar:
         member = tarfile.TarInfo(file_name)
         member.size = len(content)
-        member.mode = mode
         member.mtime = int(time.time())
         tar.addfile(member, io.BytesIO(content))
     return archive.getvalue()
@@ -378,8 +378,19 @@ def files_in(archive: bytes) -> dict[str, tuple[bytes, datetime]]:
     return found
 
 
-def only_file_in(archive: bytes) -> bytes:
-    found = files_in(archive)
-    if len(found) != 1:
-        raise ContainerHostError(f"Docker answered a file read with an archive that holds {len(found)} files, not one.")
-    return next(iter(found.values()))[0]
+@dataclass(frozen=True)
+class CommandResult:
+    exit_code: int
+    output: str
+
+    @property
+    def succeeded(self) -> bool:
+        return self.exit_code == 0
+
+
+def command_result(container: Container, command: list[str]) -> CommandResult:
+    result = container.exec_run(command)
+    exit_code, output = result.exit_code, result.output
+    if exit_code is None or not isinstance(output, bytes):
+        raise ContainerHostError(f"Running {command[0]} in {container.name} returned before the command finished.")
+    return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())

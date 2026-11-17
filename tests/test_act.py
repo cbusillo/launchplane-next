@@ -46,6 +46,7 @@ class FakeHost:
         self.data_sets: dict[str, DataSet] = {}
         self.networks: dict[str, bool] = {LANE_NETWORK: True}
         self.ready_databases: set[str] = set()
+        self.unheld_logins: dict[str, set[str]] = {}
         self.actions: list[str] = []
         self.most_background_services_running = 0
         self.background_services_that_stop: set[str] = set()
@@ -90,10 +91,17 @@ class FakeHost:
         return OnHost(list(self.instances.values()), list(self.background_services.values()), data_sets, networks)
 
     def asked(self, found: DataSet) -> DataSet:
-        databases = tuple(
-            each.model_copy(update={"accepts_connections": each.container in self.ready_databases}) for each in found.databases
-        )
-        return found.model_copy(update={"databases": databases})
+        return found.model_copy(update={"databases": tuple(self.asked_database(each) for each in found.databases)})
+
+    def asked_database(self, database: DataSetDatabase) -> DataSetDatabase:
+        if database.container not in self.ready_databases:
+            return database.model_copy(update={"accepts_connections": False})
+        unheld = tuple(sorted(self.unheld_logins.get(database.container, ())))
+        return database.model_copy(update={"accepts_connections": True, "unheld_logins": unheld})
+
+    def remove_unheld_logins(self, database: str) -> None:
+        self.unheld_logins.pop(database, None)
+        self.record(f"remove logins from {database}")
 
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
         self.place(target, container, use=use)
@@ -405,6 +413,21 @@ def test_retiring_a_lane_with_data_stops_its_background_service_first_and_keeps_
     assert (kept.deleted_data_set, kept.kept_data_sets) == (None, ["data-1"])
     deleted = lanes_on(proxy).retire("site", "testing", delete_data_set="data-1")
     assert (deleted.outcome, deleted.deleted_data_set, deleted.kept_data_sets) == (RetireOutcome.DELETED, "data-1", [])
+
+
+def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_the_next_move_and_the_next_retire() -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.actions.clear()
+    proxy.host.unheld_logins["database-data-1"] = {"i_left"}
+    moved = lanes_on(proxy).move(BUILD_A)
+    proxy.host.unheld_logins["database-data-1"] = {"i_left_again"}
+    retired = lanes_on(proxy).retire("site", "testing")
+    assert (moved.outcome, proxy.host.actions[0], proxy.host.actions[-1]) == (
+        Outcome.CLEANED_UP,
+        "remove logins from database-data-1",
+        "remove logins from database-data-1",
+    )
+    assert (retired.outcome, proxy.host.unheld_logins) == (RetireOutcome.RETIRED, {})
 
 
 def test_naming_a_data_set_of_another_lane_deletes_nothing() -> None:

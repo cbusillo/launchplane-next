@@ -14,8 +14,7 @@ Only containers carrying `launchplane.product` are Launchplane's. Any other cont
 | `launchplane.part` | `web`, `background-service` or `database`; a container without it is `web` |
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a background service, the container of its instance's web part |
-| `launchplane.secret-variables` | on a web part or background service given a secret, the environment variables that hold one, separated by commas |
-| `launchplane.password-file` | on a database server, where on its volume the data set's password is kept |
+| `launchplane.secret-variables` | on a web part, background service or database server given a secret, the environment variables that hold one, separated by commas |
 
 Data set networks and volumes carry the product, lane and data set labels too.
 
@@ -27,7 +26,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | --- | --- |
 | `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
 | `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
-| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`). An empty list is a missing part and two are two. |
+| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`, `logins_unread`). An empty list is a missing part and two are two. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`. |
 | `lanes` | the verdict on each lane: see [the verdict on a lane](data-sets.md#the-verdict-on-a-lane). |
@@ -36,6 +35,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 - `mounts` lists everything a container has mounted, each with `source` (a volume's name, or a folder of the host) and `path`.
 - `receives_visitors_for` is the web address whose visitors the proxy sends to the instance, or `null`.
 - `accepts_connections` is asked at that moment of a running server whose product's description names a database, and is `null` otherwise.
+- `unheld_logins` lists the [logins](data-sets.md#logins) on a server that accepts connections which no container on the host holds, and is `null` when they were not read. `logins_unread` then says why, if the server was asked and could not tell.
 - `exit_code` is the code a stopped database server exited with, and `null` while it is not stopped. `0` is a clean stop. `image` is the image the server runs.
 - `web_addresses` are every one the proxy routes, and the one of every lane on the host, so a route to an instance that is gone is shown. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, and `error` is why not. A web address the proxy routes nowhere is not requested.
 - A web address of a lane in [maintenance](maintenance.md) has `sends_to_container` `launchplane-back-soon` and `answers` `false`. `shows_back_soon_page` is `true` while the back soon page's container runs.
@@ -58,7 +58,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 ## Known and not fixed
 
-- **A refusal from Docker inside the read of the secrets that comes from the Docker client's own follow-up question is not read again.** It answers `503`, and asking again works.
+- **A refusal from Docker while the secrets are read, about a container removed at that moment, is not read again.** It answers `503`, and asking again works.
 - **The page reads containers and routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors for one read.
 - **The page does not show where a route to another lane's instance goes.** `/running` answers it.
 - **No test loads the page or runs its script.** Chris watching the page is the check. Comes back when the page breaks without anyone noticing, or when there is a second page.

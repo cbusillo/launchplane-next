@@ -5,6 +5,7 @@ import socket
 import tarfile
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -173,13 +174,36 @@ def environment_of(container: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in lines if "=" in line)
 
 
-def password_kept_with(data_set: dict[str, Any]) -> str:
-    return on_scratch(f"docker exec {database_of(data_set)} cat /var/lib/postgresql/launchplane-password")
+CONNECT = "python -c 'import psycopg; psycopg.connect(\"connect_timeout=3\").close()'"
+RUN_GIVEN_SQL = "python -c 'import sys, psycopg; psycopg.connect(\"connect_timeout=3\", autocommit=True).execute(sys.stdin.read())'"
+
+
+def login_attempt(container: str, without: str | None = None, **given: str) -> tuple[bool, str]:
+    changes = [*([f"-u {without}"] if without else []), *(f"{name}={value}" for name, value in given.items())]
+    return in_container(container, f"env {' '.join(changes)} {CONNECT}")
+
+
+def run_sql(container: str, statements: str) -> None:
+    on_scratch(f"docker exec --interactive {container} {RUN_GIVEN_SQL}", given=statements)
+
+
+def asked_of_server(database_container: str, query: str) -> list[str]:
+    psql = f'psql --username=postgres --dbname=app --tuples-only --no-align --command="{query}"'
+    return on_scratch(f"docker exec {database_container} {psql}").split()
+
+
+def logins_on(data_set: dict[str, Any]) -> list[str]:
+    members = "SELECT member::regrole FROM pg_auth_members WHERE roleid = 'app'::regrole"
+    return asked_of_server(database_of(data_set), members)
 
 
 def beats(database_container: str) -> list[str]:
-    query = "psql --username=postgres --tuples-only --no-align --command='SELECT run FROM beats ORDER BY at'"
-    return on_scratch(f"docker exec {database_container} {query}").split()
+    # noinspection SqlResolve
+    return asked_of_server(database_container, "SELECT run FROM beats ORDER BY at")
+
+
+def shown_by_launchplane() -> str:
+    return json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
 
 
 def runs_in_order(runs: list[str]) -> list[str]:
@@ -276,18 +300,6 @@ def test_a_release_killed_halfway_shows_at_once_as_left_unfinished_not_as_under_
     move(BUILD_B)
     assert json.loads(verdict_now()) == {"wrong": [], "release": [], "unfinished": [], "moving": False}
     assert lane_view().data_sets == lane_on_a.data_sets
-
-
-def test_data_left_without_its_password_is_reported_by_name_and_given_no_new_password(lane_on_a: LaneView) -> None:
-    [data_set] = lane_on_a.data_sets
-    on_scratch(f"docker exec {database_of(data_set)} rm /var/lib/postgresql/launchplane-password")
-    on_scratch(f"docker rm --force {database_of(data_set)}")
-    status, body = move_lane(PRODUCT, LANE, BUILD_A)
-    assert status == 503, body
-    assert f"The data set {data_set['data_set']} has data and no password" in body["error"]
-    [remade] = lane_view().data_sets[0]["databases"]
-    kept = on_scratch(f"docker cp {remade['container']}:/var/lib/postgresql/launchplane-password - 2>&1 || true")
-    assert (remade["state"], "launchplane-password" in kept and "Could not find" not in kept) == ("stopped", False)
 
 
 def test_during_a_release_the_background_service_never_runs_twice_at_once(lane_on_a: LaneView) -> None:
@@ -404,30 +416,206 @@ def test_a_release_killed_at_this_point_reaches_the_same_end_on_the_same_data_wh
     assert len(runs_in_order(runs)) == len(set(runs)), runs_in_order(runs)
 
 
-def test_each_data_set_has_its_own_password_given_to_its_instance_and_never_shown(lane_on_a: LaneView) -> None:
-    move(BUILD_A, OTHER_LANE)
-    other = lane_view(OTHER_LANE)
-    passwords = [password_kept_with(view.data_sets[0]) for view in (lane_on_a, other)]
+def test_only_an_instances_own_login_opens_its_database_from_its_network_and_nothing_does_from_outside(lane_on_a: LaneView) -> None:
     instance = lane_on_a.receiving()["container"]
     [background_service] = lane_on_a.background_services
-    assert passwords[0] != passwords[1]
-    assert "PASSWORD=" not in on_scratch(f"docker inspect --format '{{{{.Config.Env}}}}' {database_of(lane_on_a.data_sets[0])}")
-    assert environment_of(instance)["PGPASSWORD"] == environment_of(background_service["container"])["PGPASSWORD"] == passwords[0]
-    assert not in_container(instance, "env PGPASSWORD=wrong python -c 'import psycopg; psycopg.connect(\"connect_timeout=3\")'")[0]
-    shown = json.dumps(read_running()) + on_control("journalctl --unit launchplane --no-pager --since '-1 hour'")
-    assert [password in shown for password in passwords] == [False, False]
-    retire_lane_and_its_data(OTHER_LANE)
+    [data_set] = lane_on_a.data_sets
+    own = environment_of(instance)
+    address = on_scratch(
+        "docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' " + database_of(data_set)
+    ).strip()
+    refused = {
+        "no password": login_attempt(instance, without="PGPASSWORD"),
+        "a wrong password": login_attempt(instance, PGPASSWORD="wrong"),
+        "postgres with no password": login_attempt(instance, without="PGPASSWORD", PGUSER="postgres", PGDATABASE="postgres"),
+        "postgres with the instance's password": login_attempt(instance, PGUSER="postgres"),
+        "the instance's login on the postgres database": login_attempt(instance, PGDATABASE="postgres"),
+        "the instance's login from outside the network": login_attempt(
+            LISTENER, PGHOST=address, PGDATABASE="app", PGUSER=own["PGUSER"], PGPASSWORD=own["PGPASSWORD"]
+        ),
+    }
+    why = {
+        "no password": "no password supplied",
+        "a wrong password": "password authentication failed",
+        "postgres with no password": "pg_hba.conf rejects connection",
+        "postgres with the instance's password": "pg_hba.conf rejects connection",
+        "the instance's login on the postgres database": "pg_hba.conf rejects connection",
+        "the instance's login from outside the network": "",
+    }
+    assert {what: (opened, why[what] in said) for what, (opened, said) in refused.items()} == dict.fromkeys(why, (False, True))
+    assert login_attempt(instance)[0]
+    assert login_attempt(background_service["container"])[0]
+    assert (own["PGUSER"], own["PGDATABASE"]) == (logins_on(data_set)[0], "app")
+    assert environment_of(background_service["container"])["PGUSER"] == own["PGUSER"]
+    throwaway = environment_of(database_of(data_set))["POSTGRES_PASSWORD"]
+    assert [secret in shown_by_launchplane() for secret in (own["PGPASSWORD"], throwaway)] == [False, False]
 
 
-def test_a_database_server_removed_by_hand_is_made_again_with_the_same_password(lane_on_a: LaneView) -> None:
+def test_after_a_release_the_retired_instances_login_is_gone_and_its_password_opens_nothing(lane_on_a: LaneView) -> None:
+    old = environment_of(lane_on_a.receiving()["container"])
+    move(BUILD_B)
+    view = lane_view()
+    instance = view.receiving()["container"]
+    new = environment_of(instance)
+    opened, said = login_attempt(instance, PGUSER=old["PGUSER"], PGPASSWORD=old["PGPASSWORD"])
+    assert (opened, "pg_hba.conf rejects connection" in said) == (False, True), said
+    assert login_attempt(instance)[0]
+    assert logins_on(view.data_sets[0]) == [new["PGUSER"]] != [old["PGUSER"]]
+    assert new["PGPASSWORD"] != old["PGPASSWORD"]
+
+
+def write_many(container: str) -> None:
+    # noinspection SqlResolve
+    run_sql(container, "INSERT INTO made_by_new (id) SELECT generate_series(1, 200)")
+
+
+def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of_it_belongs_to_app(lane_on_a: LaneView) -> None:
+    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"])
+    view = lane_view()
+    old = view.receiving()["container"]
+    [new] = [instance["container"] for instance in view.instances if instance["container"] != old]
+    database = database_of(view.data_sets[0])
+    assert sorted(logins_on(view.data_sets[0])) == sorted(environment_of(each)["PGUSER"] for each in (old, new))
+    run_sql(old, "CREATE TABLE made_by_old (id int)")
+    # noinspection SqlResolve
+    run_sql(new, "CREATE TABLE made_by_new (id int); ALTER TABLE made_by_old ADD COLUMN note text")
+    # noinspection SqlResolve
+    run_sql(old, "ALTER TABLE made_by_new ADD COLUMN note text")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for written in [pool.submit(write_many, old), pool.submit(write_many, new)]:
+            written.result()
+    not_of_app = (
+        "SELECT relname FROM pg_class JOIN pg_namespace ON pg_namespace.oid = relnamespace "
+        "WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' AND relowner <> 'app'::regrole "
+        "UNION ALL SELECT datname FROM pg_database WHERE datname = 'app' AND datdba <> 'app'::regrole"
+    )
+    # noinspection SqlResolve
+    assert asked_of_server(database, "SELECT count(*) FROM made_by_new") == ["400"]
+    assert asked_of_server(database, not_of_app) == []
+    # noinspection SqlResolve
+    run_sql(new, "DROP TABLE made_by_old; DROP TABLE made_by_new")
+    move(BUILD_B)
+    finished = assert_lane_finished_on(BUILD_B)
+    assert logins_on(finished.data_sets[0]) == [environment_of(new)["PGUSER"]]
+
+
+def files_holding(volume: str, text: str) -> list[str]:
+    search = f"docker run --rm --user 0 --volume {volume}:/data:ro postgres:18-alpine grep -rlF -e {text} /data"
+    *files, ended = on_scratch(f"{search}; echo exit=$?").split()
+    assert ended in ("exit=0", "exit=1"), f"the search could not read every file: {ended}"
+    return files
+
+
+def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) -> None:
+    write_row("written before the volume is searched")
+    [data_set] = lane_on_a.data_sets
+    [volume] = data_set["volumes"]
+    passwords = [
+        environment_of(lane_on_a.receiving()["container"])["PGPASSWORD"],
+        environment_of(database_of(data_set))["POSTGRES_PASSWORD"],
+    ]
+    status, body = ask(f"/lanes/{PRODUCT}/{LANE}/maintenance/begin", {})
+    assert (status, body["outcome"]) == (200, "in maintenance"), body
+    assert [files_holding(volume, password) for password in passwords] == [[], []]
+    assert files_holding(volume, "SCRAM-SHA-256") != []
+
+
+def test_starts_that_fail_after_their_login_was_made_never_leave_more_than_the_last_one_and_a_good_move_removes_it(
+    lane_on_a: LaneView,
+) -> None:
+    [data_set] = lane_on_a.data_sets
+    own = environment_of(lane_on_a.receiving()["container"])["PGUSER"]
+    refusals = [move_lane(PRODUCT, LANE, "launchplane-test-ledger:no-such-build")[0] for _ in range(3)]
+    left = logins_on(data_set)
+    move(BUILD_A)
+    assert (refusals, len(left), own in left, logins_on(data_set)) == ([503, 503, 503], 2, True, [own])
+
+
+SESSION_HOLDER = "test-bed-session-holder"
+HOLD_A_SESSION = """
+import time, psycopg
+session = psycopg.connect("connect_timeout=3", autocommit=True)
+session.execute("SET ROLE NONE; CREATE TABLE owned_by_the_login (id int)")
+print("holding", flush=True)
+try:
+    while True:
+        session.execute("SELECT 1")
+        time.sleep(0.2)
+except psycopg.Error as error:
+    print("session ended:", error, flush=True)
+"""
+
+
+def session_holder_log() -> str:
+    return on_scratch(f"docker exec {SESSION_HOLDER} cat /hold.log")
+
+
+def hold_a_session(network: str, login: dict[str, str]) -> None:
+    given = " ".join(f"--env {name}={value}" for name, value in login.items() if name.startswith("PG"))
+    on_scratch(f"docker run --detach --name {SESSION_HOLDER} --network {network} {given} {BUILD_A} sleep 600")
+    on_scratch(f"docker exec --interactive {SESSION_HOLDER} sh -c 'cat > /hold.py'", given=HOLD_A_SESSION)
+    on_scratch(f"docker exec --detach {SESSION_HOLDER} sh -c 'python /hold.py > /hold.log 2>&1'")
+    wait_for(lambda: "holding" in session_holder_log(), seconds=15)
+
+
+def test_retiring_an_instance_ends_a_session_held_as_its_login_and_keeps_what_the_login_owned_for_app(lane_on_a: LaneView) -> None:
+    [data_set] = lane_on_a.data_sets
+    database = database_of(data_set)
+    login = environment_of(lane_on_a.receiving()["container"])
+    # noinspection SqlResolve
+    owner = "SELECT tableowner FROM pg_tables WHERE tablename = 'owned_by_the_login'"
+    try:
+        hold_a_session(data_set["networks"][0]["name"], login)
+        owned_by = asked_of_server(database, owner)
+        status, body = retire(PRODUCT, LANE)
+        assert status == 200, body
+        wait_for(lambda: "session ended" in session_holder_log(), seconds=10)
+        assert (owned_by, asked_of_server(database, owner), logins_on(data_set)) == ([login["PGUSER"]], ["app"], [])
+    finally:
+        on_scratch(f"docker rm --force {SESSION_HOLDER}")
+
+
+def test_a_login_no_container_holds_shows_as_left_unfinished_and_the_next_move_and_the_next_retire_remove_it(
+    lane_on_a: LaneView,
+) -> None:
+    [data_set] = lane_on_a.data_sets
+    database = database_of(data_set)
+    own = environment_of(lane_on_a.receiving()["container"])["PGUSER"]
+    asked_of_server(database, "CREATE ROLE i_left_by_a_kill LOGIN IN ROLE app")
+    left = json.loads(verdict_now())
+    moved = move(BUILD_A)
+    after_the_move = logins_on(data_set)
+    asked_of_server(database, "CREATE ROLE i_left_again LOGIN IN ROLE app")
+    status, body = retire(PRODUCT, LANE)
+    assert any("has the login i_left_by_a_kill, which no container holds" in state for state in left["unfinished"]), left
+    assert (moved["outcome"], after_the_move) == ("cleaned up", [own])
+    assert (status, logins_on(data_set)) == (200, []), body
+
+
+@pytest.mark.usefixtures("fresh_lane")
+def test_a_data_set_whose_access_rules_are_not_launchplanes_gets_no_instance_and_is_not_deleted() -> None:
+    move(BUILD_A)
+    write_row("kept")
+    retire(PRODUCT, LANE)
+    [data_set] = lane_view().data_sets
+    on_scratch(f'docker exec {database_of(data_set)} sh -c \'echo "host all all all trust" >> "$PGDATA/pg_hba.conf"\'')
+    status, body = move_lane(PRODUCT, LANE, BUILD_A)
+    assert status == 503, body
+    assert f"of the data set {data_set['data_set']} does not have Launchplane's access rules" in body["error"]
+    view = lane_view()
+    assert (view.instances, [found["data_set"] for found in view.data_sets]) == ([], [data_set["data_set"]])
+    assert logins_on(data_set) == []
+
+
+def test_a_database_server_removed_by_hand_is_made_again_on_its_data_and_the_instance_still_logs_in(lane_on_a: LaneView) -> None:
     write_row("before the server was removed")
     [data_set] = lane_on_a.data_sets
-    password = password_kept_with(data_set)
     on_scratch(f"docker rm --force {database_of(data_set)}")
     body = move(BUILD_A)
     view = assert_lane_finished_on(BUILD_A)
-    assert (body["data_set"], password_kept_with(view.data_sets[0])) == (data_set["data_set"], password)
+    assert body["data_set"] == data_set["data_set"]
     assert view.receiving()["container"] == lane_on_a.receiving()["container"]
+    wait_for(lambda: request(LANE, "GET", "/rows")[0] == 200, seconds=15)
     assert rows_read() == ["before the server was removed"]
 
 
@@ -454,29 +642,29 @@ def test_a_database_with_another_volume_mounted_is_refused_and_shown_so(lane_on_
         assert status == 503, body
         assert "has test-bed-another-volume mounted at /var/lib/postgresql, which it must not have" in body["error"]
         assert any("has test-bed-another-volume mounted" in problem for problem in verdict["problems"])
+        wait_for(lambda: "The logins of the database test-bed-impostor could not be read" in verdict_now(), seconds=30)
     finally:
         on_scratch("docker rm --force test-bed-impostor; docker volume rm test-bed-another-volume")
 
 
 def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_on_a: LaneView) -> None:
-    password = password_kept_with(lane_on_a.data_sets[0])
     status, body = move_lane(PRODUCT, LANE, BUILD_TELLTALE)
     assert (status, body["outcome"]) == (422, "check failed"), body
-    assert f"my password is {SECRET_REMOVED}" in body["error"]
-    journal = on_control("journalctl --unit launchplane --no-pager --since '-10 min'")
-    assert password not in json.dumps(body) + json.dumps(read_running()) + journal
+    assert f"my password is {SECRET_REMOVED}\n" in body["error"]
+    assert "my password is" not in shown_by_launchplane().replace(f"my password is {SECRET_REMOVED}", "")
+    assert len(logins_on(lane_on_a.data_sets[0])) == 1
 
 
 def test_a_background_service_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
     try:
         status, body = move_lane(LEAKY_PRODUCT, LANE, BUILD_A)
         [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
-        password = password_kept_with(data_set)
+        [instance] = [found for found in read_running()["instances"] if found["product"] == LEAKY_PRODUCT]
+        password = environment_of(instance["container"])["PGPASSWORD"]
+        assert data_set["data_set"] == instance["data_set"]
         assert (status, body["outcome"]) == (422, "background service failed"), body
         assert f"connecting with password {SECRET_REMOVED}" in body["error"]
-        journal = on_control("journalctl --unit launchplane --no-pager --since '-10 min'")
-        shown = json.dumps(body) + json.dumps(read_running()) + journal
-        assert password not in shown
+        assert password not in json.dumps(body) + shown_by_launchplane()
     finally:
         for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
             retire(LEAKY_PRODUCT, LANE, found["data_set"])

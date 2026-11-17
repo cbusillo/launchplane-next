@@ -17,10 +17,11 @@ from launchplane.data_set import (
     CLIENT_PASSWORD_VARIABLE,
     DATA_PATH,
     DATABASE_ADDRESS,
-    PASSWORD_PATH,
     READY_COMMAND,
-    SERVER_ENVIRONMENT,
-    client_environment,
+    SET_UP_PATH,
+    SET_UP_SCRIPT,
+    THROWAWAY_PASSWORD_VARIABLE,
+    server_environment,
 )
 from launchplane.docker_answers import (
     BUILD_LABEL,
@@ -34,6 +35,7 @@ from launchplane.docker_answers import (
     PART_LABEL,
     PRODUCT_LABEL,
     QUIET_GATEWAY_MODE,
+    CommandResult,
     ContainerHostError,
     HostAnswers,
     OnHost,
@@ -41,6 +43,7 @@ from launchplane.docker_answers import (
     TornRead,
     attempting,
     checked,
+    command_result,
     files_in,
     is_quiet,
     names_of,
@@ -49,8 +52,18 @@ from launchplane.docker_answers import (
     running_for,
     tar_of,
 )
-from launchplane.host_secrets import PASSWORD_FILE_LABEL, SECRET_VARIABLES_LABEL, HostSecrets
-from launchplane.instance import LANE_NETWORK, DataSet, DataSetUse, InstanceState, LaneBuild, background_service_container_of
+from launchplane.host_logins import HostLogins
+from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets
+from launchplane.instance import (
+    LANE_NETWORK,
+    DataSet,
+    DataSetDatabase,
+    DataSetUse,
+    InstanceState,
+    LaneBuild,
+    background_service_container_of,
+    new_password,
+)
 
 MARKED = {"label": PRODUCT_LABEL}
 DOCKER_API_VERSION = "1.47"
@@ -95,16 +108,6 @@ class FileRead:
 
 
 @dataclass(frozen=True)
-class CommandResult:
-    exit_code: int
-    output: str
-
-    @property
-    def succeeded(self) -> bool:
-        return self.exit_code == 0
-
-
-@dataclass(frozen=True)
 class RunOptions:
     image: str
     container: str
@@ -126,12 +129,12 @@ def data_set_labels(product: str, lane: str, data_set: str) -> dict[str, str]:
 
 
 def database_options(product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> RunOptions:
+    marks = {PART_LABEL: "database", SECRET_VARIABLES_LABEL: THROWAWAY_PASSWORD_VARIABLE}
     return RunOptions(
         image=image,
         container=f"{product}-{lane}-database-{data_set}",
-        labels=data_set_labels(product, lane, data_set) | {PART_LABEL: "database", PASSWORD_FILE_LABEL: str(PASSWORD_PATH)},
+        labels=data_set_labels(product, lane, data_set) | marks,
         networks={network: [DATABASE_ADDRESS]},
-        environment=SERVER_ENVIRONMENT,
         volumes={volume: DATA_PATH},
     )
 
@@ -141,9 +144,9 @@ def part_options(target: LaneBuild, container: str, part: Part, networks: list[s
     return RunOptions(target.build, container, labels, {network: [] for network in networks}, command)
 
 
-def on_data_set(options: RunOptions, use: DataSetUse, password: str) -> RunOptions:
+def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> RunOptions:
     labels = options.labels | {DATA_SET_LABEL: use.data_set, SECRET_VARIABLES_LABEL: CLIENT_PASSWORD_VARIABLE}
-    return replace(options, labels=labels, environment=client_environment(password))
+    return replace(options, labels=labels, environment=login)
 
 
 def helper_options(helper: HelperContainer) -> RunOptions:
@@ -172,6 +175,7 @@ class ContainerHost:
         self.sleep = sleep
         self.clock = clock
         self.secrets = HostSecrets(client, address)
+        self.logins = HostLogins(client, address, self.secrets)
 
     @classmethod
     def from_environment(cls) -> ContainerHost:
@@ -223,13 +227,18 @@ class ContainerHost:
             raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
     def probed(self, found: DataSet) -> DataSet:
-        databases = tuple(
-            each.model_copy(update={"accepts_connections": self.accepts_connections(each.container)})
-            if each.state == InstanceState.RUNNING
-            else each
-            for each in found.databases
-        )
+        databases = tuple(self.asked(found, each) if each.state == InstanceState.RUNNING else each for each in found.databases)
         return found.model_copy(update={"databases": databases})
+
+    def asked(self, found: DataSet, database: DataSetDatabase) -> DataSetDatabase:
+        if not self.accepts_connections(database.container):
+            return database.model_copy(update={"accepts_connections": False})
+        try:
+            with attempting(f"Reading the logins of the database {database.container}", self.address):
+                unheld = self.logins.unheld(database.container, found.product, found.data_set)
+        except ContainerHostError as error:
+            return database.model_copy(update={"accepts_connections": True, "logins_unread": str(error)})
+        return database.model_copy(update={"accepts_connections": True, "unheld_logins": tuple(unheld)})
 
     def accepts_connections(self, container: str) -> bool:
         with attempting(f"Asking the database {container} whether it accepts connections", self.address):
@@ -292,22 +301,24 @@ class ContainerHost:
             restart_policy=restart,
         )
 
-    def run_part(self, options: RunOptions, use: DataSetUse | None) -> None:
+    def run_part(self, options: RunOptions, use: DataSetUse | None, login_on: Callable[[DataSetUse], dict[str, str]]) -> None:
         if LANE_NETWORK in options.networks:
             self.ensure_network(LANE_NETWORK, quiet=True)
-        ready = options if use is None else on_data_set(options, use, self.secrets.password_of(use))
+        ready = options if use is None else on_data_set(options, use, login_on(use))
         self.create(ready).start()
 
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
-            self.run_part(part_options(target, container, "web", networks, None), use)
+            options = part_options(target, container, "web", networks, None)
+            self.run_part(options, use, lambda on: self.logins.make(container, on))
 
     def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
         networks = [LANE_NETWORK] if use is None else [use.network]
         options = part_options(target, background_service_container_of(instance), "background-service", networks, command)
         with attempting(f"Starting the background service of the instance {instance}", self.address):
-            self.run_part(replace(options, labels=options.labels | {INSTANCE_LABEL: instance}), use)
+            marked = replace(options, labels=options.labels | {INSTANCE_LABEL: instance})
+            self.run_part(marked, use, lambda _on: self.logins.given_to(instance))
 
     def await_background_service(self, container: str, steady_seconds: float) -> None:
         started = self.clock()
@@ -332,12 +343,20 @@ class ContainerHost:
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         with attempting(f"Making the database of the data set {data_set}", self.address):
-            made = self.create(database_options(product, lane, data_set, network, volume, image))
-            self.secrets.start_with_password(made)
+            throwaway_password = new_password()
+            self.secrets.note([throwaway_password])
+            options = database_options(product, lane, data_set, network, volume, image)
+            self.start_set_up(self.create(replace(options, environment=server_environment(throwaway_password))))
 
     def start_database(self, container: str) -> None:
         with attempting(f"Starting the database {container}", self.address):
-            self.secrets.start_with_password(self.client.containers.get(container))
+            self.start_set_up(self.client.containers.get(container))
+
+    # A server made and never started has no set-up yet, and one with data does not run it again.
+    @staticmethod
+    def start_set_up(database: Container) -> None:
+        database.put_archive(str(SET_UP_PATH.parent), tar_of(SET_UP_PATH.name, SET_UP_SCRIPT.encode()))  # pyright: ignore[reportUnknownMemberType]
+        database.start()
 
     def start_part(self, container: str) -> None:
         with attempting(f"Starting {container}", self.address):
@@ -392,6 +411,10 @@ class ContainerHost:
         with attempting(f"Stopping and removing {container}", self.address):
             self.retire_container(container)
 
+    def remove_unheld_logins(self, database: str) -> None:
+        with attempting(f"Removing the logins no container holds from the database {database}", self.address):
+            self.logins.remove_unheld(database)
+
     def read_log_tail(self, container: str) -> str:
         with attempting(f"Reading the log of {container}", self.address):
             found = self.find_container(container)
@@ -421,11 +444,7 @@ class ContainerHost:
             return self.command_result_in(container, command)
 
     def command_result_in(self, container: str, command: list[str]) -> CommandResult:
-        result = self.client.containers.get(container).exec_run(command)
-        exit_code, output = result.exit_code, result.output
-        if exit_code is None or not isinstance(output, bytes):
-            raise ContainerHostError(f"Running {command[0]} in {container} on {self.address} returned before the command finished.")
-        return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())
+        return command_result(self.client.containers.get(container), command)
 
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]:
         with attempting(f"Reading {folder} in {container}", self.address):

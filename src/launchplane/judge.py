@@ -263,6 +263,32 @@ def data_set_change_problems(seen: LaneSeen, switching_to: RunningInstance) -> l
     ]
 
 
+def databases_of(seen: LaneSeen) -> list[DataSetDatabase]:
+    return [database for found in seen.data_sets for database in found.databases]
+
+
+def unheld_login_findings(seen: LaneSeen) -> list[Finding]:
+    return [
+        Finding(f"The database {database.container} has the login {login}, which no container holds", of_a_release=True)
+        for database in databases_of(seen)
+        for login in database.unheld_logins or ()
+    ]
+
+
+def unread_logins_problem(database: DataSetDatabase) -> str | None:
+    if database.logins_unread is None:
+        return None
+    return (
+        f"The logins of the database {database.container} could not be read, so whether one is left that no container "
+        f"holds is unknown: {database.logins_unread}"
+    )
+
+
+def login_findings(seen: LaneSeen) -> list[Finding]:
+    unread = [Finding(problem) for problem in map(unread_logins_problem, databases_of(seen)) if problem is not None]
+    return [*unread, *unheld_login_findings(seen)]
+
+
 def data_set_findings(found: DataSet | None, seen: LaneSeen, product: Product) -> list[Finding]:
     if found is None:
         return []
@@ -296,20 +322,6 @@ def lane_problems(seen: LaneSeen, target: LaneBuild, product: Product, switching
     return [finding.text for finding in lane_findings(seen, target, product, switching_to)]
 
 
-def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
-    active = active_instance(seen)
-    used = None if active is None else active.data_set
-    of_other_data_sets = [
-        finding for found in seen.data_sets if found.data_set != used for finding in data_set_findings(found, seen, product)
-    ]
-    if active is None:
-        return [no_visitors(seen), *of_other_data_sets]
-    if active.lane is None or active.build is None:
-        return [Finding(f"The instance {active.container} does not say which lane and build it is"), *of_other_data_sets]
-    running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
-    return [*lane_findings(seen, running, product), *of_other_data_sets]
-
-
 def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
     with_owner = [
         (running, owner) for running in seen.background_services for owner in seen.instances if owner.container == running.instance
@@ -326,8 +338,28 @@ def connection_faults(seen: LaneSeen, product: Product) -> list[str]:
     ]
 
 
-def databases_of(seen: LaneSeen) -> list[DataSetDatabase]:
-    return [database for found in seen.data_sets for database in found.databases]
+def faults_not_among(findings: list[Finding], seen: LaneSeen, product: Product) -> list[Finding]:
+    found = {finding.text for finding in findings}
+    return [Finding(fault) for fault in connection_faults(seen, product) if fault not in found]
+
+
+def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
+    active = active_instance(seen)
+    used = None if active is None else active.data_set
+    of_other_data_sets = [
+        finding for found in seen.data_sets if found.data_set != used for finding in data_set_findings(found, seen, product)
+    ]
+    if active is None:
+        return [
+            no_visitors(seen),
+            *of_other_data_sets,
+            *faults_not_among(of_other_data_sets, seen, product),
+            *login_findings(seen),
+        ]
+    if active.lane is None or active.build is None:
+        return [Finding(f"The instance {active.container} does not say which lane and build it is"), *of_other_data_sets]
+    running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
+    return [*lane_findings(seen, running, product), *of_other_data_sets, *login_findings(seen)]
 
 
 class Stoppable(Protocol):
