@@ -1,0 +1,1938 @@
+{
+ "at rest and as it must be": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a new instance being prepared beside the active one": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The instance new runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance new runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "the web address moved and the old instance and its background service still there": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The background service old-background-service belongs to old, not new",
+    "The instance old runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "old": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service old-background-service belongs to old, not new",
+    "The instance old runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "old": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "the old background service stopped and the new one not yet started": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The lane has 0 background services (none) where it must have one, belonging to new",
+    "The instance old runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "old": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The lane has 0 background services (none) where it must have one, belonging to new",
+    "The instance old runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "old": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "the new background service not yet up as long as it must stay up": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The background service new-background-service has run 1.0 s of the 3 s it must stay up"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service new-background-service has run 1.0 s of the 3 s it must stay up"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service that is stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The background service new-background-service is stopped"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "wrong",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service new-background-service is stopped"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "on purpose",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a lane being brought up, its database not yet accepting connections": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "No instance receives visitors",
+    "The database database-d1 does not accept connections"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "No instance receives visitors",
+    "The database database-d1 does not accept connections"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an instance being prepared that can reach out": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The instance new runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new is attached to bridge, which it must not be",
+    "The instance new can reach out through bridge"
+   ],
+   "release_under_way": [
+    "The instance new runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an instance being prepared that is attached to another data set": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The instance new runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "good",
+    "old-background-service": "good",
+    "database-d1": "good",
+    "database-d2": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new is attached to network-d2, which it must not be"
+   ],
+   "release_under_way": [
+    "The instance new runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "good",
+    "old-background-service": "good",
+    "database-d1": "good",
+    "database-d2": "good"
+   }
+  }
+ },
+ "the old instance's background service can reach out": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service old-background-service is attached to bridge, which it must not be",
+    "The background service old-background-service can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The background service old-background-service belongs to old, not new",
+    "The instance old runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "old": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The background service old-background-service is attached to bridge, which it must not be",
+    "The background service old-background-service can reach out through bridge"
+   ],
+   "release_under_way": [
+    "The background service old-background-service belongs to old, not new",
+    "The instance old runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "old": "good",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a database attached to an outside network": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The database database-d1 is attached to bridge, which it must not be",
+    "The database database-d1 can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The database database-d1 is attached to bridge, which it must not be",
+    "The database database-d1 can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a database with another data set's volume mounted too": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a database with nothing mounted": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service that keeps restarting": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service new-background-service is restarting"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "wrong",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service new-background-service is restarting"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "on purpose",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an active instance that can reach out": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new is attached to bridge, which it must not be",
+    "The instance new can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new is attached to bridge, which it must not be",
+    "The instance new can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an active instance on another data set's network": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new is attached to network-d2, which it must not be"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good",
+    "database-d2": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new is attached to network-d2, which it must not be"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good",
+    "database-d2": "good"
+   }
+  }
+ },
+ "an active instance with a volume mounted": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new has volume-d2 mounted at /data, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new has volume-d2 mounted at /data, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an active instance that is stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new is stopped"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "wrong",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance new is stopped"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "on purpose",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an active instance with no build label": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new does not say which lane and build it is"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance new does not say which lane and build it is"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "an active instance whose data set is not on the host": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new runs against the data set d1, which is not on the host",
+    "The instance new is attached to network-d1, which it must not be",
+    "The background service new-background-service is attached to network-d1, which it must not be",
+    "The background service new-background-service is not attached to launchplane-lanes"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new is attached to network-d1, which it must not be",
+    "The background service new-background-service is attached to network-d1, which it must not be",
+    "The background service new-background-service is not attached to launchplane-lanes"
+   ],
+   "release_under_way": [
+    "The instance new runs against the data set d1, which is not on the host"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good"
+   }
+  }
+ },
+ "two background services": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The lane has 2 background services (new-background-service, second) where it must have one, belonging to new"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "second": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The lane has 2 background services (new-background-service, second) where it must have one, belonging to new"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "second": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service with a volume mounted": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service new-background-service has v mounted at /data, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The background service new-background-service has v mounted at /data, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service labelled for another data set": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service new-background-service says it runs against the data set d2, not d1"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The background service new-background-service says it runs against the data set d2, not d1"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service of another build": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service new-background-service runs a, not b"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service new-background-service runs a, not b"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service whose instance is gone": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service gone-background-service belongs to gone, not new"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "gone-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service gone-background-service belongs to gone, not new"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "gone-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a stopped instance left beside the active one": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The instance new runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "wrong",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance new runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good",
+    "new": "on purpose",
+    "old-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a database that does not accept connections": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The database database-d1 does not accept connections"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The database database-d1 does not accept connections"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a database that is stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The database database-d1 is stopped"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The database database-d1 is stopped"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "a database that keeps restarting": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The database database-d1 is restarting"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The database database-d1 is restarting"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "a data set whose network is not quiet": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The data set d1's network network-d1 is not quiet"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The data set d1's network network-d1 is not quiet"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a data set with two database servers": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The data set d1 has 2 database servers (database-a, database-b) where it must have one"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-a": "good",
+    "database-b": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The data set d1 has 2 database servers (database-a, database-b) where it must have one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-a": "good",
+    "database-b": "good"
+   }
+  }
+ },
+ "a data set with no volume and no database": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The data set d1 has no volume",
+    "The data set d1 has no database"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The data set d1 has no volume",
+    "The data set d1 has no database"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good"
+   }
+  }
+ },
+ "a second data set whose database is stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The database database-d2 is stopped"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good",
+    "database-d2": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The database database-d2 is stopped"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good",
+    "database-d2": "on purpose"
+   }
+  }
+ },
+ "a login no container holds": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The database database-d1 has the login i_left, which no container holds"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The database database-d1 has the login i_left, which no container holds"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "logins that could not be read": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The logins of the database database-d1 could not be read, so whether one is left that no container holds is unknown: psql: no such database"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The logins of the database database-d1 could not be read, so whether one is left that no container holds is unknown: psql: no such database"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a lane retired with its data set kept": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "No instance receives visitors"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "No instance receives visitors"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "database-d1": "good"
+   }
+  }
+ },
+ "a route removed by hand": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "No instance receives visitors"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "No instance receives visitors"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a route removed by hand from an instance that can reach out": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new is attached to bridge, which it must not be",
+    "The instance new can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [
+    "No instance receives visitors"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance new is attached to bridge, which it must not be",
+    "The instance new can reach out through bridge"
+   ],
+   "release_under_way": [
+    "No instance receives visitors"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "the proxy down": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "No instance receives visitors: the proxy is not running"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "web": "good",
+    "web-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "No instance receives visitors: the proxy is not running"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "web": "good",
+    "web-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "the proxy down and a part attached where it must not be": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance web is attached to bridge, which it must not be",
+    "The instance web can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [
+    "No instance receives visitors: the proxy is not running"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "web": "good",
+    "web-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance web is attached to bridge, which it must not be",
+    "The instance web can reach out through bridge"
+   ],
+   "release_under_way": [
+    "No instance receives visitors: the proxy is not running"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "web": "good",
+    "web-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ },
+ "in maintenance with every part stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "in maintenance with the web part and the database still running": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance web is running, in a lane in maintenance",
+    "The database database-d1 is running, in a lane in maintenance"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "wrong",
+    "web-background-service": "on purpose",
+    "database-d1": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance web is running, in a lane in maintenance",
+    "The database database-d1 is running, in a lane in maintenance"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "in maintenance with a database that was killed": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The database database-d1 did not stop cleanly: it exited with code 137, so it was killed or it crashed"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The database database-d1 did not stop cleanly: it exited with code 137, so it was killed or it crashed"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "in maintenance with the back soon page not running": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The back soon page's container launchplane-back-soon is not running, so the web address answers the proxy's own error"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The back soon page's container launchplane-back-soon is not running, so the web address answers the proxy's own error"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "in maintenance with the proxy down": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "in maintenance with a part attached where it must not be": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance web is attached to bridge, which it must not be",
+    "The instance web can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The instance web is attached to bridge, which it must not be",
+    "The instance web can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": true,
+   "in_maintenance_since": "2026-11-16T14:02:00Z",
+   "parts": {
+    "web": "on purpose",
+    "web-background-service": "on purpose",
+    "database-d1": "on purpose"
+   }
+  }
+ },
+ "out of maintenance with the background service stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The background service web-background-service is stopped"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "web": "good",
+    "web-background-service": "wrong",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service web-background-service is stopped"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "web": "good",
+    "web-background-service": "on purpose",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a plain lane as it must be": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good"
+   }
+  }
+ },
+ "a plain lane with an instance beside the active one": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [],
+   "release_under_way": [],
+   "left_unfinished": [
+    "The instance stray runs beside the active one"
+   ],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "stray": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance stray runs beside the active one"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "stray": "good"
+   }
+  }
+ },
+ "a plain lane whose active instance is stopped": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance new is stopped"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance new is stopped"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "on purpose"
+   }
+  }
+ },
+ "a plain lane with a background service the product has none of": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The background service new-background-service runs; the product has none"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The background service new-background-service runs; the product has none"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good"
+   }
+  }
+ },
+ "a plain lane whose instance says it runs against a data set": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The instance old runs against the data set d1; the product has none"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [],
+   "release_under_way": [
+    "The instance old runs against the data set d1; the product has none"
+   ],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "old": "good"
+   }
+  }
+ },
+ "a lane whose description cannot be read": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": false,
+   "problems": [
+    "The description of site is not one Launchplane reads."
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "a_move_is_at_work": true,
+   "problems": [
+    "The description of site is not one Launchplane reads."
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "good"
+   }
+  }
+ }
+}
