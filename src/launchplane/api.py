@@ -248,7 +248,7 @@ class Calls:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
         if kept is None:
             return self.none_such(request.id, response)
-        # A call that does not wait is answered the same whether or not its request has already ended.
+        # A call that does not wait gets the same answer even when its request has already ended.
         if wait and kept.stands in ENDED:
             return final_answer(kept, answer, response)
         response.status_code = HTTPStatus.ACCEPTED

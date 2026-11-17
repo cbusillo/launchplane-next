@@ -30,7 +30,7 @@ def the_record_answers() -> bool:
 
 @pytest.mark.usefixtures("lane_on_a")
 def test_with_its_database_stopped_launchplane_refuses_a_change_changes_nothing_and_still_shows_the_host() -> None:
-    # Debian's postgresql unit only groups the clusters, and stopping it returns before they have stopped.
+    # Debian's unit for PostgreSQL only groups the clusters, and stopping it returns before they have stopped.
     on_control("systemctl stop 'postgresql@*.service'")
     try:
         refused: tuple[int, dict[str, Any]] = ask(f"/lanes/{PRODUCT}/{LANE}/move", {"build": BUILD_B})
