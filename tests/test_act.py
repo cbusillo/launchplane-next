@@ -332,7 +332,8 @@ def test_web_addresses_are_asked_at_once_so_ones_that_hang_do_not_add_up() -> No
         proxy.route(f"testing.site{number}.test", f"site{number}-testing")
     all_waiting = threading.Barrier(3, timeout=5)
 
-    def hang_until_every_web_address_is_asked(_web_address: str) -> str | None:
+    def hang_until_every_web_address_is_asked(web_address: str) -> str | None:
+        assert web_address
         all_waiting.wait()
         return "download timed out"
 

@@ -229,7 +229,12 @@ class Reading:
 
     def lanes(self) -> list[tuple[str, str]]:
         parts: list[PartOfLane] = [*self.parts.instances, *self.parts.background_services, *self.parts.data_sets]
-        return sorted({(part.product, part.lane) for part in parts if part.lane is not None})
+        found: set[tuple[str, str]] = set()
+        for part in parts:
+            lane = part.lane
+            if lane is not None:
+                found.add((part.product, lane))
+        return sorted(found)
 
     def lane(self, product: str, lane: str) -> LaneReading:
         def of_lane[Part: PartOfLane](parts: list[Part]) -> tuple[Part, ...]:

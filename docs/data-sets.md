@@ -61,12 +61,12 @@ So a password is asked for from every address, and only a login of an instance o
 
 **An instance.** Before each login is made Launchplane reads the rules back from the server. If they are not exactly the rules above, the call answers `503` saying what the server has, starts no instance on that data set and deletes nothing. Launchplane sends the server the scrambled form of the new password, never the password. The web part gets the password as `PGPASSWORD`. The background service is given the login its instance's web part holds, read from that container on the host.
 
-**When it goes.** A move or a retire is not finished while a running database server of the lane has a login that no container on the host holds. Before it answers, it reads the logins from the server and the containers from the host, and removes each such login: closed to new sessions, its sessions ended, anything it owns given to `app`, then dropped. The same is done before each new login is made. So a retired instance's login goes in the call that retired it, one left by a call that was killed goes in the next move or retire, and one left by a start that failed goes when the next start is tried. Until then the lane's verdict shows it as left unfinished.
+**When it goes.** A move, a retire or the end of maintenance is not finished while a running database server of the lane has a login that no container on the host holds. Before it answers, it reads the logins from the server and the containers from the host, and removes each such login: closed to new sessions, its sessions ended, anything it owns given to `app`, then dropped. The same is done before each new login is made. So a retired instance's login goes in the call that retired it, one left by a call that was killed goes in the next move, retire or end of maintenance, and one left by a start that failed goes when the next start is tried. Until then the lane's judgement shows it as left unfinished.
 
 - A release that keeps the data set has two instances for a short time, each with its own login.
 - A database server removed by hand is made again on the kept volume. Its logins are in the data, so the instance still logs in.
 - A stopped server is the one exception: its logins are not read, and wait in the data until a move or a retire finds the server running.
-- When a running server's logins cannot be read, the lane's verdict has it as a problem with the reason, and a move or a retire that has done everything else answers `503` with the same words. Ask again once the server answers, or delete the data set by name.
+- When a running server's logins cannot be read, the lane's judgement has it as `could not be read` with the reason, whether or not a call is at work on the lane, and a move or a retire that has done everything else answers `503` with the same words. Ask again once the server answers, or delete the data set by name.
 - A data set made before logins were per instance does not have these rules, so no instance is started on it. Nothing is converted: delete it by name.
 
 Anyone who can run `docker inspect` on a web part or background service can read that instance's password. It opens nothing once the instance is retired.
@@ -123,21 +123,34 @@ curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/retire \
 
 The data set is deleted once the lane has no background service and no instance left: its database servers, then its volumes, then its networks. The answer's `outcome` is `deleted` and its `deleted_data_set` names it. A name that is not one of this lane's data sets deletes nothing.
 
-## The verdict on a lane
+## The judgement on a lane
 
-`/running` answers a verdict for every lane in `lanes`, and the page shows it as given.
+One judgement is made of a lane from one reading of it, what the product's description says, and which call, if any, is at work on it. `/running` answers it for every lane in `lanes`, the page draws it, and a move, a retire and the maintenance calls choose their next step from the same one. So what the page shows as wrong is what stops a call, in the same words.
 
-| Field | Meaning | On the page |
-| --- | --- | --- |
-| `a_move_is_at_work` | This Launchplane is moving the lane, retiring it, or putting it in or taking it out of maintenance right now. Nothing is stored for it; it is gone when the process is. | the pill `Launchplane is at work` |
-| `problems` | What is wrong. | a row each, with the red pill `wrong` |
-| `release_under_way` | While a call is at work: what it has not finished yet. | a row each, with the blue pill `under way` |
-| `left_unfinished` | With no call at work: what a move would finish. | a row each, with the red pill `left unfinished` |
-| `in_maintenance` | The lane's route points at the back soon page: see [a lane in maintenance](maintenance.md). | the pill `in maintenance` |
-| `in_maintenance_since` | When that route was written, or `null`. | under the lane's name |
-| `parts` | For each container of the lane, `good`, `wrong` or `on purpose`. Running is good, and anything else is wrong, or on purpose while a call is at work. In maintenance stopped is on purpose. | the colour of the part's state pill |
+| Field | Meaning |
+| --- | --- |
+| `condition` | `good`, `in maintenance`, `work under way`, `unfinished`, `wrong` or `could not be read`. The worst that applies: wrong, then could not be read, then work under way, then unfinished. |
+| `work` | What this Launchplane is doing to the lane right now: `moving`, `retiring`, `beginning maintenance`, `ending maintenance`, or `null`. Nothing is stored for it; it is gone when the process is. `a_move_is_at_work` is whether it is not `null`. |
+| `findings` | Everything found, each with `subject` (a container, a data set or the web address), `kind`, `sentence` and `shown`. |
+| `parts` | For each container of the lane, its standing: `good`, `wrong`, `on purpose` or `could not be read`. It is the worst of what was found about that container. With nothing found it is good, or on purpose when it is stopped in a lane in maintenance. |
+| `in_maintenance` | The lane's route points at the back soon page: see [a lane in maintenance](maintenance.md). |
+| `in_maintenance_since` | When that route was written, or `null`. |
+| `problems`, `release_under_way`, `left_unfinished` | The sentences of the findings shown as `wrong` or `could not be read`, as `under way`, and as `left unfinished`. |
 
-While a move is at work, only a part attached or mounted where it must not be is a problem. After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too, and so does a lane whose database server has a login no container holds.
+A finding is `shown` one of four ways:
+
+| `shown` | When |
+| --- | --- |
+| `wrong` | Never acceptable, whatever a call is doing: a part attached or mounted where it must not be, a database server in maintenance that did not stop cleanly, the back soon page not running for a lane in maintenance. Or wrong with no call at work: a part that keeps restarting, a data set with a part twice or a network that is not quiet, a part not stopped in a lane in maintenance. |
+| `under way` | A call is at work on the lane, and the finding is one of those wrong only with no call at work, or one a call passes through. |
+| `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, an instance beside the active one, a stopped or missing part, a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
+| `could not be read` | Something asked of the host has no answer: the product's description, a server's logins, a server not asked whether it accepts connections, a network a part is attached to that was not among the networks read. Never shown as under way. |
+
+While a call is ending maintenance the lane is judged as it must be once it is back: a part still stopped is under way, and a running one is good.
+
+After Launchplane is killed mid-release and starts again, the lane shows as left unfinished; asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
+
+A move answers for the instance it serves from and that instance's data set. A fault in another data set of the lane is in the judgement and on the page, and does not stop the move.
 
 How the page lays a lane out is in [the page](what-is-running.md#the-page).
 
@@ -145,18 +158,17 @@ A web part, a background service and a database server are each made with the re
 
 ## Known and not fixed
 
-- **A background service whose instance is gone**, attached to an outside network or with something mounted, shows as release progress while a move is at work.
-- **With a lane's route removed by hand**, the verdict says that no instance receives visitors, and names a part attached or mounted where it must not be. It says nothing else about the instances.
-- **Two running background services** show as release progress while a move is at work.
+- **With a lane's route removed by hand**, no instance is the one the lane serves from, so the judgement does not say whether a background service belongs to it, is of its build or has stayed up.
+- **Two running background services, a background service whose instance is gone, and one of another build** show as under way while a call is at work.
 - **A release that finishes between two readings of the move flag** can show for one reading as left unfinished.
 - **A database server keeps the password it was first started with in its environment.** The set-up takes it off `postgres`, so it opens nothing. If the set-up did not finish it is still the password of `postgres`, which the rules then left in place refuse from every address but the server's own container. Launchplane cleans it from its answers like any secret.
 - **The scrambled form of a new password can be read in Docker's events on the container host,** because it is part of the command Launchplane runs in the database server. It does not open the database.
 - **Access rules changed by hand on a running server, with the file then put back and the server not told to load it, pass the read-back,** because the read-back reads the file and not what the server has loaded.
-- **Ending maintenance on a lane that holds a login left by an earlier failed start brings the lane back, then answers `503` because of that login.** Asked again it answers `not in maintenance` without removing it. The login goes at the next move or retire. Belongs to the next step, which makes one reading and one judgement of a lane.
-- **While a call is working on a lane, logins that could not be read show as a release under way, not as a problem.** At rest they show as a problem. Belongs to the next step too.
+- **A login of an instance retired while its database server is stopped stays in the data** until a move, a retire or the end of maintenance next finds that server running.
 - **A password handed to the product as a file, a login that expires, and an encrypted connection to the database are not built.**
+- **Where a call decides from what it has itself done, because the host cannot show it:** which instance it started, whether a check passed, whether a check or a watch on a background service refused, and whether it has already started a part that reads stopped again. A second call cannot know these, so it checks again and starts again.
 - **A container made before the background service was named, marked `launchplane.part=job`, makes the host unreadable.** No version has been released, so nothing is converted: the test bed's lanes are made again.
-- **Rules no test catches:** reading the host again when Docker refuses a question about a container it has just listed, asking only the databases of a product that has one whether they accept connections, leaving out a superuser when the logins are listed, and finishing a delete whose parts have already gone. Comes back when one of them breaks without a test noticing.
+- **Rules no test catches:** reading the host again when Docker refuses a question about a container it has just listed, leaving out a superuser when the logins are listed, and finishing a delete whose parts have already gone. Comes back when one of them breaks without a test noticing.
 
 ## On the test bed
 

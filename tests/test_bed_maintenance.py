@@ -17,7 +17,9 @@ from tests.test_bed_data_set import (
     asked_of_server,
     build_pretend_product,
     database_of,
+    environment_of,
     lane_view,
+    logins_on,
     move,
     place_description,
     read_running,
@@ -241,3 +243,28 @@ def test_ending_maintenance_killed_at_this_point_is_finished_by_asking_again(poi
     verdict = verdict_of(PRODUCT, LANE)
     assert (verdict["in_maintenance"], verdict["problems"], verdict["left_unfinished"]) == (False, [], [])
     assert rows_read() == ["before the kill"]
+
+
+def test_with_the_proxy_stopped_a_lane_in_maintenance_says_so_itself_as_its_web_address_does_and_beginning_again_starts_it(
+    site: str,
+) -> None:
+    begin(SITE, SITE_LANE)
+    on_scratch("docker stop launchplane-proxy")
+    try:
+        verdict = verdict_of(SITE, SITE_LANE)
+        [entry] = [each for each in read_running()["web_addresses"] if each["web_address"] == site]
+    finally:
+        status, body = begin(SITE, SITE_LANE)
+    assert (verdict["condition"], verdict["in_maintenance"]) == ("unfinished", True)
+    assert ["The proxy is not running" in said for said in (*verdict["left_unfinished"], entry["error"])] == [True, True]
+    assert (status, body["outcome"], verdict_of(SITE, SITE_LANE)["condition"]) == (200, "in maintenance", "in maintenance")
+
+
+def test_ending_maintenance_removes_a_login_no_container_holds_so_asking_again_answers_over_nothing_left(ledger: LaneView) -> None:
+    [data_set] = ledger.data_sets
+    own = environment_of(ledger.receiving()["container"])["PGUSER"]
+    asked_of_server(database_of(data_set), "CREATE ROLE i_left_by_a_failed_start LOGIN IN ROLE app")
+    assert begin()[0] == 200
+    first, again = end(), end()
+    assert [(status, body["outcome"]) for status, body in (first, again)] == [(200, "ended"), (200, "not in maintenance")]
+    assert (logins_on(data_set), verdict_of(PRODUCT, LANE)["condition"]) == ([own], "good")

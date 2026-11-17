@@ -6,7 +6,7 @@ For now a build is a container image reference, and the instance must answer HTT
 
 ## What it does
 
-Each call takes one step at a time and reads the host and the proxy again before every step, so nothing read before a step is used after it. After a crash nothing is resumed: asking again reads and goes on from there. A call that has taken 50 steps and is not finished answers `503`; what was done stays done.
+Each call takes one step at a time. Before every step it reads the host and the proxy again and judges the lane again, with [the judgement the status page draws](data-sets.md#the-judgement-on-a-lane), so nothing read before a step is used after it. After a crash nothing is resumed: asking again reads and goes on from there. A call that has taken 50 steps and is not finished answers `503`; what was done stays done.
 
 The next step is the first of these that applies:
 

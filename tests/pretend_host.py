@@ -289,7 +289,7 @@ def on_data(instance: RunningInstance, name: str, *extra_networks: str) -> Runni
     return instance.model_copy(update={"data_set": name, "networks": (LANE_NETWORK, f"network-{name}", *extra_networks)})
 
 
-def data_set(
+def data_set_named(
     name: str,
     state: InstanceState | None = InstanceState.RUNNING,
     *,
@@ -350,7 +350,13 @@ def with_database(found: DataSet, **change: object) -> DataSet:
     return found.model_copy(update={"databases": (changed(found.databases[0], **change),)})
 
 
-# The lane testing of site as one reading finds it: what every decision and judgement test is given.
+OLD, NEW, STRAY = lane_instance("old", "a"), lane_instance("new", "b"), lane_instance("stray", "c")
+OLD_ON_D1, NEW_ON_D1 = on_data(OLD, "d1"), on_data(NEW, "d1")
+D1 = data_set_named("d1")
+OLD_BACKGROUND_SERVICE, NEW_BACKGROUND_SERVICE = background_service_of(OLD_ON_D1), background_service_of(NEW_ON_D1)
+
+
+# The lane testing of site as one reading finds it: what every test of a decision or of the judge is given.
 @dataclass(frozen=True)
 class Given:
     instances: tuple[RunningInstance, ...] = ()

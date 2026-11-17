@@ -383,15 +383,8 @@ def login_findings(lane: LaneReading) -> list[Found]:
         if database.state != InstanceState.RUNNING or not database.accepts_connections:
             continue
         if isinstance(unheld, tuple):
-            findings += [
-                Found(
-                    Weight.UNFINISHED,
-                    subject,
-                    Kind.LOGIN_UNHELD,
-                    f"The database {subject} has the login {login}, which no container holds",
-                )
-                for login in unheld
-            ]
+            held_by_none = [f"The database {subject} has the login {login}, which no container holds" for login in unheld]
+            findings += [Found(Weight.UNFINISHED, subject, Kind.LOGIN_UNHELD, sentence) for sentence in held_by_none]
         else:
             why = "they were not read" if unheld is None else unheld.why
             sentence = (
@@ -442,7 +435,7 @@ def everything_found(lane: LaneReading, product: Product | ProductError, work: W
     ]
 
 
-def shown(weight: Weight, work: Work | None) -> Shown:
+def shown_for(weight: Weight, work: Work | None) -> Shown:
     if weight == Weight.FAULT:
         return Shown.WRONG
     if weight == Weight.UNREAD:
@@ -474,7 +467,7 @@ def condition_of(lane: LaneReading, work: Work | None, shown_in_lane: set[Shown]
 
 def judge(lane: LaneReading, product: Product | ProductError, work: Work | None) -> Judgement:
     findings = tuple(
-        Finding(subject=each.subject, kind=each.kind, sentence=each.sentence, shown=shown(each.weight, work))
+        Finding(subject=each.subject, kind=each.kind, sentence=each.sentence, shown=shown_for(each.weight, work))
         for each in everything_found(lane, product, work)
     )
     if isinstance(product, ProductError):
@@ -506,6 +499,9 @@ class WebAddressJudged(BaseModel):
     standing: Standing
 
 
+ANSWERING, BACK_SOON_SHOWN, UNASKED = "answering", "shows the back soon page", "was not asked"
+
+
 def why_not_answering(web_address: str, reading: Reading, sends_to: str | None) -> str | None:
     if not reading.proxy.runs:
         return f"The proxy is not running, so {web_address} answers nothing."
@@ -513,8 +509,6 @@ def why_not_answering(web_address: str, reading: Reading, sends_to: str | None) 
         return f"The proxy sends {web_address} to no instance."
     if sends_to == BACK_SOON:
         return None if reading.proxy.back_soon_runs else f"The back soon page's container {BACK_SOON} is not running."
-    if web_address not in reading.web_address_failures:
-        return f"{web_address} was not asked, so whether it answers is unknown."
     failure = reading.web_address_failures[web_address]
     runs = any(each.container == sends_to and each.state == InstanceState.RUNNING for each in reading.parts.instances)
     return f"The instance it is sent to is running, and does not answer with success: {failure}" if failure and runs else failure
@@ -522,18 +516,19 @@ def why_not_answering(web_address: str, reading: Reading, sends_to: str | None) 
 
 def web_address_judged(web_address: str, owner: tuple[str, str | None] | None, reading: Reading) -> WebAddressJudged:
     sends_to = reading.proxy.sends_visitors_to().get(web_address) if reading.proxy.runs else None
-    error = why_not_answering(web_address, reading, sends_to)
-    if sends_to == BACK_SOON and error is None:
-        says, standing = "shows the back soon page", Standing.ON_PURPOSE
+    if sends_to not in (None, BACK_SOON) and web_address not in reading.web_address_failures:
+        error, says, standing = f"{web_address} was not asked, so whether it answers is unknown.", UNASKED, Standing.UNREAD
     else:
-        says, standing = ("answering", Standing.GOOD) if error is None else ("not answering", Standing.WRONG)
+        error = why_not_answering(web_address, reading, sends_to)
+        answering = (BACK_SOON_SHOWN, Standing.ON_PURPOSE) if sends_to == BACK_SOON else (ANSWERING, Standing.GOOD)
+        says, standing = answering if error is None else ("not answering", Standing.WRONG)
     return WebAddressJudged(
         web_address=web_address,
         product=None if owner is None else owner[0],
         lane=None if owner is None else owner[1],
         sends_to_container=sends_to,
-        answers=says == "answering",
-        shows_back_soon_page=says == "shows the back soon page",
+        answers=says == ANSWERING,
+        shows_back_soon_page=says == BACK_SOON_SHOWN,
         error=error,
         says=says,
         standing=standing,

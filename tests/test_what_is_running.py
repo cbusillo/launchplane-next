@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ from launchplane.instance import (
     RouteStatus,
     RunningInstance,
 )
-from launchplane.judge import judge, web_addresses_judged
+from launchplane.judge import Standing, judge, web_addresses_judged
 from launchplane.product import Product
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from tests.given_secrets import NO_SECRETS
@@ -82,8 +82,8 @@ def proxy_sending(routes: dict[str, str] | None, *, runs: bool = True, back_soon
     return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, loaded=loaded if runs else {})
 
 
-def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: dict[str, str | None] | None = None) -> Status:
-    answered = dict.fromkeys(proxy.sends_visitors_to(), None) | (failures or {})
+def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: Mapping[str, str | None] | None = None) -> Status:
+    answered: dict[str, str | None] = {**dict.fromkeys(proxy.sends_visitors_to()), **(failures or {})}
     reading = Reading(SINCE, proxy, OnHost(instances, [], []), answered)
     judged = [judge(reading.lane(product, lane), Product(), None) for product, lane in reading.lanes()]
     return Status(reading, judged, web_addresses_judged(reading))
@@ -92,7 +92,7 @@ def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: dict
 def app_reading(
     read: InstanceReader,
     routes: dict[str, str] | None = None,
-    failures: dict[str, str | None] | None = None,
+    failures: Mapping[str, str | None] | None = None,
     proxy: ProxySeen | None = None,
 ) -> TestClient:
     def read_status() -> Status:
@@ -181,7 +181,7 @@ def test_the_running_call_marks_the_instance_the_proxy_sends_visitors_to_and_no_
 
 
 def web_addresses_answer(
-    instances: list[RunningInstance], routes: dict[str, str], failures: dict[str, str | None] | None = None
+    instances: list[RunningInstance], routes: dict[str, str], failures: Mapping[str, str | None] | None = None
 ) -> dict[str, dict[str, Any]]:
     body = app_reading(lambda: instances, routes, failures).get("/running").json()
     return {entry["web_address"]: entry for entry in body["web_addresses"]}
@@ -211,7 +211,11 @@ def test_a_web_address_that_was_routed_and_not_asked_is_not_said_to_answer() -> 
     status = status_of([lane_instance()], proxy_sending({"testing.site.test": "site-testing-1"}))
     unasked = Status(Reading(SINCE, status.reading.proxy, status.reading.on_host), [], [])
     [entry] = web_addresses_judged(unasked.reading)
-    assert (entry.answers, entry.error) == (False, "testing.site.test was not asked, so whether it answers is unknown.")
+    assert (entry.answers, entry.standing, entry.error) == (
+        False,
+        Standing.UNREAD,
+        "testing.site.test was not asked, so whether it answers is unknown.",
+    )
 
 
 def test_a_route_to_an_instance_that_is_gone_is_shown_not_dropped() -> None:

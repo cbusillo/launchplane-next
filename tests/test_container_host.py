@@ -1,10 +1,11 @@
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from launchplane.container_host import ContainerHost, PartStopped
-from launchplane.data_set import RULES_FILE, login_of
+from launchplane.data_set import RULES_AS_READ, RULES_FILE, login_of
 from launchplane.docker_answers import ContainerHostError, HostAnswers, on_host_from_answers
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, held_from_answers
 from launchplane.instance import (
@@ -219,10 +220,10 @@ def given_to(docker: RecordingDocker, holder: str) -> dict[str, str]:
 LOGIN = {"PGUSER": "i_aaaaaaaaaaaa", "PGPASSWORD": "a-password-of-the-instance"}
 
 
-def holding_a_login(docker: RecordingDocker, container: str, login: dict[str, str] = LOGIN) -> None:
+def holding_a_login(docker: RecordingDocker, holder: str) -> None:
     labels = DATA_SET_LABELS | {SECRET_VARIABLES_LABEL: "PGPASSWORD"}
     docker.containers.create(
-        "shop:a", name=container, labels=labels, environment=login, volumes={}, restart_policy={"Name": ""}
+        "shop:a", name=holder, labels=labels, environment=LOGIN, volumes={}, restart_policy={"Name": ""}
     ).start()
 
 
@@ -239,6 +240,17 @@ def test_the_longest_product_and_lane_names_still_give_two_instances_logins_post
     longest = f"{'p' * 31}-{'l' * 31}"
     logins = {login_of(f"{longest}-aaaaaaaaaaaa"), login_of(f"{longest}-bbbbbbbbbbbb")}
     assert (len(logins), max(map(len, logins)) <= 63) == (2, True)
+
+
+def test_no_command_run_in_the_database_server_to_make_a_login_carries_the_password_the_instance_is_given() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    server = docker.containers.by_name[DATABASE]
+    server.answers = [ExecResult(0, json.dumps(RULES_AS_READ).encode()), ExecResult(0, b"[]"), ExecResult(0)]
+    host.start_instance(TARGET, WEB, LINK)
+    given, run_in_the_server = given_to(docker, WEB), " ".join(server.calls)
+    assert (given["PGUSER"], server.answers) == ("i_aaaaaaaaaaaa", [])
+    assert ("--set=verifier=SCRAM-SHA-256$4096:" in run_in_the_server, given["PGPASSWORD"] in run_in_the_server) == (True, False)
 
 
 def test_a_background_service_is_given_the_login_its_instance_holds_and_none_is_made_for_it() -> None:

@@ -48,12 +48,19 @@ from launchplane.steps import (
     WriteRoute,
 )
 from tests.pretend_host import (
+    D1,
+    NEW,
+    NEW_BACKGROUND_SERVICE,
+    NEW_ON_D1,
+    OLD,
+    OLD_ON_D1,
+    STRAY,
     WEB_ADDRESS,
     WITH_DATA,
     Given,
     background_service_of,
     changed,
-    data_set,
+    data_set_named,
     lane_instance,
     on_data,
     with_database,
@@ -63,10 +70,7 @@ TARGET = LaneBuild(product="site", lane="testing", build="b")
 FRESH = "site-testing-fresh"
 FRESH_NAMES = FreshNames(FRESH, "fresh-data")
 
-OLD = lane_instance("old", "a")
-NEW = lane_instance("new", "b")
 STOPPED_NEW = lane_instance("new", "b", InstanceState.STOPPED)
-STRAY = lane_instance("stray", "c")
 STARTED_NEW = StartInstance(TARGET, "new")
 REFUSED = CheckRefused("new", "Connection refused")
 
@@ -230,26 +234,11 @@ class DataCase:
     background_services: tuple[RunningBackgroundService, ...] = ()
 
 
-def with_database_on(found: DataSet, *networks: str) -> DataSet:
-    return with_database(found, networks=networks)
-
-
-def mounting(part: RunningInstance, source: str) -> RunningInstance:
-    return changed(part, mounts=(Mount(source=source, path="/data"),))
-
-
-def with_database_mounting(found: DataSet, *sources: str, at: tuple[str, ...] = ("/var/lib/postgresql",)) -> DataSet:
-    return with_database(found, mounts=tuple(Mount(source=source, path=path) for source in sources for path in at))
-
-
-OLD_ON_D1 = on_data(OLD, "d1")
-NEW_ON_D1 = on_data(NEW, "d1")
 NEW_ON_D2 = on_data(NEW, "d2")
-D1 = data_set("d1")
-RENAMED_STOPPED = data_set("d1", databases=("renamed-database",), state=InstanceState.STOPPED)
+OUTSIDE_AND_STOPPED = with_database(data_set_named("d1", InstanceState.STOPPED), networks=("network-d1", "bridge"))
+RENAMED_STOPPED = data_set_named("d1", databases=("renamed-database",), state=InstanceState.STOPPED)
 STOPPED_NEW_BACKGROUND_SERVICE = background_service_of(NEW_ON_D1, running_for=None)
 USE_D1 = DataSetUse("d1", "network-d1", "database-d1")
-NEW_BACKGROUND_SERVICE = background_service_of(NEW_ON_D1)
 STARTED_NEW_BACKGROUND_SERVICE = StartBackgroundService(TARGET, "new", USE_D1, ("work",))
 
 DATA_MOVES = {
@@ -257,10 +246,10 @@ DATA_MOVES = {
         (), None, (), (), CreateDataSetNetwork("site", "testing", "fresh-data")
     ),
     "a data set with a network and no volume gets its volume": DataCase(
-        (), None, (data_set("d1", None, volume=False),), (), CreateDataSetVolume("site", "testing", "d1")
+        (), None, (data_set_named("d1", None, volume=False),), (), CreateDataSetVolume("site", "testing", "d1")
     ),
     "a data set with no database gets one on the network and volume as read": DataCase(
-        (), None, (data_set("d1", None),), (), CreateDatabase("site", "testing", "d1", "network-d1", "volume-d1", IMAGE)
+        (), None, (data_set_named("d1", None),), (), CreateDatabase("site", "testing", "d1", "network-d1", "volume-d1", IMAGE)
     ),
     "a stopped database is started by the name it was read under, not made again": DataCase(
         (),
@@ -270,25 +259,25 @@ DATA_MOVES = {
         StartDatabase("renamed-database"),
     ),
     "a database read as not accepting connections is waited for before an instance starts on it": DataCase(
-        (), None, (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1")
+        (), None, (data_set_named("d1", accepts=False),), (), AwaitDatabase("database-d1")
     ),
     "an instance starts on the data set once its database is read accepting connections": DataCase(
         (), None, (D1,), (), StartInstance(TARGET, FRESH, USE_D1)
     ),
     "a release uses the data set of the instance receiving visitors, even beside another": DataCase(
-        (OLD_ON_D1,), "old", (D1, data_set("d2")), (), StartInstance(TARGET, FRESH, USE_D1)
+        (OLD_ON_D1,), "old", (D1, data_set_named("d2")), (), StartInstance(TARGET, FRESH, USE_D1)
     ),
     "the new instance is checked at the product's health path": DataCase(
         (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (StartInstance(TARGET, "new", USE_D1),), Check("new", "/health")
     ),
     "an instance left by an interrupted release waits on its database as read before its check": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1")
+        (OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", accepts=False),), (), AwaitDatabase("database-d1")
     ),
     "a checked instance attached only to its own quiet networks is switched to": DataCase(
         (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (Check("new", "/health"),), WriteRoute(WEB_ADDRESS, "new")
     ),
     "a running instance of the build on another data set is retired, not switched to": DataCase(
-        (OLD_ON_D1, NEW_ON_D2), "old", (D1, data_set("d2")), (), Retire("new")
+        (OLD_ON_D1, NEW_ON_D2), "old", (D1, data_set_named("d2")), (), Retire("new")
     ),
     "a left-over instance that can reach out is retired, not switched to": DataCase(
         (OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (), Retire("new")
@@ -296,7 +285,7 @@ DATA_MOVES = {
     "a serving instance attached to another data set's quiet network is replaced, not kept": DataCase(
         (on_data(NEW, "d1", "network-d2"),),
         "new",
-        (D1, data_set("d2")),
+        (D1, data_set_named("d2")),
         (),
         StartInstance(TARGET, FRESH, USE_D1),
         (NEW_BACKGROUND_SERVICE,),
@@ -337,33 +326,6 @@ DATA_MOVES = {
     "a background service of another build than the instance it belongs to is replaced": DataCase(
         (NEW_ON_D1,), "new", (D1,), (), Retire("new-background-service"), (changed(NEW_BACKGROUND_SERVICE, build="a"),)
     ),
-    "a background service with a volume mounted is replaced": DataCase(
-        (NEW_ON_D1,),
-        "new",
-        (D1,),
-        (),
-        Retire("new-background-service"),
-        (changed(NEW_BACKGROUND_SERVICE, mounts=(Mount(source="volume-d1", path="/data"),)),),
-    ),
-    "a serving instance with a volume mounted is replaced, not kept": DataCase(
-        (mounting(NEW_ON_D1, "volume-d2"),), "new", (D1,), (), StartInstance(TARGET, FRESH, USE_D1), (NEW_BACKGROUND_SERVICE,)
-    ),
-    "a background service labelled for another data set than its instance runs against is replaced": DataCase(
-        (NEW_ON_D1,),
-        "new",
-        (D1,),
-        (),
-        Retire("new-background-service"),
-        (changed(NEW_BACKGROUND_SERVICE, data_set="d2"),),
-    ),
-    "a background service that can reach out is replaced": DataCase(
-        (NEW_ON_D1,),
-        "new",
-        (D1,),
-        (),
-        Retire("new-background-service"),
-        (background_service_of(NEW_ON_D1, networks=("network-d1", "bridge")),),
-    ),
     "two background services of the serving instance are not answered unchanged: one is retired": DataCase(
         (NEW_ON_D1,),
         "new",
@@ -381,10 +343,15 @@ DATA_MOVES = {
         (background_service_of(on_data(lane_instance("gone", "a"), "d1")),),
     ),
     "a stopped database under a serving instance is started, not answered unchanged": DataCase(
-        (NEW_ON_D1,), "new", (data_set("d1", InstanceState.STOPPED),), (), StartDatabase("database-d1"), (NEW_BACKGROUND_SERVICE,)
+        (NEW_ON_D1,),
+        "new",
+        (data_set_named("d1", InstanceState.STOPPED),),
+        (),
+        StartDatabase("database-d1"),
+        (NEW_BACKGROUND_SERVICE,),
     ),
     "a serving lane whose database does not accept connections is waited on, not answered": DataCase(
-        (NEW_ON_D1,), "new", (data_set("d1", accepts=False),), (), AwaitDatabase("database-d1"), (NEW_BACKGROUND_SERVICE,)
+        (NEW_ON_D1,), "new", (data_set_named("d1", accepts=False),), (), AwaitDatabase("database-d1"), (NEW_BACKGROUND_SERVICE,)
     ),
 }
 
@@ -402,7 +369,7 @@ def test_a_move_with_data_takes_this_step_next(case: DataCase) -> None:
     assert next_data_move_step(case) == case.step
 
 
-LEFT_ON_D1 = data_set("d1", unheld=("i_left",))
+LEFT_ON_D1 = data_set_named("d1", unheld=("i_left",))
 AT_REST_WITH_A_LOGIN_LEFT = DataCase((NEW_ON_D1,), "new", (LEFT_ON_D1,), (), None, (NEW_BACKGROUND_SERVICE,))
 
 
@@ -425,11 +392,11 @@ def test_a_retire_does_not_answer_while_a_running_server_has_a_login_no_containe
 
 
 def test_a_retire_answers_with_a_stopped_server_whose_logins_wait_for_its_next_start() -> None:
-    assert isinstance(retire_step_with(data_set("d1", InstanceState.STOPPED)), Done)
+    assert isinstance(retire_step_with(data_set_named("d1", InstanceState.STOPPED)), Done)
 
 
 UNKNOWN_LOGINS = {
-    "does not accept connections": data_set("d1", accepts=False),
+    "does not accept connections": data_set_named("d1", accepts=False),
     "was not asked whether it accepts connections": with_database(D1, accepts_connections=None, unheld_logins=None),
     "could not tell its logins": with_database(D1, unheld_logins=Unread(why="psql: no such database")),
 }
@@ -470,16 +437,22 @@ def test_a_background_service_that_stops_during_its_watch_answers_background_ser
 
 
 DATA_STOPS = {
-    "two data sets and no instance receiving visitors": (DataCase((), None, (D1, data_set("d2")), (), None), "cannot tell which"),
-    "a data set whose network is not quiet": (DataCase((), None, (data_set("d1", quiet=False),), (), None), "not quiet"),
+    "two data sets and no instance receiving visitors": (
+        DataCase((), None, (D1, data_set_named("d2")), (), None),
+        "cannot tell which",
+    ),
+    "a data set whose network is not quiet": (DataCase((), None, (data_set_named("d1", quiet=False),), (), None), "not quiet"),
     "a left-over instance on a data set whose network is not quiet": (
-        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (data_set("d1", quiet=False),), (), None),
+        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", quiet=False),), (), None),
         "not quiet",
     ),
-    "a database that keeps restarting": (DataCase((), None, (data_set("d1", InstanceState.RESTARTING),), (), None), "is restarting"),
+    "a database that keeps restarting": (
+        DataCase((), None, (data_set_named("d1", InstanceState.RESTARTING),), (), None),
+        "is restarting",
+    ),
     "a receiving instance whose data set is gone": (DataCase((OLD_ON_D1,), "old", (), (), None), "not on the host"),
     "two database servers carrying one data set's labels": (
-        DataCase((), None, (data_set("d1", databases=("database-a", "database-b")),), (), None),
+        DataCase((), None, (data_set_named("d1", databases=("database-a", "database-b")),), (), None),
         "2 database servers (database-a, database-b)",
     ),
     "a new instance given an outside network during its check": (
@@ -487,18 +460,14 @@ DATA_STOPS = {
         "can reach out through bridge",
     ),
     "a stopped database attached to an outside network, which is not started first": (
-        DataCase((), None, (with_database_on(data_set("d1", InstanceState.STOPPED), "network-d1", "bridge"),), (), None),
+        DataCase((), None, (OUTSIDE_AND_STOPPED,), (), None),
         "can reach out through bridge",
-    ),
-    "a stopped database on a network that is not its data set's, which is not started first": (
-        DataCase((), None, (with_database_on(data_set("d1", InstanceState.STOPPED), "network-d2"),), (), None),
-        "network-d2, which it must not be",
     ),
     "a stopped database under a serving instance, attached to an outside network": (
         DataCase(
             (NEW_ON_D1,),
             "new",
-            (with_database_on(data_set("d1", InstanceState.STOPPED), "network-d1", "bridge"),),
+            (OUTSIDE_AND_STOPPED,),
             (),
             None,
             (NEW_BACKGROUND_SERVICE,),
@@ -506,36 +475,32 @@ DATA_STOPS = {
         "can reach out through bridge",
     ),
     "a running database with the right labels and network and another volume mounted": (
-        DataCase((NEW_ON_D1,), "new", (with_database_mounting(D1, "another-volume"),), (), None, (NEW_BACKGROUND_SERVICE,)),
+        DataCase(
+            (NEW_ON_D1,),
+            "new",
+            (with_database(D1, mounts=(Mount(source="another-volume", path="/var/lib/postgresql"),)),),
+            (),
+            None,
+            (NEW_BACKGROUND_SERVICE,),
+        ),
         "has another-volume mounted at /var/lib/postgresql, which it must not have; "
         "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
     ),
-    "a database with its data set's volume mounted somewhere its data is not kept": (
-        DataCase((), None, (with_database_mounting(D1, "volume-d1", at=("/somewhere-else",)),), (), None),
-        "has volume-d1 mounted at /somewhere-else, which it must not have; "
-        "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
-    ),
-    "a database with its data set's volume mounted twice": (
-        DataCase((), None, (with_database_mounting(D1, "volume-d1", at=("/var/lib/postgresql", "/copy")),), (), None),
-        "has volume-d1 mounted at /copy, which it must not have",
-    ),
-    "a database with a second volume mounted beside its own": (
-        DataCase((), None, (with_database_mounting(D1, "volume-d1", "another-volume"),), (), None),
-        "has another-volume mounted",
-    ),
-    "a stopped database with another volume mounted, which is not started first": (
-        DataCase((), None, (with_database_mounting(data_set("d1", InstanceState.STOPPED), "another-volume"),), (), None),
-        "has another-volume mounted",
-    ),
     "a new instance that passed its check with a volume mounted": (
-        DataCase((OLD_ON_D1, mounting(NEW_ON_D1, "volume-d1")), "old", (D1,), (STARTED_NEW, Check("new", "/health")), None),
+        DataCase(
+            (OLD_ON_D1, changed(NEW_ON_D1, mounts=(Mount(source="volume-d1", path="/data"),))),
+            "old",
+            (D1,),
+            (STARTED_NEW, Check("new", "/health")),
+            None,
+        ),
         "has volume-d1 mounted",
     ),
     "an instance this call started and checked, on another data set than the one receiving visitors runs against": (
         DataCase(
             (OLD_ON_D1, NEW_ON_D2),
             "old",
-            (D1, data_set("d2")),
+            (D1, data_set_named("d2")),
             (StartInstance(TARGET, "new", DataSetUse("d2", "network-d2", "database-d2")), Check("new", "/health")),
             None,
         ),
@@ -552,7 +517,7 @@ def test_a_move_with_data_stops_with_why_instead_of_switching_or_answering_succe
 
 
 def test_a_retire_stops_background_services_first_and_deletes_every_part_of_the_named_data_set() -> None:
-    doubled = data_set("d2", databases=("database-a", "database-b"))
+    doubled = data_set_named("d2", databases=("database-a", "database-b"))
 
     def step(
         instances: tuple[RunningInstance, ...], background_services: tuple[RunningBackgroundService, ...], delete: str | None

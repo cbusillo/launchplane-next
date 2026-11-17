@@ -865,6 +865,202 @@
    }
   }
  },
+ "a database with its volume mounted where its data is not kept": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": null,
+   "a_move_is_at_work": false,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+     "shown": "wrong"
+    },
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+    "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": "moving",
+   "a_move_is_at_work": true,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+     "shown": "wrong"
+    },
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+    "The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  }
+ },
+ "a database with its volume mounted twice": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": null,
+   "a_move_is_at_work": false,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 has volume-d1 mounted at /copy, which it must not have",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The database database-d1 has volume-d1 mounted at /copy, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": "moving",
+   "a_move_is_at_work": true,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 has volume-d1 mounted at /copy, which it must not have",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The database database-d1 has volume-d1 mounted at /copy, which it must not have"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  }
+ },
+ "a database on a network that is not its data set's": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": null,
+   "a_move_is_at_work": false,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 is attached to network-d2, which it must not be",
+     "shown": "wrong"
+    },
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 is not attached to network-d1",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The database database-d1 is attached to network-d2, which it must not be",
+    "The database database-d1 is not attached to network-d1"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": "moving",
+   "a_move_is_at_work": true,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 is attached to network-d2, which it must not be",
+     "shown": "wrong"
+    },
+    {
+     "subject": "database-d1",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The database database-d1 is not attached to network-d1",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The database database-d1 is attached to network-d2, which it must not be",
+    "The database database-d1 is not attached to network-d1"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "new-background-service": "good",
+    "database-d1": "wrong"
+   }
+  }
+ },
  "a background service that keeps restarting": {
   "at rest": {
    "product": "site",
@@ -1592,6 +1788,91 @@
    "parts": {
     "new": "good",
     "gone-background-service": "on purpose",
+    "database-d1": "good"
+   }
+  }
+ },
+ "a background service whose instance is gone and that can reach out": {
+  "at rest": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": null,
+   "a_move_is_at_work": false,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "gone-background-service",
+     "kind": "of another instance",
+     "sentence": "The background service gone-background-service belongs to gone, not new",
+     "shown": "wrong"
+    },
+    {
+     "subject": "gone-background-service",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The background service gone-background-service is attached to bridge, which it must not be",
+     "shown": "wrong"
+    },
+    {
+     "subject": "gone-background-service",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The background service gone-background-service can reach out through bridge",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The background service gone-background-service belongs to gone, not new",
+    "The background service gone-background-service is attached to bridge, which it must not be",
+    "The background service gone-background-service can reach out through bridge"
+   ],
+   "release_under_way": [],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "gone-background-service": "wrong",
+    "database-d1": "good"
+   }
+  },
+  "at work": {
+   "product": "site",
+   "lane": "testing",
+   "condition": "wrong",
+   "work": "moving",
+   "a_move_is_at_work": true,
+   "in_maintenance": false,
+   "in_maintenance_since": null,
+   "findings": [
+    {
+     "subject": "gone-background-service",
+     "kind": "of another instance",
+     "sentence": "The background service gone-background-service belongs to gone, not new",
+     "shown": "under way"
+    },
+    {
+     "subject": "gone-background-service",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The background service gone-background-service is attached to bridge, which it must not be",
+     "shown": "wrong"
+    },
+    {
+     "subject": "gone-background-service",
+     "kind": "attached or mounted where it must not be",
+     "sentence": "The background service gone-background-service can reach out through bridge",
+     "shown": "wrong"
+    }
+   ],
+   "problems": [
+    "The background service gone-background-service is attached to bridge, which it must not be",
+    "The background service gone-background-service can reach out through bridge"
+   ],
+   "release_under_way": [
+    "The background service gone-background-service belongs to gone, not new"
+   ],
+   "left_unfinished": [],
+   "parts": {
+    "new": "good",
+    "gone-background-service": "wrong",
     "database-d1": "good"
    }
   }

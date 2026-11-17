@@ -208,7 +208,7 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    # One pass: every marked container is listed once and described, and what each holds comes from that list.
+    # One pass: every marked container is listed once and described, and that list says what each one holds.
     def read(self, asks: Asks = asks_no_database) -> OnHost:
         return read_whole(lambda: self.read_once(asks), self.address)
 

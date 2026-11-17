@@ -40,7 +40,7 @@ from tests.pretend_host import (
     Given,
     background_service_of,
     changed,
-    data_set,
+    data_set_named,
     lane_instance,
     on_data,
     with_database,
@@ -63,7 +63,7 @@ def background_service(state: InstanceState, ran: float = 10.0) -> RunningBackgr
 
 
 def database(state: InstanceState, *, accepts: bool = True, exit_code: int = 0) -> DataSet:
-    return data_set("d1", state, accepts=accepts, exit_code=exit_code)
+    return data_set_named("d1", state, accepts=accepts, exit_code=exit_code)
 
 
 STOPPED_DATABASE = database(STOPPED)
@@ -209,7 +209,7 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
         WriteRoute(WEB_ADDRESS, WEB),
     ),
     "a login no container holds is removed while the back soon page still shows, before the web address is switched back": (
-        Lane(IN_MAINTENANCE, RUNNING, RUNNING, data_set("d1", unheld=("i_left",))),
+        Lane(IN_MAINTENANCE, RUNNING, RUNNING, data_set_named("d1", unheld=("i_left",))),
         (CHECKED,),
         RemoveLogins(DATABASE),
     ),
@@ -357,5 +357,5 @@ def test_ending_maintenance_switches_away_from_a_back_soon_page_that_is_not_runn
 
 
 def test_ending_maintenance_starts_the_stopped_database_of_another_data_set_of_the_lane_before_switching_back() -> None:
-    spare = replace(ALL_UP_BEHIND_BACK_SOON.given(), data_sets=(STARTED_DATABASE, data_set("d2", STOPPED)))
+    spare = replace(ALL_UP_BEHIND_BACK_SOON.given(), data_sets=(STARTED_DATABASE, data_set_named("d2", STOPPED)))
     assert decide_end(spare.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == StartDatabase("database-d2")
