@@ -198,6 +198,7 @@ def logins_on(data_set: dict[str, Any]) -> list[str]:
 
 
 def beats(database_container: str) -> list[str]:
+    # noinspection SqlResolve
     return asked_of_server(database_container, "SELECT run FROM beats ORDER BY at")
 
 
@@ -464,6 +465,7 @@ def test_after_a_release_the_retired_instances_login_is_gone_and_its_password_op
 
 
 def write_many(container: str) -> None:
+    # noinspection SqlResolve
     run_sql(container, "INSERT INTO made_by_new (id) SELECT generate_series(1, 200)")
 
 
@@ -475,7 +477,9 @@ def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of
     database = database_of(view.data_sets[0])
     assert sorted(logins_on(view.data_sets[0])) == sorted(environment_of(each)["PGUSER"] for each in (old, new))
     run_sql(old, "CREATE TABLE made_by_old (id int)")
+    # noinspection SqlResolve
     run_sql(new, "CREATE TABLE made_by_new (id int); ALTER TABLE made_by_old ADD COLUMN note text")
+    # noinspection SqlResolve
     run_sql(old, "ALTER TABLE made_by_new ADD COLUMN note text")
     with ThreadPoolExecutor(max_workers=2) as pool:
         for written in [pool.submit(write_many, old), pool.submit(write_many, new)]:
@@ -485,12 +489,19 @@ def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of
         "WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' AND relowner <> 'app'::regrole "
         "UNION ALL SELECT datname FROM pg_database WHERE datname = 'app' AND datdba <> 'app'::regrole"
     )
+    # noinspection SqlResolve
     assert asked_of_server(database, "SELECT count(*) FROM made_by_new") == ["400"]
     assert asked_of_server(database, not_of_app) == []
+    # noinspection SqlResolve
     run_sql(new, "DROP TABLE made_by_old; DROP TABLE made_by_new")
     move(BUILD_B)
     finished = assert_lane_finished_on(BUILD_B)
     assert logins_on(finished.data_sets[0]) == [environment_of(new)["PGUSER"]]
+
+
+def files_holding(database: str, text: str) -> str:
+    grep = "grep --recursive --files-with-matches --fixed-strings --no-messages"
+    return on_scratch(f"docker exec {database} {grep} -e {text} /var/lib/postgresql || true")
 
 
 def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) -> None:
@@ -498,14 +509,8 @@ def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) ->
     database = database_of(lane_on_a.data_sets[0])
     passwords = [environment_of(lane_on_a.receiving()["container"])["PGPASSWORD"], environment_of(database)["POSTGRES_PASSWORD"]]
     asked_of_server(database, "CHECKPOINT")
-    for password in passwords:
-        found = on_scratch(
-            f"docker exec {database} grep --recursive --files-with-matches --fixed-strings -e {password} /var/lib/postgresql || true"
-        )
-        assert found == ""
-    assert "SCRAM-SHA-256" in on_scratch(
-        f"docker exec {database} grep --recursive --files-with-matches --fixed-strings -e SCRAM-SHA-256 /var/lib/postgresql"
-    )
+    assert [files_holding(database, password) for password in passwords] == ["", ""]
+    assert files_holding(database, "SCRAM-SHA-256") != ""
 
 
 @pytest.mark.usefixtures("fresh_lane")

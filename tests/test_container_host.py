@@ -205,8 +205,8 @@ def server_of(docker: RecordingDocker) -> RecordingServer:
     return docker.containers.servers_by_volume[VOLUME]
 
 
-def given_to(docker: RecordingDocker, container: str) -> dict[str, str]:
-    return dict(entry.split("=", 1) for entry in docker.containers.by_name[container].environment)
+def given_to(docker: RecordingDocker, holder: str) -> dict[str, str]:
+    return dict(entry.split("=", 1) for entry in docker.containers.by_name[holder].environment)
 
 
 def test_a_new_database_gets_its_set_up_before_it_first_starts_and_refuses_every_address_until_it_has_run() -> None:

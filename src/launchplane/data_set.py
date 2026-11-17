@@ -1,7 +1,6 @@
 import base64
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import cast
 
 from scramp import ScramMechanism  # pyright: ignore[reportMissingTypeStubs]
 
@@ -28,9 +27,14 @@ ACCESS_RULES: tuple[AccessRule, ...] = (
     ("host", "app", "+app", "all", "scram-sha-256"),
     ("host", "all", "all", "all", "reject"),
 )
-RULES_AS_READ: list[RuleRead] = [
-    (kind, [database], [user], address, method, None) for kind, database, user, address, method in ACCESS_RULES
-]
+
+
+def as_read(rule: AccessRule) -> RuleRead:
+    kind, database, user, address, method = rule
+    return kind, [database], [user], address, method, None
+
+
+RULES_AS_READ = [as_read(rule) for rule in ACCESS_RULES]
 RULES_FILE = "\n".join(" ".join(part for part in rule if part is not None) for rule in ACCESS_RULES)
 
 SET_UP_SCRIPT = f"""\
@@ -110,6 +114,6 @@ def client_environment(login: str, password: str) -> dict[str, str]:
 
 
 def verifier_of(password: str) -> str:
-    made = cast("tuple[bytes, bytes, bytes, int]", ScramMechanism("SCRAM-SHA-256").make_auth_info(password))  # pyright: ignore[reportUnknownMemberType]
+    made: tuple[bytes, bytes, bytes, int] = ScramMechanism("SCRAM-SHA-256").make_auth_info(password)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     salt, stored_key, server_key = (base64.b64encode(part).decode() for part in made[:3])
     return f"SCRAM-SHA-256${made[3]}:{salt}${stored_key}:{server_key}"
