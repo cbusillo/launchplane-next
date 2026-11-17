@@ -1,6 +1,5 @@
 import json
-import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -8,22 +7,28 @@ import docker
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.act import Judged
-from launchplane.api import WebAddressChecker, create_app
+from launchplane.act import Status
+from launchplane.api import create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
-from launchplane.docker_answers import ContainerHostError, HostAnswers, OnHost, on_host_from_answers
+from launchplane.docker_answers import ContainerHostError, HostAnswers, on_host_from_answers
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
     InstanceState,
     LaneBuild,
     LoadedRoute,
+    OnHost,
     ProxySeen,
+    Reading,
     RouteStatus,
     RunningInstance,
+    WrittenRoute,
 )
+from launchplane.judge import Standing, judge, web_addresses_judged
+from launchplane.product import Product
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from tests.given_secrets import NO_SECRETS
+from tests.pretend_host import SINCE
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
@@ -70,28 +75,32 @@ def no_maintenance(product: str, lane: str) -> MaintenanceResult:
     raise AssertionError(f"Reading what is running asked to change the maintenance of {lane} of {product}")
 
 
-def every_web_address_answers(_web_address: str) -> str | None:
-    return None
-
-
 type InstanceReader = Callable[[], list[RunningInstance]]
 
 
 def proxy_sending(routes: dict[str, str] | None, *, runs: bool = True, back_soon_runs: bool = True) -> ProxySeen:
     loaded = {web_address: LoadedRoute(container, RouteStatus.ENABLED) for web_address, container in (routes or {}).items()}
-    return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, loaded=loaded if runs else {})
+    written = {web_address: WrittenRoute(route.container, SINCE) for web_address, route in loaded.items()}
+    return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, written=written, loaded=loaded if runs else {})
+
+
+def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: Mapping[str, str | None] | None = None) -> Status:
+    answered: dict[str, str | None] = {**dict.fromkeys(proxy.sends_visitors_to()), **(failures or {})}
+    reading = Reading(SINCE, proxy, OnHost(instances, [], []), answered)
+    judged = [judge(reading.lane(product, lane), Product(), None) for product, lane in reading.lanes()]
+    return Status(reading, judged, web_addresses_judged(reading))
 
 
 def app_reading(
     read: InstanceReader,
     routes: dict[str, str] | None = None,
-    why_fails: WebAddressChecker = every_web_address_answers,
+    failures: Mapping[str, str | None] | None = None,
     proxy: ProxySeen | None = None,
 ) -> TestClient:
-    def read_judged() -> Judged:
-        return Judged(OnHost(read(), [], []), proxy or proxy_sending(routes), [])
+    def read_status() -> Status:
+        return status_of(read(), proxy or proxy_sending(routes), failures)
 
-    return TestClient(create_app(read_judged, why_fails, no_move, no_retire, NO_SECRETS, no_maintenance, no_maintenance))
+    return TestClient(create_app(read_status, no_move, no_retire, NO_SECRETS, no_maintenance, no_maintenance))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
@@ -174,35 +183,45 @@ def test_the_running_call_marks_the_instance_the_proxy_sends_visitors_to_and_no_
 
 
 def web_addresses_answer(
-    instances: list[RunningInstance], routes: dict[str, str], why_fails: WebAddressChecker
+    instances: list[RunningInstance], routes: dict[str, str], failures: Mapping[str, str | None] | None = None
 ) -> dict[str, dict[str, Any]]:
-    body = app_reading(lambda: instances, routes, why_fails).get("/running").json()
+    body = app_reading(lambda: instances, routes, failures).get("/running").json()
     return {entry["web_address"]: entry for entry in body["web_addresses"]}
 
 
-def test_a_lane_the_proxy_routes_nowhere_says_so_without_asking_through_the_proxy() -> None:
-    def no_request(web_address: str) -> str | None:
-        raise AssertionError(f"Asked through the proxy for {web_address}, which it routes nowhere")
-
-    instance = RunningInstance(
-        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.RUNNING, networks=(LANE_NETWORK,)
+def lane_instance(state: InstanceState = InstanceState.RUNNING) -> RunningInstance:
+    return RunningInstance(
+        product="site", lane="testing", build="b1", container="site-testing-1", state=state, networks=(LANE_NETWORK,)
     )
-    entry = web_addresses_answer([instance], {}, no_request)["testing.site.test"]
-    assert (entry["product"], entry["lane"], entry["sends_to_container"], entry["answers"]) == ("site", "testing", None, False)
-    assert "no instance" in entry["error"]
 
 
 def test_a_stopped_active_instance_leaves_its_web_address_not_answering() -> None:
-    instance = RunningInstance(
-        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, networks=(LANE_NETWORK,)
+    routes = {"testing.site.test": "site-testing-1"}
+    entry = web_addresses_answer([lane_instance(InstanceState.STOPPED)], routes, {"testing.site.test": "502 Bad Gateway"})[
+        "testing.site.test"
+    ]
+    assert (entry["sends_to_container"], entry["answers"], entry["error"]) == (
+        "site-testing-1",
+        False,
+        "testing.site.test does not answer with success: 502 Bad Gateway",
     )
-    routes = {"testing.site.test": instance.container}
-    entry = web_addresses_answer([instance], routes, lambda _: "502 Bad Gateway")["testing.site.test"]
-    assert (entry["sends_to_container"], entry["answers"], entry["error"]) == (instance.container, False, "502 Bad Gateway")
+
+
+def test_a_web_address_that_was_routed_and_not_asked_is_not_said_to_answer() -> None:
+    status = status_of([lane_instance()], proxy_sending({"testing.site.test": "site-testing-1"}))
+    unasked = Status(Reading(SINCE, status.reading.proxy, status.reading.on_host), [], [])
+    [entry] = web_addresses_judged(unasked.reading)
+    assert (entry.answers, entry.standing, entry.error) == (
+        False,
+        Standing.UNREAD,
+        "testing.site.test was not asked, so whether it answers is unknown.",
+    )
 
 
 def test_a_route_to_an_instance_that_is_gone_is_shown_not_dropped() -> None:
-    entry = web_addresses_answer([], {"testing.gone.test": "gone-testing-1"}, lambda _: "502 Bad Gateway")["testing.gone.test"]
+    entry = web_addresses_answer([], {"testing.gone.test": "gone-testing-1"}, {"testing.gone.test": "502 Bad Gateway"})[
+        "testing.gone.test"
+    ]
     assert (entry["product"], entry["sends_to_container"], entry["answers"]) == (None, "gone-testing-1", False)
 
 
@@ -215,30 +234,8 @@ def test_the_page_loads_without_reading_the_host_so_it_can_say_the_host_is_unrea
     assert response.headers["content-type"].startswith("text/html")
 
 
-def test_web_addresses_are_asked_at_once_so_ones_that_hang_do_not_add_up() -> None:
-    routes = {f"testing.site{number}.test": f"site{number}-testing" for number in range(3)}
-    all_waiting = threading.Barrier(len(routes), timeout=5)
-
-    def hang_until_every_web_address_is_asked(_web_address: str) -> str | None:
-        all_waiting.wait()
-        return "download timed out"
-
-    entries = web_addresses_answer([], routes, hang_until_every_web_address_is_asked)
-    assert {entry["error"] for entry in entries.values()} == {"download timed out"}
-
-
-def stopped_instance() -> RunningInstance:
-    return RunningInstance(
-        product="site", lane="testing", build="b1", container="site-testing-1", state=InstanceState.STOPPED, networks=(LANE_NETWORK,)
-    )
-
-
-def test_a_web_address_in_maintenance_says_it_shows_the_back_soon_page_and_is_not_asked_for_the_product() -> None:
-    def no_request(web_address: str) -> str | None:
-        raise AssertionError(f"Asked {web_address} for the product, and it shows the back soon page")
-
-    routes = {"testing.site.test": BACK_SOON}
-    body = app_reading(lambda: [stopped_instance()], routes, no_request).get("/running").json()
+def test_a_web_address_in_maintenance_says_it_shows_the_back_soon_page() -> None:
+    body = app_reading(lambda: [lane_instance(InstanceState.STOPPED)], {"testing.site.test": BACK_SOON}).get("/running").json()
     [entry] = body["web_addresses"]
     assert (entry["product"], entry["lane"], entry["shows_back_soon_page"], entry["answers"], entry["error"]) == (
         "site",
@@ -250,11 +247,24 @@ def test_a_web_address_in_maintenance_says_it_shows_the_back_soon_page_and_is_no
     assert [instance["receives_visitors_for"] for instance in body["instances"]] == [None]
 
 
-def test_with_the_proxy_down_every_web_address_says_so_and_none_is_asked() -> None:
-    def no_request(web_address: str) -> str | None:
-        raise AssertionError(f"Asked {web_address} through a proxy that is not running")
+def test_the_page_is_given_every_row_with_its_wording_and_colour_so_its_script_decides_none() -> None:
+    attached = lane_instance().model_copy(update={"networks": (LANE_NETWORK, "bridge")})
+    body = app_reading(lambda: [attached], {"testing.site.test": "site-testing-1"}).get("/running").json()
+    [card] = body["cards"]
+    drawn = [(row["name"], [(pill["text"], pill["tone"]) for pill in row["pills"]]) for row in card["rows"]]
+    assert (card["title"], card["pills"]) == ("site · testing", [{"text": "wrong", "tone": "wrong"}])
+    assert drawn == [
+        ("Web address", [("answering", "good")]),
+        ("Found", [("wrong", "wrong")]),
+        ("Found", [("could not be read", "could not be read")]),
+        ("Instance 1", [("running", "wrong"), ("active", "good")]),
+    ]
+    assert card["rows"][1]["value"] == [
+        {"text": "The instance site-testing-1 is attached to bridge, which it must not be", "drawn_as": "text"}
+    ]
 
-    client = app_reading(lambda: [stopped_instance()], why_fails=no_request, proxy=proxy_sending(None, runs=False))
-    [entry] = client.get("/running").json()["web_addresses"]
-    assert (entry["sends_to_container"], entry["answers"]) == (None, False)
-    assert "The proxy is not running" in entry["error"]
+
+def test_a_host_with_nothing_marked_on_it_gives_the_page_one_card_that_says_so() -> None:
+    assert [card["title"] for card in ask_running(list)[1]["cards"]] == [
+        "The host answered, and nothing marked for Launchplane is on it."
+    ]

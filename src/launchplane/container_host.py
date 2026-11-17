@@ -1,6 +1,6 @@
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -37,23 +37,23 @@ from launchplane.docker_answers import (
     QUIET_GATEWAY_MODE,
     CommandResult,
     ContainerHostError,
-    HostAnswers,
-    OnHost,
+    DockerContainerDetails,
+    Listed,
     Part,
     TornRead,
     attempting,
     checked,
     command_result,
+    container_summaries,
     files_in,
     is_quiet,
-    names_of,
-    on_host_from_answers,
+    on_host_from,
     read_whole,
     running_for,
     tar_of,
 )
 from launchplane.host_logins import HostLogins
-from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets
+from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_of
 from launchplane.instance import (
     LANE_NETWORK,
     DataSet,
@@ -61,11 +61,12 @@ from launchplane.instance import (
     DataSetUse,
     InstanceState,
     LaneBuild,
+    OnHost,
+    Unread,
     background_service_container_of,
     new_password,
 )
 
-MARKED = {"label": PRODUCT_LABEL}
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
 RETIRE_GRACE_SECONDS = 30
@@ -79,7 +80,7 @@ type RestartPolicy = Literal["always", "unless-stopped"]
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
 ALWAYS_RUNS: RestartPolicy = "always"
 
-type HasDatabase = Callable[[str], bool]
+type Lane = tuple[str, str]
 
 
 class PartStopped(Exception):
@@ -174,7 +175,7 @@ class ContainerHost:
         self.address = address
         self.sleep = sleep
         self.clock = clock
-        self.secrets = HostSecrets(client, address)
+        self.secrets = HostSecrets()
         self.logins = HostLogins(client, address, self.secrets)
 
     @classmethod
@@ -189,10 +190,11 @@ class ContainerHost:
         client = docker.DockerClient(base_url=address, tls=tls, version=DOCKER_API_VERSION, timeout=ANSWER_TIMEOUT_SECONDS)
         return cls(client, address)
 
-    def list_marked(self, kind: Literal["containers", "volumes"]) -> object:
+    def list_marked(self, kind: Literal["containers", "volumes"], lane: Lane | None) -> object:
+        marks = PRODUCT_LABEL if lane is None else [f"{PRODUCT_LABEL}={lane[0]}", f"{LANE_LABEL}={lane[1]}"]
         if kind == "containers":
-            return self.client.api.containers(all=True, filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        return self.client.api.volumes(filters=MARKED)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            return self.client.api.containers(all=True, filters={"label": marks})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        return self.client.api.volumes(filters={"label": marks})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
     def list_networks(self) -> object:
         return self.client.api.networks()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -203,21 +205,41 @@ class ContainerHost:
     def system_information(self) -> object:
         return self.client.api.info()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
-    def read(self, has_database: HasDatabase | None = None) -> OnHost:
-        return read_whole(lambda: self.read_once(has_database), self.address)
+    # One pass over one lane, or over every lane: each container is listed once and described, and that list says what
+    # each one holds.
+    def read(self, lane: Lane | None = None) -> OnHost:
+        return read_whole(lambda: self.read_once(lane), self.address)
 
-    def read_once(self, has_database: HasDatabase | None) -> OnHost:
+    def read_once(self, lane: Lane | None) -> OnHost:
         with attempting(f"Listing the containers and volumes marked {PRODUCT_LABEL}, and the networks", self.address):
-            containers, networks, volumes = self.list_marked("containers"), self.list_networks(), self.list_marked("volumes")
-            background_services = names_of(containers, "background-service")
-            details = [self.describe_listed(name) for name in [*background_services, *names_of(containers, "database")]]
-            system = self.system_information() if background_services else None
-        on_host = on_host_from_answers(HostAnswers(containers, networks, volumes, details, system))
-        if has_database is None:
-            return on_host
-        return replace(
-            on_host, data_sets=[self.probed(found) if has_database(found.product) else found for found in on_host.data_sets]
-        )
+            found = self.described(lane)
+            networks, volumes = self.list_networks(), self.list_marked("volumes", lane)
+            system = self.system_information() if found.has_part("background-service") else None
+        on_host, held = on_host_from(found, networks, volumes, system), logins_held(found)
+        data_sets = [self.probed(each, held.get((each.product, each.data_set), set())) for each in on_host.data_sets]
+        return replace(on_host, data_sets=data_sets)
+
+    # A container's secrets are noted as it is described, before any later work that can fail and say something of it.
+    def described(self, lane: Lane | None) -> Listed:
+        summaries = container_summaries(self.list_marked("containers", lane))
+        details: dict[str, DockerContainerDetails] = {}
+        for summary in summaries:
+            answer = self.describe_listed(summary.name)
+            details[summary.name] = checked(DOCKER_CONTAINER_DETAILS, answer, f"description of {summary.name}")
+            self.secrets.note(secrets_of(summary, details[summary.name]))
+        return Listed(summaries, details)
+
+    # Asked before an answer is made that reads nothing else, so that answer too is cleaned of what every container holds.
+    def read_secrets(self) -> frozenset[str]:
+        def describe_every_container() -> None:
+            with attempting("Reading the secrets Launchplane has given to what is", self.address):
+                self.described(None)
+
+        read_whole(describe_every_container, self.address)
+        return self.secrets.seen
+
+    def secrets_seen(self) -> frozenset[str]:
+        return self.secrets.seen
 
     # A refusal about one container Docker has just listed means the host changed during the read.
     def describe_listed(self, container: str) -> object:
@@ -226,18 +248,18 @@ class ContainerHost:
         except APIError as error:
             raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
-    def probed(self, found: DataSet) -> DataSet:
-        databases = tuple(self.asked(found, each) if each.state == InstanceState.RUNNING else each for each in found.databases)
+    def probed(self, found: DataSet, held: Set[str]) -> DataSet:
+        databases = tuple(self.asked(each, held) if each.state == InstanceState.RUNNING else each for each in found.databases)
         return found.model_copy(update={"databases": databases})
 
-    def asked(self, found: DataSet, database: DataSetDatabase) -> DataSetDatabase:
+    def asked(self, database: DataSetDatabase, held: Set[str]) -> DataSetDatabase:
         if not self.accepts_connections(database.container):
             return database.model_copy(update={"accepts_connections": False})
         try:
             with attempting(f"Reading the logins of the database {database.container}", self.address):
-                unheld = self.logins.unheld(database.container, found.product, found.data_set)
+                unheld = sorted(set(self.logins.read_logins(database.container)) - held)
         except ContainerHostError as error:
-            return database.model_copy(update={"accepts_connections": True, "logins_unread": str(error)})
+            return database.model_copy(update={"accepts_connections": True, "unheld_logins": Unread(why=str(error))})
         return database.model_copy(update={"accepts_connections": True, "unheld_logins": tuple(unheld)})
 
     def accepts_connections(self, container: str) -> bool:

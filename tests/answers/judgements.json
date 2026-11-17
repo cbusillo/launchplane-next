@@ -1,0 +1,869 @@
+{
+ "at rest and as it must be": {
+  "at rest": [
+   "good",
+   "parts: new good, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "parts: new good, new-background-service good, database-d1 good"
+  ]
+ },
+ "a new instance being prepared beside the active one": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new on purpose, old-background-service good, database-d1 good"
+  ]
+ },
+ "the web address moved and the old instance and its background service still there": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | of another instance | The background service old-background-service belongs to old, not new",
+   "left unfinished | beside the active instance | The instance old runs beside the active one",
+   "parts: new good, old wrong, old-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | of another instance | The background service old-background-service belongs to old, not new",
+   "under way | beside the active instance | The instance old runs beside the active one",
+   "parts: new good, old on purpose, old-background-service on purpose, database-d1 good"
+  ]
+ },
+ "the old background service stopped and the new one not yet started": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | no background service | The lane has 0 background services (none) where it must have one, belonging to new",
+   "left unfinished | beside the active instance | The instance old runs beside the active one",
+   "parts: new good, old wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no background service | The lane has 0 background services (none) where it must have one, belonging to new",
+   "under way | beside the active instance | The instance old runs beside the active one",
+   "parts: new good, old on purpose, database-d1 good"
+  ]
+ },
+ "the new background service not yet up as long as it must stay up": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | not yet up as long as it must stay up | The background service new-background-service has run 1.0 s of the 3 s it must stay up",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | not yet up as long as it must stay up | The background service new-background-service has run 1.0 s of the 3 s it must stay up",
+   "parts: new good, new-background-service on purpose, database-d1 good"
+  ]
+ },
+ "a background service that is stopped": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | stopped | The background service new-background-service is stopped",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The background service new-background-service is stopped",
+   "parts: new good, new-background-service on purpose, database-d1 good"
+  ]
+ },
+ "a lane being brought up, its database not yet accepting connections": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | no instance receives visitors | No instance receives visitors",
+   "left unfinished | does not accept connections | The database database-d1 does not accept connections",
+   "parts: new good, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no instance receives visitors | No instance receives visitors",
+   "under way | does not accept connections | The database database-d1 does not accept connections",
+   "parts: new good, database-d1 on purpose"
+  ]
+ },
+ "an instance being prepared that can reach out": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+   "left unfinished | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+   "under way | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good"
+  ]
+ },
+ "an instance being prepared that is attached to another data set": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
+   "left unfinished | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good, database-d2 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
+   "under way | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good, database-d2 good"
+  ]
+ },
+ "the old instance's background service can reach out": {
+  "at rest": [
+   "wrong",
+   "left unfinished | of another instance | The background service old-background-service belongs to old, not new",
+   "wrong | attached or mounted where it must not be | The background service old-background-service is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service old-background-service can reach out through bridge",
+   "left unfinished | beside the active instance | The instance old runs beside the active one",
+   "parts: new good, old wrong, old-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "under way | of another instance | The background service old-background-service belongs to old, not new",
+   "wrong | attached or mounted where it must not be | The background service old-background-service is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service old-background-service can reach out through bridge",
+   "under way | beside the active instance | The instance old runs beside the active one",
+   "parts: new good, old on purpose, old-background-service wrong, database-d1 good"
+  ]
+ },
+ "a database attached to an outside network": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The database database-d1 can reach out through bridge",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The database database-d1 can reach out through bridge",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ]
+ },
+ "a database with another data set's volume mounted too": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ]
+ },
+ "a database with nothing mounted": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ]
+ },
+ "a database with its volume mounted where its data is not kept": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ]
+ },
+ "a database with its volume mounted twice": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /copy, which it must not have",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /copy, which it must not have",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ]
+ },
+ "a database on a network that is not its data set's": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 is attached to network-d2, which it must not be",
+   "wrong | attached or mounted where it must not be | The database database-d1 is not attached to network-d1",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The database database-d1 is attached to network-d2, which it must not be",
+   "wrong | attached or mounted where it must not be | The database database-d1 is not attached to network-d1",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ]
+ },
+ "a background service that keeps restarting": {
+  "at rest": [
+   "wrong",
+   "wrong | neither running nor stopped | The background service new-background-service is restarting",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | neither running nor stopped | The background service new-background-service is restarting",
+   "parts: new good, new-background-service on purpose, database-d1 good"
+  ]
+ },
+ "an active instance that can reach out": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ]
+ },
+ "an active instance on another data set's network": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
+   "parts: new wrong, new-background-service good, database-d1 good, database-d2 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
+   "parts: new wrong, new-background-service good, database-d1 good, database-d2 good"
+  ]
+ },
+ "an active instance with a volume mounted": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new has volume-d2 mounted at /data, which it must not have",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance new has volume-d2 mounted at /data, which it must not have",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ]
+ },
+ "an active instance that is stopped": {
+  "at rest": [
+   "wrong",
+   "wrong | stopped | The instance new is stopped",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The instance new is stopped",
+   "parts: new on purpose, new-background-service good, database-d1 good"
+  ]
+ },
+ "an active instance with no build label": {
+  "at rest": [
+   "wrong",
+   "wrong | no build label | The instance new does not say which build it is",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no build label | The instance new does not say which build it is",
+   "parts: new on purpose, new-background-service good, database-d1 good"
+  ]
+ },
+ "an active instance whose data set is not on the host": {
+  "at rest": [
+   "wrong",
+   "wrong | labelled for a data set it cannot have | The instance new runs against the data set d1, which is not on the host",
+   "wrong | attached or mounted where it must not be | The instance new is attached to network-d1, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service new-background-service is attached to network-d1, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service new-background-service is not attached to launchplane-lanes",
+   "parts: new wrong, new-background-service wrong"
+  ],
+  "at work": [
+   "wrong",
+   "under way | labelled for a data set it cannot have | The instance new runs against the data set d1, which is not on the host",
+   "wrong | attached or mounted where it must not be | The instance new is attached to network-d1, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service new-background-service is attached to network-d1, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service new-background-service is not attached to launchplane-lanes",
+   "parts: new wrong, new-background-service wrong"
+  ]
+ },
+ "two background services": {
+  "at rest": [
+   "wrong",
+   "wrong | more than one | The lane has 2 background services (new-background-service, second) where it must have one, belonging to new",
+   "parts: new good, new-background-service wrong, second good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | more than one | The lane has 2 background services (new-background-service, second) where it must have one, belonging to new",
+   "parts: new good, new-background-service on purpose, second good, database-d1 good"
+  ]
+ },
+ "a background service with a volume mounted": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The background service new-background-service has v mounted at /data, which it must not have",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The background service new-background-service has v mounted at /data, which it must not have",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ]
+ },
+ "a background service labelled for another data set": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The background service new-background-service says it runs against the data set d2, not d1",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The background service new-background-service says it runs against the data set d2, not d1",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ]
+ },
+ "a background service of another build": {
+  "at rest": [
+   "wrong",
+   "wrong | of another build | The background service new-background-service runs a, not b",
+   "parts: new good, new-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | of another build | The background service new-background-service runs a, not b",
+   "parts: new good, new-background-service on purpose, database-d1 good"
+  ]
+ },
+ "a background service whose instance is gone": {
+  "at rest": [
+   "wrong",
+   "wrong | of another instance | The background service gone-background-service belongs to gone, not new",
+   "parts: new good, gone-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | of another instance | The background service gone-background-service belongs to gone, not new",
+   "parts: new good, gone-background-service on purpose, database-d1 good"
+  ]
+ },
+ "a background service whose instance is gone and that can reach out": {
+  "at rest": [
+   "wrong",
+   "wrong | of another instance | The background service gone-background-service belongs to gone, not new",
+   "wrong | attached or mounted where it must not be | The background service gone-background-service is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service gone-background-service can reach out through bridge",
+   "parts: new good, gone-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "under way | of another instance | The background service gone-background-service belongs to gone, not new",
+   "wrong | attached or mounted where it must not be | The background service gone-background-service is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The background service gone-background-service can reach out through bridge",
+   "parts: new good, gone-background-service wrong, database-d1 good"
+  ]
+ },
+ "a stopped instance left beside the active one": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | stopped | The instance new is stopped",
+   "left unfinished | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The instance new is stopped",
+   "under way | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new on purpose, old-background-service good, database-d1 good"
+  ]
+ },
+ "a database that does not accept connections": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | does not accept connections | The database database-d1 does not accept connections",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | does not accept connections | The database database-d1 does not accept connections",
+   "parts: new good, new-background-service good, database-d1 on purpose"
+  ]
+ },
+ "a database that was not asked whether it accepts connections": {
+  "at rest": [
+   "could not be read",
+   "could not be read | not asked whether it accepts connections | The database database-d1 was not asked whether it accepts connections",
+   "parts: new good, new-background-service good, database-d1 could not be read"
+  ],
+  "at work": [
+   "could not be read",
+   "could not be read | not asked whether it accepts connections | The database database-d1 was not asked whether it accepts connections",
+   "parts: new good, new-background-service good, database-d1 could not be read"
+  ]
+ },
+ "a database that is stopped": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | stopped | The database database-d1 is stopped",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The database database-d1 is stopped",
+   "parts: new good, new-background-service good, database-d1 on purpose"
+  ]
+ },
+ "a database that keeps restarting": {
+  "at rest": [
+   "wrong",
+   "wrong | neither running nor stopped | The database database-d1 is restarting",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | neither running nor stopped | The database database-d1 is restarting",
+   "parts: new good, new-background-service good, database-d1 on purpose"
+  ]
+ },
+ "a data set whose network is not quiet": {
+  "at rest": [
+   "wrong",
+   "wrong | network not quiet | The data set d1's network network-d1 is not quiet",
+   "parts: new good, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | network not quiet | The data set d1's network network-d1 is not quiet",
+   "parts: new good, new-background-service good, database-d1 good"
+  ]
+ },
+ "a data set with two database servers": {
+  "at rest": [
+   "wrong",
+   "wrong | more than one | The data set d1 has 2 database servers (database-a, database-b) where it must have one",
+   "parts: new good, new-background-service good, database-a good, database-b good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | more than one | The data set d1 has 2 database servers (database-a, database-b) where it must have one",
+   "parts: new good, new-background-service good, database-a good, database-b good"
+  ]
+ },
+ "a data set with no volume and no database": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | no volume | The data set d1 has no volume",
+   "left unfinished | no database server | The data set d1 has no database",
+   "parts: new good, new-background-service good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no volume | The data set d1 has no volume",
+   "under way | no database server | The data set d1 has no database",
+   "parts: new good, new-background-service good"
+  ]
+ },
+ "a second data set whose database is stopped": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | stopped | The database database-d2 is stopped",
+   "parts: new good, new-background-service good, database-d1 good, database-d2 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The database database-d2 is stopped",
+   "parts: new good, new-background-service good, database-d1 good, database-d2 on purpose"
+  ]
+ },
+ "a login no container holds": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | a login no container holds | The database database-d1 has the login i_left, which no container holds",
+   "parts: new good, new-background-service good, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | a login no container holds | The database database-d1 has the login i_left, which no container holds",
+   "parts: new good, new-background-service good, database-d1 on purpose"
+  ]
+ },
+ "logins that could not be read": {
+  "at rest": [
+   "could not be read",
+   "could not be read | logins could not be read | The logins of the database database-d1 could not be read, so whether one is left that no container holds is unknown: psql: no such database",
+   "parts: new good, new-background-service good, database-d1 could not be read"
+  ],
+  "at work": [
+   "could not be read",
+   "could not be read | logins could not be read | The logins of the database database-d1 could not be read, so whether one is left that no container holds is unknown: psql: no such database",
+   "parts: new good, new-background-service good, database-d1 could not be read"
+  ]
+ },
+ "a lane retired with its data set kept": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | no instance receives visitors | No instance receives visitors",
+   "parts: database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no instance receives visitors | No instance receives visitors",
+   "parts: database-d1 good"
+  ]
+ },
+ "a route removed by hand": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | no instance receives visitors | No instance receives visitors",
+   "parts: new good, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no instance receives visitors | No instance receives visitors",
+   "parts: new good, new-background-service good, database-d1 good"
+  ]
+ },
+ "a route removed by hand from an instance that can reach out": {
+  "at rest": [
+   "wrong",
+   "left unfinished | no instance receives visitors | No instance receives visitors",
+   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "under way | no instance receives visitors | No instance receives visitors",
+   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ]
+ },
+ "a route written and not yet loaded": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | the proxy has not loaded the routes file | The proxy has not loaded the routes file of testing.site.test: the file sends it to new and the proxy to old",
+   "left unfinished | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new wrong, old-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | the proxy has not loaded the routes file | The proxy has not loaded the routes file of testing.site.test: the file sends it to new and the proxy to old",
+   "under way | beside the active instance | The instance new runs beside the active one",
+   "parts: old good, new on purpose, old-background-service good, database-d1 good"
+  ]
+ },
+ "a route the proxy reports as disabled": {
+  "at rest": [
+   "wrong",
+   "left unfinished | no instance receives visitors | No instance receives visitors",
+   "wrong | the proxy reports the route not enabled | The proxy has loaded the route of testing.site.test to new and reports it disabled, so the web address reaches no instance",
+   "parts: new good, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | no instance receives visitors | No instance receives visitors",
+   "under way | the proxy reports the route not enabled | The proxy has loaded the route of testing.site.test to new and reports it disabled, so the web address reaches no instance",
+   "parts: new good, new-background-service good, database-d1 good"
+  ]
+ },
+ "a web address that answers with an error though its instance runs": {
+  "at rest": [
+   "wrong",
+   "wrong | the web address does not answer | testing.site.test does not answer with success: HTTP/1.1 500 Internal Server Error",
+   "parts: new wrong, new-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | the web address does not answer | testing.site.test does not answer with success: HTTP/1.1 500 Internal Server Error",
+   "parts: new on purpose, new-background-service good, database-d1 good"
+  ]
+ },
+ "the proxy down": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | the proxy is not running | No instance receives visitors: the proxy is not running",
+   "parts: web good, web-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | the proxy is not running | No instance receives visitors: the proxy is not running",
+   "parts: web good, web-background-service good, database-d1 good"
+  ]
+ },
+ "the proxy down and a part attached where it must not be": {
+  "at rest": [
+   "wrong",
+   "left unfinished | the proxy is not running | No instance receives visitors: the proxy is not running",
+   "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
+   "parts: web wrong, web-background-service good, database-d1 good"
+  ],
+  "at work": [
+   "wrong",
+   "under way | the proxy is not running | No instance receives visitors: the proxy is not running",
+   "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
+   "parts: web wrong, web-background-service good, database-d1 good"
+  ]
+ },
+ "in maintenance with every part stopped": {
+  "at rest": [
+   "in maintenance",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "at work": [
+   "work under way",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "work under way",
+   "under way | stopped | The instance web is stopped",
+   "under way | stopped | The database database-d1 is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "in maintenance with the web part and the database still running": {
+  "at rest": [
+   "wrong",
+   "wrong | not stopped in maintenance | The instance web is running, in a lane in maintenance",
+   "wrong | not stopped in maintenance | The database database-d1 is running, in a lane in maintenance",
+   "parts: web wrong, web-background-service on purpose, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | not stopped in maintenance | The instance web is running, in a lane in maintenance",
+   "under way | not stopped in maintenance | The database database-d1 is running, in a lane in maintenance",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "work under way",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web good, web-background-service on purpose, database-d1 good"
+  ]
+ },
+ "in maintenance with a database that was killed": {
+  "at rest": [
+   "wrong",
+   "wrong | did not stop cleanly | The database database-d1 did not stop cleanly: it exited with code 137, so it was killed or it crashed",
+   "parts: web on purpose, web-background-service on purpose, database-d1 wrong"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | did not stop cleanly | The database database-d1 did not stop cleanly: it exited with code 137, so it was killed or it crashed",
+   "parts: web on purpose, web-background-service on purpose, database-d1 wrong"
+  ],
+  "ending maintenance": [
+   "work under way",
+   "under way | stopped | The instance web is stopped",
+   "under way | stopped | The database database-d1 is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "in maintenance with the back soon page not running": {
+  "at rest": [
+   "wrong",
+   "wrong | the back soon page is not running | The back soon page's container launchplane-back-soon is not running, so the web address answers the proxy's own error",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | the back soon page is not running | The back soon page's container launchplane-back-soon is not running, so the web address answers the proxy's own error",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "wrong",
+   "wrong | the back soon page is not running | The back soon page's container launchplane-back-soon is not running, so the web address answers the proxy's own error",
+   "under way | stopped | The instance web is stopped",
+   "under way | stopped | The database database-d1 is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "in maintenance with the route to the back soon page not yet loaded": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | the proxy has not loaded the routes file | The proxy has not loaded the routes file of testing.site.test: the file sends it to launchplane-back-soon and the proxy to web",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "at work": [
+   "work under way",
+   "under way | the proxy has not loaded the routes file | The proxy has not loaded the routes file of testing.site.test: the file sends it to launchplane-back-soon and the proxy to web",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "work under way",
+   "under way | the proxy has not loaded the routes file | The proxy has not loaded the routes file of testing.site.test: the file sends it to launchplane-back-soon and the proxy to web",
+   "under way | stopped | The instance web is stopped",
+   "under way | stopped | The database database-d1 is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "in maintenance with the proxy down": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | the proxy is not running | The proxy is not running, so testing.site.test answers nothing, not the back soon page",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "at work": [
+   "work under way",
+   "under way | the proxy is not running | The proxy is not running, so testing.site.test answers nothing, not the back soon page",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "work under way",
+   "under way | the proxy is not running | The proxy is not running, so testing.site.test answers nothing, not the back soon page",
+   "under way | stopped | The instance web is stopped",
+   "under way | stopped | The database database-d1 is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "in maintenance with a part attached where it must not be": {
+  "at rest": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
+   "parts: web wrong, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "at work": [
+   "wrong",
+   "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
+   "parts: web wrong, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "wrong",
+   "under way | stopped | The instance web is stopped",
+   "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
+   "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
+   "under way | stopped | The database database-d1 is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web wrong, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "in maintenance with a login no container holds on a server still running": {
+  "at rest": [
+   "wrong",
+   "wrong | not stopped in maintenance | The database database-d1 is running, in a lane in maintenance",
+   "left unfinished | a login no container holds | The database database-d1 has the login i_left, which no container holds",
+   "parts: web on purpose, web-background-service on purpose, database-d1 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | not stopped in maintenance | The database database-d1 is running, in a lane in maintenance",
+   "under way | a login no container holds | The database database-d1 has the login i_left, which no container holds",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ],
+  "ending maintenance": [
+   "work under way",
+   "under way | stopped | The instance web is stopped",
+   "under way | stopped | The background service web-background-service is stopped",
+   "under way | a login no container holds | The database database-d1 has the login i_left, which no container holds",
+   "parts: web on purpose, web-background-service on purpose, database-d1 on purpose"
+  ]
+ },
+ "out of maintenance with the background service stopped": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | stopped | The background service web-background-service is stopped",
+   "parts: web good, web-background-service wrong, database-d1 good"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The background service web-background-service is stopped",
+   "parts: web good, web-background-service on purpose, database-d1 good"
+  ]
+ },
+ "a plain lane as it must be": {
+  "at rest": [
+   "good",
+   "parts: new good"
+  ],
+  "at work": [
+   "work under way",
+   "parts: new good"
+  ]
+ },
+ "a plain lane with an instance beside the active one": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | beside the active instance | The instance stray runs beside the active one",
+   "parts: new good, stray wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | beside the active instance | The instance stray runs beside the active one",
+   "parts: new good, stray on purpose"
+  ]
+ },
+ "a plain lane whose active instance is stopped": {
+  "at rest": [
+   "wrong",
+   "wrong | stopped | The instance new is stopped",
+   "parts: new wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | stopped | The instance new is stopped",
+   "parts: new on purpose"
+  ]
+ },
+ "a plain lane with a background service the product has none of": {
+  "at rest": [
+   "wrong",
+   "wrong | a background service the product has none of | The background service new-background-service runs; the product has none",
+   "parts: new good, new-background-service wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | a background service the product has none of | The background service new-background-service runs; the product has none",
+   "parts: new good, new-background-service on purpose"
+  ]
+ },
+ "a plain lane whose instance says it runs against a data set": {
+  "at rest": [
+   "wrong",
+   "wrong | labelled for a data set it cannot have | The instance old runs against the data set d1; the product has none",
+   "parts: old wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | labelled for a data set it cannot have | The instance old runs against the data set d1; the product has none",
+   "parts: old on purpose"
+  ]
+ },
+ "a lane whose description cannot be read": {
+  "at rest": [
+   "could not be read",
+   "could not be read | could not be read | The description of site is not one Launchplane reads.",
+   "parts: new could not be read, new-background-service could not be read, database-d1 could not be read"
+  ],
+  "at work": [
+   "could not be read",
+   "could not be read | could not be read | The description of site is not one Launchplane reads.",
+   "parts: new could not be read, new-background-service could not be read, database-d1 could not be read"
+  ]
+ }
+}

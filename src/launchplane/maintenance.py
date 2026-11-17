@@ -1,27 +1,19 @@
-from launchplane.instance import (
-    DataSetUse,
-    InstanceState,
-    LaneBuild,
-    LaneRoute,
-    LaneSeen,
-    RouteStatus,
-    RunningInstance,
-    web_address_of,
-)
-from launchplane.judge import Fix, StillUp, background_service_problems, findings_as_read, killed_databases, still_up
+from launchplane.instance import DataSetUse, InstanceState, LaneReading, LaneRoute, RunningInstance, web_address_of
+from launchplane.judge import Judgement, Kind
 from launchplane.plan import (
+    Step,
     changes_so_far,
     check_or_problems,
-    disabled_route_stop,
     failure_report,
-    is_loaded_as_written,
+    left_for_a_move,
     prepared,
+    route_step,
+    sentences,
 )
 from launchplane.product import Product
 from launchplane.steps import (
     Action,
     AwaitBackgroundService,
-    AwaitRoute,
     BackgroundServiceRefused,
     Check,
     CheckRefused,
@@ -31,8 +23,8 @@ from launchplane.steps import (
     MaintenanceOutcome,
     MaintenanceResult,
     ReadLog,
+    RemoveLogins,
     ShowBackSoon,
-    StartProxy,
     StartRefused,
     StartStopped,
     Stop,
@@ -41,23 +33,26 @@ from launchplane.steps import (
     WriteRoute,
 )
 
-type Step = Action | Done[MaintenanceResult] | Stop
+STARTED_AGAIN = {Kind.STOPPED, Kind.NOT_RUNNING, Kind.UNSTEADY}
 
 
-def route_step(route: LaneRoute, web_address: str, done: tuple[Event, ...]) -> Action | Stop | None:
-    if not is_loaded_as_written(route):
-        return AwaitRoute(web_address, route.written)
-    if route.loaded is not None and route.loaded.status != RouteStatus.ENABLED:
-        return disabled_route_stop(web_address, route.loaded, done)
+# What writes stops before the web part, and the database stops last.
+def next_to_stop(lane: LaneReading) -> Action | None:
+    parts = [
+        *sorted(lane.background_services, key=lambda each: each.container),
+        *sorted(lane.instances, key=lambda each: each.container),
+    ]
+    for part in parts:
+        if part.state != InstanceState.STOPPED:
+            return StopPart(part.container)
+    for database in sorted(lane.databases, key=lambda each: each.container):
+        if database.state != InstanceState.STOPPED:
+            return StopDatabase(database.container)
     return None
 
 
-def stop_of(up: StillUp) -> Action:
-    return StopDatabase(up.container) if up.is_database else StopPart(up.container)
-
-
-def has_nothing(seen: LaneSeen) -> bool:
-    return not (seen.instances or seen.background_services or seen.data_sets)
+def has_nothing(lane: LaneReading) -> bool:
+    return not (lane.instances or lane.background_services or lane.data_sets)
 
 
 def answer_for(product: str, lane: str, route: LaneRoute, outcome: MaintenanceOutcome) -> MaintenanceResult:
@@ -71,57 +66,46 @@ def answer_for(product: str, lane: str, route: LaneRoute, outcome: MaintenanceOu
     )
 
 
-def not_as_it_must_be(seen: LaneSeen, description: Product, done: tuple[Event, ...]) -> Stop | None:
-    problems = [finding.text for finding in findings_as_read(seen, description)]
-    if not problems:
+def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None:
+    if not judged.findings:
         return None
-    state = "is in maintenance" if seen.route.in_maintenance else "is out of maintenance"
+    state = "is in maintenance" if judged.lane.route.in_maintenance else "is out of maintenance"
     return Stop(
-        f"The lane {state} and is not as it must be, so the call does not answer success: {'; '.join(problems)}. "
+        f"The lane {state} and is not as it must be, so the call does not answer success: {sentences(list(judged.findings))}. "
         f"{changes_so_far(done)}"
     )
 
 
-def decide_begin(seen: LaneSeen, product: str, lane: str, description: Product, done: tuple[Event, ...]) -> Step:
-    route = seen.route
-    if not route.proxy_runs:
-        return StartProxy()
-    web_address = web_address_of(product, lane)
-    step = route_step(route, web_address, done)
-    if step is not None:
+def decide_begin(judged: Judgement, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
+    lane = judged.lane
+    route = lane.route
+    if (step := route_step(judged, done)) is not None:
         return step
     if not route.in_maintenance:
-        if route.written is None and has_nothing(seen):
+        if route.written is None and has_nothing(lane):
             return Stop(
-                f"{lane} of {product} has no route, no instance, no background service and no data set on the host, "
+                f"{lane.lane} of {lane.product} has no route, no instance, no background service and no data set on the host, "
                 "so there is nothing to put in maintenance. Nothing was changed."
             )
-        return ShowBackSoon(web_address)
-    up = still_up(seen)
-    if up:
-        return stop_of(up[0])
-    killed = killed_databases(seen)
+        return ShowBackSoon(lane.web_address)
+    if (stop := next_to_stop(lane)) is not None:
+        return stop
+    killed = judged.of_kind(Kind.KILLED)
     if killed:
-        answer = answer_for(product, lane, route, MaintenanceOutcome.DATABASE_KILLED)
-        return Done(answer.model_copy(update={"error": "; ".join(killed)}))
-    return not_as_it_must_be(seen, description, done) or Done(answer_for(product, lane, route, MaintenanceOutcome.IN_MAINTENANCE))
+        answer = answer_for(lane.product, lane.lane, route, MaintenanceOutcome.DATABASE_KILLED)
+        return Done(answer.model_copy(update={"error": sentences(killed)}))
+    return not_as_it_must_be(judged, done) or Done(answer_for(lane.product, lane.lane, route, MaintenanceOutcome.IN_MAINTENANCE))
 
 
-def the_instance(seen: LaneSeen, product: str, lane: str, done: tuple[Event, ...]) -> tuple[RunningInstance, LaneBuild] | Stop:
-    way_out = (
-        f"Retiring the lane and moving it to a build again brings it back on its data set. {changes_so_far(done)} "
-        "The web address still shows the back soon page."
+def the_instance(lane: LaneReading, done: tuple[Event, ...]) -> RunningInstance | Stop:
+    if len(lane.instances) == 1:
+        return lane.instances[0]
+    names = ", ".join(sorted(instance.container for instance in lane.instances)) or "none"
+    return Stop(
+        f"{lane.lane} of {lane.product} has {len(lane.instances)} instances ({names}) where ending maintenance needs one, "
+        "so Launchplane cannot tell which to start. Retiring the lane and moving it to a build again brings it back on its "
+        f"data set. {changes_so_far(done)} The web address still shows the back soon page."
     )
-    if len(seen.instances) != 1:
-        names = ", ".join(sorted(instance.container for instance in seen.instances)) or "none"
-        return Stop(
-            f"{lane} of {product} has {len(seen.instances)} instances ({names}) where ending maintenance needs one, "
-            f"so Launchplane cannot tell which to start. {way_out}"
-        )
-    [instance] = seen.instances
-    if instance.build is None:
-        return Stop(f"The instance {instance.container} does not say which build it is, so it cannot be judged. {way_out}")
-    return instance, LaneBuild(product=product, lane=lane, build=instance.build)
 
 
 type Refusal = CheckRefused | StartRefused | BackgroundServiceRefused
@@ -134,57 +118,70 @@ def refusal_report(refused: Refusal, log: LogRead) -> str:
 
 
 # Everything stops before the log is read, so a log that cannot be read leaves nothing running.
-def stop_again(seen: LaneSeen, refused: Refusal, answer: MaintenanceResult, done: tuple[Event, ...]) -> Step:
-    up = still_up(seen)
-    if up:
-        return stop_of(up[0])
+def stop_again(lane: LaneReading, refused: Refusal, answer: MaintenanceResult, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
+    if (stop := next_to_stop(lane)) is not None:
+        return stop
     logs = [event for event in done if isinstance(event, LogRead)]
     log = next((each for each in logs if each.container == refused.container), None)
     if log is None:
         return ReadLog(refused.container)
-    of_the_web_part = any(instance.container == refused.container for instance in seen.instances)
+    of_the_web_part = any(instance.container == refused.container for instance in lane.instances)
     outcome = MaintenanceOutcome.WEB_PART_FAILED if of_the_web_part else MaintenanceOutcome.BACKGROUND_SERVICE_FAILED
     return Done(answer.model_copy(update={"outcome": outcome, "error": refusal_report(refused, log)}))
 
 
-def background_service_step(
-    seen: LaneSeen, instance: RunningInstance, description: Product, done: tuple[Event, ...]
-) -> Action | Stop | None:
-    problems = background_service_problems(seen, instance, description)
-    if not problems:
+STILL_BACK_SOON = "The web address still shows the back soon page."
+
+
+# Whether this call started a part that reads stopped again, the host cannot show, so it is asked of what the call has done.
+def background_service_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | None:
+    findings = judged.about_background_services()
+    if not findings:
         return None
-    first = problems[0]
-    if first.container is None or first.fix == Fix.REPLACE:
+    first = findings[0]
+    if first.kind not in STARTED_AGAIN:
         return Stop(
-            f"The background service is not one ending maintenance can start: {first.text}. {changes_so_far(done)} "
-            "The web address still shows the back soon page. Retiring the lane and moving it to a build again brings it back."
+            f"The background service is not one ending maintenance can start: {first.sentence}. {changes_so_far(done)} "
+            f"{STILL_BACK_SOON} Retiring the lane and moving it to a build again brings it back."
         )
-    start = StartStopped(first.container)
-    stopped = any(
-        running.container == first.container and running.state == InstanceState.STOPPED for running in seen.background_services
-    )
-    if stopped and start not in done:
+    start = StartStopped(first.subject)
+    if first.kind == Kind.STOPPED and start not in done:
         return start
-    return AwaitBackgroundService(first.container)
+    return AwaitBackgroundService(first.subject)
 
 
-def bring_back(
-    seen: LaneSeen, product: str, lane: str, description: Product, answer: MaintenanceResult, done: tuple[Event, ...]
-) -> Step:
+# A login nobody holds goes, and what else is found is said, while the back soon page still shows, so the lane never comes
+# back with it unsaid. Like a move, ending maintenance answers for the instance and its data set, not for another data set.
+def rest_step(judged: Judgement, instance: RunningInstance, done: tuple[Event, ...]) -> Action | Stop | None:
+    unheld = judged.of_kind(Kind.LOGIN_UNHELD)
+    if unheld:
+        return RemoveLogins(unheld[0].subject)
+    # Switching back is what takes visitors off a back soon page that is not running.
+    found = [*left_for_a_move(judged, instance), *judged.of_kind(Kind.LOGINS_UNREAD)]
+    left = [finding for finding in found if finding.kind != Kind.BACK_SOON_STOPPED]
+    if not left:
+        return None
+    return Stop(
+        f"The lane is not as it must be to switch back, so the web address still shows the back soon page: "
+        f"{sentences(left)}. {changes_so_far(done)} Beginning maintenance again stops what was started."
+    )
+
+
+def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
+    lane = judged.lane
     refused = next((event for event in done if isinstance(event, CheckRefused | StartRefused | BackgroundServiceRefused)), None)
     if refused is not None:
-        return stop_again(seen, refused, answer, done)
-    found = the_instance(seen, product, lane, done)
-    if isinstance(found, Stop):
-        return found
-    instance, target = found
-    use = prepared(seen, instance.data_set, None, target, description, done)
+        return stop_again(lane, refused, answer, done)
+    instance = the_instance(lane, done)
+    if isinstance(instance, Stop):
+        return instance
+    use = prepared(judged, instance.data_set, None, product, done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     start = StartStopped(instance.container)
     if instance.state == InstanceState.STOPPED and start not in done:
         return start
-    problems = check_or_problems(seen, instance, target, description, done)
+    problems = check_or_problems(judged, instance, product, done)
     if isinstance(problems, Check):
         return problems
     if problems:
@@ -193,17 +190,15 @@ def bring_back(
             f"the web address still shows the back soon page: {'; '.join(problems)}. {changes_so_far(done)} "
             "Beginning maintenance again stops what was started."
         )
-    return background_service_step(seen, instance, description, done) or WriteRoute(answer.web_address, instance.container)
+    step = background_service_step(judged, done) or rest_step(judged, instance, done)
+    return step or WriteRoute(answer.web_address, instance.container)
 
 
-def decide_end(seen: LaneSeen, product: str, lane: str, description: Product, done: tuple[Event, ...]) -> Step:
-    route = seen.route
-    if not route.proxy_runs:
-        return StartProxy()
-    step = route_step(route, web_address_of(product, lane), done)
-    if step is not None:
+def decide_end(judged: Judgement, product: Product, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
+    lane = judged.lane
+    if (step := route_step(judged, done)) is not None:
         return step
-    answer = answer_for(product, lane, route, MaintenanceOutcome.ENDED)
-    if route.in_maintenance:
-        return bring_back(seen, product, lane, description, answer, done)
-    return not_as_it_must_be(seen, description, done) or Done(answer)
+    answer = answer_for(lane.product, lane.lane, lane.route, MaintenanceOutcome.ENDED)
+    if lane.route.in_maintenance:
+        return bring_back(judged, product, answer, done)
+    return not_as_it_must_be(judged, done) or Done(answer)

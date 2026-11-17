@@ -6,7 +6,7 @@ For now a build is a container image reference, and the instance must answer HTT
 
 ## What it does
 
-Each call takes one step at a time and reads the host and the proxy again before every step, so nothing read before a step is used after it. After a crash nothing is resumed: asking again reads and goes on from there. A call that has taken 50 steps and is not finished answers `503`; what was done stays done.
+Each call takes one step at a time. Before every step it reads the host and the proxy again and judges the lane again, with [the judgement the status page draws](data-sets.md#the-judgement-on-a-lane), so nothing read before a step is used after it. After a crash nothing is resumed: asking again reads and goes on from there. A call that has taken 50 steps and is not finished answers `503`; what was done stays done.
 
 The next step is the first of these that applies:
 
@@ -28,6 +28,8 @@ The next step is the first of these that applies:
 | `cleaned up` | 200 | It already did, and what an interrupted move left was removed. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service: see [a move with data](data-sets.md#a-move-with-data). |
+
+A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
 
 A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again. One move, retirement or maintenance call runs at a time in a Launchplane process; a second call waits.
 
@@ -55,7 +57,6 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 
 - **A slow reader can lose the end of a large download when the old instance stops.** Measured: a 24 MiB download read at 1.8 MB/s across a move lost its last 2.4 to 2.9 MB in 4 of 4 runs. Comes back if a real product kind shows it.
 - **Asking for the old build while its instance is still stopping answers `check failed` for a good build.** Confirmed once, after a kill during retirement. Asking again works, and the web address never moves.
-- **`/running` reads the containers and the routes at two moments**, so during a switch it can show the retired instance and no instance receiving visitors.
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
 - **Two routers for one web address, one of them not written by Launchplane, can make a move answer `unchanged` for the wrong instance.** Found by the checker; not reproduced on the test bed. Comes back if anything else writes to the routes folder.

@@ -647,6 +647,17 @@ def test_a_database_with_another_volume_mounted_is_refused_and_shown_so(lane_on_
         on_scratch("docker rm --force test-bed-impostor; docker volume rm test-bed-another-volume")
 
 
+def test_a_running_part_attached_where_it_must_not_be_is_shown_as_wrong_and_a_move_stops_in_the_same_words(
+    lane_on_a: LaneView,
+) -> None:
+    database = database_of(lane_on_a.data_sets[0])
+    on_scratch(f"docker network connect bridge {database}")
+    [verdict] = [lane for lane in read_running()["lanes"] if (lane["product"], lane["lane"]) == (PRODUCT, LANE)]
+    status, body = move_lane(PRODUCT, LANE, BUILD_A)
+    assert (verdict["condition"], verdict["parts"][database], len(verdict["problems"])) == ("wrong", "wrong", 2)
+    assert (status, [problem in body["error"] for problem in verdict["problems"]]) == (503, [True, True])
+
+
 def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_on_a: LaneView) -> None:
     status, body = move_lane(PRODUCT, LANE, BUILD_TELLTALE)
     assert (status, body["outcome"]) == (422, "check failed"), body

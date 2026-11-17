@@ -82,10 +82,8 @@ class HostLogins:
                 held.add(login)
         return held
 
-    # The logins are read before the containers, so one made between the two reads is not taken for one nothing holds.
-    def unheld(self, database: str, product: str, data_set: str) -> list[str]:
-        logins = self.read(database, "Reading the logins", READ_LOGINS, LOGINS_READ)
-        return sorted(set(logins) - self.held(product, data_set))
+    def read_logins(self, database: str) -> list[str]:
+        return self.read(database, "Reading the logins", READ_LOGINS, LOGINS_READ)
 
     def remove_unheld(self, database: str) -> None:
         labels = self.client.containers.get(database).labels
@@ -95,7 +93,9 @@ class HostLogins:
                 f"The database {database} does not say which product and data set it is, so Launchplane cannot tell "
                 "which containers hold its logins. No login was removed."
             )
-        for login in self.unheld(database, product, data_set):
+        # The logins are read before the containers, so one made between the two reads is not taken for one nothing holds.
+        logins = self.read_logins(database)
+        for login in sorted(set(logins) - self.held(product, data_set)):
             self.answer(database, f"Removing the login {login}", REMOVE_LOGIN, login=login)
 
     def make(self, instance: str, use: DataSetUse) -> dict[str, str]:
