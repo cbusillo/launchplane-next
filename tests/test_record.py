@@ -371,11 +371,11 @@ def test_a_statement_given_values_the_gate_has_not_judged_is_not_run(postgres_re
         session.execute(record_module.Sql.SAME_KEY, unjudged)
 
 
-@pytest.mark.parametrize("key", ["one-release", None], ids=["with a key", "with no key"])
+@pytest.mark.parametrize("repeated", ["one-release", None], ids=["with a key", "with no key"])
 def test_a_repeated_call_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_its_request_is_written(
-    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch, key: str | None
+    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch, repeated: str | None
 ) -> None:
-    first = postgres_record.write(MOVE_B, CALLER, key)
+    first = postgres_record.write(MOVE_B, CALLER, repeated)
     same_as_written = record_module.same_as_written
 
     def find_it_then_lose_the_connection(
@@ -386,7 +386,7 @@ def test_a_repeated_call_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_i
 
     monkeypatch.setattr(record_module, "same_as_written", find_it_then_lose_the_connection)
     with pytest.raises(Unconfirmed, match="server closed the connection"):
-        postgres_record.write(MOVE_B, CALLER, key)
+        postgres_record.write(MOVE_B, CALLER, repeated)
 
 
 def test_a_write_lost_after_the_record_said_it_holds_nothing_like_it_is_said_to_be_unwritten(

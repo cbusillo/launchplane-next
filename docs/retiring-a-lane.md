@@ -31,7 +31,7 @@ The web address goes first so that no new request reaches an instance that is st
 
 The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
 
-A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. One request works at a time, in the order they came.
+A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
 
 ## Known and not fixed
 

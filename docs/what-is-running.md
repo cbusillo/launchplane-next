@@ -33,7 +33,8 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`, and what the page shows for it: `says` and `standing`. |
 | `lanes` | the judgement on each lane: see [the judgement on a lane](data-sets.md#the-judgement-on-a-lane). |
 | `requests` | every [request](requests.md) that has not ended, as `GET /requests` gives it. |
-| `record_error` | why Launchplane's record could not be read, or `null`. The rest of the answer is still what is on the host. |
+| `cancelled` | every request cancelled in the last 10 minutes. |
+| `record_error` | why Launchplane's record could not be read or did not answer in time, or `null`. The rest of the answer is still what is on the host. |
 | `cards` | the page, ready to draw: see [the page](#the-page). |
 | `read_at` | the moment the host was asked. |
 
@@ -85,8 +86,6 @@ Anything asked is either known or could not be read, with the reason. What could
 - **The page does not show where a route to another lane's instance goes.** `/running` answers it.
 - **No test runs the page's script.** A unit test covers the cards it is given. Chris watching the page is the check on the drawing. Comes back when the page breaks without anyone noticing, or when there is a second page.
 - **While a start is between making a login and making its container, a reading can find that login held by no container.** A call is at work then, so the page shows it as under way. The removal of logins reads the server first and the containers after, so it never takes that login.
-- **Of two background services where a lane must have one, only the first by name is shown as wrong.** The second shows as good, also when it belongs to another instance or runs another build. The lane's condition is wrong, and a move retires the first.
-- **A background service in a lane where no instance receives visitors shows as good.** Only where it is attached is judged then. The lane itself shows that no instance receives visitors.
 - **A container that Docker keeps refusing to describe stops every call.** Every answer is cleaned of the secrets containers hold, so each call first describes every container, and answers `503` when one cannot be described.
 
 ## Measured

@@ -244,7 +244,7 @@ class Sql:
     UNFINISHED_BEFORE: Final = """
     select id from request where (product, lane) = (%s, %s) and id < %s and stands in ('waiting', 'working')
     """
-    # One statement, so a request taken up while it is being cancelled is either ended or marked, never neither.
+    # One statement, so a request taken up during its cancel is either ended or marked, never neither.
     CANCEL: Final = """
     update request set
         stands = case stands when 'waiting' then 'cancelled' else stands end,
@@ -326,7 +326,7 @@ def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked)
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
-# The one path by which a request is cancelled, for the call and for a newer request of its lane: one that waits ends
+# The one path of a cancel, for the call and for a newer request of its lane: a request that waits ends
 # with nothing done, and one that is worked is marked for its worker to read between actions.
 def cancel_each(session: Session, gate: Gate, requests: list[int], by: str) -> None:
     session.execute(Sql.CANCEL, gate.sent(PutBack().model_dump(), by, list[JsonValue](requests)))

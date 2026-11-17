@@ -294,8 +294,8 @@ def test_a_cancelled_request_shows_on_its_lanes_card_and_among_the_ended_with_wh
     while_working: list[tuple[int, list[str], str]] = []
 
     def cancel_by_the_call(_container: str) -> None:
-        marked = bed.client.post(f"/requests/{asked}/cancel")
-        while_working.append((marked.status_code, *row_of(bed, asked)))
+        answer = bed.client.post(f"/requests/{asked}/cancel")
+        while_working.append((answer.status_code, *row_of(bed, asked)))
 
     bed.proxy.while_checking = cancel_by_the_call
     assert bed.worker.worked_one() is True

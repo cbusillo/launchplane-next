@@ -91,7 +91,7 @@ class Stopped(Exception):
     pass
 
 
-# The call was cancelled and has put its lane back, so it has no answer of its own to give.
+# A cancel was carried out and the lane is put back, so the call has no answer of its own to give.
 class Cancelled(Exception):
     def __init__(self, put_back: PutBack) -> None:
         super().__init__(f"The call was cancelled: {put_back.put_back or 'nothing had to be put back'}.")
@@ -169,7 +169,7 @@ type Decide[Answer] = Callable[[Judgement, tuple[Event, ...]], Action | Done[Ans
 type DecideBack = Callable[[Judgement, tuple[Event, ...]], plan.StepBack]
 
 
-# A cancel is read between actions, after the host. From then on the call takes the steps back and ends as cancelled,
+# A cancel is read between actions, after the host. From then on the call takes the steps back and ends by saying so,
 # unless the host shows it is too late: then the cancel is refused, once, and the call goes on as asked.
 def settle[Answer](
     read_judged: Callable[[], Judgement],

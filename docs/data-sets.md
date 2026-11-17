@@ -151,6 +151,8 @@ Whether the web address answers is asked by the status call and by a move, and i
 
 While a call is ending maintenance the lane is judged as it must be once it is back: a part still stopped is under way, and a running one is good.
 
+Every background service is judged for itself. Where a lane has more than the one it must have, each of them is wrong. One whose instance is not on the host is wrong, and one whose instance does not receive visitors says so.
+
 After Launchplane is killed mid-release and starts again, its [request](requests.md) still stands as working, so the lane shows as work under way, and the worker takes the request up and finishes the release with nobody asking. A lane shows as left unfinished when a request failed halfway or was given up: then asking for the build of the instance beside the active one finishes the release, and asking for the active build removes what was left. A lane retired with its data set kept shows as left unfinished too.
 
 A move and the end of maintenance answer for the instance they serve from and that instance's data set. A fault in another data set of the lane is in the judgement and on the page, and does not stop them.
@@ -161,7 +163,7 @@ A web part, a background service and a database server are each made with the re
 
 ## Known and not fixed
 
-- **With a lane's route removed by hand**, no instance is the one the lane serves from, so the judgement does not say whether a background service belongs to it, is of its build or has stayed up.
+- **With a lane's route removed by hand**, no instance is the one the lane serves from. A background service is then shown as belonging to an instance that receives no visitors, and the judgement does not say whether it is of the right build or has stayed up.
 - **Two running background services, a background service whose instance is gone, and one of another build** show as under way while a call is at work.
 - **A release that finishes between two readings of the move flag** can show for one reading as left unfinished.
 - **A database server keeps the password it was first started with in its environment.** The set-up takes it off `postgres`, so it opens nothing. If the set-up did not finish it is still the password of `postgres`, which the rules then left in place refuse from every address but the server's own container. Launchplane cleans it from its answers like any secret.

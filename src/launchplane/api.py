@@ -340,7 +340,7 @@ def is_cancel_settled(kept: Kept) -> bool:
     return kept.stands in ENDED or kept.cancel_refused is not None
 
 
-# One sentence for a request that is not cancelled and will not be, or None while it is cancelled or still may be.
+# One sentence for a request no cancel will end, or None while one has ended it or still may.
 def why_not_cancelled(kept: Kept) -> str | None:
     ended = f"Request {kept.id} ended as {kept.stands}"
     if kept.cancel_refused is not None:
@@ -351,8 +351,7 @@ def why_not_cancelled(kept: Kept) -> str | None:
             f"for it again with POST /requests/{kept.id}/retry or give it up with POST /requests/{kept.id}/give-up."
         )
     if kept.stands in (Stands.DONE, Stands.FAILED):
-        when = "before its worker read the cancel" if kept.cancel_asked_at is not None else "before it was cancelled"
-        return f"{ended} {when}, so it was not cancelled. Nothing was changed by this call."
+        return f"{ended}, so it was not cancelled. Nothing was changed by this call."
     return None
 
 

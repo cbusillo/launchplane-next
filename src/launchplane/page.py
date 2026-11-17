@@ -212,7 +212,7 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
-# What has not ended, and what was cancelled a short while ago.
+# Every request that has not ended, then those a cancel ended a short while ago.
 def shown_requests(status: Status) -> list[Request]:
     return [*status.requests, *status.cancelled]
 

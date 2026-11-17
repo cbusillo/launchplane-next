@@ -133,7 +133,8 @@ class PretendRecord(Record):
     def recently_cancelled(self) -> list[Request]:
         self.reach("reading the requests that were cancelled")
         since = now() - timedelta(minutes=MINUTES_A_CANCELLED_REQUEST_IS_SHOWN)
-        return [each for each in self.every() if each.stands is Stands.CANCELLED and each.ended_at and each.ended_at > since]
+        cancelled = (each for each in self.every() if each.stands is Stands.CANCELLED and each.ended_at and each.ended_at > since)
+        return list[Request](cancelled)
 
     def next_up(self) -> list[Request]:
         self.reach("looking for the next requests")
