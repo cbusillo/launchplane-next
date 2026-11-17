@@ -95,6 +95,8 @@ class PretendRecord(Record):
         return new
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
+        if not self.reachable and idempotency_key is not None:
+            raise Unconfirmed("Launchplane's record could not be reached while writing a request: connection refused.")
         self.reach("writing a request")
         self.gate.refuse(*said(asked), asked_by)
         with self.writing:

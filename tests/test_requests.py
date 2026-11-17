@@ -219,6 +219,9 @@ def test_an_answer_says_nothing_was_changed_only_when_the_request_is_known_not_t
     unconfirmed_record = PretendRecord(confirms_writes=False)
     unconfirmed = bed_on(unconfirmed_record).client.post(MOVE, json=TO_B, headers={"Idempotency-Key": "one-release"})
     assert (unreachable.status_code, "was not written and nothing was changed" in unreachable.json()["error"]) == (503, True)
+    repeated = bed_on(PretendRecord(reachable=False)).client.post(MOVE, json=TO_B, headers={"Idempotency-Key": "one-release"})
+    assert (repeated.status_code, "nothing was changed" in repeated.json()["error"]) == (503, False)
+    assert "is not known" in repeated.json()["error"]
     assert (unconfirmed.status_code, "nothing was changed" in unconfirmed.json()["error"]) == (503, False)
     assert "is not known" in unconfirmed.json()["error"] and "GET /requests" in unconfirmed.json()["error"]
     assert len(unconfirmed_record.unfinished()) == 1

@@ -1,4 +1,5 @@
 import copy
+import logging.config
 import os
 import time
 from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -420,6 +421,8 @@ def serve() -> None:
     address = os.environ.get("LAUNCHPLANE_LISTEN_ADDRESS", "127.0.0.1")
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
+    # Before anything that can log is started, so the first line this process writes is already cleaned.
+    logging.config.dictConfig(cleaned_log_config(host))
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     record = PostgresRecord(database(), host)

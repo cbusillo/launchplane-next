@@ -344,19 +344,21 @@ class PostgresRecord(Record):
             raise unreachable(doing, error) from error
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-        sent = False
+        # A call with a key may be a repeat of one that was written, so only a call without one is known unwritten.
+        may_be_written = idempotency_key is not None
         try:
             with self.session("writing a request") as session:
                 # Two calls asking the same thing at once write one request: the second waits here and finds the first.
                 session.execute(Sql.LOCK_WRITERS)
                 same = same_as_written(session, self.gate, asked, idempotency_key)
                 if same is not None:
+                    may_be_written = True
                     return same
                 refuse_while_a_person_is_awaited(session, self.gate, asked)
-                sent = True
+                may_be_written = True
                 return write_new(session, self.gate, asked, asked_by, idempotency_key)
         except RecordError as error:
-            if sent:
+            if may_be_written:
                 raise Unconfirmed(str(error)) from error
             raise
 

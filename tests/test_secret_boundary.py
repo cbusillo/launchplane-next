@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from launchplane import api
 from launchplane.act import Lanes, Status, Stopped
 from launchplane.api import cleaned_log_config, create_app
 from launchplane.container_host import ContainerHost
@@ -274,18 +276,52 @@ SERVICE_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 @pytest.fixture
-def written_by_the_service_log() -> Iterator[io.StringIO]:
+def service_loggers() -> Iterator[list[logging.Logger]]:
     loggers = [logging.root, *map(logging.getLogger, SERVICE_LOGGERS)]
     before = [(logger, logger.handlers[:], logger.propagate, logger.level) for logger in loggers]
+    yield loggers
+    for logger, handlers, propagate, level in before:
+        logger.handlers[:], logger.propagate, logger.level = handlers, propagate, level
+
+
+@pytest.fixture
+def written_by_the_service_log(service_loggers: list[logging.Logger]) -> io.StringIO:
     logging.config.dictConfig(cleaned_log_config(GivenSecrets(seen=frozenset({SECRET}))))
     written = io.StringIO()
-    for logger in loggers:
+    for logger in service_loggers:
         for handler in logger.handlers:
             assert isinstance(handler, CleanedStream), f"{logger.name} writes through {handler}, which cleans nothing"
             handler.setStream(written)
-    yield written
-    for logger, handlers, propagate, level in before:
-        logger.handlers[:], logger.propagate, logger.level = handlers, propagate, level
+    return written
+
+
+@pytest.mark.usefixtures("service_loggers")
+def test_a_line_logged_as_the_service_starts_is_cleaned_before_the_worker_or_the_server_has_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    docker = RecordingDocker()
+    holding_the_secret(docker)
+    host = ContainerHost(docker.as_client(), "test")
+    writing_through: list[bool] = []
+
+    def start_and_fail(_worker: Worker) -> None:
+        host.read_secrets()
+        writing_through.extend(isinstance(handler, CleanedStream) for handler in logging.root.handlers)
+        logging.getLogger("launchplane.worker").error("not an error Launchplane expects: %s", SECRET)
+
+    def record_in_memory(_database: str, _secrets: Secrets) -> PretendRecord:
+        return PretendRecord()
+
+    def serve_nothing(_server: uvicorn.Server) -> None:
+        pass
+
+    monkeypatch.setattr(ContainerHost, "from_environment", lambda: host)
+    monkeypatch.setattr("launchplane.api.PostgresRecord", record_in_memory)
+    monkeypatch.setattr(Worker, "start", start_and_fail)
+    monkeypatch.setattr(uvicorn.Server, "run", serve_nothing)
+    api.serve()
+    written: str = capsys.readouterr().err
+    assert (writing_through, SECRET in written, written.count(SECRET_REMOVED)) == ([True], False, 1)
 
 
 def test_every_log_launchplane_writes_as_a_service_is_cleaned_whichever_library_wrote_it(

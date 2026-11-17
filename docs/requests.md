@@ -20,7 +20,7 @@ Each of the four calls writes a request and answers `202` with the request and a
 - **`Idempotency-Key: <text>`**. The same key with the same call and body answers with the request already written, whether or not it has ended. The same key with anything else answers `409` and writes nothing. A key is never forgotten and never shown: the record keeps only its SHA-256 digest. A call with a key always writes its own request, even when the same thing is already waiting.
 - **`409`** also answers a call for a lane that has a request needing a person, and says which.
 - **`422`** with `error` also answers a call that carries a secret a container holds, in any part of it. Nothing is written.
-- **`503`** with `error` means the record could not be reached. The answer says the request was not written and nothing was changed only when that is known. When the record was lost after the request was sent to it, the answer says that whether it was written is not known: if it was, it will be worked. Asking again with the same key answers with it if it was, and `GET /requests` lists it.
+- **`503`** with `error` means the record could not be reached. The answer says the request was not written and nothing was changed only when that is known. When the record was lost after the request was sent to it, or the call had a key and so may repeat a request already written, the answer says that whether it was written is not known: if it was, it will be worked. Asking again with the same key answers with it if it was, and `GET /requests` lists it.
 
 ## Reading
 
@@ -58,7 +58,7 @@ Three tables in a PostgreSQL database of Launchplane's own: a request, an attemp
 
 No secret is written to the record, because the record outlives the container that holds a secret and nothing could then know to remove it on the way out.
 
-Every value on its way into the database passes one gate, whatever call it comes from: a new request, a retry, a give-up, an attempt, an event, the final answer, and who asked. A statement runs only with values the gate has passed. The gate judges a value as an answer is judged: on the value itself, whatever characters the secret has, against every secret a container holds.
+A value is judged as an answer is: on the value itself, whatever characters the secret has, against every secret a container holds.
 
 - **What a caller sent** is refused with `422` when it carries one, and nothing is written: the product, lane, build and data set name of a call, and who asked, also when a request is asked for again.
 - **What Launchplane writes itself** is cleaned of it: every event, error and answer. The worker reads every container's secrets when it takes a request up, and a secret it makes while working is known from the moment it is made.

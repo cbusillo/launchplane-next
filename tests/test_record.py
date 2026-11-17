@@ -369,3 +369,20 @@ def test_a_statement_given_values_the_gate_has_not_judged_is_not_run(postgres_re
     unjudged: Any = [HELD]
     with pytest.raises(AttributeError, match="values"), postgres_record.session("writing around the gate") as session:
         session.execute(record_module.Sql.SAME_KEY, unjudged)
+
+
+def test_a_repeated_key_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_its_request_is_written(
+    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = postgres_record.write(MOVE_B, CALLER, "one-release")
+    same_as_written = record_module.same_as_written
+
+    def find_it_then_lose_the_connection(
+        session: record_module.Session, gate: record_module.Gate, asked: Asked, key: str | None
+    ) -> None:
+        assert same_as_written(session, gate, asked, key) == first
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(record_module, "same_as_written", find_it_then_lose_the_connection)
+    with pytest.raises(Unconfirmed, match="server closed the connection"):
+        postgres_record.write(MOVE_B, CALLER, "one-release")
