@@ -15,7 +15,6 @@ from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
     InstanceState,
-    LaneBuild,
     LoadedRoute,
     OnHost,
     ProxySeen,
@@ -26,9 +25,9 @@ from launchplane.instance import (
 )
 from launchplane.judge import Standing, judge, web_addresses_judged
 from launchplane.product import Product
-from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import SINCE
+from tests.pretend_record import PretendRecord
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
 
@@ -63,16 +62,8 @@ def refusing_host() -> ContainerHost:
     return ContainerHost(client, "tcp://127.0.0.1:1")
 
 
-def no_move(target: LaneBuild) -> MoveResult:
-    raise AssertionError(f"Reading what is running asked for a move to {target.build}")
-
-
-def no_retire(product: str, lane: str, _delete_data_set: str | None) -> RetireResult:
-    raise AssertionError(f"Reading what is running asked to retire {lane} of {product}")
-
-
-def no_maintenance(product: str, lane: str) -> MaintenanceResult:
-    raise AssertionError(f"Reading what is running asked to change the maintenance of {lane} of {product}")
+def no_wake() -> None:
+    raise AssertionError("Reading what is running woke the worker")
 
 
 type InstanceReader = Callable[[], list[RunningInstance]]
@@ -100,7 +91,7 @@ def app_reading(
     def read_status() -> Status:
         return status_of(read(), proxy or proxy_sending(routes), failures)
 
-    return TestClient(create_app(read_status, no_move, no_retire, NO_SECRETS, no_maintenance, no_maintenance))
+    return TestClient(create_app(read_status, PretendRecord(), no_wake, NO_SECRETS))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:

@@ -10,13 +10,12 @@ from launchplane.instance import (
     BACK_SOON,
     InstanceState,
     LaneBuild,
-    LoadedRoute,
     OnHost,
-    RouteStatus,
     background_service_container_of,
 )
 from launchplane.judge import Work
 from launchplane.product import Product, ProductError
+from launchplane.record import Asked, Kept, Stands
 from launchplane.steps import MaintenanceOutcome, Outcome, RetireOutcome
 from tests.pretend_host import (
     SINCE,
@@ -31,6 +30,7 @@ from tests.pretend_host import (
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 BUILD_B = LaneBuild(product="site", lane="testing", build="site:b")
+MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
 
 
 def lanes_serving(build: LaneBuild, container: str) -> tuple[Lanes, PretendProxy]:
@@ -174,7 +174,7 @@ def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_th
     proxy.host.change_database("database-data-1", unheld_logins=("i_left_again",))
     retired = lanes_on(proxy).retire("site", "testing")
     assert (moved.outcome, proxy.host.actions[0], proxy.host.actions[-1]) == (
-        Outcome.CLEANED_UP,
+        Outcome.REPAIRED,
         "remove logins from database-data-1",
         "remove logins from database-data-1",
     )
@@ -202,38 +202,11 @@ def test_a_retry_after_a_crash_before_the_background_service_was_watched_watches
     assert result.outcome == Outcome.UNCHANGED
 
 
-def test_a_retire_asked_during_a_move_waits_for_it() -> None:
-    lanes, proxy = lanes_serving(BUILD_A, "a")
-    checking, checked = threading.Event(), threading.Event()
-
-    def hold_the_check(_container: str) -> None:
-        checking.set()
-        assert checked.wait(timeout=5)
-
-    proxy.while_checking = hold_the_check
-    move = threading.Thread(target=lanes.move, args=(BUILD_B,))
-    retire = threading.Thread(target=lanes.retire, args=("site", "testing"))
-    move.start()
-    assert checking.wait(timeout=5)
-    retire.start()
-    retire.join(timeout=0.3)
-    done_while_the_move_was_held = list(proxy.host.actions)
-    checked.set()
-    move.join(timeout=5)
-    retire.join(timeout=5)
-    assert [action.split()[0] for action in done_while_the_move_was_held] == ["start", "check"]
-    assert proxy.host.actions[-2:] == ["unroute", f"retire {proxy.host.actions[0].split()[1]}"]
-
-
 def problems_by_lane(lanes: Lanes) -> dict[tuple[str, str], list[str]]:
     return {
         (judged.lane.product, judged.lane.lane): [finding.sentence for finding in judged.findings]
         for judged in lanes.read_status().lanes
     }
-
-
-def at_work_by_lane(lanes: Lanes) -> dict[str, Work | None]:
-    return {judged.lane.lane: judged.work for judged in lanes.read_status().lanes}
 
 
 def test_every_lane_is_judged_for_the_status_call_even_one_whose_description_cannot_be_read() -> None:
@@ -272,36 +245,25 @@ def test_ending_maintenance_on_a_lane_not_in_maintenance_reads_no_container_at_a
     assert (result.outcome, proxy.host.lanes_read) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, [])
 
 
-def test_only_the_lane_being_moved_is_said_to_be_at_work_and_only_meanwhile() -> None:
-    lanes, proxy = lanes_serving(BUILD_A, "a")
-    proxy.host.place(LaneBuild(product="site", lane="other", build="site:a"), "other-1")
-    at_work_during_the_check: list[dict[str, Work | None]] = []
-    proxy.while_checking = lambda _container: at_work_during_the_check.append(at_work_by_lane(lanes))
-    lanes.move(BUILD_B)
-    assert at_work_during_the_check == [{"other": None, "testing": Work.MOVE}]
-    assert at_work_by_lane(lanes) == {"other": None, "testing": None}
-
-
-def test_a_move_that_stops_with_an_error_no_longer_counts_as_at_work_on_its_lane() -> None:
-    lanes, proxy = lanes_serving(BUILD_A, "a")
-    proxy.loaded[WEB_ADDRESS] = LoadedRoute(proxy.written[WEB_ADDRESS], RouteStatus.DISABLED)
-    with pytest.raises(Stopped):
-        lanes.move(BUILD_B)
-    assert at_work_by_lane(lanes) == {"testing": None}
-
-
-def test_a_move_that_ends_during_a_read_is_still_at_work_on_what_was_read() -> None:
-    lanes, proxy = lanes_serving(BUILD_A, "a")
-    read_as_before = proxy.host.read
-
-    def read_while_the_move_ends(lane: Lane | None = None) -> OnHost:
-        on_host = read_as_before(lane)
-        lanes.at_work = None
-        return on_host
-
-    lanes.at_work = (("site", "testing"), Work.MOVE)
-    proxy.host.read = read_while_the_move_ends
-    assert at_work_by_lane(lanes) == {"testing": Work.MOVE}
+def test_a_request_taken_up_or_ended_while_the_host_is_read_is_at_work_on_what_was_read() -> None:
+    proxy = PretendProxy(PretendHost())
+    proxy.host.place(BUILD_A, "a")
+    working = Kept(
+        **MOVE_B.model_dump(),
+        id=1,
+        asked_by="the address 192.0.2.1",
+        asked_at=SINCE,
+        idempotency_key=None,
+        stands=Stands.WORKING,
+        ended_at=None,
+        answer=None,
+        error=None,
+        attempts=[],
+        events=[],
+    )
+    for reads in ([[working], []], [[], [working]]):
+        lanes = Lanes(proxy.host, proxy, read_unfinished=iter(reads).__next__)
+        assert [judged.work for judged in lanes.read_status().lanes] == [Work.MOVE]
 
 
 def web_addresses_read(proxy: PretendProxy) -> dict[str, tuple[str | None, bool, str | None]]:

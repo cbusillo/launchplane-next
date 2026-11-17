@@ -1,5 +1,6 @@
 import copy
 import os
+import time
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -9,7 +10,7 @@ from typing import Annotated, Any, TextIO
 
 import uvicorn
 import uvicorn.config
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Query, Request, Response
 from fastapi import Path as PathParameter
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,22 +19,24 @@ from pydantic import BaseModel
 from launchplane.act import Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import DataSet, HostNetwork, LaneBuild, RunningBackgroundService, RunningInstance
+from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
+from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, conninfo
+from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
+from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
+from launchplane.worker import Worker
 
 type StatusReader = Callable[[], Status]
-type MoveRequester = Callable[[LaneBuild], MoveResult]
-type RetireRequester = Callable[[str, str, str | None], RetireResult]
-type MaintenanceRequester = Callable[[str, str], MaintenanceResult]
 
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
 UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
 PRODUCTS_FOLDER = "/var/lib/launchplane/products"
+MOST_SECONDS_WAITED = 3600
+SECONDS_BETWEEN_READS = 0.1
 
 
 class InstanceAnswer(RunningInstance):
@@ -63,6 +66,8 @@ class RunningAnswer(BaseModel):
     networks: list[HostNetwork]
     web_addresses: list[WebAddressJudged]
     lanes: list[LaneAnswer]
+    requests: list[Kept]
+    record_error: str | None
     cards: list[Card]
 
 
@@ -83,24 +88,22 @@ class NotFinished(BaseModel):
     error: str
 
 
-RUNNING_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": HostUnreadable}}
+class RequestsAnswer(BaseModel):
+    unfinished: list[Kept]
+    ended: list[KeptRequest]
 
 
-def responses_when_not_done(result: type[BaseModel]) -> dict[int | str, dict[str, Any]]:
-    return {
-        HTTPStatus.UNPROCESSABLE_CONTENT.value: {"model": result},
-        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished},
-    }
+def responses(*models: tuple[HTTPStatus, type[BaseModel]]) -> dict[int | str, dict[str, Any]]:
+    return {status.value: {"model": model} for status, model in models}
 
 
-MOVE_ERROR_RESPONSES = responses_when_not_done(MoveResult)
-RETIRE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": NotFinished}}
-MAINTENANCE_ERROR_RESPONSES = responses_when_not_done(MaintenanceResult)
-NOT_A_SUCCESS = {
-    MaintenanceOutcome.DATABASE_KILLED,
-    MaintenanceOutcome.WEB_PART_FAILED,
-    MaintenanceOutcome.BACKGROUND_SERVICE_FAILED,
-}
+RUNNING_ERROR_RESPONSES = responses((HTTPStatus.SERVICE_UNAVAILABLE, HostUnreadable))
+NOT_KEPT = ((HTTPStatus.CONFLICT, NotFinished), (HTTPStatus.SERVICE_UNAVAILABLE, NotFinished))
+NOT_FOUND = (HTTPStatus.NOT_FOUND, NotFinished)
+
+
+def responses_to_a_request(answer: type[BaseModel]) -> dict[int | str, dict[str, Any]]:
+    return responses((HTTPStatus.ACCEPTED, Kept), (HTTPStatus.UNPROCESSABLE_CONTENT, answer), *NOT_KEPT)
 
 
 def lane_answer(judged: Judgement) -> LaneAnswer:
@@ -134,6 +137,8 @@ def running_answer(status: Status) -> RunningAnswer:
         networks=on_host.networks,
         web_addresses=status.web_addresses,
         lanes=[lane_answer(judged) for judged in status.lanes],
+        requests=status.requests,
+        record_error=status.record_error,
         cards=cards(status),
     )
 
@@ -186,41 +191,167 @@ def running_page() -> str:
     return files("launchplane").joinpath("running.html").read_text()
 
 
-def maintenance_answer(
-    request: MaintenanceRequester, attempt: str, product: str, lane: str, response: Response
-) -> MaintenanceResult | NotFinished:
-    try:
-        result = request(product, lane)
-    except UNREADABLE as error:
-        response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
-        return NotFinished(error=f"{attempt} {lane} of {product} stopped, and is safe to ask again: {error}")
-    if result.outcome in NOT_A_SUCCESS:
+def not_finished(response: Response, status: HTTPStatus, error: str) -> NotFinished:
+    response.status_code = status
+    return NotFinished(error=error)
+
+
+# Nobody is known by name yet, so a request says where it was asked from.
+def asker(http: Request) -> str:
+    return "an unknown address" if http.client is None else f"the address {http.client.host}"
+
+
+def read_until_ended(record: Record, request: int, seconds: float) -> Kept | None:
+    deadline = time.monotonic() + seconds
+    while True:
+        kept = record.read(request)
+        if kept is None or kept.stands in ENDED:
+            return kept
+        if time.monotonic() >= deadline:
+            return kept
+        time.sleep(SECONDS_BETWEEN_READS)
+
+
+# The answer a call gave before requests were kept: the final answer, with the status that goes with it.
+def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: Response) -> Answer | NotFinished | Kept:
+    if kept.stands not in ENDED:
+        response.status_code = HTTPStatus.ACCEPTED
+        return kept
+    if kept.answer is None:
+        return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, kept.error or f"Request {kept.id} failed and kept no error.")
+    if kept.stands is Stands.FAILED:
         response.status_code = HTTPStatus.UNPROCESSABLE_CONTENT
-    return result
+    return answer.model_validate(kept.answer)
 
 
-def add_maintenance_calls(app: FastAPI, begin: MaintenanceRequester, end: MaintenanceRequester) -> None:
-    @app.post("/lanes/{product}/{lane}/maintenance/begin", responses=MAINTENANCE_ERROR_RESPONSES)
+class Calls:
+    def __init__(self, record: Record, wake: Callable[[], object]) -> None:
+        self.record = record
+        self.wake = wake
+
+    def keep[Answer: BaseModel](
+        self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
+    ) -> Answer | NotFinished | Kept:
+        try:
+            request = self.record.write(asked, asker(http), http.headers.get("idempotency-key"))
+        except Refused as error:
+            return not_finished(response, HTTPStatus.CONFLICT, str(error))
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed, and asking again is safe.")
+        self.wake()
+        response.headers["Location"] = f"/requests/{request.id}"
+        try:
+            kept = read_until_ended(self.record, request.id, wait)
+        except RecordError as error:
+            why = f"Request {request.id} is kept, and how it stands is not known: {error}"
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
+        return self.none_such(request.id, response) if kept is None else final_answer(kept, answer, response)
+
+    @staticmethod
+    def none_such(request: int, response: Response) -> NotFinished:
+        return not_finished(response, HTTPStatus.NOT_FOUND, f"Launchplane's record holds no request {request}.")
+
+    def read(self, request: int, response: Response) -> Kept | NotFinished:
+        try:
+            kept = self.record.read(request)
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+        return kept or self.none_such(request, response)
+
+    # Only a request that needs a person is asked for again or given up, so any other is refused, saying how it stands.
+    def answered_by_a_person(self, request: int, answered: KeptRequest | None, response: Response) -> KeptRequest | NotFinished:
+        if answered is not None:
+            return answered
+        kept = self.read(request, response)
+        if isinstance(kept, NotFinished):
+            return kept
+        why = f"Request {request} is {kept.stands}. Only a request that needs a person is asked for again or given up."
+        return not_finished(response, HTTPStatus.CONFLICT, f"{why} Nothing was changed.")
+
+
+WAIT = Query(ge=0, le=MOST_SECONDS_WAITED, description="Seconds to wait for the request to end before answering 202.")
+
+
+def add_lane_calls(app: FastAPI, calls: Calls) -> None:
+    @app.post("/lanes/{product}/{lane}/move", responses=responses_to_a_request(MoveResult))
+    def move_lane(
+        product: Annotated[str, SLUG],
+        lane: Annotated[str, SLUG],
+        request: MoveRequest,
+        http: Request,
+        response: Response,
+        wait: Annotated[float, WAIT] = 0,
+    ) -> MoveResult | NotFinished | Kept:
+        asked = Asked(product=product, lane=lane, work=Work.MOVE, build=request.build)
+        return calls.keep(asked, MoveResult, http, response, wait)
+
+    @app.post("/lanes/{product}/{lane}/retire", responses=responses_to_a_request(RetireResult))
+    def retire_lane(
+        product: Annotated[str, SLUG],
+        lane: Annotated[str, SLUG],
+        request: RetireRequest,
+        http: Request,
+        response: Response,
+        wait: Annotated[float, WAIT] = 0,
+    ) -> RetireResult | NotFinished | Kept:
+        asked = Asked(product=product, lane=lane, work=Work.RETIRE, delete_data_set=request.delete_data_set)
+        return calls.keep(asked, RetireResult, http, response, wait)
+
+    @app.post("/lanes/{product}/{lane}/maintenance/begin", responses=responses_to_a_request(MaintenanceResult))
     def begin_lane_maintenance(
-        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], response: Response
-    ) -> MaintenanceResult | NotFinished:
-        return maintenance_answer(begin, "Putting into maintenance", product, lane, response)
+        product: Annotated[str, SLUG],
+        lane: Annotated[str, SLUG],
+        http: Request,
+        response: Response,
+        wait: Annotated[float, WAIT] = 0,
+    ) -> MaintenanceResult | NotFinished | Kept:
+        return calls.keep(Asked(product=product, lane=lane, work=Work.BEGIN_MAINTENANCE), MaintenanceResult, http, response, wait)
 
-    @app.post("/lanes/{product}/{lane}/maintenance/end", responses=MAINTENANCE_ERROR_RESPONSES)
+    @app.post("/lanes/{product}/{lane}/maintenance/end", responses=responses_to_a_request(MaintenanceResult))
     def end_lane_maintenance(
-        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], response: Response
-    ) -> MaintenanceResult | NotFinished:
-        return maintenance_answer(end, "Taking out of maintenance", product, lane, response)
+        product: Annotated[str, SLUG],
+        lane: Annotated[str, SLUG],
+        http: Request,
+        response: Response,
+        wait: Annotated[float, WAIT] = 0,
+    ) -> MaintenanceResult | NotFinished | Kept:
+        return calls.keep(Asked(product=product, lane=lane, work=Work.END_MAINTENANCE), MaintenanceResult, http, response, wait)
 
 
-def create_app(
-    read: StatusReader,
-    move: MoveRequester,
-    retire: RetireRequester,
-    secrets: Secrets,
-    begin_maintenance: MaintenanceRequester,
-    end_maintenance: MaintenanceRequester,
-) -> FastAPI:
+def add_request_calls(app: FastAPI, calls: Calls) -> None:
+    @app.get("/requests", responses=responses(NOT_KEPT[1]))
+    def requests(response: Response) -> RequestsAnswer | NotFinished:
+        try:
+            return RequestsAnswer(unfinished=calls.record.unfinished(), ended=calls.record.recently_ended())
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+
+    @app.get("/requests/{request}", responses=responses(NOT_FOUND, NOT_KEPT[1]))
+    def request_kept(request: int, response: Response) -> Kept | NotFinished:
+        return calls.read(request, response)
+
+    @app.post("/requests/{request}/retry", status_code=HTTPStatus.ACCEPTED, responses=responses(NOT_FOUND, *NOT_KEPT))
+    def retry_request(request: int, http: Request, response: Response) -> KeptRequest | NotFinished:
+        try:
+            again = calls.record.retry(request, asker(http))
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed.")
+        if again is not None:
+            calls.wake()
+            response.headers["Location"] = f"/requests/{again.id}"
+        return calls.answered_by_a_person(request, again, response)
+
+    @app.post("/requests/{request}/give-up", responses=responses(NOT_FOUND, *NOT_KEPT))
+    def give_up_request(request: int, response: Response) -> KeptRequest | NotFinished:
+        try:
+            given_up = calls.record.give_up(request)
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed.")
+        calls.wake()
+        return calls.answered_by_a_person(request, given_up, response)
+
+
+def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 
@@ -238,32 +369,9 @@ def create_app(
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    @app.post("/lanes/{product}/{lane}/move", responses=MOVE_ERROR_RESPONSES)
-    def move_lane(
-        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], request: MoveRequest, response: Response
-    ) -> MoveResult | NotFinished:
-        try:
-            result = move(LaneBuild(product=product, lane=lane, build=request.build))
-        except UNREADABLE as error:
-            response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
-            return NotFinished(
-                error=f"The move of {lane} of {product} to {request.build} stopped, and is safe to ask again: {error}"
-            )
-        if result.outcome in {Outcome.CHECK_FAILED, Outcome.BACKGROUND_SERVICE_FAILED}:
-            response.status_code = HTTPStatus.UNPROCESSABLE_CONTENT
-        return result
-
-    @app.post("/lanes/{product}/{lane}/retire", responses=RETIRE_ERROR_RESPONSES)
-    def retire_lane(
-        product: Annotated[str, SLUG], lane: Annotated[str, SLUG], request: RetireRequest, response: Response
-    ) -> RetireResult | NotFinished:
-        try:
-            return retire(product, lane, request.delete_data_set)
-        except UNREADABLE as error:
-            response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
-            return NotFinished(error=f"Retiring {lane} of {product} stopped, and is safe to ask again: {error}")
-
-    add_maintenance_calls(app, begin_maintenance, end_maintenance)
+    calls = Calls(record, wake)
+    add_lane_calls(app, calls)
+    add_request_calls(app, calls)
     return app
 
 
@@ -273,6 +381,9 @@ def serve() -> None:
     host = ContainerHost.from_environment()
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
-    lanes = Lanes(host, proxy, products.read)
-    app = create_app(lanes.read_status, lanes.move, lanes.retire, host, lanes.begin_maintenance, lanes.end_maintenance)
+    record = PostgresRecord(conninfo())
+    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished)
+    worker = Worker(record, lanes, host)
+    worker.start()
+    app = create_app(lanes.read_status, record, worker.wake, host)
     uvicorn.run(app, host=address, port=port, log_config=cleaned_log_config(host))

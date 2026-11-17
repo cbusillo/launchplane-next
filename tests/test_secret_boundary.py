@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from launchplane.act import Lanes, Status, Stopped
@@ -28,8 +29,11 @@ from launchplane.judge import judge, web_addresses_judged
 from launchplane.product import Product
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
+from launchplane.telling import Tell
+from launchplane.worker import Carries, Worker
 from tests.given_secrets import GivenSecrets
 from tests.pretend_host import SINCE, PretendHost, PretendProxy
+from tests.pretend_record import PretendRecord
 from tests.recording_docker import RecordingDocker
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
@@ -58,8 +62,8 @@ def unreadable_host() -> Status:
     raise ContainerHostError(f"Docker refused: {SECRET}")
 
 
-def move_answering(outcome: Outcome) -> Callable[[LaneBuild], MoveResult]:
-    def move(target: LaneBuild) -> MoveResult:
+def move_answering(outcome: Outcome) -> Callable[[LaneBuild, Tell], MoveResult]:
+    def move(target: LaneBuild, _tell: Tell) -> MoveResult:
         return MoveResult(
             product=target.product,
             lane=target.lane,
@@ -73,11 +77,11 @@ def move_answering(outcome: Outcome) -> Callable[[LaneBuild], MoveResult]:
     return move
 
 
-def move_stopped(_target: LaneBuild) -> MoveResult:
+def move_stopped(_target: LaneBuild, _tell: Tell) -> MoveResult:
     raise Stopped(f"The lane is not as it must be: {SECRET}")
 
 
-def retire_answering(product: str, lane: str, _delete_data_set: str | None) -> RetireResult:
+def retire_answering(product: str, lane: str, _delete_data_set: str | None, _tell: Tell) -> RetireResult:
     return RetireResult(
         product=product,
         lane=lane,
@@ -88,11 +92,11 @@ def retire_answering(product: str, lane: str, _delete_data_set: str | None) -> R
     )
 
 
-def retire_stopped(product: str, lane: str, _delete_data_set: str | None) -> RetireResult:
+def retire_stopped(product: str, lane: str, _delete_data_set: str | None, _tell: Tell) -> RetireResult:
     raise ContainerHostError(f"Stopping {lane} of {product} failed: {SECRET}")
 
 
-def maintenance_answering(product: str, lane: str) -> MaintenanceResult:
+def maintenance_answering(product: str, lane: str, _tell: Tell) -> MaintenanceResult:
     return MaintenanceResult(
         product=product,
         lane=lane,
@@ -103,7 +107,7 @@ def maintenance_answering(product: str, lane: str) -> MaintenanceResult:
     )
 
 
-def maintenance_stopped(product: str, lane: str) -> MaintenanceResult:
+def maintenance_stopped(product: str, lane: str, _tell: Tell) -> MaintenanceResult:
     raise ContainerHostError(f"Stopping a part of {lane} of {product} failed: {SECRET}")
 
 
@@ -114,11 +118,24 @@ class Asked:
     status: int
     body: dict[str, Any] | None = None
     read: Callable[[], Status] = running_with_leaks
-    move: Callable[[LaneBuild], MoveResult] = move_stopped
-    retire: Callable[[str, str, str | None], RetireResult] = retire_stopped
-    maintenance: Callable[[str, str], MaintenanceResult] = maintenance_stopped
+    move: Callable[[LaneBuild, Tell], MoveResult] = move_stopped
+    retire: Callable[[str, str, str | None, Tell], RetireResult] = retire_stopped
+    maintenance: Callable[[str, str, Tell], MaintenanceResult] = maintenance_stopped
+
+    def begin_maintenance(self, product: str, lane: str, tell: Tell, /) -> MaintenanceResult:
+        return self.maintenance(product, lane, tell)
+
+    def end_maintenance(self, product: str, lane: str, tell: Tell, /) -> MaintenanceResult:
+        return self.maintenance(product, lane, tell)
 
 
+# Each request is worked within the call that asked for it, so the call answers with how it ended.
+def app_working_at_once(read: Callable[[], Status], lanes: Carries, secrets: Secrets) -> FastAPI:
+    record = PretendRecord()
+    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets)
+
+
+STOPPED = Asked("POST", "/", 503)
 MOVE = "/lanes/site/testing/move"
 RETIRE = "/lanes/site/testing/retire"
 MAINTENANCE_BEGIN = "/lanes/site/testing/maintenance/begin"
@@ -143,14 +160,7 @@ ANSWERS = {
 
 
 def answer_to(asked: Asked, secrets: Secrets) -> tuple[int, str]:
-    app = create_app(
-        asked.read,
-        asked.move,
-        asked.retire,
-        secrets,
-        asked.maintenance,
-        asked.maintenance,
-    )
+    app = app_working_at_once(asked.read, asked, secrets)
     response = TestClient(app, follow_redirects=False).request(asked.method, asked.path, json=asked.body)
     headers = "".join(f"{name}: {value}\n" for name, value in response.headers.items())
     return response.status_code, headers + response.text
@@ -174,7 +184,7 @@ def test_no_answer_is_made_when_the_secrets_to_clean_it_of_cannot_be_read(asked:
 
 
 def test_nothing_is_moved_when_the_secrets_cannot_be_read() -> None:
-    def move(target: LaneBuild) -> MoveResult:
+    def move(target: LaneBuild, _tell: Tell) -> MoveResult:
         raise AssertionError(f"Moved to {target.build} with no way to clean the answer")
 
     asked = Asked("POST", MOVE, 503, {"build": "site:b"}, move=move)
@@ -226,14 +236,7 @@ def test_the_secrets_are_read_before_the_answer_is_made() -> None:
         seen_when_the_host_was_read.append(secrets.secrets_seen())
         raise RuntimeError(f"not an error Launchplane expects: {SECRET}")
 
-    app = create_app(
-        read,
-        move_stopped,
-        retire_stopped,
-        secrets,
-        maintenance_stopped,
-        maintenance_stopped,
-    )
+    app = app_working_at_once(read, STOPPED, secrets)
     assert TestClient(app, raise_server_exceptions=False).get("/running").status_code == 500
     assert seen_when_the_host_was_read == [{SECRET}]
 
@@ -305,7 +308,7 @@ def holding_the_secret(docker: RecordingDocker, **labels: str) -> None:
 def just_restarted(docker: RecordingDocker) -> TestClient:
     host = ContainerHost(docker.as_client(), "test")
     lanes = Lanes(host, PretendProxy(PretendHost()))
-    return TestClient(create_app(lanes.read_status, move_stopped, retire_stopped, host, maintenance_stopped, maintenance_stopped))
+    return TestClient(app_working_at_once(lanes.read_status, STOPPED, host))
 
 
 def test_an_error_about_the_read_itself_is_cleaned_of_a_secret_that_same_read_found() -> None:
