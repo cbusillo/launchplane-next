@@ -183,11 +183,18 @@ def test_a_secret_sent_as_the_key_is_not_shown_once_its_container_is_gone_and_la
     assert (first.status_code, SECRET in shown, again.headers["location"]) == (202, False, first.headers["location"])
 
 
-def test_a_call_that_carries_a_secret_a_container_holds_is_refused_and_nothing_of_it_is_written(record: Record) -> None:
-    client = app_on(record, GivenSecrets(on_host=frozenset({SECRET})))
+SECRETS = {
+    "of letters, digits and marks": SECRET,
+    "with a quote, a backslash and a newline": 'Zx3"quoted\\slashed\nand-on-two-lines',
+}
+
+
+@pytest.mark.parametrize("secret", SECRETS.values(), ids=SECRETS.keys())
+def test_a_call_that_carries_a_secret_a_container_holds_is_refused_and_nothing_of_it_is_written(record: Record, secret: str) -> None:
+    client = app_on(record, GivenSecrets(on_host=frozenset({secret})))
     refused = [
-        client.post(MOVE, json={"build": f"registry.test/site:{SECRET}"}),
-        client.post("/lanes/site/testing/retire", json={"delete_data_set": SECRET}),
+        client.post(MOVE, json={"build": f"registry.test/site:{secret}"}),
+        client.post("/lanes/site/testing/retire", json={"delete_data_set": secret}),
     ]
     assert [each.status_code for each in refused] == [422, 422]
     assert all("was not written" in each.json()["error"] for each in refused)

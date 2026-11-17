@@ -32,6 +32,11 @@ def cleaned_value(value: JsonValue, secrets: Collection[str]) -> JsonValue:
     return value
 
 
+# One rule for what is answered and for what is stored: a value carries a secret when cleaning would change it.
+def carries_a_secret(value: JsonValue, secrets: Collection[str]) -> bool:
+    return cleaned_value(value, secrets) != value
+
+
 def cleaned_body(body: bytes, media_type: str, secrets: Collection[str]) -> bytes:
     text = body.decode(errors="replace")
     if media_type.startswith(JSON):

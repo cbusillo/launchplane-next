@@ -26,7 +26,7 @@ from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, Unconfirmed, database
 from launchplane.record import Request as KeptRequest
-from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
+from launchplane.secret_boundary import CleanedStream, Secrets, carries_a_secret, cleaned, cleaned_body
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from launchplane.worker import Worker
 
@@ -241,15 +241,11 @@ class Calls:
         self.wake = wake
         self.secrets = secrets
 
-    # The record outlives the container that holds a secret, so a secret is kept out of it and not cleaned on the way out.
-    def carries_a_secret(self, asked: Asked) -> bool:
-        said = asked.model_dump_json()
-        return cleaned(said, self.secrets.secrets_seen()) != said
-
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
     ) -> Answer | NotFinished | Kept:
-        if self.carries_a_secret(asked):
+        # The record outlives the container that holds a secret, so a secret is kept out of it, not cleaned on the way out.
+        if carries_a_secret(asked.model_dump(mode="json"), self.secrets.secrets_seen()):
             return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, REFUSED_AS_ASKED)
         try:
             request = self.record.write(asked, asker(http), http.headers.get("idempotency-key"))

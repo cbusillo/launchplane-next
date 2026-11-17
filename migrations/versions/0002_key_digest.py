@@ -14,4 +14,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("alter table request rename column key_digest to idempotency_key")
+    raise NotImplementedError(
+        "The keys cannot be given back: only their digests are kept. Going down and up again would digest them twice, and "
+        "a caller repeating a key would then be written a second request. Nothing was changed."
+    )

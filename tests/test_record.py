@@ -5,6 +5,8 @@ from typing import Any, LiteralString
 
 import psycopg
 import pytest
+from alembic import command
+from alembic.config import Config
 
 from launchplane import record as record_module
 from launchplane.judge import Work
@@ -19,6 +21,7 @@ from launchplane.record import (
     Stands,
     Unconfirmed,
 )
+from tests.conftest import ALEMBIC
 from tests.pretend_record import lose_every_turn
 
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
@@ -263,3 +266,12 @@ def test_an_attempt_and_its_event_written_while_a_request_is_being_read_do_not_b
         worker.close()
     assert kept is not None
     assert (written_meanwhile, len(kept.attempts), kept.events) == ([request.id], 1, [])
+
+
+def test_the_migration_to_key_digests_refuses_to_be_undone_and_leaves_a_repeated_key_answering_with_its_request(
+    postgres_record: PostgresRecord,
+) -> None:
+    first = postgres_record.write(MOVE_B, CALLER, "one-release")
+    with pytest.raises(NotImplementedError, match="cannot be given back"):
+        command.downgrade(Config(ALEMBIC), "0001")
+    assert postgres_record.write(MOVE_B, CALLER, "one-release").id == first.id

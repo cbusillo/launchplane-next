@@ -59,7 +59,7 @@ Three tables in a PostgreSQL database of Launchplane's own: a request, an attemp
 No secret is written to the record, because the record outlives the container that holds a secret and nothing could then know to remove it on the way out.
 
 - The caller's key is kept as a digest only.
-- A call whose build or data set name carries a secret a container holds is refused. Every secret on the host is read just before, as for every answer.
+- A call whose build or data set name carries a secret a container holds is refused. Every secret on the host is read just before, as for every answer. Whether a value carries a secret is judged as it is for an answer: on the value itself, whatever characters the secret has.
 - A product or lane name is at most 31 lowercase letters, digits and hyphens. A password Launchplane makes is 43 characters, so a name cannot be one.
 - `asked_by` is the address the connection came from, not text the caller chose.
 - Every event, error and answer is cleaned of every secret a container holds before it is written. The worker reads every container's secrets when it takes a request up, and a secret it makes while working is known from the moment it is made.
@@ -79,7 +79,7 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - The login has no password and is not a superuser. It is used through the local socket by the system user `launchplane` only. It owns the database, and no other login but the superuser `postgres` may connect to it.
 - PostgreSQL listens on `127.0.0.1` and `::1` only.
 - `LAUNCHPLANE_DATABASE` names the database, by default `postgresql:///launchplane?host=/var/run/postgresql`.
-- A migration is a file in `migrations/versions`, written as SQL.
+- A migration is a file in `migrations/versions`, written as SQL. The one that turned keys into digests cannot be undone, and going down past it refuses and says why.
 
 ## Known and not fixed
 
