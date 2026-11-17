@@ -3,7 +3,7 @@ from collections.abc import Generator, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, LiteralString, Protocol
+from typing import Any, Final, LiteralString, Protocol
 
 import psycopg
 from psycopg.rows import DictRow, dict_row
@@ -17,7 +17,7 @@ MOST_ATTEMPTS = 3
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
 
-type Session = psycopg.Connection[DictRow]
+type Session = psycopg.Cursor[DictRow]
 
 
 class RecordError(Exception):
@@ -111,7 +111,7 @@ class Record(Protocol):
     def retry(self, request: int, asked_by: str) -> Request | None: ...
 
 
-def conninfo() -> str:
+def database() -> str:
     return os.environ.get("LAUNCHPLANE_DATABASE", DATABASE)
 
 
@@ -124,53 +124,63 @@ def needs_a_person(request: Request) -> str:
     )
 
 
-SAME_KEY = "select * from request where idempotency_key = %s"
-WAITS_ON_A_PERSON = "select id from request where (product, lane) = (%s, %s) and stands = 'needs a person' order by id limit 1"
-SAME_UNFINISHED = """
-select * from request
-where (product, lane, work) = (%s, %s, %s) and build is not distinct from %s and delete_data_set is not distinct from %s
-    and stands in ('waiting', 'working')
-order by id limit 1
-"""
-WRITE = """
-insert into request (product, lane, work, build, delete_data_set, asked_by, idempotency_key)
-values (%s, %s, %s, %s, %s, %s, %s) returning *
-"""
-UNFINISHED = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
-RECENTLY_ENDED = "select * from request where stands in ('done', 'failed') order by ended_at desc, id desc limit 20"
-ATTEMPTS = "select id, request, began_at, ended_at, ended from attempt where request = any(%s) order by id"
-EVENTS = "select request, attempt, at, did, error from event where request = any(%s) order by id"
-NEXT_UP = """
-select * from request asked
-where stands in ('waiting', 'working') and not exists (
-    select from request stuck where (stuck.product, stuck.lane) = (asked.product, asked.lane) and stuck.stands = 'needs a person'
-)
-order by id limit 1
-"""
-TAKE_TURN = "select pg_try_advisory_lock(hashtextextended(%s, 0)) as ours"
-INTERRUPT = "update attempt set ended_at = now(), ended = 'interrupted' where request = %s and ended is null"
-COUNT_ATTEMPTS = "select count(*) from attempt where request = %s"
-STOP_FOR_A_PERSON = "update request set stands = 'needs a person', error = %s where id = %s"
-BEGIN_ATTEMPT = """
-with taken as (update request set stands = 'working' where id = %s)
-insert into attempt (request) values (%s) returning id
-"""
-NOTE = """
-insert into event (request, attempt, did, error)
-select request, id, %s, %s from attempt where id = %s and ended is null returning id
-"""
-END = """
-with ended as (update attempt set ended_at = now(), ended = %s where id = %s and ended is null returning request)
-update request set stands = %s, ended_at = now(), answer = %s, error = %s from ended where request.id = ended.request
-returning request.id
-"""
-GIVE_UP = """
-update request set stands = 'failed', ended_at = now(), error = error || %s
-where id = %s and stands = 'needs a person' returning *
-"""
-STUCK = "select * from request where id = %s and stands = 'needs a person' for update"
 GIVEN_UP = " A person gave it up."
 ASKED_AGAIN = " A person asked for it again, as request {again}."
+
+
+# PyCharm has no schema to resolve these against. The tests run every statement against PostgreSQL.
+# noinspection SqlResolve
+class Sql:
+    SAME_KEY: Final = "select * from request where idempotency_key = %s"
+    WAITS_ON_A_PERSON: Final = """
+    select id from request where (product, lane) = (%s, %s) and stands = 'needs a person' order by id limit 1
+    """
+    SAME_UNFINISHED: Final = """
+    select * from request
+    where (product, lane, work) = (%s, %s, %s) and build is not distinct from %s and delete_data_set is not distinct from %s
+        and stands in ('waiting', 'working')
+    order by id limit 1
+    """
+    WRITE: Final = """
+    insert into request (product, lane, work, build, delete_data_set, asked_by, idempotency_key)
+    values (%s, %s, %s, %s, %s, %s, %s) returning *
+    """
+    UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
+    RECENTLY_ENDED: Final = "select * from request where stands in ('done', 'failed') order by ended_at desc, id desc limit 20"
+    ATTEMPTS: Final = "select id, request, began_at, ended_at, ended from attempt where request = any(%s) order by id"
+    EVENTS: Final = "select request, attempt, at, did, error from event where request = any(%s) order by id"
+    NEXT_UP: Final = """
+    select * from request asked
+    where stands in ('waiting', 'working') and not exists (
+        select from request stuck where (stuck.product, stuck.lane) = (asked.product, asked.lane) and stuck.stands = 'needs a person'
+    )
+    order by id limit 1
+    """
+    TAKE_TURN: Final = "select pg_try_advisory_lock(hashtextextended(%s, 0)) as ours"
+    INTERRUPT: Final = "update attempt set ended_at = now(), ended = 'interrupted' where request = %s and ended is null"
+    COUNT_ATTEMPTS: Final = "select count(*) from attempt where request = %s"
+    STOP_FOR_A_PERSON: Final = "update request set stands = 'needs a person', error = %s where id = %s"
+    BEGIN_ATTEMPT: Final = """
+    with taken as (update request set stands = 'working' where id = %s)
+    insert into attempt (request) values (%s) returning id
+    """
+    NOTE: Final = """
+    insert into event (request, attempt, did, error)
+    select request, id, %s, %s from attempt where id = %s and ended is null returning id
+    """
+    END: Final = """
+    with ended as (update attempt set ended_at = now(), ended = %s where id = %s and ended is null returning request)
+    update request set stands = %s, ended_at = now(), answer = %s, error = %s from ended where request.id = ended.request
+    returning request.id
+    """
+    GIVE_UP: Final = """
+    update request set stands = 'failed', ended_at = now(), error = error || %s
+    where id = %s and stands = 'needs a person' returning *
+    """
+    STUCK: Final = "select * from request where id = %s and stands = 'needs a person' for update"
+    LOCK_WRITERS: Final = "lock table request in share row exclusive mode"
+    READ: Final = "select * from request where id = %s"
+    READ_TO_TAKE_UP: Final = "select * from request where id = %s for update"
 
 
 def key_reused(idempotency_key: str, written: Request) -> Refused:
@@ -191,32 +201,42 @@ def lane_waits_on_a_person(asked: Asked, stuck: int) -> Refused:
 def same_as_written(session: Session, asked: Asked, idempotency_key: str | None) -> Request | None:
     if idempotency_key is None:
         values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set]
-        row = session.execute(SAME_UNFINISHED, values).fetchone()
+        row = session.execute(Sql.SAME_UNFINISHED, values).fetchone()
         return None if row is None else Request.model_validate(row)
-    row = session.execute(SAME_KEY, [idempotency_key]).fetchone()
+    row = session.execute(Sql.SAME_KEY, [idempotency_key]).fetchone()
     if row is None:
         return None
-    written = Request.model_validate(row)
-    if written.asked() != asked:
-        raise key_reused(idempotency_key, written)
-    return written
+    same_key = Request.model_validate(row)
+    if same_key.asked() != asked:
+        raise key_reused(idempotency_key, same_key)
+    return same_key
 
 
 def refuse_while_a_person_is_awaited(session: Session, asked: Asked) -> None:
-    stuck = session.execute(WAITS_ON_A_PERSON, [asked.product, asked.lane]).fetchone()
+    stuck = session.execute(Sql.WAITS_ON_A_PERSON, [asked.product, asked.lane]).fetchone()
     if stuck is not None:
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
-def written(session: Session, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
+def write_new(session: Session, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
     values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set, asked_by, idempotency_key]
-    return Request.model_validate(session.execute(WRITE, values).fetchone())
+    return Request.model_validate(session.execute(Sql.WRITE, values).fetchone())
+
+
+def asked_once(session: Session, doing: str, query: LiteralString, values: list[Any]) -> DictRow:
+    try:
+        row = session.execute(query, values).fetchone()
+    except psycopg.Error as error:
+        raise RecordError(f"Launchplane's record could not be reached while {doing}: {error}") from error
+    if row is None:
+        raise RecordError(f"Launchplane's record gave no answer while {doing}.")
+    return row
 
 
 def with_history(session: Session, rows: Sequence[DictRow]) -> list[Kept]:
     ids = [row["id"] for row in rows]
-    attempts = session.execute(ATTEMPTS, [ids]).fetchall()
-    events = session.execute(EVENTS, [ids]).fetchall()
+    attempts = session.execute(Sql.ATTEMPTS, [ids]).fetchall()
+    events = session.execute(Sql.EVENTS, [ids]).fetchall()
     numbers: dict[int, int] = {}
     of: dict[int, list[Attempt]] = {each: [] for each in ids}
     for attempt in attempts:
@@ -234,18 +254,10 @@ def with_history(session: Session, rows: Sequence[DictRow]) -> list[Kept]:
     ]
 
 
-class PostgresRecord:
-    def __init__(self, conninfo: str, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
-        self.conninfo = conninfo
-        self.pool = ConnectionPool(
-            conninfo,
-            connection_class=psycopg.Connection[DictRow],
-            kwargs={"row_factory": dict_row},
-            min_size=1,
-            max_size=4,
-            timeout=seconds_to_reach,
-            open=False,
-        )
+class PostgresRecord(Record):
+    def __init__(self, database_named: str, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
+        self.database = database_named
+        self.pool = ConnectionPool(database_named, min_size=1, max_size=4, timeout=seconds_to_reach, open=False)
         self.pool.open()
 
     def close(self) -> None:
@@ -255,7 +267,7 @@ class PostgresRecord:
     @contextmanager
     def session(self, doing: str) -> Generator[Session]:
         try:
-            with self.pool.connection() as session:
+            with self.pool.connection() as connection, connection.cursor(row_factory=dict_row) as session:
                 yield session
         except psycopg.Error as error:
             raise RecordError(f"Launchplane's record could not be reached while {doing}: {error}") from error
@@ -263,86 +275,79 @@ class PostgresRecord:
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         with self.session("writing a request") as session:
             # Two calls asking the same thing at once write one request: the second waits here and finds the first.
-            session.execute("lock table request in share row exclusive mode")
+            session.execute(Sql.LOCK_WRITERS)
             same = same_as_written(session, asked, idempotency_key)
             if same is not None:
                 return same
             refuse_while_a_person_is_awaited(session, asked)
-            return written(session, asked, asked_by, idempotency_key)
+            return write_new(session, asked, asked_by, idempotency_key)
 
     def read(self, request: int) -> Kept | None:
         with self.session("reading a request") as session:
-            rows = session.execute("select * from request where id = %s", [request]).fetchall()
+            rows = session.execute(Sql.READ, [request]).fetchall()
             return with_history(session, rows)[0] if rows else None
 
     def unfinished(self) -> list[Kept]:
         with self.session("reading the requests not finished") as session:
-            return with_history(session, session.execute(UNFINISHED).fetchall())
+            return with_history(session, session.execute(Sql.UNFINISHED).fetchall())
 
     def recently_ended(self) -> list[Request]:
         with self.session("reading the requests that ended") as session:
-            return [Request.model_validate(row) for row in session.execute(RECENTLY_ENDED).fetchall()]
+            return [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()]
 
     def next_up(self) -> Request | None:
         with self.session("looking for the next request") as session:
-            row = session.execute(NEXT_UP).fetchone()
+            row = session.execute(Sql.NEXT_UP).fetchone()
             return None if row is None else Request.model_validate(row)
+
+    def turn(self, product: str, lane: str) -> AbstractContextManager[bool]:
+        return self.turn_held(product, lane)
 
     # A lane's turn is a lock held by a connection of its own, so it is let go when the work ends or this Launchplane dies,
     # and never apart from the work.
     @contextmanager
-    def turn(self, product: str, lane: str) -> Generator[bool]:
+    def turn_held(self, product: str, lane: str) -> Generator[bool]:
         try:
-            connection = psycopg.Connection[DictRow].connect(self.conninfo, autocommit=True, row_factory=dict_row)
+            connection = psycopg.connect(self.database, autocommit=True)
         except psycopg.Error as error:
             raise RecordError(f"Launchplane's record could not be reached while taking a lane's turn: {error}") from error
-        with closing(connection):
-            yield bool(self.asked_once(connection, "taking a lane's turn", TAKE_TURN, [f"{product}/{lane}"])["ours"])
-
-    @staticmethod
-    def asked_once(connection: Session, doing: str, query: LiteralString, values: list[Any]) -> DictRow:
-        try:
-            row = connection.execute(query, values).fetchone()
-        except psycopg.Error as error:
-            raise RecordError(f"Launchplane's record could not be reached while {doing}: {error}") from error
-        if row is None:
-            raise RecordError(f"Launchplane's record gave no answer while {doing}.")
-        return row
+        with closing(connection), connection.cursor(row_factory=dict_row) as session:
+            yield bool(asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, [f"{product}/{lane}"])["ours"])
 
     # A request found working with nobody holding its lane was interrupted. That is counted, never taken for waiting.
     def take_up(self, request: int) -> int | None:
         with self.session("taking up a request") as session:
-            row = session.execute("select * from request where id = %s for update", [request]).fetchone()
+            row = session.execute(Sql.READ_TO_TAKE_UP, [request]).fetchone()
             found = None if row is None else Request.model_validate(row)
             if found is None or found.stands not in (Stands.WAITING, Stands.WORKING):
                 return None
-            session.execute(INTERRUPT, [request])
-            if self.asked_once(session, "counting attempts", COUNT_ATTEMPTS, [request])["count"] >= MOST_ATTEMPTS:
-                session.execute(STOP_FOR_A_PERSON, [needs_a_person(found), request])
+            session.execute(Sql.INTERRUPT, [request])
+            if asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, [request])["count"] >= MOST_ATTEMPTS:
+                session.execute(Sql.STOP_FOR_A_PERSON, [needs_a_person(found), request])
                 return None
-            return self.asked_once(session, "beginning an attempt", BEGIN_ATTEMPT, [request, request])["id"]
+            return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, [request, request])["id"]
 
     def note(self, attempt: int, did: str, error: str | None) -> None:
         with self.session("writing what was done") as session:
-            if session.execute(NOTE, [did, error, attempt]).fetchone() is None:
+            if session.execute(Sql.NOTE, [did, error, attempt]).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
     def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
         with self.session("writing how a request ended") as session:
             values = [stands, attempt, stands, None if answer is None else Jsonb(answer), error]
-            if session.execute(END, values).fetchone() is None:
+            if session.execute(Sql.END, values).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
 
     def give_up(self, request: int) -> Request | None:
         with self.session("giving a request up") as session:
-            row = session.execute(GIVE_UP, [GIVEN_UP, request]).fetchone()
+            row = session.execute(Sql.GIVE_UP, [GIVEN_UP, request]).fetchone()
             return None if row is None else Request.model_validate(row)
 
     def retry(self, request: int, asked_by: str) -> Request | None:
         with self.session("asking for a request again") as session:
-            row = session.execute(STUCK, [request]).fetchone()
+            row = session.execute(Sql.STUCK, [request]).fetchone()
             if row is None:
                 return None
-            again = written(session, Request.model_validate(row).asked(), asked_by, None)
-            session.execute(GIVE_UP, [ASKED_AGAIN.format(again=again.id), request])
+            again = write_new(session, Request.model_validate(row).asked(), asked_by, None)
+            session.execute(Sql.GIVE_UP, [ASKED_AGAIN.format(again=again.id), request])
             return again

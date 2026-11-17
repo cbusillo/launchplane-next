@@ -24,7 +24,7 @@ from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, We
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
-from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, conninfo
+from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, database
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
@@ -94,7 +94,10 @@ class RequestsAnswer(BaseModel):
 
 
 def responses(*models: tuple[HTTPStatus, type[BaseModel]]) -> dict[int | str, dict[str, Any]]:
-    return {status.value: {"model": model} for status, model in models}
+    answers: dict[int | str, dict[str, Any]] = {}
+    for status, model in models:
+        answers[status.value] = {"model": model}
+    return answers
 
 
 RUNNING_ERROR_RESPONSES = responses((HTTPStatus.SERVICE_UNAVAILABLE, HostUnreadable))
@@ -198,7 +201,8 @@ def not_finished(response: Response, status: HTTPStatus, error: str) -> NotFinis
 
 # Nobody is known by name yet, so a request says where it was asked from.
 def asker(http: Request) -> str:
-    return "an unknown address" if http.client is None else f"the address {http.client.host}"
+    caller = http.client
+    return "an unknown address" if caller is None else f"the address {caller.host}"
 
 
 def read_until_ended(record: Record, request: int, seconds: float) -> Kept | None:
@@ -381,7 +385,7 @@ def serve() -> None:
     host = ContainerHost.from_environment()
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
-    record = PostgresRecord(conninfo())
+    record = PostgresRecord(database())
     lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished)
     worker = Worker(record, lanes, host)
     worker.start()

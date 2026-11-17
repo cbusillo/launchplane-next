@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from tests.bed import SCRATCH_ADDRESS, ask, kill_once, move_lane, needs_test_bed, on_scratch, retire, wait_for
+from tests.bed import SCRATCH_ADDRESS, ask, ask_and_wait, kill_once, move_lane, needs_test_bed, on_scratch, retire, wait_for
 from tests.test_bed_data_set import (
     BUILD_A,
     BUILD_B,
@@ -38,11 +38,11 @@ BEAT_SECONDS = 0.2
 
 
 def begin(product: str = PRODUCT, lane: str = LANE) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{product}/{lane}/maintenance/begin", {})
+    return ask_and_wait(f"/lanes/{product}/{lane}/maintenance/begin", {})
 
 
 def end(product: str = PRODUCT, lane: str = LANE) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{product}/{lane}/maintenance/end", {})
+    return ask_and_wait(f"/lanes/{product}/{lane}/maintenance/end", {})
 
 
 def visit(web_address: str, method: str, path: str, body: str | None = None) -> tuple[int, str | None, str | None]:

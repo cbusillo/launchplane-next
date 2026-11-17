@@ -141,6 +141,28 @@ def taken_and_told(action: Action, take: Callable[[Action], Event], tell: Tell) 
     return event
 
 
+def settle[Answer](
+    read_judged: Callable[[], Judgement],
+    next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
+    take: Callable[[Action], Event],
+    tell: Tell,
+) -> Answer:
+    done: list[Event] = []
+    while True:
+        judged = read_judged()
+        step = next_step(judged, tuple(done))
+        if isinstance(step, Done):
+            return step.answer
+        if isinstance(step, Stop):
+            raise Stopped(step.reason)
+        if len(done) == MOST_STEPS:
+            raise Stopped(
+                f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
+                f"stopped before {step}. What was done stays done, and asking again goes on from there."
+            )
+        done.append(taken_and_told(step, take, tell))
+
+
 class Lanes:
     def __init__(
         self,
@@ -203,7 +225,7 @@ class Lanes:
 
     def move(self, target: LaneBuild, tell: Tell = tell_nobody) -> MoveResult:
         product = self.read_product(target.product)
-        return self.settle(
+        return settle(
             self.judging(target.product, target.lane, product, Work.MOVE),
             lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
             self.take,
@@ -211,7 +233,7 @@ class Lanes:
         )
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, tell: Tell = tell_nobody) -> RetireResult:
-        return self.settle(
+        return settle(
             self.judging(product, lane, self.description_of(product), Work.RETIRE),
             lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
             self.take,
@@ -220,7 +242,7 @@ class Lanes:
 
     def begin_maintenance(self, product: str, lane: str, tell: Tell = tell_nobody) -> MaintenanceResult:
         judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)
-        return self.settle(judging, maintenance.decide_begin, self.take, tell)
+        return settle(judging, maintenance.decide_begin, self.take, tell)
 
     def end_maintenance(self, product: str, lane: str, tell: Tell = tell_nobody) -> MaintenanceResult:
         # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
@@ -231,7 +253,7 @@ class Lanes:
                 self.proxy.await_route(web_address, route.written)
             return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
         description = self.read_product(product)
-        return self.settle(
+        return settle(
             self.judging(product, lane, description, Work.END_MAINTENANCE),
             lambda judged, done: maintenance.decide_end(judged, description, done),
             self.take_behind_back_soon,
@@ -242,28 +264,6 @@ class Lanes:
     def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
         return lambda: judge(self.read(scope).lane(product, lane), description, work)
-
-    def settle[Answer](
-        self,
-        read_judged: Callable[[], Judgement],
-        next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
-        take: Callable[[Action], Event],
-        tell: Tell,
-    ) -> Answer:
-        done: list[Event] = []
-        while True:
-            judged = read_judged()
-            step = next_step(judged, tuple(done))
-            if isinstance(step, Done):
-                return step.answer
-            if isinstance(step, Stop):
-                raise Stopped(step.reason)
-            if len(done) == MOST_STEPS:
-                raise Stopped(
-                    f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
-                    f"stopped before {step}. What was done stays done, and asking again goes on from there."
-                )
-            done.append(taken_and_told(step, take, tell))
 
     def take(self, action: Action) -> Event:
         if isinstance(action, steps.Check):

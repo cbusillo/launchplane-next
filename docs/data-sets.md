@@ -111,7 +111,7 @@ A web part or a background service with anything mounted is replaced. That rule 
 | --- | --- | --- |
 | `background service failed` | 422 | The web address points at the new instance, and its background service did not stay up 3 s. `error` has why and its last log lines. Asking again retires it and starts it again. |
 
-The other outcomes are those of [the move](the-move.md). `data_set` in the answer is the data set of the instance receiving visitors. After a crash nothing is resumed: asking again reads the host and goes on from there.
+The other outcomes are those of [the move](the-move.md). `data_set` in the answer is the data set of the instance receiving visitors. After an interruption the request is taken up again, reads the host and goes on from what is there.
 
 ## Retiring a lane with data
 
@@ -131,7 +131,7 @@ One judgement is made of a lane from one reading of it, what the product's descr
 | Field | Meaning |
 | --- | --- |
 | `condition` | `good`, `in maintenance`, `work under way`, `unfinished`, `wrong` or `could not be read`. The worst that applies: wrong, then could not be read, then work under way, then unfinished. |
-| `work` | What this Launchplane is doing to the lane right now: `moving`, `retiring`, `beginning maintenance`, `ending maintenance`, or `null`. Nothing is stored for it; it is gone when the process is. `a_move_is_at_work` is whether it is not `null`. |
+| `work` | What the [request](requests.md) being worked on the lane is doing: `moving`, `retiring`, `beginning maintenance`, `ending maintenance`, or `null`. It is read from the record with the host, and is `null` when the record cannot be read. `a_move_is_at_work` is whether it is not `null`. |
 | `findings` | Everything found, each with `subject` (a container, a data set or the web address), `kind`, `sentence` and `shown`. |
 | `parts` | For each container of the lane, its standing: `good`, `wrong`, `on purpose` or `could not be read`. It is the worst of what was found about that container. With nothing found it is good, or on purpose when it is stopped in a lane in maintenance. |
 | `in_maintenance` | The lane's route points at the back soon page: see [a lane in maintenance](maintenance.md). |

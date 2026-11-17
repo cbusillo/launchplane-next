@@ -1,7 +1,6 @@
 import http.client
-import threading
-from collections.abc import Generator, Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -13,9 +12,11 @@ from tests.bed import (
     UnexpectedAnswer,
     ask,
     kill_launchplane,
+    kill_launchplane_and_end_what_was_asked,
     move_lane,
     needs_test_bed,
     on_scratch,
+    request_ended,
     retire,
     wait_for,
 )
@@ -78,17 +79,12 @@ def copy_of_build_b_is_on_scratch() -> bool:
     return bool(on_scratch(f"docker ps --quiet {filters}"))
 
 
-def kill_launchplane_once_build_b_has_started() -> None:
-    mover = threading.Thread(target=move_to_b_cut_short_by_the_kill)
-    mover.start()
+def kill_launchplane_once_build_b_has_started(kill: Callable[[], None] = kill_launchplane_and_end_what_was_asked) -> int:
+    status, request = ask(f"/lanes/{PRODUCT}/{LANE}/move", {"build": BUILD_B})
+    assert status == 202, request
     wait_for(copy_of_build_b_is_on_scratch, seconds=30)
-    kill_launchplane()
-    mover.join()
-
-
-def move_to_b_cut_short_by_the_kill() -> None:
-    with suppress(OSError):
-        move(BUILD_B)
+    kill()
+    return request["id"]
 
 
 def move(build: str, product: str = PRODUCT, lane: str = LANE) -> tuple[int, dict[str, Any]]:
@@ -150,7 +146,18 @@ def test_a_build_that_fails_its_check_switches_nothing_and_leaves_no_copy() -> N
 
 
 @pytest.mark.usefixtures("lane_serving_a")
-def test_a_move_killed_before_the_switch_is_finished_by_asking_again() -> None:
+def test_a_move_killed_before_the_switch_is_taken_up_again_and_finished_with_nobody_asking() -> None:
+    with request_loop() as loop:
+        request = request_ended(kill_launchplane_once_build_b_has_started(kill_launchplane))
+    assert (request["stands"], request["answer"]["outcome"]) == ("done", "switched"), request
+    assert [attempt["ended"] for attempt in request["attempts"]] == ["interrupted", "done"]
+    assert loop.failures == []
+    assert loop.answers_in_order() == [ANSWER_A, ANSWER_B]
+    assert list(lane_copies()) == [BUILD_B]
+
+
+@pytest.mark.usefixtures("lane_serving_a")
+def test_a_move_that_failed_before_the_switch_is_finished_by_asking_again() -> None:
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
         assert sorted(lane_copies()) == [BUILD_A, BUILD_B]
@@ -163,11 +170,11 @@ def test_a_move_killed_before_the_switch_is_finished_by_asking_again() -> None:
 
 
 @pytest.mark.usefixtures("lane_serving_a")
-def test_a_move_killed_before_the_switch_is_cleaned_up_by_asking_for_the_serving_build() -> None:
+def test_a_move_that_failed_before_the_switch_is_repaired_by_asking_for_the_serving_build() -> None:
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
         status, body = move(BUILD_A)
-    assert (status, body["outcome"]) == (200, "cleaned up"), body
+    assert (status, body["outcome"], len(body["did"])) == (200, "repaired", 1), body
     assert loop.failures == []
     assert loop.answers_in_order() == [ANSWER_A]
     assert list(lane_copies()) == [BUILD_A]

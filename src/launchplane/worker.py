@@ -100,8 +100,8 @@ class Worker:
         return True
 
     def carry_through(self, request: Request, attempt: int) -> None:
-        def tell(did: str, error: str | None) -> None:
-            self.record.note(attempt, self.cleaned(did), None if error is None else self.cleaned(error))
+        def tell(did: str, refusal: str | None) -> None:
+            self.record.note(attempt, self.cleaned(did), None if refusal is None else self.cleaned(refusal))
 
         try:
             answer = carried_out(self.lanes, request, tell)

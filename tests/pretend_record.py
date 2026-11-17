@@ -1,6 +1,6 @@
 import threading
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +15,7 @@ from launchplane.record import (
     Event,
     Interrupted,
     Kept,
+    Record,
     RecordError,
     Request,
     Stands,
@@ -31,7 +32,7 @@ def now() -> datetime:
 
 
 @dataclass
-class PretendRecord:
+class PretendRecord(Record):
     kept: dict[int, Kept] = field(default_factory=dict[int, Kept])
     open_attempts: dict[int, int] = field(default_factory=dict[int, int])
     turns: set[tuple[str, str]] = field(default_factory=set[tuple[str, str]])
@@ -53,12 +54,12 @@ class PretendRecord:
     def same_as_written(self, asked: Asked, idempotency_key: str | None) -> Request | None:
         if idempotency_key is None:
             return next((each for each in self.kept.values() if each.asked() == asked and each.stands in UNFINISHED[:2]), None)
-        written = next((each for each in self.kept.values() if each.idempotency_key == idempotency_key), None)
-        if written is not None and written.asked() != asked:
-            raise key_reused(idempotency_key, written)
-        return written
+        same_key = next((each for each in self.kept.values() if each.idempotency_key == idempotency_key), None)
+        if same_key is not None and same_key.asked() != asked:
+            raise key_reused(idempotency_key, same_key)
+        return same_key
 
-    def written(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
+    def write_new(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         new = Kept(
             **asked.model_dump(),
             id=len(self.kept) + 1,
@@ -85,7 +86,7 @@ class PretendRecord:
             stuck = next((each.id for each in of_lane if each.stands is Stands.NEEDS_A_PERSON), None)
             if stuck is not None:
                 raise lane_waits_on_a_person(asked, stuck)
-            return self.written(asked, asked_by, idempotency_key)
+            return self.write_new(asked, asked_by, idempotency_key)
 
     def read(self, request: int) -> Kept | None:
         self.reach("reading a request")
@@ -97,7 +98,7 @@ class PretendRecord:
 
     def recently_ended(self) -> list[Request]:
         self.reach("reading the requests that ended")
-        ended: list[Request] = [each for each in self.kept.values() if each.stands in ENDED]
+        ended = list[Request](each for each in self.kept.values() if each.stands in ENDED)
         return sorted(ended, key=lambda each: each.id, reverse=True)[:20]
 
     def next_up(self) -> Request | None:
@@ -106,8 +107,11 @@ class PretendRecord:
         waiting = (each for each in self.kept.values() if each.stands in UNFINISHED[:2] and (each.product, each.lane) not in stuck)
         return next(waiting, None)
 
+    def turn(self, product: str, lane: str) -> AbstractContextManager[bool]:
+        return self.turn_held(product, lane)
+
     @contextmanager
-    def turn(self, product: str, lane: str) -> Generator[bool]:
+    def turn_held(self, product: str, lane: str) -> Generator[bool]:
         self.reach("taking a lane's turn")
         ours = (product, lane) not in self.turns
         self.turns.add((product, lane))
@@ -174,6 +178,6 @@ class PretendRecord:
             found = self.kept.get(request)
             if found is None or found.stands is not Stands.NEEDS_A_PERSON:
                 return None
-            again = self.written(found.asked(), asked_by, None)
+            again = self.write_new(found.asked(), asked_by, None)
             self.answered_by_a_person(request, ASKED_AGAIN.format(again=again.id))
             return again

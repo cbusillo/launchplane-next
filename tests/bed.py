@@ -48,16 +48,21 @@ def ask(path: str, body: dict[str, Any] | None = None, timeout: float = 60) -> t
         return error.code, json.loads(error.read())
 
 
+# A call that changes a lane is kept as a request. The tests wait for it to end, and so read the answer it ended with.
+def ask_and_wait(path: str, body: dict[str, Any], timeout: float = 120) -> tuple[int, dict[str, Any]]:
+    return ask(f"{path}?wait={timeout - 10:g}", body, timeout)
+
+
 def remove_product_copies(product: str) -> None:
     on_scratch(f"docker rm --force $(docker ps --all --quiet --filter label=launchplane.product={product}) 2>/dev/null || true")
 
 
 def move_lane(product: str, lane: str, build: str) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{product}/{lane}/move", {"build": build})
+    return ask_and_wait(f"/lanes/{product}/{lane}/move", {"build": build})
 
 
 def retire(product: str, lane: str, delete_data_set: str | None = None) -> tuple[int, dict[str, Any]]:
-    return ask(f"/lanes/{product}/{lane}/retire", {"delete_data_set": delete_data_set})
+    return ask_and_wait(f"/lanes/{product}/{lane}/retire", {"delete_data_set": delete_data_set})
 
 
 def wait_for(condition: Callable[[], bool], seconds: float) -> None:
@@ -79,7 +84,41 @@ def kill_launchplane() -> None:
     wait_for(launchplane_answers, seconds=30)
 
 
-def kill_once(call: Callable[[], object], seen: Callable[[], bool]) -> None:
+# noinspection SqlResolve
+END_WHAT_WAS_ASKED = """
+update attempt set ended_at = now(), ended = 'interrupted' where ended is null;
+update request set stands = 'failed', ended_at = now(), error = 'Ended by a test, as a request that failed halfway.'
+where stands in ('waiting', 'working');
+"""
+
+
+# After a kill Launchplane takes its request up again by itself. A test of what a request that failed halfway leaves behind
+# ends the request in the record while Launchplane is down, so the lane stays as the kill left it.
+def kill_launchplane_and_end_what_was_asked() -> None:
+    on_control(
+        "systemctl kill --signal=KILL launchplane; systemctl stop launchplane; "
+        "runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --dbname launchplane; ended=$?; "
+        "systemctl start launchplane; exit $ended",
+        given=END_WHAT_WAS_ASKED,
+    )
+    wait_for(launchplane_answers, seconds=30)
+
+
+def unfinished_requests() -> list[dict[str, Any]]:
+    status, body = ask("/requests")
+    assert status == 200, body
+    return body["unfinished"]
+
+
+def request_ended(request: int) -> dict[str, Any]:
+    def has_ended() -> bool:
+        return ask(f"/requests/{request}")[1]["stands"] in ("done", "failed")
+
+    wait_for(has_ended, seconds=120)
+    return ask(f"/requests/{request}")[1]
+
+
+def kill_once(call: Callable[[], object], seen: Callable[[], bool], kill: Callable[[], None] = kill_launchplane) -> None:
     cut_short: list[OSError] = []
 
     def call_until_the_kill() -> None:
@@ -97,7 +136,7 @@ def kill_once(call: Callable[[], object], seen: Callable[[], bool]) -> None:
     caller = threading.Thread(target=call_until_the_kill)
     caller.start()
     wait_for(point_is_seen, seconds=90)
-    kill_launchplane()
+    kill()
     caller.join()
 
 

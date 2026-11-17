@@ -1,12 +1,12 @@
 # The move
 
-`POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The lane answers at the web address `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
+`POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when the move ends. The lane answers at the web address `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
 For now a build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a background service or a health path of its own says so in its description: see [a lane with a database](data-sets.md). Each instance gets a new container name, `{product}-{lane}-` and 12 random hex digits. Which product, lane and build an instance is comes from its labels, never from its name.
 
 ## What it does
 
-Each call takes one step at a time. Before every step it reads the host and the proxy again and judges the lane again, with [the judgement the status page draws](data-sets.md#the-judgement-on-a-lane), so nothing read before a step is used after it. After a crash nothing is resumed: asking again reads and goes on from there. A call that has taken 50 steps and is not finished answers `503`; what was done stays done.
+A move takes one step at a time. Before every step it reads the host and the proxy again and judges the lane again, with [the judgement the status page draws](data-sets.md#the-judgement-on-a-lane), so nothing read before a step is used after it. After an interruption nothing is resumed from where it was: the request is taken up again, reads, and goes on from what is there. A move that has taken 50 steps and is not finished answers `503`; what was done stays done.
 
 The next step is the first of these that applies:
 
@@ -24,14 +24,16 @@ The next step is the first of these that applies:
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `switched` | 200 | The web address now points at a running instance of this build. |
-| `unchanged` | 200 | It already did. Nothing changed. |
-| `cleaned up` | 200 | It already did, and what an interrupted move left was removed. |
+| `unchanged` | 200 | It already did, and nothing was done. |
+| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service: see [a move with data](data-sets.md#a-move-with-data). |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
 
-A `503` means the host or proxy could not be read or changed. The move stopped where it was and is safe to ask again. One move, retirement or maintenance call runs at a time in a Launchplane process; a second call waits.
+`did` lists every change the move made, whatever the outcome.
+
+A `503` means the host or proxy could not be read or changed. The move stopped where it was, its request has failed, and it is safe to ask again. One request works at a time; another waits its turn.
 
 **The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error.
 
@@ -78,4 +80,4 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_move.py -v
 ```
 
-Builds A, B and C are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again.
+Builds A, B and C are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.

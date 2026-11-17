@@ -34,7 +34,7 @@ def postgres_record(migrated_database: str) -> Iterator[PostgresRecord]:
     record.close()
 
 
-# Every test of what the record does runs against the pretend one and against PostgreSQL, so the two cannot drift apart.
+# Each test of what the record does is run against the pretend one and against PostgreSQL, so the two cannot drift apart.
 @pytest.fixture(params=["pretend", "postgres"])
 def record(request: pytest.FixtureRequest) -> Record:
     if request.param == "pretend":

@@ -159,7 +159,7 @@ def test_a_lanes_turn_has_one_holder_and_is_free_again_when_the_holder_lets_go(r
 
 
 def test_a_lanes_turn_is_let_go_when_its_holder_dies_without_letting_go(postgres_record: PostgresRecord) -> None:
-    holder = psycopg.connect(postgres_record.conninfo, autocommit=True)
+    holder = psycopg.connect(postgres_record.database, autocommit=True)
     holder.execute("select pg_advisory_lock(hashtextextended('site/testing', 0))")
     with postgres_record.turn("site", "testing") as while_held:
         assert while_held is False

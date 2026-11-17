@@ -1,6 +1,7 @@
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 
 import pytest
 
@@ -52,7 +53,7 @@ def killed_while_checking(record: Record, lanes: Lanes, proxy: PretendProxy) -> 
     assert attempt is not None
     proxy.while_checking = kill
     with pytest.raises(LaunchplaneKilled):
-        lanes.move(LaneBuild(product="site", lane="testing", build="site:b"), lambda did, error: record.note(attempt, did, error))
+        lanes.move(LaneBuild(product="site", lane="testing", build="site:b"), partial(record.note, attempt))
     proxy.while_checking = lambda _container: None
     proxy.host.actions.clear()
     return request.id
@@ -94,6 +95,7 @@ def test_a_request_left_working_is_taken_up_and_finished_from_what_is_on_the_hos
             record.change(request, events=[])
         if isinstance(record, PostgresRecord):
             with record.session("deleting every event") as session:
+                # noinspection SqlResolve,SqlWithoutWhere
                 session.execute("delete from event")
     assert worker.work_next() is True
     kept = kept_of(record, request)

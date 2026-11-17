@@ -9,7 +9,15 @@ from typing import Any
 
 import pytest
 
-from tests.bed import SCRATCH_ADDRESS, ask, kill_launchplane, move_lane, needs_test_bed, retire, wait_for
+from tests.bed import (
+    SCRATCH_ADDRESS,
+    ask,
+    kill_launchplane_and_end_what_was_asked,
+    move_lane,
+    needs_test_bed,
+    retire,
+    wait_for,
+)
 
 pytestmark = needs_test_bed
 
@@ -136,12 +144,12 @@ def test_retiring_a_retired_lane_changes_nothing_and_says_so() -> None:
 
 
 @pytest.mark.usefixtures("lane_serving_slow_build")
-def test_a_retire_killed_after_the_name_is_gone_is_finished_by_asking_again() -> None:
+def test_a_retire_that_failed_after_the_name_is_gone_is_finished_by_asking_again() -> None:
     copy_name = next(copy["container"] for copy in read_running()["instances"] if copy["lane"] == LANE)
     with request_in_flight(seconds=10):
         retirer = in_background(retire_cut_short_by_the_kill)
         wait_for(name_is_gone_and_copy_remains, seconds=30)
-        kill_launchplane()
+        kill_launchplane_and_end_what_was_asked()
         retirer.join()
     assert name_is_gone_and_copy_remains()
     status, body = retire(PRODUCT, LANE)
