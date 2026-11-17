@@ -10,10 +10,10 @@ from launchplane.instance import LaneBuild
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Interrupted, Record, RecordError, Request, Stands
+from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands
 from launchplane.secret_boundary import Secrets, cleaned, cleaned_value
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
-from launchplane.telling import Tell
+from launchplane.telling import Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 STOPPED = (ContainerHostError, ProxyError, ProductError, Stopped)
@@ -30,25 +30,25 @@ type Answer = MoveResult | RetireResult | MaintenanceResult
 
 
 class Carries(Protocol):
-    def move(self, target: LaneBuild, tell: Tell, /) -> MoveResult: ...
-    def retire(self, product: str, lane: str, delete_data_set: str | None, tell: Tell, /) -> RetireResult: ...
-    def begin_maintenance(self, product: str, lane: str, tell: Tell, /) -> MaintenanceResult: ...
-    def end_maintenance(self, product: str, lane: str, tell: Tell, /) -> MaintenanceResult: ...
+    def move(self, target: LaneBuild, witness: Witness, /) -> MoveResult: ...
+    def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
+    def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
+    def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
 
 
-def carried_out(lanes: Carries, request: Request, tell: Tell) -> Answer:
+def carried_out(lanes: Carries, request: Request, witness: Witness) -> Answer:
     product, lane = request.product, request.lane
     match request.work:
         case Work.MOVE:
             if request.build is None:
                 raise Stopped("The request names no build to move to. Nothing was changed.")
-            return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), tell)
+            return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), witness)
         case Work.RETIRE:
-            return lanes.retire(product, lane, request.delete_data_set, tell)
+            return lanes.retire(product, lane, request.delete_data_set, witness)
         case Work.BEGIN_MAINTENANCE:
-            return lanes.begin_maintenance(product, lane, tell)
+            return lanes.begin_maintenance(product, lane, witness)
         case Work.END_MAINTENANCE:
-            return lanes.end_maintenance(product, lane, tell)
+            return lanes.end_maintenance(product, lane, witness)
 
 
 class Worker:
@@ -91,20 +91,27 @@ class Worker:
         request = self.record.next_up()
         if request is None:
             return False
-        with self.record.turn(request.product, request.lane) as ours:
-            if not ours:
+        with self.record.turn(request.product, request.lane) as held:
+            if held is None:
                 return False
             attempt = self.record.take_up(request.id)
             if attempt is not None:
-                self.carry_through(request, attempt)
+                self.carry_through(request, attempt, held)
         return True
 
-    def carry_through(self, request: Request, attempt: int) -> None:
+    def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, self.cleaned(did), None if refusal is None else self.cleaned(refusal))
 
+        # Another Launchplane may hold the turn by now and have changed the lane, so what was decided is not acted on.
+        def hold() -> None:
+            if not held():
+                raise Interrupted(f"The turn of {request.lane} of {request.product} is no longer held, so nothing more was done.")
+
         try:
-            answer = carried_out(self.lanes, request, tell)
+            # Every secret a container holds is known before anything about this request is written.
+            self.secrets.read_secrets()
+            answer = carried_out(self.lanes, request, Witness(tell, hold))
         except STOPPED as error:
             self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.

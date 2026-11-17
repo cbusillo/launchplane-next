@@ -1,5 +1,6 @@
+import hashlib
 import os
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager
 from datetime import datetime
 from enum import StrEnum
@@ -18,9 +19,16 @@ DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
 
 type Session = psycopg.Cursor[DictRow]
+# Asked before each action on the host: whether the lane's turn is still held.
+type Held = Callable[[], bool]
 
 
 class RecordError(Exception):
+    pass
+
+
+# The write of a request may or may not have reached the record, so the request may be worked.
+class Unconfirmed(RecordError):
     pass
 
 
@@ -68,7 +76,6 @@ class Request(Asked):
     id: int
     asked_by: str
     asked_at: datetime
-    idempotency_key: str | None
     stands: Stands
     ended_at: datetime | None
     answer: dict[str, Any] | None
@@ -103,7 +110,7 @@ class Record(Protocol):
     def unfinished(self) -> list[Kept]: ...
     def recently_ended(self) -> list[Request]: ...
     def next_up(self) -> Request | None: ...
-    def turn(self, product: str, lane: str) -> AbstractContextManager[bool]: ...
+    def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
     def take_up(self, request: int) -> int | None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
     def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None: ...
@@ -113,6 +120,11 @@ class Record(Protocol):
 
 def database() -> str:
     return os.environ.get("LAUNCHPLANE_DATABASE", DATABASE)
+
+
+# A caller never needs its key shown back, so only this is kept: a key that is a secret cannot be read from the record.
+def key_digest(idempotency_key: str | None) -> str | None:
+    return None if idempotency_key is None else hashlib.sha256(idempotency_key.encode()).hexdigest()
 
 
 def needs_a_person(request: Request) -> str:
@@ -131,7 +143,7 @@ ASKED_AGAIN = " A person asked for it again, as request {again}."
 # PyCharm has no schema to resolve these against. The tests run every statement against PostgreSQL.
 # noinspection SqlResolve
 class Sql:
-    SAME_KEY: Final = "select * from request where idempotency_key = %s"
+    SAME_KEY: Final = "select * from request where key_digest = %s"
     WAITS_ON_A_PERSON: Final = """
     select id from request where (product, lane) = (%s, %s) and stands = 'needs a person' order by id limit 1
     """
@@ -142,7 +154,7 @@ class Sql:
     order by id limit 1
     """
     WRITE: Final = """
-    insert into request (product, lane, work, build, delete_data_set, asked_by, idempotency_key)
+    insert into request (product, lane, work, build, delete_data_set, asked_by, key_digest)
     values (%s, %s, %s, %s, %s, %s, %s) returning *
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
@@ -156,6 +168,8 @@ class Sql:
     )
     order by id limit 1
     """
+    ONE_READING: Final = "set transaction isolation level repeatable read, read only"
+    TURN_HELD: Final = "select count(*) as held from pg_locks where locktype = 'advisory' and pid = pg_backend_pid() and granted"
     TAKE_TURN: Final = "select pg_try_advisory_lock(hashtextextended(%s, 0)) as ours"
     INTERRUPT: Final = "update attempt set ended_at = now(), ended = 'interrupted' where request = %s and ended is null"
     COUNT_ATTEMPTS: Final = "select count(*) from attempt where request = %s"
@@ -183,9 +197,9 @@ class Sql:
     READ_TO_TAKE_UP: Final = "select * from request where id = %s for update"
 
 
-def key_reused(idempotency_key: str, written: Request) -> Refused:
+def key_reused(written: Request) -> Refused:
     return Refused(
-        f"The Idempotency-Key {idempotency_key} was given with request {written.id}, which asked something else: "
+        f"The Idempotency-Key was given with request {written.id}, which asked something else: "
         f"{written.attempted()}. Nothing was written. Ask with a new key, or with none."
     )
 
@@ -203,12 +217,12 @@ def same_as_written(session: Session, asked: Asked, idempotency_key: str | None)
         values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set]
         row = session.execute(Sql.SAME_UNFINISHED, values).fetchone()
         return None if row is None else Request.model_validate(row)
-    row = session.execute(Sql.SAME_KEY, [idempotency_key]).fetchone()
+    row = session.execute(Sql.SAME_KEY, [key_digest(idempotency_key)]).fetchone()
     if row is None:
         return None
     same_key = Request.model_validate(row)
     if same_key.asked() != asked:
-        raise key_reused(idempotency_key, same_key)
+        raise key_reused(same_key)
     return same_key
 
 
@@ -219,7 +233,7 @@ def refuse_while_a_person_is_awaited(session: Session, asked: Asked) -> None:
 
 
 def write_new(session: Session, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-    values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set, asked_by, idempotency_key]
+    values = [asked.product, asked.lane, asked.work, asked.build, asked.delete_data_set, asked_by, key_digest(idempotency_key)]
     return Request.model_validate(session.execute(Sql.WRITE, values).fetchone())
 
 
@@ -237,6 +251,7 @@ def asked_once(session: Session, doing: str, query: LiteralString, values: list[
     return row
 
 
+# The caller has made the transaction one reading, so no attempt or event is seen that began after the requests were read.
 def with_history(session: Session, rows: Sequence[DictRow]) -> list[Kept]:
     ids = [row["id"] for row in rows]
     attempts = session.execute(Sql.ATTEMPTS, [ids]).fetchall()
@@ -280,22 +295,31 @@ class PostgresRecord(Record):
             raise unreachable(doing, error) from error
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-        with self.session("writing a request") as session:
-            # Two calls asking the same thing at once write one request: the second waits here and finds the first.
-            session.execute(Sql.LOCK_WRITERS)
-            same = same_as_written(session, asked, idempotency_key)
-            if same is not None:
-                return same
-            refuse_while_a_person_is_awaited(session, asked)
-            return write_new(session, asked, asked_by, idempotency_key)
+        sent = False
+        try:
+            with self.session("writing a request") as session:
+                # Two calls asking the same thing at once write one request: the second waits here and finds the first.
+                session.execute(Sql.LOCK_WRITERS)
+                same = same_as_written(session, asked, idempotency_key)
+                if same is not None:
+                    return same
+                refuse_while_a_person_is_awaited(session, asked)
+                sent = True
+                return write_new(session, asked, asked_by, idempotency_key)
+        except RecordError as error:
+            if sent:
+                raise Unconfirmed(str(error)) from error
+            raise
 
     def read(self, request: int) -> Kept | None:
         with self.session("reading a request") as session:
+            session.execute(Sql.ONE_READING)
             rows = session.execute(Sql.READ, [request]).fetchall()
             return with_history(session, rows)[0] if rows else None
 
     def unfinished(self) -> list[Kept]:
         with self.session("reading the requests not finished") as session:
+            session.execute(Sql.ONE_READING)
             return with_history(session, session.execute(Sql.UNFINISHED).fetchall())
 
     def recently_ended(self) -> list[Request]:
@@ -307,19 +331,28 @@ class PostgresRecord(Record):
             row = session.execute(Sql.NEXT_UP).fetchone()
             return None if row is None else Request.model_validate(row)
 
-    def turn(self, product: str, lane: str) -> AbstractContextManager[bool]:
+    def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
         return self.turn_held(product, lane)
 
     # A lane's turn is a lock held by a connection of its own, so it is let go when the work ends or this Launchplane dies,
-    # and never apart from the work.
+    # and never apart from the work. What is given asks that connection whether it still holds the lock.
     @contextmanager
-    def turn_held(self, product: str, lane: str) -> Generator[bool]:
+    def turn_held(self, product: str, lane: str) -> Generator[Held | None]:
         try:
             connection = psycopg.connect(self.database, autocommit=True)
         except psycopg.Error as error:
             raise unreachable("taking a lane's turn", error) from error
         with closing(connection), connection.cursor(row_factory=dict_row) as session:
-            yield bool(asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, [f"{product}/{lane}"])["ours"])
+
+            def held() -> bool:
+                try:
+                    row = session.execute(Sql.TURN_HELD).fetchone()
+                except psycopg.Error:
+                    return False
+                return row is not None and row["held"] > 0
+
+            ours = asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, [f"{product}/{lane}"])["ours"]
+            yield held if ours else None
 
     # A request found working with nobody holding its lane was interrupted. That is counted, never taken for waiting.
     def take_up(self, request: int) -> int | None:

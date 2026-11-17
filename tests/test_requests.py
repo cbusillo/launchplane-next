@@ -10,13 +10,14 @@ from launchplane.api import create_app
 from launchplane.instance import LaneBuild
 from launchplane.record import MOST_ATTEMPTS, Record
 from launchplane.worker import Worker
-from tests.given_secrets import NO_SECRETS
+from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy, numbered_names
 from tests.pretend_record import PretendRecord
 from tests.test_worker import wait_until
 
 MOVE = "/lanes/site/testing/move"
 TO_B = {"build": "site:b"}
+SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
 
 
 @dataclass
@@ -164,3 +165,40 @@ def test_with_the_record_unreachable_a_call_that_changes_something_is_refused_an
         1,
         True,
     )
+
+
+def app_on(record: Record, secrets: GivenSecrets) -> TestClient:
+    proxy = PretendProxy(PretendHost())
+    lanes = Lanes(proxy.host, proxy, read_unfinished=record.unfinished)
+    return TestClient(create_app(lanes.read_status, record, lambda: None, secrets))
+
+
+def test_a_secret_sent_as_the_key_is_not_shown_once_its_container_is_gone_and_launchplane_has_restarted(record: Record) -> None:
+    key = {"Idempotency-Key": SECRET}
+    while_held = app_on(record, GivenSecrets(on_host=frozenset({SECRET})))
+    first = while_held.post(MOVE, json=TO_B, headers=key)
+    after_a_restart = app_on(record, GivenSecrets())
+    shown = after_a_restart.get(first.headers["location"]).text + after_a_restart.get("/requests").text
+    again = after_a_restart.post(MOVE, json=TO_B, headers=key)
+    assert (first.status_code, SECRET in shown, again.headers["location"]) == (202, False, first.headers["location"])
+
+
+def test_a_call_that_carries_a_secret_a_container_holds_is_refused_and_nothing_of_it_is_written(record: Record) -> None:
+    client = app_on(record, GivenSecrets(on_host=frozenset({SECRET})))
+    refused = [
+        client.post(MOVE, json={"build": f"registry.test/site:{SECRET}"}),
+        client.post("/lanes/site/testing/retire", json={"delete_data_set": SECRET}),
+    ]
+    assert [each.status_code for each in refused] == [422, 422]
+    assert all("was not written" in each.json()["error"] for each in refused)
+    assert (record.unfinished(), record.recently_ended()) == ([], [])
+
+
+def test_an_answer_says_nothing_was_changed_only_when_the_request_is_known_not_to_be_written() -> None:
+    unreachable = bed_on(PretendRecord(reachable=False)).client.post(MOVE, json=TO_B)
+    unconfirmed_record = PretendRecord(confirms_writes=False)
+    unconfirmed = bed_on(unconfirmed_record).client.post(MOVE, json=TO_B, headers={"Idempotency-Key": "one-release"})
+    assert (unreachable.status_code, "was not written and nothing was changed" in unreachable.json()["error"]) == (503, True)
+    assert (unconfirmed.status_code, "nothing was changed" in unconfirmed.json()["error"]) == (503, False)
+    assert "is not known" in unconfirmed.json()["error"] and "GET /requests" in unconfirmed.json()["error"]
+    assert len(unconfirmed_record.unfinished()) == 1

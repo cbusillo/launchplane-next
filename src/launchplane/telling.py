@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from launchplane import steps
@@ -9,6 +10,20 @@ type Tell = Callable[[str, str | None], None]
 
 def tell_nobody(_did: str, _error: str | None) -> None:
     pass
+
+
+def hold_nothing() -> None:
+    pass
+
+
+# Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
+@dataclass(frozen=True)
+class Witness:
+    tell: Tell = tell_nobody
+    hold: Callable[[], None] = hold_nothing
+
+
+NOBODY = Witness()
 
 
 NAMED: dict[type, Callable[[Any], str]] = {

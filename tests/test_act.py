@@ -253,7 +253,6 @@ def test_a_request_taken_up_or_ended_while_the_host_is_read_is_at_work_on_what_w
         id=1,
         asked_by="the address 192.0.2.1",
         asked_at=SINCE,
-        idempotency_key=None,
         stands=Stands.WORKING,
         ended_at=None,
         answer=None,

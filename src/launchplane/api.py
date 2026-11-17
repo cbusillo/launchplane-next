@@ -24,7 +24,7 @@ from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, We
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
 from launchplane.proxy import ProxyError, TraefikProxy
-from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, database
+from launchplane.record import ENDED, Asked, Kept, PostgresRecord, Record, RecordError, Refused, Stands, Unconfirmed, database
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
@@ -225,20 +225,41 @@ def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: 
     return answer.model_validate(kept.answer)
 
 
+REFUSED_AS_ASKED = (
+    "What was asked carries a secret Launchplane gave a lane, and the record keeps what was asked, so the request was not "
+    "written. Nothing was changed."
+)
+NOT_CONFIRMED = (
+    "Whether the request was written is not known. If it was, it will be worked. Asking again with the same "
+    "Idempotency-Key answers with it if it was; without a key, GET /requests lists it."
+)
+
+
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object]) -> None:
+    def __init__(self, record: Record, wake: Callable[[], object], secrets: Secrets) -> None:
         self.record = record
         self.wake = wake
+        self.secrets = secrets
+
+    # The record outlives the container that holds a secret, so a secret is kept out of it and not cleaned on the way out.
+    def carries_a_secret(self, asked: Asked) -> bool:
+        said = asked.model_dump_json()
+        return cleaned(said, self.secrets.secrets_seen()) != said
 
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
     ) -> Answer | NotFinished | Kept:
+        if self.carries_a_secret(asked):
+            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, REFUSED_AS_ASKED)
         try:
             request = self.record.write(asked, asker(http), http.headers.get("idempotency-key"))
         except Refused as error:
             return not_finished(response, HTTPStatus.CONFLICT, str(error))
+        except Unconfirmed as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} {NOT_CONFIRMED}")
         except RecordError as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed, and asking again is safe.")
+            why = f"{error} The request was not written and nothing was changed, and asking again is safe."
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
         self.wake()
         response.headers["Location"] = f"/requests/{request.id}"
         try:
@@ -253,6 +274,10 @@ class Calls:
             return final_answer(kept, answer, response)
         response.status_code = HTTPStatus.ACCEPTED
         return kept
+
+    @staticmethod
+    def not_known(request: int, error: RecordError) -> str:
+        return f"{error} Whether request {request} was changed is not known: read it with GET /requests/{request}."
 
     @staticmethod
     def none_such(request: int, response: Response) -> NotFinished:
@@ -342,7 +367,7 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
         try:
             again = calls.record.retry(request, asker(http))
         except RecordError as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed.")
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, calls.not_known(request, error))
         if again is not None:
             calls.wake()
             response.headers["Location"] = f"/requests/{again.id}"
@@ -353,7 +378,7 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
         try:
             given_up = calls.record.give_up(request)
         except RecordError as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed.")
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, calls.not_known(request, error))
         calls.wake()
         return calls.answered_by_a_person(request, given_up, response)
 
@@ -376,7 +401,7 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    calls = Calls(record, wake)
+    calls = Calls(record, wake, secrets)
     add_lane_calls(app, calls)
     add_request_calls(app, calls)
     return app

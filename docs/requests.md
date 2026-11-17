@@ -17,9 +17,10 @@ Each of the four calls writes a request and answers `202` with the request and a
 
 - **`?wait=<seconds>`**, up to 3600. The call answers when the request ends, with the status and body the call had before requests were kept: `200` with the result, `422` with the result for an outcome that is not a success, or `503` with `error` when it stopped. If the request has not ended in that time, or needs a person, the answer is `202` with the request. The `Location` header is there either way.
 - **Asking the same thing of a lane while a request for it is waiting or working** writes nothing and answers with that request. The same thing is the same call, lane, build and data set named for deleting.
-- **`Idempotency-Key: <text>`**. The same key with the same call and body answers with the request already written, whether or not it has ended. The same key with anything else answers `409` and writes nothing. A key is never forgotten. A call with a key always writes its own request, even when the same thing is already waiting.
+- **`Idempotency-Key: <text>`**. The same key with the same call and body answers with the request already written, whether or not it has ended. The same key with anything else answers `409` and writes nothing. A key is never forgotten and never shown: the record keeps only its SHA-256 digest. A call with a key always writes its own request, even when the same thing is already waiting.
 - **`409`** also answers a call for a lane that has a request needing a person, and says which.
-- **`503`** with `error` means the record could not be reached. Nothing was written and nothing was changed.
+- **`422`** with `error` also answers a call whose build or data set name carries a secret a container holds. Nothing is written.
+- **`503`** with `error` means the record could not be reached. The answer says the request was not written and nothing was changed only when that is known. When the record was lost after the request was sent to it, the answer says that whether it was written is not known: if it was, it will be worked. Asking again with the same key answers with it if it was, and `GET /requests` lists it.
 
 ## Reading
 
@@ -31,7 +32,6 @@ Each of the four calls writes a request and answers `202` with the request and a
 | `work` | `moving`, `retiring`, `beginning maintenance` or `ending maintenance`. |
 | `build`, `delete_data_set` | Exactly what was asked: the build of a move, the data set a retire named for deleting. |
 | `asked_by`, `asked_at` | The address the call came from, and when. Nobody is known by name yet. |
-| `idempotency_key` | The caller's key, or `null`. |
 | `stands` | `waiting`, `working`, `done`, `failed` or `needs a person`. |
 | `ended_at`, `answer`, `error` | When it ended; the result the call answers with `?wait=`; the real error of a request that failed or needs a person. |
 | `attempts` | Each time a worker took the request up: `number`, `began_at`, `ended_at`, and `ended` as `done`, `failed` or `interrupted`. |
@@ -45,7 +45,7 @@ A request is `done` when its call would have answered `200`, and `failed` when i
 
 One worker runs in the Launchplane process. It takes the oldest request that is waiting or working, on a lane with no request needing a person, and carries it through with the same judgement and the same steps as before. One request works at a time, in the order they came.
 
-- **A lane's turn** is a PostgreSQL advisory lock held by a connection of its own for as long as the request is worked. When the work ends or Launchplane dies, the connection closes and the turn is free. No transaction is open and no row is locked while Launchplane talks to the container host.
+- **A lane's turn** is a PostgreSQL advisory lock held by a connection of its own for as long as the request is worked. When the work ends or Launchplane dies, the connection closes and the turn is free. No transaction is open and no row is locked while Launchplane talks to the container host. Before each action on the host the worker asks that connection whether it still holds the lock, and when it does not it stops without acting and writes nothing more; the request is then taken up again as interrupted.
 - **After a restart, with nobody calling,** a request found working with nobody holding its lane's turn was interrupted. The worker ends that attempt as `interrupted`, begins a new one, reads the host and decides from what is there, as asking again always did. It does not go on from where the last attempt was.
 - **A request taken up three times without ending** is not taken up a fourth time. It stands as `needs a person` with the reason in `error`, and its lane takes no other request. `POST /requests/<id>/retry` ends it as `failed` and writes a new request for the same thing, answering `202` with it. `POST /requests/<id>/give-up` ends it as `failed` and changes nothing on the host. Either answers `409` for a request that does not need a person.
 - **Nothing is run again by itself** except this taking-up after an interruption. A request that fails stays failed until someone asks again.
@@ -56,7 +56,13 @@ One worker runs in the Launchplane process. It takes the oldest request that is 
 
 Three tables in a PostgreSQL database of Launchplane's own: a request, an attempt, and an event. It holds what was asked and what Launchplane did. It never holds which build a lane runs, which instance receives visitors, whether a part is healthy, or how far a request has got: those are read from the host every time. With every event deleted, Launchplane decides exactly as before.
 
-A secret Launchplane gave a lane is removed from an event, an error and an answer before it is written, as it is from an answer to a call.
+No secret is written to the record, because the record outlives the container that holds a secret and nothing could then know to remove it on the way out.
+
+- The caller's key is kept as a digest only.
+- A call whose build or data set name carries a secret a container holds is refused. Every secret on the host is read just before, as for every answer.
+- A product or lane name is at most 31 lowercase letters, digits and hyphens. A password Launchplane makes is 43 characters, so a name cannot be one.
+- `asked_by` is the address the connection came from, not text the caller chose.
+- Every event, error and answer is cleaned of every secret a container holds before it is written. The worker reads every container's secrets when it takes a request up, and a secret it makes while working is known from the moment it is made.
 
 ## On the page
 
@@ -83,6 +89,9 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **Only one request works at a time**, whatever its lane.
 - **The fresh names of a move are made anew in each attempt.** An instance started by an interrupted attempt is found on the host by its build and taken as the one to check.
 - **A request that needs a person is not told to anyone.** It shows on the page and in `GET /requests`.
+- **A worker can lose its lane's turn while one action on the host is under way.** The turn is asked before each action, not during it. An action can take as long as a check, 20 s, or a stop, 30 s. If the lock's connection ends in that time and another Launchplane takes the lane, that one action still finishes. With one worker in one process this needs a lost connection and a second Launchplane.
+- **A secret no container holds any more is not known to be one.** A caller who sends the password of a container already removed has it stored as sent, in a build or a data set name.
+- **A request written before the key was kept as a digest** had its key replaced by the digest when the database was migrated.
 - **Untried:** two Launchplane processes on one record. The lane's turn and the count of attempts are built for it and tested against PostgreSQL, not on the test bed.
 
 ## Measured

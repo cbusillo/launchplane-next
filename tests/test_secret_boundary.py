@@ -29,7 +29,7 @@ from launchplane.judge import judge, web_addresses_judged
 from launchplane.product import Product
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream, Secrets, cleaned_body
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
-from launchplane.telling import Tell
+from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker
 from tests.given_secrets import GivenSecrets
 from tests.pretend_host import SINCE, PretendHost, PretendProxy
@@ -62,8 +62,8 @@ def unreadable_host() -> Status:
     raise ContainerHostError(f"Docker refused: {SECRET}")
 
 
-def move_answering(outcome: Outcome) -> Callable[[LaneBuild, Tell], MoveResult]:
-    def move(target: LaneBuild, _tell: Tell) -> MoveResult:
+def move_answering(outcome: Outcome) -> Callable[[LaneBuild, Witness], MoveResult]:
+    def move(target: LaneBuild, _witness: Witness) -> MoveResult:
         return MoveResult(
             product=target.product,
             lane=target.lane,
@@ -77,11 +77,11 @@ def move_answering(outcome: Outcome) -> Callable[[LaneBuild, Tell], MoveResult]:
     return move
 
 
-def move_stopped(_target: LaneBuild, _tell: Tell) -> MoveResult:
+def move_stopped(_target: LaneBuild, _witness: Witness) -> MoveResult:
     raise Stopped(f"The lane is not as it must be: {SECRET}")
 
 
-def retire_answering(product: str, lane: str, _delete_data_set: str | None, _tell: Tell) -> RetireResult:
+def retire_answering(product: str, lane: str, _delete_data_set: str | None, _witness: Witness) -> RetireResult:
     return RetireResult(
         product=product,
         lane=lane,
@@ -92,11 +92,11 @@ def retire_answering(product: str, lane: str, _delete_data_set: str | None, _tel
     )
 
 
-def retire_stopped(product: str, lane: str, _delete_data_set: str | None, _tell: Tell) -> RetireResult:
+def retire_stopped(product: str, lane: str, _delete_data_set: str | None, _witness: Witness) -> RetireResult:
     raise ContainerHostError(f"Stopping {lane} of {product} failed: {SECRET}")
 
 
-def maintenance_answering(product: str, lane: str, _tell: Tell) -> MaintenanceResult:
+def maintenance_answering(product: str, lane: str, _witness: Witness) -> MaintenanceResult:
     return MaintenanceResult(
         product=product,
         lane=lane,
@@ -107,7 +107,7 @@ def maintenance_answering(product: str, lane: str, _tell: Tell) -> MaintenanceRe
     )
 
 
-def maintenance_stopped(product: str, lane: str, _tell: Tell) -> MaintenanceResult:
+def maintenance_stopped(product: str, lane: str, _witness: Witness) -> MaintenanceResult:
     raise ContainerHostError(f"Stopping a part of {lane} of {product} failed: {SECRET}")
 
 
@@ -118,15 +118,15 @@ class Asked:
     status: int
     body: dict[str, Any] | None = None
     read: Callable[[], Status] = running_with_leaks
-    move: Callable[[LaneBuild, Tell], MoveResult] = move_stopped
-    retire: Callable[[str, str, str | None, Tell], RetireResult] = retire_stopped
-    maintenance: Callable[[str, str, Tell], MaintenanceResult] = maintenance_stopped
+    move: Callable[[LaneBuild, Witness], MoveResult] = move_stopped
+    retire: Callable[[str, str, str | None, Witness], RetireResult] = retire_stopped
+    maintenance: Callable[[str, str, Witness], MaintenanceResult] = maintenance_stopped
 
-    def begin_maintenance(self, product: str, lane: str, tell: Tell, /) -> MaintenanceResult:
-        return self.maintenance(product, lane, tell)
+    def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult:
+        return self.maintenance(product, lane, witness)
 
-    def end_maintenance(self, product: str, lane: str, tell: Tell, /) -> MaintenanceResult:
-        return self.maintenance(product, lane, tell)
+    def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult:
+        return self.maintenance(product, lane, witness)
 
 
 # Each request is worked within the call that asked for it, so the call answers with how it ended.
@@ -184,7 +184,7 @@ def test_no_answer_is_made_when_the_secrets_to_clean_it_of_cannot_be_read(asked:
 
 
 def test_nothing_is_moved_when_the_secrets_cannot_be_read() -> None:
-    def move(target: LaneBuild, _tell: Tell) -> MoveResult:
+    def move(target: LaneBuild, _witness: Witness) -> MoveResult:
         raise AssertionError(f"Moved to {target.build} with no way to clean the answer")
 
     asked = Asked("POST", MOVE, 503, {"build": "site:b"}, move=move)

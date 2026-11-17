@@ -1,11 +1,25 @@
 import threading
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, LiteralString
 
 import psycopg
 import pytest
 
+from launchplane import record as record_module
 from launchplane.judge import Work
-from launchplane.record import MOST_ATTEMPTS, Asked, Interrupted, PostgresRecord, Record, RecordError, Refused, Stands
+from launchplane.record import (
+    MOST_ATTEMPTS,
+    Asked,
+    Interrupted,
+    PostgresRecord,
+    Record,
+    RecordError,
+    Refused,
+    Stands,
+    Unconfirmed,
+)
+from tests.pretend_record import lose_every_turn
 
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
 MOVE_C = Asked(product="site", lane="testing", work=Work.MOVE, build="site:c")
@@ -153,19 +167,20 @@ def test_only_a_request_that_needs_a_person_is_given_up_or_asked_for_again(recor
 
 def test_a_lanes_turn_has_one_holder_and_is_free_again_when_the_holder_lets_go(record: Record) -> None:
     with record.turn("site", "testing") as first, record.turn("site", "testing") as second, record.turn("site", "other") as other:
-        assert (first, second, other) == (True, False, True)
+        assert first is not None and other is not None
+        assert (first(), second, other()) == (True, None, True)
     with record.turn("site", "testing") as after:
-        assert after is True
+        assert after is not None
 
 
 def test_a_lanes_turn_is_let_go_when_its_holder_dies_without_letting_go(postgres_record: PostgresRecord) -> None:
     holder = psycopg.connect(postgres_record.database, autocommit=True)
     holder.execute("select pg_advisory_lock(hashtextextended('site/testing', 0))")
     with postgres_record.turn("site", "testing") as while_held:
-        assert while_held is False
+        assert while_held is None
     holder.close()
     with postgres_record.turn("site", "testing") as after:
-        assert after is True
+        assert after is not None
 
 
 def test_a_turn_is_a_session_lock_on_a_connection_of_its_own_with_no_transaction_open(postgres_record: PostgresRecord) -> None:
@@ -182,9 +197,69 @@ def test_a_database_that_cannot_be_reached_is_said_as_such_and_not_waited_for_lo
     unreachable = PostgresRecord("postgresql://launchplane@127.0.0.1:1/launchplane", seconds_to_reach=0.2)
     done = threading.Event()
     try:
-        with pytest.raises(RecordError, match="could not be reached while writing a request"):
+        with pytest.raises(RecordError, match="could not be reached while writing a request") as refused:
             unreachable.write(MOVE_B, CALLER, None)
+        assert not isinstance(refused.value, Unconfirmed)
         done.set()
     finally:
         unreachable.close()
     assert done.is_set()
+
+
+def test_a_turn_whose_connection_was_lost_says_it_is_no_longer_held(record: Record) -> None:
+    with record.turn("site", "testing") as held:
+        assert held is not None and held() is True
+        lose_every_turn(record)
+        assert held() is False
+
+
+def test_a_key_is_kept_only_as_a_digest_so_the_record_cannot_show_it(postgres_record: PostgresRecord) -> None:
+    key = "Zx3-a-password-sent-as-a-key"
+    first = postgres_record.write(MOVE_B, CALLER, key)
+    with postgres_record.session("reading every row") as session:
+        # noinspection SqlResolve
+        stored = str(session.execute("select * from request").fetchall())
+    assert (key in stored, postgres_record.write(MOVE_B, CALLER, key).id) == (False, first.id)
+
+
+def test_a_write_lost_after_the_request_was_sent_is_said_to_be_unconfirmed_not_unwritten(
+    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_new = record_module.write_new
+
+    def write_then_lose_the_connection(session: record_module.Session, asked: Asked, asked_by: str, key: str | None) -> None:
+        write_new(session, asked, asked_by, key)
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(record_module, "write_new", write_then_lose_the_connection)
+    with pytest.raises(Unconfirmed, match="server closed the connection"):
+        postgres_record.write(MOVE_B, CALLER, None)
+
+
+def test_an_attempt_and_its_event_written_while_a_request_is_being_read_do_not_break_the_reading(
+    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = postgres_record.write(MOVE_B, CALLER, None)
+    assert postgres_record.take_up(request.id) is not None
+    execute = psycopg.Cursor[Any].execute
+    worker = PostgresRecord(postgres_record.database)
+    assert worker.read(request.id) is not None
+    written_meanwhile: list[int] = []
+
+    def execute_after_a_new_attempt(
+        cursor: psycopg.Cursor[Any], query: LiteralString, values: Sequence[object] | None = None, **options: bool | None
+    ) -> psycopg.Cursor[Any]:
+        if query == record_module.Sql.EVENTS and not written_meanwhile:
+            written_meanwhile.append(request.id)
+            attempt = worker.take_up(request.id)
+            assert attempt is not None
+            worker.note(attempt, "start the instance site-testing-1", None)
+        return execute(cursor, query, values, **options)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", execute_after_a_new_attempt)
+    try:
+        kept = postgres_record.read(request.id)
+    finally:
+        worker.close()
+    assert kept is not None
+    assert (written_meanwhile, len(kept.attempts), kept.events) == ([request.id], 1, [])

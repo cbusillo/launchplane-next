@@ -13,12 +13,15 @@ from launchplane.record import (
     Asked,
     Attempt,
     Event,
+    Held,
     Interrupted,
     Kept,
+    PostgresRecord,
     Record,
     RecordError,
     Request,
     Stands,
+    Unconfirmed,
     key_reused,
     lane_waits_on_a_person,
     needs_a_person,
@@ -35,9 +38,11 @@ def now() -> datetime:
 class PretendRecord(Record):
     kept: dict[int, Kept] = field(default_factory=dict[int, Kept])
     open_attempts: dict[int, int] = field(default_factory=dict[int, int])
-    turns: set[tuple[str, str]] = field(default_factory=set[tuple[str, str]])
+    turns: dict[tuple[str, str], object] = field(default_factory=dict[tuple[str, str], object])
     attempts_begun: int = 0
     reachable: bool = True
+    confirms_writes: bool = True
+    keys: dict[str, int] = field(default_factory=dict[str, int])
     writing: threading.RLock = field(default_factory=threading.RLock)
 
     def close(self) -> None:
@@ -54,9 +59,9 @@ class PretendRecord(Record):
     def same_as_written(self, asked: Asked, idempotency_key: str | None) -> Request | None:
         if idempotency_key is None:
             return next((each for each in self.kept.values() if each.asked() == asked and each.stands in UNFINISHED[:2]), None)
-        same_key = next((each for each in self.kept.values() if each.idempotency_key == idempotency_key), None)
+        same_key = self.kept.get(self.keys.get(idempotency_key, 0))
         if same_key is not None and same_key.asked() != asked:
-            raise key_reused(idempotency_key, same_key)
+            raise key_reused(same_key)
         return same_key
 
     def write_new(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
@@ -65,7 +70,6 @@ class PretendRecord(Record):
             id=len(self.kept) + 1,
             asked_by=asked_by,
             asked_at=now(),
-            idempotency_key=idempotency_key,
             stands=Stands.WAITING,
             ended_at=None,
             answer=None,
@@ -74,6 +78,10 @@ class PretendRecord(Record):
             events=[],
         )
         self.kept[new.id] = new
+        if idempotency_key is not None:
+            self.keys[idempotency_key] = new.id
+        if not self.confirms_writes:
+            raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")
         return new
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
@@ -107,19 +115,22 @@ class PretendRecord(Record):
         waiting = (each for each in self.kept.values() if each.stands in UNFINISHED[:2] and (each.product, each.lane) not in stuck)
         return next(waiting, None)
 
-    def turn(self, product: str, lane: str) -> AbstractContextManager[bool]:
+    def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
         return self.turn_held(product, lane)
 
     @contextmanager
-    def turn_held(self, product: str, lane: str) -> Generator[bool]:
+    def turn_held(self, product: str, lane: str) -> Generator[Held | None]:
         self.reach("taking a lane's turn")
-        ours = (product, lane) not in self.turns
-        self.turns.add((product, lane))
+        if (product, lane) in self.turns:
+            yield None
+            return
+        holder = object()
+        self.turns[product, lane] = holder
         try:
-            yield ours
+            yield lambda: self.turns.get((product, lane)) is holder
         finally:
-            if ours:
-                self.turns.discard((product, lane))
+            if self.turns.get((product, lane)) is holder:
+                del self.turns[product, lane]
 
     def take_up(self, request: int) -> int | None:
         self.reach("taking up a request")
@@ -181,3 +192,12 @@ class PretendRecord(Record):
             again = self.write_new(found.asked(), asked_by, None)
             self.answered_by_a_person(request, ASKED_AGAIN.format(again=again.id))
             return again
+
+
+# What a lost connection does: every turn is free, and its holder has not been told.
+def lose_every_turn(record: Record) -> None:
+    if isinstance(record, PretendRecord):
+        record.turns.clear()
+    if isinstance(record, PostgresRecord):
+        with record.session("ending every connection that holds a turn") as session:
+            session.execute("select pg_terminate_backend(pid) from pg_locks where locktype = 'advisory'")

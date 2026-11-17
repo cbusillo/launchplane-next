@@ -7,15 +7,16 @@ import pytest
 
 from launchplane.act import Lanes
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import LaneBuild
+from launchplane.instance import LaneBuild, OnHost
 from launchplane.judge import Condition, Work
 from launchplane.page import RECORD_UNREAD, cards
-from launchplane.record import MOST_ATTEMPTS, Asked, Kept, PostgresRecord, Record, RecordError, Stands
+from launchplane.record import MOST_ATTEMPTS, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
 from launchplane.secret_boundary import SECRET_REMOVED
+from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
-from tests.pretend_record import PretendRecord
+from tests.pretend_record import PretendRecord, lose_every_turn
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
@@ -53,7 +54,7 @@ def killed_while_checking(record: Record, lanes: Lanes, proxy: PretendProxy) -> 
     assert attempt is not None
     proxy.while_checking = kill
     with pytest.raises(LaunchplaneKilled):
-        lanes.move(LaneBuild(product="site", lane="testing", build="site:b"), partial(record.note, attempt))
+        lanes.move(LaneBuild(product="site", lane="testing", build="site:b"), Witness(tell=partial(record.note, attempt)))
     proxy.while_checking = lambda _container: None
     proxy.host.actions.clear()
     return request.id
@@ -274,3 +275,29 @@ def test_a_request_asked_while_another_is_worked_waits_for_it_and_they_run_in_th
         Stands.WAITING,
     )
     assert proxy.host.actions[-2:] == ["unroute", f"retire {proxy.host.actions[0].split()[1]}"]
+
+
+def test_a_worker_whose_turn_was_lost_and_taken_by_another_does_nothing_more_on_the_host(record: Record) -> None:
+    worker, lanes, proxy = serving_a(record)
+    other = Worker(record, lanes, NO_SECRETS)
+    read = proxy.host.read
+    moved = record.write(MOVE_B, CALLER, None)
+    retired = record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None)
+    done_by_the_other: list[str] = []
+    lost: list[bool] = []
+
+    def read_then_lose_the_turn_before_the_route_is_written(lane: tuple[str, str] | None = None) -> OnHost:
+        on_host = read(lane)
+        if proxy.host.actions[-1:] == ["check site-testing-0/"] and not lost:
+            lost.append(True)
+            lose_every_turn(record)
+            assert (other.work_next(), other.work_next()) == (True, True)
+            done_by_the_other.extend(proxy.host.actions)
+        return on_host
+
+    proxy.host.read = read_then_lose_the_turn_before_the_route_is_written
+    with pytest.raises(Interrupted, match="no longer held"):
+        worker.work_next()
+    assert done_by_the_other[-2:] == ["unroute", "retire site-testing-0"]
+    assert proxy.host.actions == done_by_the_other
+    assert (kept_of(record, moved.id).stands, kept_of(record, retired.id).stands, proxy.written) == (Stands.DONE, Stands.DONE, {})

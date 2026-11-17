@@ -32,7 +32,7 @@ from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.record import Kept, RecordError, Stands
 from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
-from launchplane.telling import Tell, named, tell_nobody, told
+from launchplane.telling import NOBODY, Witness, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -131,7 +131,9 @@ TAKE: dict[type, Take] = {
 }
 
 
-def taken_and_told(action: Action, take: Callable[[Action], Event], tell: Tell) -> Event:
+def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness) -> Event:
+    witness.hold()
+    tell = witness.tell
     try:
         event = take(action)
     except (ContainerHostError, ProxyError) as error:
@@ -145,7 +147,7 @@ def settle[Answer](
     read_judged: Callable[[], Judgement],
     next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
     take: Callable[[Action], Event],
-    tell: Tell,
+    witness: Witness,
 ) -> Answer:
     done: list[Event] = []
     while True:
@@ -160,7 +162,7 @@ def settle[Answer](
                 f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
             )
-        done.append(taken_and_told(step, take, tell))
+        done.append(taken_and_told(step, take, witness))
 
 
 class Lanes:
@@ -223,28 +225,28 @@ class Lanes:
         ]
         return Status(reading, judgements, web_addresses_judged(reading), requests, record_error)
 
-    def move(self, target: LaneBuild, tell: Tell = tell_nobody) -> MoveResult:
+    def move(self, target: LaneBuild, witness: Witness = NOBODY) -> MoveResult:
         product = self.read_product(target.product)
         return settle(
             self.judging(target.product, target.lane, product, Work.MOVE),
             lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
             self.take,
-            tell,
+            witness,
         )
 
-    def retire(self, product: str, lane: str, delete_data_set: str | None = None, tell: Tell = tell_nobody) -> RetireResult:
+    def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
         return settle(
             self.judging(product, lane, self.description_of(product), Work.RETIRE),
             lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
             self.take,
-            tell,
+            witness,
         )
 
-    def begin_maintenance(self, product: str, lane: str, tell: Tell = tell_nobody) -> MaintenanceResult:
+    def begin_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)
-        return settle(judging, maintenance.decide_begin, self.take, tell)
+        return settle(judging, maintenance.decide_begin, self.take, witness)
 
-    def end_maintenance(self, product: str, lane: str, tell: Tell = tell_nobody) -> MaintenanceResult:
+    def end_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
         web_address = web_address_of(product, lane)
         route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
@@ -257,7 +259,7 @@ class Lanes:
             self.judging(product, lane, description, Work.END_MAINTENANCE),
             lambda judged, done: maintenance.decide_end(judged, description, done),
             self.take_behind_back_soon,
-            tell,
+            witness,
         )
 
     # A move answers from what the status call sees, so it asks its lane's web address too.
