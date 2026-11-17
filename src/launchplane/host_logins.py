@@ -100,6 +100,8 @@ class HostLogins:
 
     def make(self, instance: str, use: DataSetUse) -> dict[str, str]:
         self.require_rules(use)
+        # A start that failed after its login was made left one that no call has answered for yet.
+        self.remove_unheld(use.database_container)
         login, password = login_of(instance), new_password()
         self.secrets.note([password])
         # A statement that fails is written whole into the server's log, so the server is never sent the password.

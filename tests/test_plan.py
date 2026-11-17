@@ -505,7 +505,21 @@ def test_a_retire_answers_with_a_stopped_server_whose_logins_wait_for_its_next_s
 def test_a_retire_does_not_answer_success_while_a_running_servers_logins_cannot_be_read() -> None:
     step = retire_step_with(data_set("d1", accepts=False))
     assert isinstance(step, Stop)
-    assert "its logins could not be read" in step.reason
+    assert "so its logins could not be read" in step.reason
+
+
+def test_logins_that_could_not_be_read_are_wrong_on_the_page_in_the_words_a_move_stops_with() -> None:
+    found = data_set("d1")
+    unread = found.databases[0].model_copy(update={"unheld_logins": None, "logins_unread": "psql: no such database"})
+    case = DataCase((NEW_ON_D1,), "new", (found.model_copy(update={"databases": (unread,)}),), (), None, (NEW_BACKGROUND_SERVICE,))
+    verdict = lane_verdict(lane_seen_of(case), WITH_DATA, "site", "testing", a_move_is_at_work=False)
+    step = next_data_move_step(case)
+    assert isinstance(step, Stop)
+    assert verdict.problems == [
+        "The logins of the database database-d1 could not be read, so whether one is left that no container holds is "
+        "unknown: psql: no such database"
+    ]
+    assert verdict.problems[0] in step.reason
 
 
 def test_a_data_set_named_for_deleting_is_deleted_without_its_logins_being_removed_first() -> None:

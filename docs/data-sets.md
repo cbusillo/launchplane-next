@@ -61,12 +61,12 @@ So a password is asked for from every address, and only a login of an instance o
 
 **An instance.** Before each login is made Launchplane reads the rules back from the server. If they are not exactly the rules above, the call answers `503` saying what the server has, starts no instance on that data set and deletes nothing. Launchplane sends the server the scrambled form of the new password, never the password. The web part gets the password as `PGPASSWORD`. The background service is given the login its instance's web part holds, read from that container on the host.
 
-**When it goes.** A move or a retire is not finished while a running database server of the lane has a login that no container on the host holds. Before it answers, it reads the logins from the server and the containers from the host, and removes each such login: closed to new sessions, its sessions ended, anything it owns given to `app`, then dropped. So a retired instance's login goes in the call that retired it, and one left by a call that was killed goes in the next move or retire. Until then the lane's verdict shows it as left unfinished.
+**When it goes.** A move or a retire is not finished while a running database server of the lane has a login that no container on the host holds. Before it answers, it reads the logins from the server and the containers from the host, and removes each such login: closed to new sessions, its sessions ended, anything it owns given to `app`, then dropped. The same is done before each new login is made. So a retired instance's login goes in the call that retired it, one left by a call that was killed goes in the next move or retire, and one left by a start that failed goes when the next start is tried. Until then the lane's verdict shows it as left unfinished.
 
 - A release that keeps the data set has two instances for a short time, each with its own login.
 - A database server removed by hand is made again on the kept volume. Its logins are in the data, so the instance still logs in.
 - A stopped server is the one exception: its logins are not read, and wait in the data until a move or a retire finds the server running.
-- When a running server's logins cannot be read, a move or a retire that has done everything else answers `503` saying why. Ask again once the server answers, or delete the data set by name.
+- When a running server's logins cannot be read, the lane's verdict has it as a problem with the reason, and a move or a retire that has done everything else answers `503` with the same words. Ask again once the server answers, or delete the data set by name.
 - A data set made before logins were per instance does not have these rules, so no instance is started on it. Nothing is converted: delete it by name.
 
 Anyone who can run `docker inspect` on a web part or background service can read that instance's password. It opens nothing once the instance is retired.

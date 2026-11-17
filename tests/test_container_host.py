@@ -286,6 +286,14 @@ def test_only_a_login_no_container_holds_is_removed_and_one_goes_when_its_last_c
     assert (while_the_web_part_holds_it, server_of(docker).logins) == ({"i_aaaaaaaaaaaa", "i_bbbbbbbbbbbb"}, {"i_bbbbbbbbbbbb"})
 
 
+def test_a_login_left_by_a_start_that_failed_is_removed_before_the_next_login_is_made() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    server_of(docker).logins.add("i_left_by_a_failed_start")
+    host.start_instance(TARGET, WEB, LINK)
+    assert server_of(docker).logins == {"i_aaaaaaaaaaaa"}
+
+
 def data_set_read(docker: RecordingDocker, host: ContainerHost) -> DataSetDatabase:
     server_of(docker).ready = True
     listed = DataSetDatabase(container=DATABASE, state=InstanceState.RUNNING, networks=(DATA_SET_NETWORK,))

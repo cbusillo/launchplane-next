@@ -520,6 +520,17 @@ def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) ->
     assert files_holding(volume, "SCRAM-SHA-256") != []
 
 
+def test_starts_that_fail_after_their_login_was_made_never_leave_more_than_the_last_one_and_a_good_move_removes_it(
+    lane_on_a: LaneView,
+) -> None:
+    [data_set] = lane_on_a.data_sets
+    own = environment_of(lane_on_a.receiving()["container"])["PGUSER"]
+    refusals = [move_lane(PRODUCT, LANE, "launchplane-test-ledger:no-such-build")[0] for _ in range(3)]
+    left = logins_on(data_set)
+    move(BUILD_A)
+    assert (refusals, len(left), own in left, logins_on(data_set)) == ([503, 503, 503], 2, True, [own])
+
+
 SESSION_HOLDER = "test-bed-session-holder"
 HOLD_A_SESSION = """
 import time, psycopg
@@ -631,6 +642,7 @@ def test_a_database_with_another_volume_mounted_is_refused_and_shown_so(lane_on_
         assert status == 503, body
         assert "has test-bed-another-volume mounted at /var/lib/postgresql, which it must not have" in body["error"]
         assert any("has test-bed-another-volume mounted" in problem for problem in verdict["problems"])
+        assert any("The logins of the database test-bed-impostor could not be read" in problem for problem in verdict["problems"])
     finally:
         on_scratch("docker rm --force test-bed-impostor; docker volume rm test-bed-another-volume")
 

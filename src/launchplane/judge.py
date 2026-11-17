@@ -275,6 +275,20 @@ def unheld_login_findings(seen: LaneSeen) -> list[Finding]:
     ]
 
 
+def unread_logins_problem(database: DataSetDatabase) -> str | None:
+    if database.logins_unread is None:
+        return None
+    return (
+        f"The logins of the database {database.container} could not be read, so whether one is left that no container "
+        f"holds is unknown: {database.logins_unread}"
+    )
+
+
+def login_findings(seen: LaneSeen) -> list[Finding]:
+    unread = [Finding(problem) for problem in map(unread_logins_problem, databases_of(seen)) if problem is not None]
+    return [*unread, *unheld_login_findings(seen)]
+
+
 def data_set_findings(found: DataSet | None, seen: LaneSeen, product: Product) -> list[Finding]:
     if found is None:
         return []
@@ -340,12 +354,12 @@ def findings_at_rest(seen: LaneSeen, product: Product) -> list[Finding]:
             no_visitors(seen),
             *of_other_data_sets,
             *faults_not_among(of_other_data_sets, seen, product),
-            *unheld_login_findings(seen),
+            *login_findings(seen),
         ]
     if active.lane is None or active.build is None:
         return [Finding(f"The instance {active.container} does not say which lane and build it is"), *of_other_data_sets]
     running = LaneBuild(product=active.product, lane=active.lane, build=active.build)
-    return [*lane_findings(seen, running, product), *of_other_data_sets, *unheld_login_findings(seen)]
+    return [*lane_findings(seen, running, product), *of_other_data_sets, *login_findings(seen)]
 
 
 class Stoppable(Protocol):

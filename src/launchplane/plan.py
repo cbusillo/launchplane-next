@@ -18,6 +18,7 @@ from launchplane.judge import (
     databases_of,
     instance_problems,
     lane_problems,
+    unread_logins_problem,
 )
 from launchplane.product import Product
 from launchplane.steps import (
@@ -265,12 +266,10 @@ def login_step(seen: LaneSeen, done: tuple[Event, ...]) -> Action | Stop | None:
         if database.unheld_logins:
             return RemoveLogins(database.container)
         if database.unheld_logins is None:
-            why = database.logins_unread or "it does not accept connections"
-            return Stop(
-                f"The database {database.container} is running and its logins could not be read, so Launchplane cannot tell "
-                f"whether one is left that no container holds: {why}. {changes_so_far(done)} "
-                "Ask again once the server answers, or delete its data set by name."
+            unread = unread_logins_problem(database) or (
+                f"The database {database.container} is running and does not accept connections, so its logins could not be read"
             )
+            return Stop(f"{unread}. {changes_so_far(done)} Ask again once the server answers, or delete its data set by name.")
     return None
 
 
