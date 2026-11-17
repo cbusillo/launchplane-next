@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -95,6 +97,35 @@ def sends_visitors_to(host: ProxyHost) -> dict[str, str]:
 def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
     clock = iter(range(1000))
     return TraefikProxy(host, sleep=lambda _: host.load(), clock=lambda: next(clock), **seconds)
+
+
+def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_place() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    place, run_in, read_folder = host.place_file, host.run_in, host.read_folder
+    touched: list[str] = []
+
+    def place_slowly(container: str, path: PurePosixPath, content: str) -> None:
+        touched.append("placed")
+        time.sleep(0.1)
+        place(container, path, content)
+
+    def run_and_say(container: str, command: list[str]) -> CommandResult:
+        touched.extend(["put in place"] if command[0] == "mv" else [])
+        return run_in(container, command)
+
+    def read_and_say(container: str, folder: PurePosixPath) -> dict[str, FileRead]:
+        touched.append("read")
+        return read_folder(container, folder)
+
+    host.place_file, host.run_in, host.read_folder = place_slowly, run_and_say, read_and_say
+    other_lane = threading.Thread(target=proxy.write_route, args=(OTHER, "b"))
+    other_lane.start()
+    while not touched:
+        time.sleep(0.01)
+    read = proxy.read_written()
+    other_lane.join(timeout=5)
+    assert (touched, sorted(read)) == (["placed", "put in place", "read"], [OTHER, WEB_ADDRESS])
 
 
 UNEXPECTED_ANSWERS = {

@@ -31,8 +31,20 @@ from launchplane.judge import (
 )
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.record import Kept, RecordError, Stands
-from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
+from launchplane.record import Kept, RecordError, Request, Stands
+from launchplane.steps import (
+    Action,
+    Done,
+    Event,
+    FreshNames,
+    MaintenanceOutcome,
+    MaintenanceResult,
+    MoveResult,
+    PutBack,
+    RetireResult,
+    Stop,
+    TooLate,
+)
 from launchplane.telling import NOBODY, Witness, named, told
 
 MOST_STEPS = 50
@@ -72,10 +84,18 @@ class Proxy(Protocol):
 
 type ProductReader = Callable[[str], Product]
 type KeptReader = Callable[[], list[Kept]]
+type CancelledReader = Callable[[], list[Request]]
 
 
 class Stopped(Exception):
     pass
+
+
+# The call was cancelled and has put its lane back, so it has no answer of its own to give.
+class Cancelled(Exception):
+    def __init__(self, put_back: PutBack) -> None:
+        super().__init__(f"The call was cancelled: {put_back.put_back or 'nothing had to be put back'}.")
+        self.put_back = put_back
 
 
 # What a caller needs read. A reading never holds more than was asked for, and never stands for what was not.
@@ -98,6 +118,7 @@ class Status:
     web_addresses: list[WebAddressJudged]
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
+    cancelled: list[Request] = field(default_factory=list[Request])
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -144,17 +165,34 @@ def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Wit
     return event
 
 
+type Decide[Answer] = Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop]
+type DecideBack = Callable[[Judgement, tuple[Event, ...]], plan.StepBack]
+
+
+# A cancel is read between actions, after the host. From then on the call takes the steps back and ends as cancelled,
+# unless the host shows it is too late: then the cancel is refused, once, and the call goes on as asked.
 def settle[Answer](
     read_judged: Callable[[], Judgement],
-    next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
+    next_step: Decide[Answer],
+    step_back: DecideBack,
     take: Callable[[Action], Event],
     witness: Witness,
 ) -> Answer:
     done: list[Event] = []
+    decide: Decide[Answer] | DecideBack = next_step
+    turned_at = 0
     while True:
         judged = read_judged()
-        step = next_step(judged, tuple(done))
+        if decide is next_step and witness.cancel_asked():
+            decide, turned_at = step_back, len(done)
+        step = decide(judged, tuple(done[turned_at:]))
+        if isinstance(step, TooLate):
+            witness.refuse_cancel(step.reason)
+            decide, turned_at = next_step, 0
+            step = next_step(judged, tuple(done))
         if isinstance(step, Done):
+            if isinstance(step.answer, PutBack):
+                raise Cancelled(step.answer)
             return step.answer
         if isinstance(step, Stop):
             raise Stopped(step.reason)
@@ -174,12 +212,14 @@ class Lanes:
         read_product: ProductReader = lambda _product: Product(),
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
+        read_cancelled: CancelledReader = lambda: [],
     ) -> None:
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
         self.name_fresh = name_fresh
         self.read_unfinished = read_unfinished
+        self.read_cancelled = read_cancelled
 
     # The containers are read before the proxy, so what is secret on the host is known before anything can be said of it.
     def read(self, scope: Scope) -> Reading:
@@ -207,17 +247,22 @@ class Lanes:
         except ProductError as error:
             return error
 
-    def unfinished(self) -> tuple[list[Kept], str | None]:
+    @staticmethod
+    def kept_or_why_not[Read](read: Callable[[], list[Read]], unread: str | None = None) -> tuple[list[Read], str | None]:
+        if unread is not None:
+            return [], unread
         try:
-            return self.read_unfinished(), None
+            return read(), None
         except RecordError as error:
             return [], str(error)
 
     def read_status(self) -> Status:
         # A request taken up or ended while the host is read is at work on what was read.
-        before, unread_before = self.unfinished()
+        before, unread_before = self.kept_or_why_not(self.read_unfinished)
         reading = self.read(EVERY_LANE)
-        requests, record_error = ([], unread_before) if unread_before else self.unfinished()
+        requests, unread_after = self.kept_or_why_not(self.read_unfinished, unread_before)
+        cancelled, record_error = self.kept_or_why_not(self.read_cancelled, unread_after)
+        requests = [] if record_error else requests
         at_work = {(each.product, each.lane): each.work for each in (*before, *requests) if each.stands is Stands.WORKING}
         # With either reading of the record missing, which lane a request is at work on is not known for any lane.
         unread = None if record_error is None else WorkUnread(record_error)
@@ -226,13 +271,14 @@ class Lanes:
             judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
-        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error)
+        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancelled)
 
     def move(self, target: LaneBuild, witness: Witness = NOBODY) -> MoveResult:
         product = self.read_product(target.product)
         return settle(
             self.judging(target.product, target.lane, product, Work.MOVE),
             lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
+            lambda judged, done: plan.move_step_back(judged, target, done),
             self.take,
             witness,
         )
@@ -241,13 +287,14 @@ class Lanes:
         return settle(
             self.judging(product, lane, self.description_of(product), Work.RETIRE),
             lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
+            plan.retire_step_back,
             self.take,
             witness,
         )
 
     def begin_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)
-        return settle(judging, maintenance.decide_begin, self.take, witness)
+        return settle(judging, maintenance.decide_begin, maintenance.begin_step_back, self.take, witness)
 
     def end_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
@@ -261,6 +308,7 @@ class Lanes:
         return settle(
             self.judging(product, lane, description, Work.END_MAINTENANCE),
             lambda judged, done: maintenance.decide_end(judged, description, done),
+            maintenance.end_step_back,
             self.take_behind_back_soon,
             witness,
         )

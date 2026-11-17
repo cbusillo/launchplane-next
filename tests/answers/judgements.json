@@ -308,13 +308,15 @@
  "two background services": {
   "at rest": [
    "wrong",
-   "wrong | more than one | The lane has 2 background services (new-background-service, second) where it must have one, belonging to new",
-   "parts: new good, new-background-service wrong, second good, database-d1 good"
+   "wrong | more than one | The background service new-background-service is one of 2 (new-background-service, second) where it must have one, belonging to new",
+   "wrong | more than one | The background service second is one of 2 (new-background-service, second) where it must have one, belonging to new",
+   "parts: new good, new-background-service wrong, second wrong, database-d1 good"
   ],
   "at work": [
    "work under way",
-   "under way | more than one | The lane has 2 background services (new-background-service, second) where it must have one, belonging to new",
-   "parts: new good, new-background-service on purpose, second good, database-d1 good"
+   "under way | more than one | The background service new-background-service is one of 2 (new-background-service, second) where it must have one, belonging to new",
+   "under way | more than one | The background service second is one of 2 (new-background-service, second) where it must have one, belonging to new",
+   "parts: new good, new-background-service on purpose, second on purpose, database-d1 good"
   ]
  },
  "a background service with a volume mounted": {
@@ -356,26 +358,26 @@
  "a background service whose instance is gone": {
   "at rest": [
    "wrong",
-   "wrong | of another instance | The background service gone-background-service belongs to gone, not new",
+   "wrong | of another instance | The background service gone-background-service belongs to gone, which is not on the host",
    "parts: new good, gone-background-service wrong, database-d1 good"
   ],
   "at work": [
    "work under way",
-   "under way | of another instance | The background service gone-background-service belongs to gone, not new",
+   "under way | of another instance | The background service gone-background-service belongs to gone, which is not on the host",
    "parts: new good, gone-background-service on purpose, database-d1 good"
   ]
  },
  "a background service whose instance is gone and that can reach out": {
   "at rest": [
    "wrong",
-   "wrong | of another instance | The background service gone-background-service belongs to gone, not new",
+   "wrong | of another instance | The background service gone-background-service belongs to gone, which is not on the host",
    "wrong | attached or mounted where it must not be | The background service gone-background-service is attached to bridge, which it must not be",
    "wrong | attached or mounted where it must not be | The background service gone-background-service can reach out through bridge",
    "parts: new good, gone-background-service wrong, database-d1 good"
   ],
   "at work": [
    "wrong",
-   "under way | of another instance | The background service gone-background-service belongs to gone, not new",
+   "under way | of another instance | The background service gone-background-service belongs to gone, which is not on the host",
    "wrong | attached or mounted where it must not be | The background service gone-background-service is attached to bridge, which it must not be",
    "wrong | attached or mounted where it must not be | The background service gone-background-service can reach out through bridge",
    "parts: new good, gone-background-service wrong, database-d1 good"
@@ -533,28 +535,32 @@
   "at rest": [
    "unfinished",
    "left unfinished | no instance receives visitors | No instance receives visitors",
-   "parts: new good, new-background-service good, database-d1 good"
+   "left unfinished | of an instance that receives no visitors | The background service new-background-service belongs to new, which does not receive visitors: no instance does",
+   "parts: new good, new-background-service wrong, database-d1 good"
   ],
   "at work": [
    "work under way",
    "under way | no instance receives visitors | No instance receives visitors",
-   "parts: new good, new-background-service good, database-d1 good"
+   "under way | of an instance that receives no visitors | The background service new-background-service belongs to new, which does not receive visitors: no instance does",
+   "parts: new good, new-background-service on purpose, database-d1 good"
   ]
  },
  "a route removed by hand from an instance that can reach out": {
   "at rest": [
    "wrong",
    "left unfinished | no instance receives visitors | No instance receives visitors",
+   "left unfinished | of an instance that receives no visitors | The background service new-background-service belongs to new, which does not receive visitors: no instance does",
    "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
    "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
-   "parts: new wrong, new-background-service good, database-d1 good"
+   "parts: new wrong, new-background-service wrong, database-d1 good"
   ],
   "at work": [
    "wrong",
    "under way | no instance receives visitors | No instance receives visitors",
+   "under way | of an instance that receives no visitors | The background service new-background-service belongs to new, which does not receive visitors: no instance does",
    "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
    "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
-   "parts: new wrong, new-background-service good, database-d1 good"
+   "parts: new wrong, new-background-service on purpose, database-d1 good"
   ]
  },
  "a route written and not yet loaded": {
@@ -576,13 +582,15 @@
    "wrong",
    "left unfinished | no instance receives visitors | No instance receives visitors",
    "wrong | the proxy reports the route not enabled | The proxy has loaded the route of testing.site.test to new and reports it disabled, so the web address reaches no instance",
-   "parts: new good, new-background-service good, database-d1 good"
+   "left unfinished | of an instance that receives no visitors | The background service new-background-service belongs to new, which does not receive visitors: no instance does",
+   "parts: new good, new-background-service wrong, database-d1 good"
   ],
   "at work": [
    "work under way",
    "under way | no instance receives visitors | No instance receives visitors",
    "under way | the proxy reports the route not enabled | The proxy has loaded the route of testing.site.test to new and reports it disabled, so the web address reaches no instance",
-   "parts: new good, new-background-service good, database-d1 good"
+   "under way | of an instance that receives no visitors | The background service new-background-service belongs to new, which does not receive visitors: no instance does",
+   "parts: new good, new-background-service on purpose, database-d1 good"
   ]
  },
  "a web address that answers with an error though its instance runs": {
@@ -601,28 +609,32 @@
   "at rest": [
    "unfinished",
    "left unfinished | the proxy is not running | No instance receives visitors: the proxy is not running",
-   "parts: web good, web-background-service good, database-d1 good"
+   "left unfinished | of an instance that receives no visitors | The background service web-background-service belongs to web, which does not receive visitors: no instance does",
+   "parts: web good, web-background-service wrong, database-d1 good"
   ],
   "at work": [
    "work under way",
    "under way | the proxy is not running | No instance receives visitors: the proxy is not running",
-   "parts: web good, web-background-service good, database-d1 good"
+   "under way | of an instance that receives no visitors | The background service web-background-service belongs to web, which does not receive visitors: no instance does",
+   "parts: web good, web-background-service on purpose, database-d1 good"
   ]
  },
  "the proxy down and a part attached where it must not be": {
   "at rest": [
    "wrong",
    "left unfinished | the proxy is not running | No instance receives visitors: the proxy is not running",
+   "left unfinished | of an instance that receives no visitors | The background service web-background-service belongs to web, which does not receive visitors: no instance does",
    "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
    "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
-   "parts: web wrong, web-background-service good, database-d1 good"
+   "parts: web wrong, web-background-service wrong, database-d1 good"
   ],
   "at work": [
    "wrong",
    "under way | the proxy is not running | No instance receives visitors: the proxy is not running",
+   "under way | of an instance that receives no visitors | The background service web-background-service belongs to web, which does not receive visitors: no instance does",
    "wrong | attached or mounted where it must not be | The instance web is attached to bridge, which it must not be",
    "wrong | attached or mounted where it must not be | The instance web can reach out through bridge",
-   "parts: web wrong, web-background-service good, database-d1 good"
+   "parts: web wrong, web-background-service on purpose, database-d1 good"
   ]
  },
  "in maintenance with every part stopped": {

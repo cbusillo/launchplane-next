@@ -1,6 +1,7 @@
 import hashlib
 import os
 from collections.abc import Callable, Generator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,10 +16,14 @@ from pydantic import BaseModel, ConfigDict
 
 from launchplane.judge import Work
 from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
+from launchplane.steps import PutBack
 
 MOST_ATTEMPTS = 3
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
+MOST_CONNECTIONS = 10
+MOST_READINGS_AT_ONCE = 4
+MINUTES_A_CANCELLED_REQUEST_IS_SHOWN = 10
 
 # Asked before each action on the host: whether the lane's turn is still held.
 type Held = Callable[[], bool]
@@ -92,9 +97,10 @@ class Stands(StrEnum):
     DONE = "done"
     FAILED = "failed"
     NEEDS_A_PERSON = "needs a person"
+    CANCELLED = "cancelled"
 
 
-ENDED = (Stands.DONE, Stands.FAILED)
+ENDED = (Stands.DONE, Stands.FAILED, Stands.CANCELLED)
 
 ATTEMPTED = {
     Work.MOVE: "The move of {lane} of {product} to {build}",
@@ -125,6 +131,10 @@ class Request(Asked):
     ended_at: datetime | None
     answer: dict[str, Any] | None
     error: str | None
+    cancel_asked_at: datetime | None = None
+    cancel_asked_by: str | None = None
+    # Why a cancel that was asked was not carried out, once the worker has read the host and said so.
+    cancel_refused: str | None = None
 
     def asked(self) -> Asked:
         return Asked.model_validate(self.model_dump(include=set(Asked.model_fields)))
@@ -154,13 +164,17 @@ class Record(Protocol):
     def read(self, request: int) -> Kept | None: ...
     def unfinished(self) -> list[Kept]: ...
     def recently_ended(self) -> list[Request]: ...
-    def next_up(self) -> Request | None: ...
+    def recently_cancelled(self) -> list[Request]: ...
+    def next_up(self) -> list[Request]: ...
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
     def take_up(self, request: int) -> int | None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
     def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None: ...
     def give_up(self, request: int) -> Request | None: ...
     def retry(self, request: int, asked_by: str) -> Request | None: ...
+    def cancel(self, request: int, by: str) -> Request | None: ...
+    def cancel_wanted(self, request: int) -> bool: ...
+    def refuse_cancel(self, attempt: int, why: str) -> None: ...
 
 
 def database() -> str:
@@ -181,6 +195,12 @@ def needs_a_person(request: Request) -> str:
     )
 
 
+def how_cancelled(request: Request) -> str:
+    put_back = PutBack.model_validate(request.answer or {}).put_back
+    did = f"To put the lane back, Launchplane {', '.join(put_back)}." if put_back else "Nothing on the host had to be put back."
+    return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}"
+
+
 GIVEN_UP = " A person gave it up."
 ASKED_AGAIN = " A person asked for it again, as request {again}."
 
@@ -195,7 +215,7 @@ class Sql:
     SAME_UNFINISHED: Final = """
     select * from request
     where (product, lane, work) = (%s, %s, %s) and build is not distinct from %s and delete_data_set is not distinct from %s
-        and stands in ('waiting', 'working')
+        and stands in ('waiting', 'working') and cancel_asked_at is null
     order by id limit 1
     """
     WRITE: Final = """
@@ -203,15 +223,41 @@ class Sql:
     values (%s, %s, %s, %s, %s, %s, %s) returning *
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
-    RECENTLY_ENDED: Final = "select * from request where stands in ('done', 'failed') order by ended_at desc, id desc limit 20"
+    RECENTLY_ENDED: Final = """
+    select * from request where stands in ('done', 'failed', 'cancelled') order by ended_at desc, id desc limit 20
+    """
+    RECENTLY_CANCELLED: Final = """
+    select * from request where stands = 'cancelled' and ended_at > now() - make_interval(mins => %s) order by id
+    """
     ATTEMPTS: Final = "select id, request, began_at, ended_at, ended from attempt where request = any(%s) order by id"
     EVENTS: Final = "select request, attempt, at, did, error from event where request = any(%s) order by id"
     NEXT_UP: Final = """
-    select * from request asked
-    where stands in ('waiting', 'working') and not exists (
-        select from request stuck where (stuck.product, stuck.lane) = (asked.product, asked.lane) and stuck.stands = 'needs a person'
-    )
-    order by id limit 1
+    select * from (
+        select distinct on (product, lane) * from request asked
+        where stands in ('waiting', 'working') and not exists (
+            select from request stuck
+            where (stuck.product, stuck.lane) = (asked.product, asked.lane) and stuck.stands = 'needs a person'
+        )
+        order by product, lane, id
+    ) oldest_of_each_lane order by id
+    """
+    UNFINISHED_BEFORE: Final = """
+    select id from request where (product, lane) = (%s, %s) and id < %s and stands in ('waiting', 'working')
+    """
+    # One statement, so a request taken up while it is being cancelled is either ended or marked, never neither.
+    CANCEL: Final = """
+    update request set
+        stands = case stands when 'waiting' then 'cancelled' else stands end,
+        ended_at = case stands when 'waiting' then now() end,
+        answer = case stands when 'waiting' then %s end,
+        cancel_asked_at = now(),
+        cancel_asked_by = %s
+    where id = any(%s) and stands in ('waiting', 'working') and cancel_asked_at is null
+    """
+    CANCEL_WANTED: Final = "select cancel_asked_at is not null and cancel_refused is null as wanted from request where id = %s"
+    REFUSE_CANCEL: Final = """
+    update request set cancel_refused = %s from attempt
+    where attempt.id = %s and attempt.ended is null and request.id = attempt.request returning request.id
     """
     ONE_READING: Final = "set transaction isolation level repeatable read, read only"
     TURN_HELD: Final = "select count(*) as held from pg_locks where locktype = 'advisory' and pid = pg_backend_pid() and granted"
@@ -280,9 +326,20 @@ def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked)
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
+# The one path by which a request is cancelled, for the call and for a newer request of its lane: one that waits ends
+# with nothing done, and one that is worked is marked for its worker to read between actions.
+def cancel_each(session: Session, gate: Gate, requests: list[int], by: str) -> None:
+    session.execute(Sql.CANCEL, gate.sent(PutBack().model_dump(), by, list[JsonValue](requests)))
+
+
+# A newer request for a lane cancels every unfinished one that came before it. One that needs a person is never among
+# them: its lane takes no request at all.
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
     passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key))
-    return Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
+    new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
+    before = session.execute(Sql.UNFINISHED_BEFORE, gate.made(new.product, new.lane, new.id)).fetchall()
+    cancel_each(session, gate, [row["id"] for row in before], f"request {new.id}")
+    return new
 
 
 def unreachable(doing: str, error: psycopg.Error) -> RecordError:
@@ -325,13 +382,22 @@ class PostgresRecord(Record):
     def __init__(self, database_named: str, secrets: Secrets, seconds_to_reach: float = SECONDS_TO_REACH_THE_DATABASE) -> None:
         self.database = database_named
         self.gate = Gate(secrets)
+        self.seconds_to_answer = seconds_to_reach
         # Each connection is checked as it is taken, so one the database dropped is replaced and not handed out.
         self.pool = ConnectionPool(
-            database_named, min_size=1, max_size=4, timeout=seconds_to_reach, check=ConnectionPool.check_connection, open=False
+            database_named,
+            min_size=1,
+            max_size=MOST_CONNECTIONS,
+            timeout=seconds_to_reach,
+            check=ConnectionPool.check_connection,
+            open=False,
         )
         self.pool.open()
+        # Fewer than the pool has connections, so readings the record never answers leave connections for the workers.
+        self.readers = ThreadPoolExecutor(max_workers=MOST_READINGS_AT_ONCE, thread_name_prefix="record-reading")
 
     def close(self) -> None:
+        self.readers.shutdown(wait=False, cancel_futures=True)
         self.pool.close()
 
     # One transaction on a connection of the pool. It is never held while Launchplane talks to the container host.
@@ -343,17 +409,32 @@ class PostgresRecord(Record):
         except psycopg.Error as error:
             raise unreachable(doing, error) from error
 
+    # One reading of the record in one transaction, given up on when the record has not answered in time. The reading
+    # itself is left to end when the record answers.
+    def reading[Answer](self, doing: str, read: Callable[[Session], Answer]) -> Answer:
+        def read_at_one_moment() -> Answer:
+            with self.session(doing) as session:
+                session.execute(Sql.ONE_READING)
+                return read(session)
+
+        waited_for = self.readers.submit(read_at_one_moment)
+        try:
+            return waited_for.result(self.seconds_to_answer)
+        except TimeoutError:
+            waited_for.cancel()
+            raise RecordError(f"Launchplane's record did not answer within {self.seconds_to_answer:g} s while {doing}.") from None
+
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-        # A call with a key may be a repeat of one that was written, so only a call without one is known unwritten.
-        may_be_written = idempotency_key is not None
+        # Until the record has been asked, the call may be a repeat of one it holds, so it is not known unwritten.
+        may_be_written = True
         try:
             with self.session("writing a request") as session:
                 # Two calls asking the same thing at once write one request: the second waits here and finds the first.
                 session.execute(Sql.LOCK_WRITERS)
                 same = same_as_written(session, self.gate, asked, idempotency_key)
                 if same is not None:
-                    may_be_written = True
                     return same
+                may_be_written = False
                 refuse_while_a_person_is_awaited(session, self.gate, asked)
                 may_be_written = True
                 return write_new(session, self.gate, asked, asked_by, idempotency_key)
@@ -363,24 +444,35 @@ class PostgresRecord(Record):
             raise
 
     def read(self, request: int) -> Kept | None:
-        with self.session("reading a request") as session:
-            session.execute(Sql.ONE_READING)
+        def one(session: Session) -> Kept | None:
             rows = session.execute(Sql.READ, self.gate.made(request)).fetchall()
             return with_history(session, self.gate, rows)[0] if rows else None
 
+        return self.reading("reading a request", one)
+
     def unfinished(self) -> list[Kept]:
-        with self.session("reading the requests not finished") as session:
-            session.execute(Sql.ONE_READING)
-            return with_history(session, self.gate, session.execute(Sql.UNFINISHED).fetchall())
+        return self.reading(
+            "reading the requests not finished",
+            lambda session: with_history(session, self.gate, session.execute(Sql.UNFINISHED).fetchall()),
+        )
 
     def recently_ended(self) -> list[Request]:
-        with self.session("reading the requests that ended") as session:
-            return [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()]
+        return self.reading(
+            "reading the requests that ended",
+            lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()],
+        )
 
-    def next_up(self) -> Request | None:
-        with self.session("looking for the next request") as session:
-            row = session.execute(Sql.NEXT_UP).fetchone()
-            return None if row is None else Request.model_validate(row)
+    def recently_cancelled(self) -> list[Request]:
+        shown = self.gate.made(MINUTES_A_CANCELLED_REQUEST_IS_SHOWN)
+        return self.reading(
+            "reading the requests that were cancelled",
+            lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_CANCELLED, shown).fetchall()],
+        )
+
+    # The oldest request of each lane that takes one, oldest first.
+    def next_up(self) -> list[Request]:
+        with self.session("looking for the next requests") as session:
+            return [Request.model_validate(row) for row in session.execute(Sql.NEXT_UP).fetchall()]
 
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
         return self.turn_held(product, lane)
@@ -443,3 +535,19 @@ class PostgresRecord(Record):
             again = write_new(session, self.gate, Request.model_validate(row).asked(), asked_by, None)
             session.execute(Sql.GIVE_UP, self.gate.made(ASKED_AGAIN.format(again=again.id), request))
             return again
+
+    def cancel(self, request: int, by: str) -> Request | None:
+        with self.session("cancelling a request") as session:
+            cancel_each(session, self.gate, [request], by)
+            row = session.execute(Sql.READ, self.gate.made(request)).fetchone()
+            return None if row is None else Request.model_validate(row)
+
+    def cancel_wanted(self, request: int) -> bool:
+        with self.session("reading whether a request is to be cancelled") as session:
+            row = session.execute(Sql.CANCEL_WANTED, self.gate.made(request)).fetchone()
+            return row is not None and row["wanted"]
+
+    def refuse_cancel(self, attempt: int, why: str) -> None:
+        with self.session("writing why a request was not cancelled") as session:
+            if session.execute(Sql.REFUSE_CANCEL, self.gate.made(why, attempt)).fetchone() is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so why it was not cancelled was not written.")

@@ -63,6 +63,11 @@ class MaintenanceResult(BaseModel):
     error: str | None = None
 
 
+# How a cancelled request ended: what was done to put its lane back as it was.
+class PutBack(BaseModel):
+    put_back: list[str] = []
+
+
 @dataclass(frozen=True)
 class FreshNames:
     container: str
@@ -229,6 +234,12 @@ class Done[Answer]:
 
 @dataclass(frozen=True)
 class Stop:
+    reason: str
+
+
+# A cancel that came after the point where the lane can be put back. The call goes on as asked.
+@dataclass(frozen=True)
+class TooLate:
     reason: str
 
 

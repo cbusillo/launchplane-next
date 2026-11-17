@@ -59,6 +59,7 @@ class Kind(StrEnum):
     NO_BACKGROUND_SERVICE = "no background service"
     DOUBLED = "more than one"
     OF_ANOTHER_INSTANCE = "of another instance"
+    OF_NO_ACTIVE_INSTANCE = "of an instance that receives no visitors"
     OF_ANOTHER_BUILD = "of another build"
     UNSTEADY = "not yet up as long as it must stay up"
     NO_NETWORK = "no network"
@@ -340,26 +341,36 @@ def steadiness_findings(part: str, running: RunningBackgroundService, of: Judged
     return []
 
 
-# Two of them, or one the product has none of, are judged as a count; then only where each is attached is judged.
-def one_background_service_findings(running: RunningBackgroundService, of: Judged, *, counted: bool) -> list[Found]:
-    part, subject = f"The background service {running.container}", running.container
+# Which instance a background service must belong to, and whether it does.
+def belonging_findings(part: str, running: RunningBackgroundService, owner: RunningInstance | None, of: Judged) -> list[Found]:
+    subject = running.container
+    if owner is None:
+        sentence = f"{part} belongs to {running.instance or 'no instance'}, which is not on the host"
+        return [Found(Weight.WRONG, subject, Kind.OF_ANOTHER_INSTANCE, sentence)]
+    if of.serving is None:
+        # In maintenance no instance receiving visitors is meant, and which instance will again is not known of several.
+        if of.lane.route.in_maintenance:
+            return []
+        sentence = f"{part} belongs to {owner.container}, which does not receive visitors: no instance does"
+        return [Found(Weight.UNFINISHED, subject, Kind.OF_NO_ACTIVE_INSTANCE, sentence)]
+    if owner.container != of.serving.container:
+        sentence = f"{part} belongs to {owner.container}, not {of.serving.container}"
+        return [Found(Weight.UNFINISHED, subject, Kind.OF_ANOTHER_INSTANCE, sentence)]
+    if of.serving.build in (None, running.build):
+        return []
+    return [Found(Weight.WRONG, subject, Kind.OF_ANOTHER_BUILD, f"{part} runs {running.build}, not {of.serving.build}")]
+
+
+# Each is judged for itself, however many the lane has: one more than it must have makes none of them good.
+def one_background_service_findings(running: RunningBackgroundService, of: Judged) -> list[Found]:
+    part = f"The background service {running.container}"
     owner = next((instance for instance in of.lane.instances if instance.container == running.instance), None)
     still_up = state_findings(part, running, of, Weight.UNFINISHED) if of.stopped_is_meant else []
     beside = owner or of.serving
     connected = [] if beside is None else connection_findings(running, beside, of)
-    if of.serving is None or counted:
-        return [*still_up, *connected]
-    if running.instance != of.serving.container:
-        weight = Weight.WRONG if owner is None else Weight.UNFINISHED
-        sentence = f"{part} belongs to {running.instance}, not {of.serving.container}"
-        return [Found(weight, subject, Kind.OF_ANOTHER_INSTANCE, sentence), *still_up, *connected]
-    build = f"{part} runs {running.build}, not {of.serving.build}"
-    return [
-        *([] if of.serving.build in (None, running.build) else [Found(Weight.WRONG, subject, Kind.OF_ANOTHER_BUILD, build)]),
-        *still_up,
-        *connected,
-        *steadiness_findings(part, running, of),
-    ]
+    belonging = belonging_findings(part, running, owner, of)
+    of_the_serving_instance = of.serving is not None and not belonging
+    return [*belonging, *still_up, *connected, *(steadiness_findings(part, running, of) if of_the_serving_instance else [])]
 
 
 def background_service_count_findings(containers: list[str], of: Judged) -> list[Found]:
@@ -370,22 +381,30 @@ def background_service_count_findings(containers: list[str], of: Judged) -> list
         return [Found(Weight.WRONG, container, Kind.UNWANTED, sentence) for container, sentence in sentences]
     if len(containers) == 1:
         return []
-    names = ", ".join(containers) or "none"
-    sentence = (
-        f"The lane has {len(containers)} background services ({names}) where it must have one, belonging to {of.serving.container}"
-    )
+    must = f"where it must have one, belonging to {of.serving.container}"
     if not containers:
-        return [Found(Weight.UNFINISHED, of.lane.web_address, Kind.NO_BACKGROUND_SERVICE, sentence)]
-    return [Found(Weight.WRONG, containers[0], Kind.DOUBLED, sentence)]
+        return [
+            Found(
+                Weight.UNFINISHED,
+                of.lane.web_address,
+                Kind.NO_BACKGROUND_SERVICE,
+                f"The lane has 0 background services (none) {must}",
+            )
+        ]
+    names = ", ".join(containers)
+    return [
+        Found(
+            Weight.WRONG, container, Kind.DOUBLED, f"The background service {container} is one of {len(containers)} ({names}) {must}"
+        )
+        for container in containers
+    ]
 
 
 def background_service_findings(of: Judged) -> list[Found]:
     running = sorted(of.lane.background_services, key=lambda each: each.container)
-    counted = background_service_count_findings([each.container for each in running], of)
-    as_a_count = bool(counted) or of.product is None
     return [
-        *counted,
-        *[finding for each in running for finding in one_background_service_findings(each, of, counted=as_a_count)],
+        *background_service_count_findings([each.container for each in running], of),
+        *[finding for each in running for finding in one_background_service_findings(each, of)],
     ]
 
 

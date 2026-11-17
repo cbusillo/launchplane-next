@@ -25,6 +25,7 @@ from launchplane.steps import (
     FreshNames,
     MoveResult,
     Outcome,
+    PutBack,
     RemoveInstance,
     RemoveLogins,
     RemoveRoute,
@@ -40,10 +41,12 @@ from launchplane.steps import (
     Stop,
     StopDatabase,
     StopPart,
+    TooLate,
     WriteRoute,
 )
 
 type Step[Answer] = Action | Done[Answer] | Stop
+type StepBack = Step[PutBack] | TooLate
 MADE_READY = {Kind.NO_NETWORK, Kind.NO_VOLUME, Kind.NO_DATABASE, Kind.STOPPED, Kind.NOT_ACCEPTING}
 LOGINS_UNKNOWN = {Kind.LOGINS_UNREAD, Kind.NOT_ACCEPTING, Kind.NOT_ASKED}
 
@@ -397,4 +400,37 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
             deleted_data_set=deleted,
             kept_data_sets=sorted(found.data_set for found in lane.data_sets),
         )
+    )
+
+
+def put_back(done: tuple[Event, ...]) -> Done[PutBack]:
+    return Done(PutBack(put_back=changes_made(done)))
+
+
+# Whether visitors have been switched is read from the routes file, as the move reads which instance receives them.
+# What the move started is found as the move finds the instance to switch to: beside the one receiving, of its build.
+def move_step_back(judged: Judgement, target: LaneBuild, done: tuple[Event, ...]) -> StepBack:
+    lane = judged.lane
+    receiving = next((instance for instance in lane.instances if instance.container == lane.route.written), None)
+    if receiving is not None and receiving.build == target.build:
+        return TooLate(
+            f"{lane.web_address} already sends its visitors to {receiving.container}, an instance of {target.build}, so the "
+            "move could not be cancelled and is finished as asked. Moving the lane to its earlier build puts that build back."
+        )
+    # A move starts nothing in a lane in maintenance, and the instance stopped there is the lane's own.
+    started = [] if lane.route.in_maintenance else [each.container for each in lane.instances if each.build == target.build]
+    if started:
+        return RemoveInstance(min(started))
+    return with_logins_settled(put_back(done), judged, done)
+
+
+# The first thing a retire changes is the route, and nothing it does after that can be put back.
+def retire_step_back(judged: Judgement, done: tuple[Event, ...]) -> StepBack:
+    lane = judged.lane
+    if lane.route.written is not None:
+        return put_back(done)
+    return TooLate(
+        f"{lane.web_address} has no route, so retiring {lane.lane} of {lane.product} could not be cancelled and is finished "
+        "as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself. "
+        "Moving the lane to a build brings it back on its data set."
     )

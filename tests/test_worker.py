@@ -10,10 +10,10 @@ from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import LaneBuild, OnHost
 from launchplane.judge import Condition, Work
 from launchplane.page import RECORD_UNREAD, cards
-from launchplane.record import MOST_ATTEMPTS, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
+from launchplane.record import ENDED, MOST_ATTEMPTS, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
 from launchplane.secret_boundary import SECRET_REMOVED
 from launchplane.telling import Witness
-from launchplane.worker import Worker
+from launchplane.worker import MOST_LANES_AT_ONCE, Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
 from tests.pretend_record import PretendRecord, lose_every_turn
@@ -43,6 +43,27 @@ def kept_of(record: Record, request: int) -> Kept:
     kept = record.read(request)
     assert kept is not None
     return kept
+
+
+def delete_every_event(record: Record, request: int) -> None:
+    if isinstance(record, PretendRecord):
+        record.change(request, events=[])
+    if isinstance(record, PostgresRecord):
+        with record.session("deleting every event") as session:
+            # noinspection SqlResolve,SqlWithoutWhere
+            session.execute("delete from event")
+
+
+def other_lane(proxy: PretendProxy, lane: str) -> Asked:
+    proxy.host.place(LaneBuild(product="site", lane=lane, build="site:a"), f"{lane}-a")
+    proxy.route(f"{lane}.site.test", f"{lane}-a")
+    return Asked(product="site", lane=lane, work=Work.MOVE, build="site:b")
+
+
+def stopped(worker: Worker, threads: list[threading.Thread]) -> None:
+    worker.stop()
+    for thread in threads:
+        thread.join(timeout=5)
 
 
 def killed_while_checking(record: Record, lanes: Lanes, proxy: PretendProxy) -> int:
@@ -92,12 +113,7 @@ def test_a_request_left_working_is_taken_up_and_finished_from_what_is_on_the_hos
     request = killed_while_checking(record, lanes, proxy)
     started = next(container for container in proxy.host.instances if container != "a")
     if events_deleted:
-        if isinstance(record, PretendRecord):
-            record.change(request, events=[])
-        if isinstance(record, PostgresRecord):
-            with record.session("deleting every event") as session:
-                # noinspection SqlResolve,SqlWithoutWhere
-                session.execute("delete from event")
+        delete_every_event(record, request)
     assert worker.work_next() is True
     kept = kept_of(record, request)
     assert proxy.host.actions == [f"check {started}/", f"route {started}", "retire a"]
@@ -160,8 +176,9 @@ def test_a_failure_launchplane_does_not_know_fails_its_request_and_the_next_requ
 
     proxy.while_checking = break_once
     broken = record.write(MOVE_B, CALLER, None)
+    assert worker.work_next() is True
     after = record.write(Asked(product="site", lane="testing", work=Work.MOVE, build="site:a"), CALLER, None)
-    assert (worker.work_next(), worker.work_next()) == (True, True)
+    assert worker.work_next() is True
     error = kept_of(record, broken.id).error
     assert error is not None and "a mistake in Launchplane" in error
     assert (kept_of(record, broken.id).stands, kept_of(record, after.id).stands) == (Stands.FAILED, Stands.DONE)
@@ -256,30 +273,21 @@ def test_losing_the_record_for_one_write_stops_the_work_and_it_is_taken_up_again
     assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.DONE, ["interrupted", "done"])
 
 
-def test_a_request_asked_while_another_is_worked_waits_for_it_and_they_run_in_the_order_they_came(record: Record) -> None:
+def test_a_request_too_late_to_cancel_finishes_first_and_the_newer_one_is_then_worked_in_its_turn(record: Record) -> None:
     worker, _, proxy = serving_a(record)
-    checking, checked = threading.Event(), threading.Event()
+    newer: list[int] = []
 
-    def hold_the_check(_container: str) -> None:
-        checking.set()
-        assert checked.wait(timeout=5)
+    def ask_for_a_retire_once_switched() -> None:
+        if not newer:
+            newer.append(record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None).id)
 
-    proxy.while_checking = hold_the_check
-    record.write(MOVE_B, CALLER, None)
-    retire = record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None)
-    thread = worker.start()
-    assert checking.wait(timeout=5)
-    done_while_the_move_was_held = list(proxy.host.actions)
-    waiting_meanwhile = kept_of(record, retire.id).stands
-    checked.set()
-    wait_until(lambda: kept_of(record, retire.id).stands == Stands.DONE)
-    worker.stop()
-    thread.join(timeout=5)
-    assert ([action.split()[0] for action in done_while_the_move_was_held], waiting_meanwhile) == (
-        ["start", "check"],
-        Stands.WAITING,
-    )
-    assert proxy.host.actions[-2:] == ["unroute", f"retire {proxy.host.actions[0].split()[1]}"]
+    proxy.while_awaiting = ask_for_a_retire_once_switched
+    moved = record.write(MOVE_B, CALLER, None)
+    assert (worker.work_next(), worker.work_next(), worker.work_next()) == (True, True, False)
+    move, retire = kept_of(record, moved.id), kept_of(record, newer[0])
+    assert move.cancel_refused is not None and "already sends its visitors to site-testing-0" in move.cancel_refused
+    assert (move.stands, move.cancel_asked_by, retire.stands) == (Stands.DONE, f"request {retire.id}", Stands.DONE)
+    assert proxy.host.actions[2:] == ["route site-testing-0", "retire a", "unroute", "retire site-testing-0"]
 
 
 def test_a_worker_whose_turn_was_lost_and_taken_by_another_does_nothing_more_on_the_host(record: Record) -> None:
@@ -287,7 +295,6 @@ def test_a_worker_whose_turn_was_lost_and_taken_by_another_does_nothing_more_on_
     other = Worker(record, lanes, NO_SECRETS)
     read = proxy.host.read
     moved = record.write(MOVE_B, CALLER, None)
-    retired = record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None)
     done_by_the_other: list[str] = []
     lost: list[bool] = []
 
@@ -296,13 +303,77 @@ def test_a_worker_whose_turn_was_lost_and_taken_by_another_does_nothing_more_on_
         if proxy.host.actions[-1:] == ["check site-testing-0/"] and not lost:
             lost.append(True)
             lose_every_turn(record)
-            assert (other.work_next(), other.work_next()) == (True, True)
+            assert other.work_next() is True
             done_by_the_other.extend(proxy.host.actions)
         return on_host
 
     proxy.host.read = read_then_lose_the_turn_before_the_route_is_written
     with pytest.raises(Interrupted, match="no longer held"):
         worker.work_next()
-    assert done_by_the_other[-2:] == ["unroute", "retire site-testing-0"]
+    kept = kept_of(record, moved.id)
+    assert done_by_the_other[-2:] == ["route site-testing-0", "retire a"]
     assert proxy.host.actions == done_by_the_other
-    assert (kept_of(record, moved.id).stands, kept_of(record, retired.id).stands, proxy.written) == (Stands.DONE, Stands.DONE, {})
+    assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.DONE, ["interrupted", "done"])
+
+
+def test_requests_for_different_lanes_are_worked_at_the_same_time(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    both_checking = threading.Barrier(2, timeout=3)
+
+    def wait_for_the_other_lane(_container: str) -> None:
+        both_checking.wait()
+
+    proxy.while_checking = wait_for_the_other_lane
+    asked = [record.write(MOVE_B, CALLER, None), record.write(other_lane(proxy, "other"), CALLER, None)]
+    threads = worker.start()
+    wait_until(lambda: all(kept_of(record, each.id).stands in ENDED for each in asked))
+    stopped(worker, threads)
+    assert [kept_of(record, each.id).stands for each in asked] == [Stands.DONE, Stands.DONE]
+
+
+def test_no_more_lanes_are_worked_at_once_than_the_fixed_number(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    checking: list[str] = []
+    go_on = threading.Event()
+
+    def hold_the_check(container: str) -> None:
+        checking.append(container)
+        assert go_on.wait(timeout=5)
+
+    proxy.while_checking = hold_the_check
+    asked = [record.write(other_lane(proxy, f"lane-{number}"), CALLER, None) for number in range(MOST_LANES_AT_ONCE + 2)]
+    threads = worker.start()
+    wait_until(lambda: len(checking) == MOST_LANES_AT_ONCE)
+    time.sleep(0.3)
+    held_at_once = len(checking)
+    go_on.set()
+    wait_until(lambda: all(kept_of(record, each.id).stands in ENDED for each in asked))
+    stopped(worker, threads)
+    assert (held_at_once, {kept_of(record, each.id).stands for each in asked}) == (MOST_LANES_AT_ONCE, {Stands.DONE})
+
+
+def test_two_workers_that_want_one_lane_work_it_one_at_a_time_and_take_each_of_its_requests_up_once(record: Record) -> None:
+    worker, lanes, proxy = serving_a(record)
+    other = Worker(record, lanes, NO_SECRETS)
+    inside: list[str] = []
+    most_inside: list[int] = []
+
+    def count_who_is_checking(container: str) -> None:
+        inside.append(container)
+        most_inside.append(len(inside))
+        time.sleep(0.2)
+        inside.remove(container)
+
+    proxy.while_checking = count_who_is_checking
+    moved = record.write(MOVE_B, CALLER, None)
+    threads = [*worker.start(), *other.start()]
+    wait_until(lambda: kept_of(record, moved.id).stands in ENDED)
+    retired = record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None)
+    wait_until(lambda: kept_of(record, retired.id).stands in ENDED)
+    other.stop()
+    stopped(worker, threads)
+    assert (most_inside, [[each.ended for each in kept_of(record, asked.id).attempts] for asked in (moved, retired)]) == (
+        [1],
+        [["done"], ["done"]],
+    )
+    assert [action.split()[0] for action in proxy.host.actions] == ["start", "check", "route", "retire", "unroute", "retire"]

@@ -2,11 +2,13 @@ from launchplane.instance import DataSetUse, InstanceState, LaneReading, LaneRou
 from launchplane.judge import Judgement, Kind
 from launchplane.plan import (
     Step,
+    StepBack,
     changes_so_far,
     check_or_problems,
     failure_report,
     left_for_a_move,
     prepared,
+    put_back,
     route_step,
     sentences,
 )
@@ -30,6 +32,7 @@ from launchplane.steps import (
     Stop,
     StopDatabase,
     StopPart,
+    TooLate,
     WriteRoute,
 )
 
@@ -202,3 +205,25 @@ def decide_end(judged: Judgement, product: Product, done: tuple[Event, ...]) -> 
     if lane.route.in_maintenance:
         return bring_back(judged, product, answer, done)
     return not_as_it_must_be(judged, done) or Done(answer)
+
+
+# The first thing beginning maintenance changes is what visitors get, and bringing a lane back is ending maintenance.
+def begin_step_back(judged: Judgement, done: tuple[Event, ...]) -> StepBack:
+    lane = judged.lane
+    if not lane.route.in_maintenance:
+        return put_back(done)
+    return TooLate(
+        f"{lane.web_address} already shows the back soon page, so beginning maintenance could not be cancelled and is "
+        f"finished as asked. POST /lanes/{lane.product}/{lane.lane}/maintenance/end brings the lane back."
+    )
+
+
+# Until the web address is switched back, what ending maintenance started is stopped again, as after a failed check.
+def end_step_back(judged: Judgement, done: tuple[Event, ...]) -> StepBack:
+    lane = judged.lane
+    if lane.route.in_maintenance:
+        return next_to_stop(lane) or put_back(done)
+    return TooLate(
+        f"{lane.web_address} already sends its visitors to {lane.route.written}, so ending maintenance could not be cancelled "
+        f"and is finished as asked. POST /lanes/{lane.product}/{lane.lane}/maintenance/begin puts the lane in maintenance again."
+    )

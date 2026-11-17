@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from collections.abc import Callable, Set
 from contextlib import suppress
@@ -177,6 +178,9 @@ class ContainerHost:
         self.clock = clock
         self.secrets = HostSecrets()
         self.logins = HostLogins(client, address, self.secrets)
+        # Every lane shares the proxy, the back soon page and their networks. Each is looked for and made while this is
+        # held and no longer, so two lanes that find one missing do not both make it.
+        self.making_what_lanes_share = threading.RLock()
 
     @classmethod
     def from_environment(cls) -> ContainerHost:
@@ -295,11 +299,12 @@ class ContainerHost:
             self.client.networks.create(name, driver="bridge", labels=labels)
 
     def ensure_network(self, name: str, *, quiet: bool) -> None:
-        try:
-            found = self.client.networks.get(name)
-        except NotFound:
-            self.create_network(name, None, quiet=quiet)
-            return
+        with self.making_what_lanes_share:
+            try:
+                found = self.client.networks.get(name)
+            except NotFound:
+                self.create_network(name, None, quiet=quiet)
+                return
         if quiet and not is_quiet(checked(DOCKER_NETWORK, found.attrs, f"description of the network {name}")):
             raise ContainerHostError(
                 f"The network {name} exists and is not quiet: it lets what is attached to it reach out. "
@@ -445,7 +450,7 @@ class ContainerHost:
             return found.logs(tail=LOG_TAIL_LINES).decode(errors="replace")
 
     def ensure_helper(self, helper: HelperContainer) -> None:
-        with attempting(f"Starting Launchplane's own container {helper.container}", self.address):
+        with attempting(f"Starting Launchplane's own container {helper.container}", self.address), self.making_what_lanes_share:
             found = self.find_container(helper.container)
             if found is None:
                 if helper.outside_network is not None:

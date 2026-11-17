@@ -4,7 +4,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from launchplane.act import Stopped
+from launchplane.act import Cancelled, Stopped
 from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import LaneBuild
 from launchplane.judge import Work
@@ -16,6 +16,8 @@ from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult,
 from launchplane.telling import Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
+# Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
+MOST_LANES_AT_ONCE = 4
 STOPPED = (ContainerHostError, ProxyError, ProductError, Stopped)
 NOT_A_SUCCESS = {
     Outcome.CHECK_FAILED,
@@ -27,6 +29,7 @@ NOT_A_SUCCESS = {
 log = logging.getLogger(__name__)
 
 type Answer = MoveResult | RetireResult | MaintenanceResult
+type Lane = tuple[str, str]
 
 
 class Carries(Protocol):
@@ -51,31 +54,47 @@ def carried_out(lanes: Carries, request: Request, witness: Witness) -> Answer:
             return lanes.end_maintenance(product, lane, witness)
 
 
+# Several threads each take the oldest request of a lane none of them is on, so a lane has one worker and its requests
+# run in the order they came, while different lanes are worked at once.
 class Worker:
     def __init__(self, record: Record, lanes: Carries, secrets: Secrets) -> None:
         self.record = record
         self.lanes = lanes
         self.secrets = secrets
-        self.asked = threading.Event()
-        self.stopping = threading.Event()
+        self.at_work: set[Lane] = set()
+        self.choosing = threading.Lock()
+        self.asked = threading.Condition()
+        self.times_asked = 0
+        self.stopping = False
 
-    def start(self) -> threading.Thread:
-        thread = threading.Thread(target=self.work_until_stopped, name="worker", daemon=True)
-        thread.start()
-        return thread
+    def start(self) -> list[threading.Thread]:
+        threads = [
+            threading.Thread(target=self.work_until_stopped, name=f"worker-{number}", daemon=True)
+            for number in range(1, MOST_LANES_AT_ONCE + 1)
+        ]
+        for thread in threads:
+            thread.start()
+        return threads
 
     def wake(self) -> None:
-        self.asked.set()
+        with self.asked:
+            self.times_asked += 1
+            self.asked.notify_all()
 
     def stop(self) -> None:
-        self.stopping.set()
-        self.asked.set()
+        self.stopping = True
+        self.wake()
 
     def work_until_stopped(self) -> None:
-        while not self.stopping.is_set():
-            self.asked.clear()
+        while not self.stopping:
+            asked_before = self.times_asked
             if not self.worked_one():
-                self.asked.wait(SECONDS_BETWEEN_LOOKS)
+                self.wait_to_be_asked(asked_before)
+
+    # A request asked for while this thread was looking is not slept through: it was asked since the thread last saw.
+    def wait_to_be_asked(self, asked_before: int) -> None:
+        with self.asked:
+            self.asked.wait_for(lambda: self.times_asked != asked_before, SECONDS_BETWEEN_LOOKS)
 
     def worked_one(self) -> bool:
         try:
@@ -86,20 +105,38 @@ class Worker:
             log.warning("A request was left to the Launchplane that took it up: %s", error)
         return False
 
-    # One request at a time, the oldest first. A lane whose turn another Launchplane holds is left to it.
     def work_next(self) -> bool:
-        request = self.record.next_up()
-        if request is None:
-            return False
-        with self.record.turn(request.product, request.lane) as held:
-            if held is None:
-                return False
-            attempt = self.record.take_up(request.id)
-            if attempt is not None:
-                self.carry_through(request, attempt, held)
-        return True
+        return any(self.worked(request) for request in self.record.next_up())
 
-    def carry_through(self, request: Request, attempt: int, held: Held) -> None:
+    def claimed(self, lane: Lane) -> bool:
+        with self.choosing:
+            if lane in self.at_work:
+                return False
+            self.at_work.add(lane)
+            return True
+
+    def let_go(self, lane: Lane) -> None:
+        with self.choosing:
+            self.at_work.discard(lane)
+
+    # A lane another thread is on, or whose turn another Launchplane holds, is left to it.
+    def worked(self, request: Request) -> bool:
+        lane = (request.product, request.lane)
+        if not self.claimed(lane):
+            return False
+        try:
+            with self.record.turn(*lane) as held:
+                if held is None:
+                    return False
+                attempt = self.record.take_up(request.id)
+                if attempt is not None:
+                    self.carry_through(request, attempt, held)
+                return True
+        finally:
+            self.let_go(lane)
+
+    # What a call is given to say what it did, to ask before each action, and to ask between actions.
+    def witness_of(self, request: Request, attempt: int, held: Held) -> Witness:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
 
@@ -108,10 +145,21 @@ class Worker:
             if not held():
                 raise Interrupted(f"The turn of {request.lane} of {request.product} is no longer held, so nothing more was done.")
 
+        def cancel_asked() -> bool:
+            return self.record.cancel_wanted(request.id)
+
+        def refuse_cancel(why: str) -> None:
+            self.record.refuse_cancel(attempt, why)
+
+        return Witness(tell, hold, cancel_asked, refuse_cancel)
+
+    def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
-            answer = carried_out(self.lanes, request, Witness(tell, hold))
+            answer = carried_out(self.lanes, request, self.witness_of(request, attempt, held))
+        except Cancelled as cancelled:
+            self.end(attempt, Stands.CANCELLED, cancelled.put_back, None)
         except STOPPED as error:
             self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.

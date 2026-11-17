@@ -1,8 +1,9 @@
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -172,6 +173,9 @@ class TraefikProxy:
     load_deadline_seconds: float = 10
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    # Every lane's routes file is in the one folder. It is held while the folder is read whole or a file in it is
+    # changed, and no longer, so no reading finds a file half put in place by another lane's worker.
+    routes_folder: threading.Lock = field(default_factory=threading.Lock, init=False, compare=False, repr=False)
 
     def start(self) -> None:
         self.host.ensure_helper(PROXY)
@@ -189,7 +193,9 @@ class TraefikProxy:
 
     def read_written(self) -> dict[str, WrittenRoute]:
         written: dict[str, WrittenRoute] = {}
-        for name, file in self.host.read_folder(PROXY_NAME, ROUTES_FOLDER).items():
+        with self.routes_folder:
+            files_read = self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
+        for name, file in files_read.items():
             if name.endswith(ROUTE_FILE_SUFFIX):
                 web_address = name.removesuffix(ROUTE_FILE_SUFFIX)
                 written[web_address] = WrittenRoute(written_route_from_file(file.text, web_address), file.changed_at)
@@ -221,18 +227,20 @@ class TraefikProxy:
             self.sleep(POLL_SECONDS)
 
     def remove_route(self, web_address: str) -> None:
-        self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
+        with self.routes_folder:
+            self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
 
     def loaded_container(self, web_address: str) -> str | None:
         route = self.read_loaded().get(web_address)
         return None if route is None else route.container
 
     def write_route(self, web_address: str, container: str) -> None:
-        self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container))
-        self.run_or_fail(
-            ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
-            f"Putting the route of {web_address} in place",
-        )
+        with self.routes_folder:
+            self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container))
+            self.run_or_fail(
+                ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
+                f"Putting the route of {web_address} in place",
+            )
 
     def run_or_fail(self, command: list[str], attempt: str) -> None:
         result = self.host.run_in(PROXY_NAME, command)
