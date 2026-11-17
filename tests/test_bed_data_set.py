@@ -642,7 +642,7 @@ def test_a_database_with_another_volume_mounted_is_refused_and_shown_so(lane_on_
         assert status == 503, body
         assert "has test-bed-another-volume mounted at /var/lib/postgresql, which it must not have" in body["error"]
         assert any("has test-bed-another-volume mounted" in problem for problem in verdict["problems"])
-        assert any("The logins of the database test-bed-impostor could not be read" in problem for problem in verdict["problems"])
+        wait_for(lambda: "The logins of the database test-bed-impostor could not be read" in verdict_now(), seconds=30)
     finally:
         on_scratch("docker rm --force test-bed-impostor; docker volume rm test-bed-another-volume")
 
