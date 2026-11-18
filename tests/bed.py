@@ -9,6 +9,7 @@ import urllib.request
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -158,7 +159,7 @@ class RequestLoop:
             try:
                 self.answers.append(self.request_once())
             except (OSError, UnexpectedAnswer) as error:
-                self.failures.append(repr(error))
+                self.failures.append(f"{datetime.now(UTC):%H:%M:%S.%f} {error!r}")
             time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
 
     def answers_in_order(self) -> list[str]:

@@ -139,7 +139,7 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **A cancel waits for the action under way.** The mark is read between actions, and one action can take as long as a check, 20 s, or a stop, 30 s.
 - **A cancel asked of a retire keeps the data set it named, also when the rest was too late to cancel.** The direction session chose this as the safe side; Chris may reverse it.
 - **Ending maintenance that is cancelled answers for every part of the lane,** also one that was wrong before it began: which of them it started, the host cannot show, since a start changes no label.
-- **A routes file written before routes said who wrote them says nobody did.** A move that wrote one and is cancelled is taken not to have switched.
+- **A routes file written before routes said who wrote them says nobody did.** A move that wrote one and is cancelled is taken not to have switched. It then ends as `failed` and removes nothing: no action removes the instance the proxy sends visitors to, see [the move](the-move.md#which-instance-receives-visitors).
 - **A data set is stamped on its network only,** the first part of it that is made.
 - **A part made before stamps carries none,** so a cancel leaves it.
 - **An instance left by an earlier request that a move retired before it was cancelled is not brought back.** It received no visitors.

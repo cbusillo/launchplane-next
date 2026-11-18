@@ -329,7 +329,22 @@ class Lanes:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
         return lambda back: judge(self.read(scope).lane(product, lane), description, (turned_back or work) if back else work)
 
+    # A check of its own, whatever the step was decided from: read from the routes the proxy has loaded at the moment
+    # of the action, and from no stamp or mark. A retire has removed the route by then, and the old instance of a
+    # move is retired once the proxy has loaded the switch, so neither is stopped by it.
+    def refuse_to_take_from_visitors(self, action: Action) -> None:
+        if not isinstance(action, steps.Retire | steps.RemoveInstance | steps.StopPart):
+            return
+        loaded = self.proxy.read().loaded
+        sent_here = sorted(web_address for web_address, route in loaded.items() if route.container == action.container)
+        if sent_here:
+            raise Stopped(
+                f"Launchplane was about to {named(action)}, and the proxy sends the visitors of {', '.join(sent_here)} to it, "
+                "so it was left running. Nothing more was done."
+            )
+
     def take(self, action: Action) -> Event:
+        self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path)
         if isinstance(action, steps.AwaitBackgroundService):

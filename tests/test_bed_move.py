@@ -74,9 +74,15 @@ def serving_builds() -> list[str]:
     return [build for build, copy in lane_copies().items() if copy["receives_visitors_for"] == NAME]
 
 
+# Of this lane: another lane of the product on the same build must not pass for it.
 def copy_of_build_b_is_on_scratch() -> bool:
-    filters = f"--filter label=launchplane.product={PRODUCT} --filter label=launchplane.build={BUILD_B}"
-    return bool(on_scratch(f"docker ps --quiet {filters}"))
+    of_the_lane = f"--filter label=launchplane.product={PRODUCT} --filter label=launchplane.lane={LANE}"
+    return bool(on_scratch(f"docker ps --quiet {of_the_lane} --filter label=launchplane.build={BUILD_B}"))
+
+
+def copy_of_build_b_answers_the_proxy() -> bool:
+    container = lane_copies()[BUILD_B]["container"]
+    return on_scratch(f"docker exec {PROXY_NAME} wget -q -O /dev/null -T 2 http://{container}:80/ && echo yes || true") != ""
 
 
 def kill_launchplane_once_build_b_has_started(kill: Callable[[], None] = kill_launchplane_and_end_what_was_asked) -> int:
@@ -184,6 +190,7 @@ def test_a_move_that_failed_before_the_switch_is_repaired_by_asking_for_the_serv
 def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_not_deleted() -> None:
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
+        wait_for(copy_of_build_b_answers_the_proxy, seconds=30)
         write_route_without_launchplane_keeping_every_loaded_route(lane_copies()[BUILD_B]["container"])
         status, body = move(BUILD_A)
     assert (status, body["outcome"]) == (200, "switched"), body
