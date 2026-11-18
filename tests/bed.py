@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -215,10 +215,8 @@ def holds_answer() -> bool:
 
 # As `kill -9`: no handler runs, and systemd starts Launchplane again.
 def kill_held_launchplane() -> None:
-    try:
+    with suppress(OSError):
         urllib.request.urlopen(urllib.request.Request(f"{HOLDS_URL}/kill", method="POST"), timeout=10)  # noqa: S310
-    except OSError:
-        pass
     wait_for(holds_answer, seconds=30)
 
 

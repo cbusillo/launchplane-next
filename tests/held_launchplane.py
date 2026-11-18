@@ -99,58 +99,68 @@ def hold_proxy_delivery(host: ContainerHost, held: bool) -> None:
         host.run_in(PROXY_NAME, ["rm", "-f", str(UNREADABLE_ROUTES_FILE)])
 
 
+def answer(to: BaseHTTPRequestHandler, status: HTTPStatus, body: object) -> None:
+    encoded = json.dumps(body).encode()
+    to.send_response(status)
+    to.send_header("Content-Type", "application/json")
+    to.send_header("Content-Length", str(len(encoded)))
+    to.end_headers()
+    to.wfile.write(encoded)
+
+
+def what_is_held() -> dict[str, object]:
+    return {"held": sorted(each.name for each in HOLDS.iterdir()), "stopped_at": sorted(stopped_at)}
+
+
+def point_named(to: BaseHTTPRequestHandler) -> str | None:
+    name = urlsplit(to.path).path.removeprefix("/holds").removeprefix("/")
+    if name and POINT.fullmatch(name) is None:
+        answer(to, HTTPStatus.NOT_FOUND, {"error": f"{name} is not a hold: {POINT.pattern}"})
+        return None
+    return name
+
+
+def set_hold(host: ContainerHost, point: str, only: str) -> None:
+    if point == PROXY_DELIVERY:
+        hold_proxy_delivery(host, held=True)
+    (HOLDS / point).write_text(only)
+
+
+def let_go(host: ContainerHost, point: str) -> None:
+    for each in [HOLDS / point] if point else list(HOLDS.iterdir()):
+        if each.name == PROXY_DELIVERY and each.exists():
+            hold_proxy_delivery(host, held=False)
+        each.unlink(missing_ok=True)
+
+
 def holds_handler(host: ContainerHost) -> type[BaseHTTPRequestHandler]:
     class Holds(BaseHTTPRequestHandler):
-        def answer(self, status: HTTPStatus, body: object) -> None:
-            encoded = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
-
-        def held(self) -> dict[str, object]:
-            return {"held": sorted(each.name for each in HOLDS.iterdir()), "stopped_at": sorted(stopped_at)}
-
-        def point(self) -> str | None:
-            name = urlsplit(self.path).path.removeprefix("/holds").removeprefix("/")
-            if name and POINT.fullmatch(name) is None:
-                self.answer(HTTPStatus.NOT_FOUND, {"error": f"{name} is not a hold: {POINT.pattern}"})
-                return None
-            return name
-
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 the name the base class gives it
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
         # noinspection PyPep8Naming
         def do_GET(self) -> None:
-            self.answer(HTTPStatus.OK, self.held())
+            answer(self, HTTPStatus.OK, what_is_held())
 
         # noinspection PyPep8Naming
         def do_PUT(self) -> None:
-            point = self.point()
+            point = point_named(self)
             if point:
-                if point == PROXY_DELIVERY:
-                    hold_proxy_delivery(host, held=True)
-                (HOLDS / point).write_text(parse_qs(urlsplit(self.path).query).get("only", [""])[0])
-                self.answer(HTTPStatus.OK, self.held())
+                set_hold(host, point, parse_qs(urlsplit(self.path).query).get("only", [""])[0])
+                answer(self, HTTPStatus.OK, what_is_held())
 
         # noinspection PyPep8Naming
         def do_DELETE(self) -> None:
-            point = self.point()
-            if point is None:
-                return
-            for each in [HOLDS / point] if point else list(HOLDS.iterdir()):
-                if each.name == PROXY_DELIVERY and each.exists():
-                    hold_proxy_delivery(host, held=False)
-                each.unlink(missing_ok=True)
-            self.answer(HTTPStatus.OK, self.held())
+            point = point_named(self)
+            if point is not None:
+                let_go(host, point)
+                answer(self, HTTPStatus.OK, what_is_held())
 
         # noinspection PyPep8Naming
         def do_POST(self) -> None:
             if urlsplit(self.path).path == "/kill":
                 os.kill(os.getpid(), signal.SIGKILL)
-            self.answer(HTTPStatus.NOT_FOUND, {"error": "POST /kill is the only call to post."})
+            answer(self, HTTPStatus.NOT_FOUND, {"error": "POST /kill is the only call to post."})
 
     return Holds
 
