@@ -362,9 +362,9 @@ def test_a_background_service_a_request_started_that_has_stopped_by_the_next_rea
         proxy.host.change_part(f"{instance}-background-service", InstanceState.RESTARTING)
 
     proxy.host.start_background_service = start_one_that_stops_at_once
-    request = record.write(MOVE_B, CALLER, None)
+    asked = record.write(MOVE_B, CALLER, None)
     assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
-    kept = kept_of(record, request.id)
+    kept = kept_of(record, asked.id)
     started = [action for action in proxy.host.actions if action.startswith("start background service")]
     assert kept.answer is not None
     assert (kept.stands, kept.answer["outcome"], len(started)) == (Stands.FAILED, "background service failed", 1)
