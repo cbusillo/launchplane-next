@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
-from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute, is_generation
+from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, Verdict, WrittenRoute, is_generation
 
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
@@ -134,16 +134,18 @@ def committed_mark_of(web_address: str, generation: str) -> PurePosixPath:
 
 # The gate. Everything that settles a release runs as one command on the container host, holding the one lock file
 # there, so each finds what any earlier one did, whichever Launchplane sent it and however late it arrives. A verdict is
-# a file of the generation's own, made once and replaced by nothing done for another generation. Each answers LOST when
-# what it finds has settled the matter against it.
+# a file of the generation's own, made once and replaced by nothing done for another generation. Every command answers
+# with the verdict as it stands when it is done, and that answer is what its sender acts on.
 GATE = ROUTES_FOLDER / ".gate"
-LOST = 3
-# Renames for a candidate, unless its generation is abandoned or the candidate's staged file was taken away.
-SWITCH = f'if [ -e "$1" ] || [ ! -e "$2" ]; then rm -f "$2"; exit {LOST}; fi; mv "$2" "$3" && : > "$4"'
+VERDICT = 'if [ -e "$2" ]; then echo committed; elif [ -e "$1" ]; then echo abandoned; else echo none; fi'
+# Renames for a candidate, only while its generation has no verdict and the candidate's staged file is still there.
+SWITCH = f'set -e; if [ ! -e "$1" ] && [ ! -e "$2" ] && [ -e "$3" ]; then mv "$3" "$4"; : > "$2"; else rm -f "$3"; fi; {VERDICT}'
 # Marks a generation abandoned, unless the routes file was renamed for it, now or ever.
-ABANDON = f'if [ -e "$1" ] || head -n 1 "$2" 2>/dev/null | grep -qxF "$3"; then exit {LOST}; fi; : > "$4"'
-# Takes a candidate's staged file away, unless the routes file sends visitors to the candidate.
-DISCARD = f'if grep -qF "$2" "$1" 2>/dev/null; then exit {LOST}; fi; rm -f "$3"'
+ABANDON = (
+    f'set -e; if [ ! -e "$2" ] && head -n 1 "$3" 2>/dev/null | grep -qxF "$4"; then : > "$2"; fi; [ -e "$2" ] || : > "$1"; {VERDICT}'
+)
+# Takes a candidate's staged file away, unless the routes file sends visitors to the candidate: its release is committed.
+DISCARD = 'set -e; if grep -qF "$2" "$1" 2>/dev/null; then echo committed; else rm -f "$3"; echo none; fi'
 REMOVE = f'rm -f "$1" "$2".*{ABANDONED_SUFFIX} "$2".*{COMMITTED_SUFFIX} "$2".*.next'
 
 
@@ -305,32 +307,31 @@ class TraefikProxy:
                 f"Putting the route of {web_address} in place",
             )
 
-    # Whether the command won at the gate. The lock is the host's, so the command is decided there and not here.
-    def pass_gate(self, script: str, arguments: Iterable[PurePosixPath | str], attempt: str) -> bool:
+    # The verdict the gate gives. The lock is the host's, so the command is decided there and not here.
+    def pass_gate(self, script: str, arguments: Iterable[PurePosixPath | str], attempt: str) -> Verdict:
         with self.routes_folder:
             result = self.host.run_in(PROXY_NAME, ["flock", str(GATE), "sh", "-c", script, "sh", *map(str, arguments)])
-        if result.exit_code not in (0, LOST):
+        if not result.succeeded or result.output not in Verdict:
             raise ProxyError(f"{attempt} failed: {result.output}")
-        return result.succeeded
+        return Verdict(result.output)
 
-    # The rename is the one moment a release becomes real. It is not made once a cancel has won against the generation,
-    # or once the candidate was discarded.
-    def switch(self, web_address: str, container: str, generation: str) -> bool:
+    # The rename is the one moment a release becomes real. It is made once for a generation: never after a cancel has
+    # won against it, after it was made before, or after the candidate was discarded.
+    def switch(self, web_address: str, container: str, generation: str) -> Verdict:
         staged = staged_route_file_of(web_address, container)
         self.host.place_file(PROXY_NAME, staged, route_text(web_address, container, generation))
         marks = abandoned_mark_of(web_address, generation), committed_mark_of(web_address, generation)
-        arguments = [marks[0], staged, route_file_of(web_address), marks[1]]
-        return self.pass_gate(SWITCH, arguments, f"Putting the route of {web_address} in place")
+        return self.pass_gate(SWITCH, [*marks, staged, route_file_of(web_address)], f"Putting the route of {web_address} in place")
 
     # A cancel wins unless the routes file was renamed for the generation. Winning again changes nothing.
-    def abandon(self, web_address: str, generation: str) -> bool:
-        marks = committed_mark_of(web_address, generation), abandoned_mark_of(web_address, generation)
-        arguments = [marks[0], route_file_of(web_address), stamp_line(generation), marks[1]]
+    def abandon(self, web_address: str, generation: str) -> Verdict:
+        marks = abandoned_mark_of(web_address, generation), committed_mark_of(web_address, generation)
+        arguments = [*marks, route_file_of(web_address), stamp_line(generation)]
         return self.pass_gate(ABANDON, arguments, f"Marking the release of {web_address} as cancelled")
 
     # Before an instance that receives no visitors is removed: a rename still on its way to it is refused from here on,
-    # or has already happened, and then the instance is the one the routes file names and is not removed.
-    def discard(self, web_address: str, container: str) -> bool:
+    # or has already happened. Then the answer is committed, and the instance is the one the routes file names.
+    def discard(self, web_address: str, container: str) -> Verdict:
         arguments = [route_file_of(web_address), f'"{instance_url(container)}"', staged_route_file_of(web_address, container)]
         return self.pass_gate(DISCARD, arguments, f"Refusing a switch of {web_address} to {container}")
 

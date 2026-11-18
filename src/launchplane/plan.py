@@ -3,11 +3,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import overload
 
-from launchplane.instance import DataSet, DataSetUse, InstanceState, LaneBuild, LaneReading, RunningInstance
+from launchplane.instance import DataSet, DataSetUse, InstanceState, LaneBuild, LaneReading, RunningInstance, Verdict
 from launchplane.judge import LOGIN_KINDS, Finding, Judgement, Kind, is_loaded_as_written, subjects_of
 from launchplane.product import Product
 from launchplane.steps import (
     Abandon,
+    Abandoned,
     Action,
     AwaitBackgroundService,
     AwaitDatabase,
@@ -85,11 +86,11 @@ def change_made_by(event: Event) -> str | None:
             return f"started the database {container}"
         case StartInstance(container=container):
             return f"started the instance {container}"
-        case WriteRoute(container=container) | Switched(container=container, won=True):
+        case WriteRoute(container=container) | Switched(container=container, verdict=Verdict.COMMITTED):
             return f"wrote the route to {container}"
         case StartBackgroundService(instance=instance):
             return f"started the background service of {instance}"
-        case Retire(container=container) | Discarded(container=container, won=True):
+        case Retire(container=container) | Discarded(container=container, verdict=Verdict.NONE):
             return f"retired {container}"
         case RemoveInstance(container=container):
             return f"removed {container}"
@@ -281,10 +282,19 @@ class Move:
     def lane(self) -> LaneReading:
         return self.judged.lane
 
+    # What the gate told this attempt, where it asked. No reading made before the answer stands against it.
+    @property
+    def told(self) -> Verdict | None:
+        return next((event.verdict for event in reversed(self.done) if isinstance(event, Switched | Abandoned)), None)
+
     # Read from the routes file itself, whoever asks and whichever attempt renamed it.
     @property
     def is_switched(self) -> bool:
         return self.lane.route.written_by == self.generation
+
+    @property
+    def is_abandoned(self) -> bool:
+        return self.generation in self.lane.route.abandoned or self.told is Verdict.ABANDONED
 
     @property
     def named(self) -> RunningInstance | None:
@@ -466,7 +476,7 @@ def put_lane_back(move: Move) -> Step[PutBack]:
 # is carried to the gate, where a rename already sent may still win. The gate is a command in the proxy's container.
 def cancel_wins(move: Move, asked: bool) -> StepBack | None:
     route = move.lane.route
-    if move.generation in route.abandoned:
+    if move.is_abandoned:
         return put_lane_back(move)
     if not asked:
         return None
@@ -508,6 +518,12 @@ def decide_move(
     cancel: Cancel | None = None,
 ) -> Step[MoveResult] | StepBack:
     move = Move(judged, target, product, fresh, done, generation)
+    # The gate's answer stands. A reading that does not show what the gate said was done is not acted on.
+    if move.told is Verdict.COMMITTED and not move.is_switched:
+        return Stop(
+            f"The gate answered that this release of {move.lane.web_address} is committed, and the routes file as read "
+            f"names {move.lane.route.written}. Nothing was done against the gate's answer. {changes_so_far(done)}"
+        )
     phase, instance = phase_of(move)
     row = MOVE[phase]
     back = row.cancel(move, is_turned_back(cancel))

@@ -116,6 +116,13 @@ class DataSetUse:
     database_container: str
 
 
+# What the gate has decided for a generation, and the only thing it is told apart by from then on.
+class Verdict(StrEnum):
+    COMMITTED = "committed"
+    ABANDONED = "abandoned"
+    NONE = "none"
+
+
 class RouteStatus(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"

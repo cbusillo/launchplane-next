@@ -467,14 +467,27 @@ def test_after_a_release_the_retired_instances_login_is_gone_and_its_password_op
     assert new["PGPASSWORD"] != old["PGPASSWORD"]
 
 
+# The kill has about 3 s, the length of a check, to land between the new instance starting and the switch. One that
+# lands before the instance runs or after the switch leaves another lane than this, so the lane is looked at, and put
+# back on A to try again, until it is the one wanted.
+def lane_left_with_a_running_instance_of_each_build() -> LaneView:
+    for _ in range(3):
+        kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
+        view = lane_view()
+        running = sorted(instance["build"] for instance in view.instances if instance["state"] == "running")
+        if running == [BUILD_A, BUILD_B] and view.receiving()["build"] == BUILD_A:
+            return view
+        move(BUILD_A)
+    raise AssertionError("three kills in a row landed before the new instance ran or after the switch")
+
+
 def write_many(container: str) -> None:
     # noinspection SqlResolve
     run_sql(container, "INSERT INTO made_by_new (id) SELECT generate_series(1, 200)")
 
 
 def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of_it_belongs_to_app(lane_on_a: LaneView) -> None:
-    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
-    view = lane_view()
+    view = lane_left_with_a_running_instance_of_each_build()
     old = view.receiving()["container"]
     [new] = [instance["container"] for instance in view.instances if instance["container"] != old]
     database = database_of(view.data_sets[0])

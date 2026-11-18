@@ -10,7 +10,7 @@ import pytest
 
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
-from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, RouteStatus
+from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, RouteStatus, Verdict
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
@@ -71,8 +71,9 @@ class ProxyHost:
             self.files[PurePosixPath(command[2])] = self.files.pop(PurePosixPath(command[1]))
         elif "sh" in command:
             result = self.run_in_a_folder(command[command.index("sh") :])
-            if not result.succeeded:
-                return result
+            if self.loads_on_write:
+                self.load()
+            return result
         elif command[-1] == LOADED_ROUTES_URL:
             return CommandResult(exit_code=0, output=self.loaded) if self.reads_answer else CommandResult(1, "Connection refused")
         else:
@@ -90,7 +91,7 @@ class ProxyHost:
             there = [argument.replace(str(ROUTES_FOLDER), folder) for argument in command]
             ran = subprocess.run(there, capture_output=True, text=True, check=False)  # noqa: S603
             self.files = {ROUTES_FOLDER / each.name: each.read_text() for each in Path(folder).iterdir()}
-        return CommandResult(exit_code=ran.returncode, output=ran.stderr.strip())
+        return CommandResult(exit_code=ran.returncode, output=(ran.stdout or ran.stderr).strip())
 
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]:
         assert container == PROXY_NAME
@@ -117,28 +118,31 @@ def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
     return TraefikProxy(host, sleep=lambda _: host.load(), clock=lambda: next(clock), **seconds)
 
 
+COMMITTED, ABANDONED, NO_VERDICT = Verdict.COMMITTED, Verdict.ABANDONED, Verdict.NONE
+
+
 def test_a_route_says_which_generation_it_was_renamed_for_and_one_written_by_hand_or_for_maintenance_says_none() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    assert proxy.switch(OTHER, "b", GENERATION) is True
+    assert proxy.switch(OTHER, "b", GENERATION) is COMMITTED
     seen = proxy.read()
     assert (seen.route_of(OTHER).written_by, seen.route_of(WEB_ADDRESS).written_by) == (GENERATION, None)
     assert (seen.route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == ("b", "b")
 
 
-def test_a_cancel_that_reaches_the_gate_first_wins_and_the_switch_of_that_generation_then_renames_nothing() -> None:
+def test_a_cancel_that_reaches_the_gate_first_wins_and_the_switch_of_that_generation_is_told_so_and_renames_nothing() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    assert (proxy.abandon(WEB_ADDRESS, GENERATION), proxy.switch(WEB_ADDRESS, "b", GENERATION)) == (True, False)
+    assert (proxy.abandon(WEB_ADDRESS, GENERATION), proxy.switch(WEB_ADDRESS, "b", GENERATION)) == (ABANDONED, ABANDONED)
     route = proxy.read().route_of(WEB_ADDRESS)
     assert (route.written, route.written_by, route.abandoned) == ("a", None, {GENERATION})
     assert sorted(host.files) == [abandoned_mark_of(WEB_ADDRESS, GENERATION), route_file_of(WEB_ADDRESS)]
 
 
-def test_a_switch_that_reaches_the_gate_first_wins_and_a_cancel_of_that_generation_is_then_told_it_lost() -> None:
+def test_a_switch_that_reaches_the_gate_first_wins_and_a_cancel_of_that_generation_is_told_it_is_committed() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    assert (proxy.switch(WEB_ADDRESS, "b", GENERATION), proxy.abandon(WEB_ADDRESS, GENERATION)) == (True, False)
+    assert (proxy.switch(WEB_ADDRESS, "b", GENERATION), proxy.abandon(WEB_ADDRESS, GENERATION)) == (COMMITTED, COMMITTED)
     route = proxy.read().route_of(WEB_ADDRESS)
     assert (route.written, route.written_by, route.abandoned) == ("b", GENERATION, frozenset())
 
@@ -146,26 +150,35 @@ def test_a_switch_that_reaches_the_gate_first_wins_and_a_cancel_of_that_generati
 def test_a_cancel_won_twice_is_still_won_and_one_of_an_earlier_generation_does_not_stop_a_later_switch() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    assert [proxy.abandon(WEB_ADDRESS, EARLIER), proxy.abandon(WEB_ADDRESS, EARLIER)] == [True, True]
-    assert proxy.switch(WEB_ADDRESS, "b", GENERATION) is True
+    assert [proxy.abandon(WEB_ADDRESS, EARLIER), proxy.abandon(WEB_ADDRESS, EARLIER)] == [ABANDONED, ABANDONED]
+    assert proxy.switch(WEB_ADDRESS, "b", GENERATION) is COMMITTED
     assert proxy.read().route_of(WEB_ADDRESS).written_by == GENERATION
 
 
 def test_a_verdict_is_its_generations_own_and_a_late_cancel_of_another_generation_replaces_nothing() -> None:
     host = ProxyHost({WEB_ADDRESS: "a", OTHER: "p"})
     proxy = TraefikProxy(host)
-    assert [proxy.abandon(OTHER, EARLIER), proxy.abandon(WEB_ADDRESS, GENERATION), proxy.abandon(WEB_ADDRESS, EARLIER)] == [True] * 3
-    assert proxy.switch(WEB_ADDRESS, "b", GENERATION) is False
+    cancels = [proxy.abandon(OTHER, EARLIER), proxy.abandon(WEB_ADDRESS, GENERATION), proxy.abandon(WEB_ADDRESS, EARLIER)]
+    assert (cancels, proxy.switch(WEB_ADDRESS, "b", GENERATION)) == ([ABANDONED] * 3, ABANDONED)
     seen = proxy.read()
     assert dict(seen.abandoned) == {WEB_ADDRESS: {GENERATION, EARLIER}, OTHER: {EARLIER}}
     assert seen.route_of(WEB_ADDRESS).written == "a"
 
 
-def test_a_generation_that_was_once_switched_to_stays_too_late_to_cancel_after_a_later_generation_switched() -> None:
+def test_a_generation_that_was_once_switched_to_stays_committed_after_a_later_generation_switched() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    assert (proxy.switch(WEB_ADDRESS, "b", EARLIER), proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (True, True)
-    assert (proxy.abandon(WEB_ADDRESS, EARLIER), proxy.read().route_of(WEB_ADDRESS).written) == (False, "c")
+    assert (proxy.switch(WEB_ADDRESS, "b", EARLIER), proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (COMMITTED, COMMITTED)
+    assert (proxy.abandon(WEB_ADDRESS, EARLIER), proxy.read().route_of(WEB_ADDRESS).written) == (COMMITTED, "c")
+
+
+def test_a_whole_switch_asked_again_for_a_generation_that_has_its_verdict_renames_nothing_and_is_told_the_verdict() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    proxy.switch(WEB_ADDRESS, "b", EARLIER)
+    proxy.switch(WEB_ADDRESS, "c", GENERATION)
+    assert (proxy.switch(WEB_ADDRESS, "b", EARLIER), proxy.read().route_of(WEB_ADDRESS).written) == (COMMITTED, "c")
+    assert not any(path.name.endswith(".next") for path in host.files)
 
 
 def test_a_rename_sent_before_its_candidate_was_discarded_and_arriving_after_renames_nothing() -> None:
@@ -175,39 +188,25 @@ def test_a_rename_sent_before_its_candidate_was_discarded_and_arriving_after_ren
 
     def accept_and_do_not_run_yet(container: str, command: list[str]) -> CommandResult:
         sent.append(command)
-        return CommandResult(0, f"held for {container}")
+        return CommandResult(0, f"none, held for {container}".split(",")[0])
 
     host.run_in = accept_and_do_not_run_yet
     proxy.switch(WEB_ADDRESS, "b", GENERATION)
     host.run_in = run_in
-    assert proxy.discard(WEB_ADDRESS, "b") is True
+    assert proxy.discard(WEB_ADDRESS, "b") is NO_VERDICT
     late = run_in(PROXY_NAME, sent[0])
-    assert (late.exit_code, proxy.read().route_of(WEB_ADDRESS).written, proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (3, "a", True)
-
-
-def test_a_candidate_the_routes_file_already_names_is_not_discarded_so_a_rename_that_happened_is_honoured() -> None:
-    host = ProxyHost({WEB_ADDRESS: "a"})
-    proxy = TraefikProxy(host)
-    assert (proxy.switch(WEB_ADDRESS, "b", GENERATION), proxy.discard(WEB_ADDRESS, "b"), proxy.discard(WEB_ADDRESS, "a")) == (
-        True,
-        False,
-        True,
+    assert (late.output, proxy.read().route_of(WEB_ADDRESS).written, proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (
+        "none",
+        "a",
+        COMMITTED,
     )
 
 
-def test_a_replayed_rename_of_a_generation_changes_nothing_once_another_generation_has_switched() -> None:
+def test_a_candidate_the_routes_file_already_names_is_not_discarded_and_the_gate_answers_that_it_is_committed() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    run_in, sent = host.run_in, list[list[str]]()
-
-    def run_and_keep(container: str, command: list[str]) -> CommandResult:
-        sent.append(command)
-        return run_in(container, command)
-
-    host.run_in = run_and_keep
-    assert (proxy.switch(WEB_ADDRESS, "b", EARLIER), proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (True, True)
-    replayed = run_in(PROXY_NAME, next(command for command in sent if "flock" in command))
-    assert (replayed.exit_code, proxy.read().route_of(WEB_ADDRESS).written) == (3, "c")
+    asked = proxy.switch(WEB_ADDRESS, "b", GENERATION), proxy.discard(WEB_ADDRESS, "b"), proxy.discard(WEB_ADDRESS, "a")
+    assert asked == (COMMITTED, COMMITTED, NO_VERDICT)
 
 
 def test_a_gate_command_the_host_fails_is_an_error_and_is_taken_neither_as_won_nor_as_lost() -> None:

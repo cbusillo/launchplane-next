@@ -165,12 +165,13 @@ class Worker:
         return Witness(tell, hold, cancel_asked, refuse_cancel)
 
     # A move does not end, however it would, over a cancel its call never saw: the record refuses that ending, and the
-    # call goes through once more, sees the cancel at its first reading and answers it from the host.
+    # call goes through once more, sees the cancel at its first reading and answers it from the host. Once more and no
+    # oftener: a cancel that still cannot be answered, since the host cannot be read, ends the request with that reason.
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         seen = threading.Event()
         witness = self.witness_of(request, attempt, held, seen)
-        while not self.record.end(attempt, *self.ending_of(request, witness), cancel_seen=seen.is_set()):
-            pass
+        if not self.record.end(attempt, *self.ending_of(request, witness), cancel_seen=seen.is_set()):
+            self.record.end(attempt, *self.ending_of(request, witness))
 
     def ending_of(self, request: Request, witness: Witness) -> Ending:
         try:

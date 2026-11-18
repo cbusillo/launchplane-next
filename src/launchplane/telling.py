@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from launchplane import steps
+from launchplane.instance import Verdict
 from launchplane.steps import Action, Event
 
 type Tell = Callable[[str, str | None], None]
@@ -83,9 +84,9 @@ def told(action: Action, event: Event) -> tuple[str, str | None]:
             return named(action), unreadable
         case steps.NotLoadedYet(report=report):
             return named(action), report
-        case steps.Discarded(won=False):
+        case steps.Discarded(verdict=Verdict.COMMITTED):
             return named(action), "The routes file sends visitors to it, so it was left running."
-        case steps.Switched(won=False):
+        case steps.Switched(verdict=Verdict.ABANDONED | Verdict.NONE):
             return named(
                 action
             ), "A cancel had won against this release, or its instance was discarded, so the routes file was not renamed."

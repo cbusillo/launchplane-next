@@ -6,9 +6,10 @@ from typing import Any, NoReturn
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.act import MOST_STEPS, Lanes
+from launchplane.act import MOST_READS_MISSED, MOST_STEPS, Lanes
 from launchplane.api import create_app
-from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus
+from launchplane.docker_answers import ContainerHostError
+from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
 from launchplane.proxy import ProxyError
 from launchplane.record import Asked, Record, RecordError, Refused, Request, Stands
@@ -785,7 +786,7 @@ def test_a_renamed_release_whose_proxy_stays_held_far_past_the_step_limit_is_sti
     )
 
 
-def test_an_instance_the_routes_file_was_renamed_to_while_it_was_being_cleaned_up_as_left_over_is_not_removed(
+def test_a_left_over_instance_the_gate_says_is_committed_and_the_proxy_already_serves_is_kept_and_its_release_finished(
     record: Record,
 ) -> None:
     worker, lanes, proxy = serving_a(record)
@@ -793,9 +794,10 @@ def test_an_instance_the_routes_file_was_renamed_to_while_it_was_being_cleaned_u
     generation = kept_of(record, request).generation
     discard = proxy.discard
 
-    def the_rename_sent_before_the_kill_lands_first(web_address: str, container: str) -> bool:
+    def the_rename_sent_before_the_kill_lands_first(web_address: str, container: str) -> Verdict:
         if proxy.written[web_address] == "a":
             proxy.switch(web_address, NEW, generation)
+            proxy.loaded[web_address] = LoadedRoute(NEW, RouteStatus.ENABLED)
         return discard(web_address, container)
 
     proxy.discard = the_rename_sent_before_the_kill_lands_first
@@ -808,3 +810,23 @@ def test_an_instance_the_routes_file_was_renamed_to_while_it_was_being_cleaned_u
         {WEB_ADDRESS: NEW},
         [NEW],
     )
+
+
+def test_a_worker_whose_host_cannot_be_read_with_a_cancel_on_record_waits_between_readings_and_ends_the_request_without_spinning(
+    record: Record,
+) -> None:
+    proxy = PretendProxy(PretendHost())
+    waits, readings = list[float](), list[int]()
+
+    def unreadable(lane: tuple[str, str] | None = None) -> OnHost:
+        readings.append(1)
+        raise ContainerHostError(f"Listing the containers of {lane} on test failed: connection refused")
+
+    proxy.host.read = unreadable
+    lanes = Lanes(proxy.host, proxy, sleep=waits.append)
+    request = taken_up_and_left(record, MOVE_B)
+    record.cancel(request, BY_HAND)
+    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    kept = kept_of(record, request)
+    assert kept.error is not None and "connection refused" in kept.error
+    assert (kept.stands, len(readings), len(waits)) == (Stands.FAILED, 2 * MOST_READS_MISSED, 2 * (MOST_READS_MISSED - 1))

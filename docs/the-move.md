@@ -69,9 +69,11 @@ An instance that exists and does not receive visitors is left over from a move c
 
 Everything that settles a release passes one gate on the container host. Each is one command, run in the proxy's container while it holds a lock on the file `.gate` in the routes folder:
 
-- **The switch** renames the candidate's staged routes file into place and writes the mark `<web address>.<generation>.committed`. It renames nothing when the mark `<web address>.<generation>.abandoned` is there, or when the candidate's staged file is gone.
+- **The switch** renames the candidate's staged routes file into place and writes the mark `<web address>.<generation>.committed`. It renames nothing when the generation already has a verdict, either mark, or when the candidate's staged file is gone. So a generation is renamed for once, and a whole switch sent again for it changes nothing.
 - **A cancel** writes the generation's `.abandoned` mark. It marks nothing, and is told it is too late, when the generation's `.committed` mark is there or the first line of the routes file names the generation.
 - **Cleaning up an instance that receives no visitors** takes its staged routes file away. It does nothing, and the instance stays, when the routes file sends visitors to that instance.
+
+Each command answers with the verdict as it stands when the command is done: `committed`, `abandoned` or `none`. Whoever asked acts on that answer and on nothing else, whatever it had meant to do. An instance about to be cleaned up whose release the gate says is committed is kept, and the release is finished as a committed one. The gate is asked before the instance is looked at for visitors, so a rename that landed a moment earlier is learnt from the gate. A reading that does not show what the gate said was done is not acted on.
 
 A verdict is a file of the generation's own. It is written once, by the command that won, and nothing done for another generation replaces or removes it: a late or repeated command for one release cannot change the outcome of another. The staged file is named for the candidate, so a rename that Docker accepted before a kill either reaches the gate before the candidate is cleaned up, and is then honoured and finished, or reaches it after, and renames nothing.
 

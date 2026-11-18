@@ -1,3 +1,4 @@
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -16,6 +17,7 @@ from launchplane.instance import (
     OnHost,
     ProxySeen,
     Reading,
+    Verdict,
     new_container_name,
     new_data_set_name,
     web_address_of,
@@ -50,6 +52,9 @@ from launchplane.steps import (
 from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, tell_nobody, told
 
 MOST_STEPS = 50
+# A host or proxy that cannot be read is asked again this often, this far apart, before the call stops over it.
+MOST_READS_MISSED = 5
+SECONDS_BETWEEN_READS = 2.0
 type Lane = tuple[str, str]
 
 
@@ -80,9 +85,9 @@ class Proxy(Protocol):
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None) -> None: ...
     def write_route(self, web_address: str, container: str) -> None: ...
-    def switch(self, web_address: str, container: str, generation: str) -> bool: ...
-    def abandon(self, web_address: str, generation: str) -> bool: ...
-    def discard(self, web_address: str, container: str) -> bool: ...
+    def switch(self, web_address: str, container: str, generation: str) -> Verdict: ...
+    def abandon(self, web_address: str, generation: str) -> Verdict: ...
+    def discard(self, web_address: str, container: str) -> Verdict: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
     def show_back_soon(self, web_address: str) -> None: ...
@@ -138,7 +143,6 @@ TAKE: dict[type, Take] = {
     steps.StartProxy: lambda _host, proxy, _step: proxy.start(),
     steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container),
     steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container),
-    steps.Abandon: lambda _host, proxy, step: proxy.abandon(step.web_address, step.generation),
     steps.RemoveRoute: lambda _host, proxy, step: proxy.remove_route(step.web_address),
     steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(
         step.product, step.lane, step.data_set, step.generation
@@ -234,7 +238,9 @@ class Lanes:
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
         read_cancels: CancelsReader = lambda: [],
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self.sleep = sleep
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
@@ -308,7 +314,8 @@ class Lanes:
     # A cancel of a move, carried to the gate by whoever asks. Why it came too late, or None when it won there.
     def abandon(self, product: str, lane: str, generation: str) -> str | None:
         web_address = web_address_of(product, lane)
-        return None if self.proxy.abandon(web_address, generation) else plan.too_late_to_cancel(web_address)
+        verdict = self.proxy.abandon(web_address, generation)
+        return plan.too_late_to_cancel(web_address) if verdict is Verdict.COMMITTED else None
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
         return settle(
@@ -346,15 +353,28 @@ class Lanes:
     ) -> tuple[Callable[[], LaneReading], Callable[[LaneReading, bool], Judgement]]:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
         return (
-            lambda: self.read(scope).lane(product, lane),
+            self.patient(lambda: self.read(scope).lane(product, lane)),
             lambda read, back: judge(read, description, (turned_back or work) if back else work),
         )
+
+    # A reading that fails is waited on and asked again, so no call spins on a host it cannot read, and after a few in a
+    # row the call stops with the last failure.
+    def patient(self, read: Callable[[], LaneReading]) -> Callable[[], LaneReading]:
+        def read_or_wait_and_read_again() -> LaneReading:
+            for _ in range(MOST_READS_MISSED - 1):
+                try:
+                    return read()
+                except ContainerHostError, ProxyError:
+                    self.sleep(SECONDS_BETWEEN_READS)
+            return read()
+
+        return read_or_wait_and_read_again
 
     # A check of its own, whatever the step was decided from: read from the routes the proxy has loaded at the moment
     # of the action, and from no stamp or mark. A retire has removed the route by then, and the old instance of a
     # move is retired once the proxy has loaded the switch, so neither is stopped by it.
     def refuse_to_take_from_visitors(self, action: Action) -> None:
-        if not isinstance(action, steps.Retire | steps.Discard | steps.RemoveInstance | steps.StopPart):
+        if not isinstance(action, steps.Retire | steps.RemoveInstance | steps.StopPart):
             return
         loaded = self.proxy.read().loaded
         sent_here = sorted(web_address for web_address, route in loaded.items() if route.container == action.container)
@@ -378,14 +398,19 @@ class Lanes:
             return self.await_switch(action)
         if isinstance(action, steps.Discard):
             return self.discard(action)
+        if isinstance(action, steps.Abandon):
+            return steps.Abandoned(self.proxy.abandon(action.web_address, action.generation))
         TAKE[type(action)](self.host, self.proxy, action)
         return action
 
+    # The gate is asked first, and its answer is what is acted on: an instance whose release it says is committed stays,
+    # and only one it has refused every rename to is looked at for visitors and retired.
     def discard(self, action: steps.Discard) -> Event:
-        won = self.proxy.discard(action.web_address, action.container)
-        if won:
+        verdict = self.proxy.discard(action.web_address, action.container)
+        if verdict is not Verdict.COMMITTED:
+            self.refuse_to_take_from_visitors(steps.Retire(action.container))
             self.host.retire_instance(action.container)
-        return steps.Discarded(action.container, won)
+        return steps.Discarded(action.container, verdict)
 
     def await_switch(self, action: steps.AwaitSwitch) -> Event:
         try:

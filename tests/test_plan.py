@@ -15,12 +15,14 @@ from launchplane.instance import (
     RunningBackgroundService,
     RunningInstance,
     Unread,
+    Verdict,
 )
 from launchplane.judge import Kind, Work, judge
 from launchplane.plan import MOVE, Move, Phase, decide_move, decide_retire, phase_of, too_late_to_cancel
 from launchplane.product import Product
 from launchplane.steps import (
     Abandon,
+    Abandoned,
     Action,
     AwaitBackgroundService,
     AwaitDatabase,
@@ -85,7 +87,7 @@ FRESH_NAMES = FreshNames(FRESH, "fresh-data")
 
 STOPPED_NEW = lane_instance("new", "b", InstanceState.STOPPED)
 STARTED_NEW = StartInstance(TARGET, "new", None, GENERATION)
-SWITCHED_TO_NEW = Switched("new", won=True)
+SWITCHED_TO_NEW = Switched("new", Verdict.COMMITTED)
 REFUSED = CheckRefused("new", "Connection refused")
 
 
@@ -133,7 +135,7 @@ MOVES = {
     "a finished switch answers switched": Case(
         (NEW,),
         ("new", "new"),
-        (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", won=True)),
+        (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", Verdict.NONE)),
         answer(Outcome.SWITCHED, "new", did=("started the instance new", "wrote the route to new", "retired old")),
         switched=True,
     ),
@@ -146,7 +148,7 @@ MOVES = {
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Discard(WEB_ADDRESS, "stray")),
     "a finished cleanup answers repaired, with what it did": Case(
-        (NEW,), ("new", "new"), (Discarded("stray", won=True),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
+        (NEW,), ("new", "new"), (Discarded("stray", Verdict.NONE),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
     ),
     "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
         (OLD, NEW), ("old", "old"), (), Discard(WEB_ADDRESS, "new")
@@ -535,7 +537,7 @@ def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:
 
 def test_a_background_service_that_stops_during_its_watch_answers_background_service_failed_with_why_not_switched() -> None:
     refused = BackgroundServiceRefused("new-background-service", "The background service new-background-service is not running.")
-    done = (STARTED_NEW_BACKGROUND_SERVICE, refused, SWITCHED_TO_NEW)
+    done = (STARTED_NEW_BACKGROUND_SERVICE, refused)
     step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), done, None, (STOPPED_NEW_BACKGROUND_SERVICE,)))
     assert isinstance(step, Done)
     assert (step.answer.outcome, step.answer.error) == (Outcome.BACKGROUND_SERVICE_FAILED, refused.report)
@@ -646,3 +648,14 @@ def test_a_routes_file_launchplane_did_not_write_is_that_lanes_fault_stops_its_m
     assert [finding.shown for finding in judged.of_kind(Kind.ROUTE_UNREAD)] == ["wrong"]
     assert isinstance(step, Stop) and "Retiring the lane removes the file" in step.reason
     assert decide_retire(judge(lane, Product(), Work.RETIRE), None, ()) == RemoveRoute(WEB_ADDRESS, None)
+
+
+def test_a_reading_that_does_not_show_the_rename_the_gate_said_was_made_is_not_acted_on() -> None:
+    told = Case((OLD, NEW), ("old", "old"), (STARTED_NEW, Check("new"), SWITCHED_TO_NEW), None)
+    step = next_move_step(told)
+    assert isinstance(step, Stop) and "Nothing was done against the gate's answer" in step.reason
+
+
+def test_a_cancel_the_gate_answered_as_won_is_followed_by_putting_back_whatever_the_reading_shows_of_marks() -> None:
+    told = Case((OLD, MADE_NEW), ("old", "old"), (STARTED_NEW, Abandoned(Verdict.ABANDONED)), None)
+    assert next_move_step(told) == REMOVE_NEW

@@ -51,14 +51,14 @@ A request is `done` when its call would have answered `200`, `failed` when it wo
 `POST /requests/<id>/cancel` cancels one request, and a newer request for a lane cancels the older ones the same way. What it means depends only on where the request is:
 
 - **Waiting:** it ends as `cancelled`. Nothing was done.
-- **A move being worked:** the call itself carries the cancel to [the gate](the-move.md#the-gate) on the container host before it answers, and there either the cancel or the rename of the routes file wins, never both.
+- **A move being worked:** the call itself carries the cancel to [the gate](the-move.md#the-gate) on the container host before it answers, and there either the cancel or the rename of the routes file wins, never both. A cancel counts from the moment it passes the gate, not from the moment it is written to the record: one that is on record and has not reached the gate when the switch passes it is told too late.
   - **The cancel wins** when the routes file is not renamed for the request's generation. The gate keeps a mark on the host, the rename is refused from then on, and the worker puts the lane back: it removes what the generation made and nothing else, by the same judged and checked steps as the call itself. The request ends as `cancelled`. The mark is on the host, so a Launchplane killed just after the cancel won, also before the call was answered, puts the lane back when it takes the request up again.
   - **The cancel is too late** from the rename on, also while the proxy has not loaded the renamed file and the old build still answers. The call answers `409` at once, `cancel_refused` says the rename was the boundary, and the release is finished as asked, also after a kill.
-  - **The call cannot reach the container host:** it answers `503`. The cancel stays asked in the record, and the worker of the request carries it to the gate before its next action.
+  - **The call cannot reach the container host:** it answers `503`. The cancel stays asked in the record, and the worker of the request carries it to the gate at its next reading, where it wins or is too late like any other.
 - **A retire, or beginning or ending maintenance, being worked:** the request is marked in the record. Its worker reads the mark before its next action and puts the lane back, or finds it too late and says why in `cancel_refused`.
 - **Ended, or needing a person:** nothing changes.
 
-A move never ends, however it would, over a cancel its worker has not seen. When a cancel is recorded while the worker is making its answer, the record refuses that ending, and the worker goes through once more, sees the cancel and answers it from the host. So a move whose check failed, or one to the build already active, that is cancelled before its result is saved ends as `cancelled`, and one that had renamed the routes file ends as `done` with `cancel_refused`.
+A move never ends, however it would, over a cancel its worker has not seen. When a cancel is recorded while the worker is making its answer, the record refuses that ending, and the worker goes through once more, sees the cancel and answers it from the host. So a move whose check failed, or one to the build already active, that is cancelled before its result is saved ends as `cancelled`, and one that had renamed the routes file ends as `done` with `cancel_refused`. It goes through once more and no oftener: when the host cannot be read then either, the request ends as `failed` with that reason.
 
 If putting back fails, or leaves a part wrong, such as a database server that had to be killed to stop it, the request ends as `failed` and `error` says which.
 
@@ -93,6 +93,7 @@ Four workers run in the Launchplane process. Each takes the oldest request that 
 - **After a restart, with nobody calling,** a request found working with nobody holding its lane's turn was interrupted. The worker ends that attempt as `interrupted`, begins a new one, reads the host and decides from what is there, as asking again always did. It does not go on from where the last attempt was.
 - **A request taken up three times without ending** is not taken up a fourth time. It stands as `needs a person` with the reason in `error`, and its lane takes no other request. `POST /requests/<id>/retry` ends it as `failed` and writes a new request for the same thing, answering `202` with it. `POST /requests/<id>/give-up` ends it as `failed` and changes nothing on the host. Either answers `409` for a request that does not need a person.
 - **Nothing is run again by itself** except this taking-up after an interruption. A request that fails stays failed until someone asks again.
+- **A host or proxy that cannot be read** is asked again, 5 times in all and 2 s apart, before the request fails with the last error. The lane's turn is let go when it fails.
 - **Losing the record while working** stops the work at the next thing to write. The request stays working, and when the record is back it is taken up as interrupted, which counts.
 - **A restart of Launchplane while a request is working**, a deploy included, is an interruption like any other.
 
@@ -145,6 +146,8 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **The database is not backed up.** Losing it loses the requests and their history, and no lane: what runs is on the host.
 - **`asked_by` is an address, not a person.** Who may ask is not settled yet.
 - **Who may cancel is not settled.** Any caller can, as any caller can ask.
+- **A routes file that is not Launchplane's, on a lane with nothing else on the host, does not show on the status page.** A lane is shown from its instances, background services and data sets, and from the routes the proxy has loaded.
+- **A loaded route whose target is not a kind Launchplane knows makes the whole reading of the proxy fail.** `/running` and every call then answer `503` for every lane, until that route is removed from the proxy by hand.
 - **A lane is put back after the action under way.** Who wins is decided at once at the gate. The worker reads the gate's mark between actions, and one action can take as long as a check, 20 s, or a stop, 30 s.
 - **A cancel asked of a retire keeps the data set it named, also when the rest was too late to cancel.** The direction session chose this as the safe side; Chris may reverse it.
 - **Ending maintenance that is cancelled answers for every part of the lane,** also one that was wrong before it began: which of them it started, the host cannot show, since a start changes no label.

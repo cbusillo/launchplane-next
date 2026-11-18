@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from launchplane.instance import DataSet, DataSetUse, LaneBuild
+from launchplane.instance import DataSet, DataSetUse, LaneBuild, Verdict
 
 
 class Outcome(StrEnum):
@@ -145,7 +145,7 @@ class WriteRoute:
     container: str
 
 
-# The rename of a release, through the gate. `Switched` is what it is once taken, with whether it won there.
+# What passes the gate, and what each is once taken: the verdict the gate gave, which the call acts on from then on.
 @dataclass(frozen=True)
 class Switch:
     web_address: str
@@ -156,11 +156,11 @@ class Switch:
 @dataclass(frozen=True)
 class Switched:
     container: str
-    won: bool
+    verdict: Verdict
 
 
 # An instance that receives no visitors, taken through the gate and then retired: a rename on its way to it is refused
-# from there on. Where the rename had already happened, it lost: the routes file names the instance, and it stays.
+# from there on. Where the rename had already happened, the verdict is committed and the instance stays.
 @dataclass(frozen=True)
 class Discard:
     web_address: str
@@ -170,7 +170,7 @@ class Discard:
 @dataclass(frozen=True)
 class Discarded:
     container: str
-    won: bool
+    verdict: Verdict
 
 
 # A cancel carried to the gate.
@@ -178,6 +178,11 @@ class Discarded:
 class Abandon:
     web_address: str
     generation: str
+
+
+@dataclass(frozen=True)
+class Abandoned:
+    verdict: Verdict
 
 
 # Waiting for the proxy to load a route that is already renamed: the release is real, so not loading yet is waited
@@ -334,4 +339,6 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | NotLoadedYet
+type Event = (
+    Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | Abandoned | NotLoadedYet
+)

@@ -24,6 +24,7 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
+    Verdict,
     WrittenRoute,
     background_service_container_of,
 )
@@ -291,28 +292,32 @@ class PretendProxy:
         self.host.record(f"route {container}")
 
     # As on the host, the two that pass the gate exclude each other: one finds what the other did.
-    def switch(self, web_address: str, container: str, generation: str) -> bool:
+    def verdict_of(self, web_address: str, generation: str) -> Verdict:
+        if generation in self.committed:
+            return Verdict.COMMITTED
+        return Verdict.ABANDONED if generation in self.abandoned.get(web_address, ()) else Verdict.NONE
+
+    def switch(self, web_address: str, container: str, generation: str) -> Verdict:
         self.at_the_gate("before the switch")
-        if generation in self.abandoned.get(web_address, ()) or container in self.discarded:
-            return False
+        if self.verdict_of(web_address, generation) is not Verdict.NONE or container in self.discarded:
+            return self.verdict_of(web_address, generation)
         self.written[web_address] = container
         self.written_by[web_address] = generation
         self.committed.add(generation)
         self.at_the_gate("after the switch")
         self.host.record(f"route {container}")
-        return True
+        return Verdict.COMMITTED
 
-    def abandon(self, web_address: str, generation: str) -> bool:
-        if generation in self.committed:
-            return False
-        self.abandoned[web_address] = self.abandoned.get(web_address, frozenset()) | {generation}
-        return True
+    def abandon(self, web_address: str, generation: str) -> Verdict:
+        if generation not in self.committed:
+            self.abandoned[web_address] = self.abandoned.get(web_address, frozenset()) | {generation}
+        return self.verdict_of(web_address, generation)
 
-    def discard(self, web_address: str, container: str) -> bool:
+    def discard(self, web_address: str, container: str) -> Verdict:
         if self.written.get(web_address) == container:
-            return False
+            return Verdict.COMMITTED
         self.discarded.add(container)
-        return True
+        return Verdict.NONE
 
     def remove_route(self, web_address: str) -> None:
         del self.written[web_address]
@@ -336,7 +341,7 @@ def numbered_names() -> Callable[[LaneBuild], FreshNames]:
 
 
 def lanes_on(proxy: PretendProxy, product: Product = WITH_DATA) -> Lanes:
-    return Lanes(proxy.host, proxy, read_product=lambda _product: product, name_fresh=numbered_names())
+    return Lanes(proxy.host, proxy, read_product=lambda _product: product, name_fresh=numbered_names(), sleep=lambda _seconds: None)
 
 
 def lane_instance(container: str, build: str | None, state: InstanceState = InstanceState.RUNNING) -> RunningInstance:
