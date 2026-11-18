@@ -153,30 +153,34 @@ class Worker:
 
         return Witness(tell, hold, cancel_asked, refuse_cancel)
 
+    # A cancel asked while the call was answering is answered by the call, from the host, before the request ends.
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
+        witness = self.witness_of(request, attempt, held)
+        while not self.carried_to_an_end(request, attempt, witness):
+            pass
+
+    def carried_to_an_end(self, request: Request, attempt: int, witness: Witness) -> bool:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
-            witness = self.witness_of(request, attempt, held)
-            # A cancel asked while the call was answering is answered by the call, from the host, before the request ends.
-            while not self.ended_with(attempt, carried_out(self.lanes, request, witness)):
-                pass
+            answer = carried_out(self.lanes, request, witness)
         except Cancelled as cancelled:
-            self.end_cancelled(request, attempt, cancelled.put_back)
+            return self.end_cancelled(request, attempt, cancelled.put_back)
         except STOPPED as error:
-            self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
+            return self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
         except Interrupted, RecordError:
             raise
         except Exception as error:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
-            self.end(attempt, Stands.FAILED, None, why)
+            return self.end(attempt, Stands.FAILED, None, why)
+        return self.ended_with(attempt, answer)
 
-    def end_cancelled(self, request: Request, attempt: int, answer: PutBack) -> None:
+    def end_cancelled(self, request: Request, attempt: int, answer: PutBack) -> bool:
         kept = self.record.read(request.id)
         told = [] if kept is None else put_back_told(kept)
-        self.end(attempt, Stands.CANCELLED, answer.model_copy(update={"put_back": told}), None)
+        return self.end(attempt, Stands.CANCELLED, answer.model_copy(update={"put_back": told}), None)
 
     def ended_with(self, attempt: int, answer: Answer) -> bool:
         failed = answer.outcome in NOT_A_SUCCESS

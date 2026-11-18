@@ -178,3 +178,58 @@ def request_loop(request_once: Callable[[], str]) -> Generator[RequestLoop]:
         time.sleep(1)
         loop.running = False
         thread.join()
+
+
+HOLDS_URL = os.environ.get("LAUNCHPLANE_HOLDS_URL", f"{LAUNCHPLANE_URL.rsplit(':', 1)[0]}:8701")
+HELD_UNIT = "/opt/launchplane/tests/launchplane-held.service"
+
+
+# The holds of tests/held_launchplane.py, which runs Launchplane on the control container with its calls able to be held.
+def holds(method: str = "GET", point: str = "") -> dict[str, list[str]]:
+    request = urllib.request.Request(f"{HOLDS_URL}/holds{'/' if point else ''}{point}", method=method)  # noqa: S310
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return json.loads(response.read())
+
+
+def hold(point: str) -> None:
+    holds("PUT", point)
+
+
+def let_go(point: str = "") -> None:
+    holds("DELETE", point)
+
+
+def wait_until_stopped_at(point: str, seconds: float = 60) -> None:
+    def launchplane_is_stopped_at_the_hold() -> bool:
+        return point.split("?")[0] in holds()["stopped_at"]
+
+    wait_for(launchplane_is_stopped_at_the_hold, seconds)
+
+
+def holds_answer() -> bool:
+    try:
+        return bool(holds()) and launchplane_answers()
+    except OSError:
+        return False
+
+
+# As `kill -9`: no handler runs, and systemd starts Launchplane again.
+def kill_held_launchplane() -> None:
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"{HOLDS_URL}/kill", method="POST"), timeout=10)  # noqa: S310
+    except OSError:
+        pass
+    wait_for(holds_answer, seconds=30)
+
+
+@contextmanager
+def launchplane_held() -> Generator[None]:
+    on_control(f"install -m 644 {HELD_UNIT} /etc/systemd/system/ && systemctl daemon-reload && systemctl start launchplane-held")
+    wait_for(holds_answer, seconds=30)
+    let_go()
+    try:
+        yield
+    finally:
+        let_go()
+        on_control("systemctl start launchplane")
+        wait_for(launchplane_answers, seconds=30)

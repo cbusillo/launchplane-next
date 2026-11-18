@@ -45,7 +45,8 @@ WITH_DATA = Product(
 )
 
 
-class LaunchplaneKilled(Exception):
+# Not an Exception: nothing in Launchplane may catch its own death and go on.
+class LaunchplaneKilled(BaseException):
     pass
 
 
