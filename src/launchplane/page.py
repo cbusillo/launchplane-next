@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Literal
 
@@ -6,7 +7,7 @@ from pydantic import BaseModel
 from launchplane.act import Status
 from launchplane.instance import InstanceState, PartOfLane
 from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
-from launchplane.record import Kept, Stands
+from launchplane.record import Kept, Request, Stands, how_cancelled
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -18,7 +19,12 @@ TONE = {
     Shown.WRONG: Standing.WRONG,
     Shown.UNREAD: Standing.UNREAD,
 }
-STANDS_TONE = {Stands.WAITING: Standing.ON_PURPOSE, Stands.WORKING: Standing.ON_PURPOSE, Stands.NEEDS_A_PERSON: Standing.WRONG}
+STANDS_TONE = {
+    Stands.WAITING: Standing.ON_PURPOSE,
+    Stands.WORKING: Standing.ON_PURPOSE,
+    Stands.NEEDS_A_PERSON: Standing.WRONG,
+    Stands.CANCELLED: Standing.ON_PURPOSE,
+}
 RECORD_UNREAD = "Launchplane's record cannot be read"
 NOT_KNOWN_AT_WORK = (
     "What is below is read from the host. Whether a request is at work on a lane is not known, so what would be under way "
@@ -74,7 +80,7 @@ def finding_rows(judged: Judgement) -> list[Row]:
     return rows
 
 
-def asked_for(request: Kept) -> str:
+def asked_for(request: Request) -> str:
     if request.work is Work.MOVE:
         return f"{request.work} to {request.build}"
     deleting = "" if request.delete_data_set is None else f", deleting the data set {request.delete_data_set}"
@@ -87,13 +93,25 @@ def done_so_far(request: Kept) -> str:
     return f"{taken_up}So far: {'; '.join(lines)}." if lines else f"{taken_up}Nothing done so far."
 
 
-def request_note(request: Kept) -> str | None:
+def being_cancelled(request: Kept) -> str:
+    if request.cancel_refused is not None:
+        return f" {request.cancel_refused}"
+    if request.cancel_asked_by is None:
+        return ""
+    return f" To be cancelled by {request.cancel_asked_by}: its worker reads that before its next action."
+
+
+def request_note(request: Request) -> str | None:
     if request.stands is Stands.NEEDS_A_PERSON:
         return request.error
-    return done_so_far(request) if request.stands is Stands.WORKING else None
+    if request.stands is Stands.CANCELLED:
+        return how_cancelled(request)
+    if isinstance(request, Kept) and request.stands is Stands.WORKING:
+        return f"{done_so_far(request)}{being_cancelled(request)}"
+    return None
 
 
-def request_rows(requests: list[Kept]) -> list[Row]:
+def request_rows(requests: Sequence[Request]) -> list[Row]:
     return [
         Row(
             name=f"Request {request.id}",
@@ -101,11 +119,11 @@ def request_rows(requests: list[Kept]) -> list[Row]:
             pills=[Pill(text=request.stands, tone=STANDS_TONE.get(request.stands, Standing.WRONG))],
             note=request_note(request),
         )
-        for request in requests
+        for request in sorted(requests, key=lambda each: each.id)
     ]
 
 
-def person_pills(requests: list[Kept]) -> list[Pill]:
+def person_pills(requests: Sequence[Request]) -> list[Pill]:
     needs = any(request.stands is Stands.NEEDS_A_PERSON for request in requests)
     return [Pill(text=Stands.NEEDS_A_PERSON, tone=Standing.WRONG)] if needs else []
 
@@ -127,7 +145,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
     instances = sorted(of_lane(on_host.instances), key=lambda each: (each.container != active, each.container))
     data_sets = of_lane(on_host.data_sets)
     receiving = [Pill(text="active", tone=Standing.GOOD)]
-    requests = [each for each in status.requests if (each.product, each.lane) == (entry.product, entry.lane)]
+    requests = [each for each in shown_requests(status) if (each.product, each.lane) == (entry.product, entry.lane)]
     return Card(
         title=f"{entry.product} · {entry.lane or 'no lane'}" if entry.product else "A web address with no instance on the host",
         pills=[*person_pills(requests), *([] if judged is None else lane_pills(judged))],
@@ -194,11 +212,17 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
+# Every request that has not ended, then those a cancel ended a short while ago.
+def shown_requests(status: Status) -> list[Request]:
+    return [*status.requests, *status.cancelled]
+
+
 # A request for a lane with nothing on the host yet has no card of the host's to show on.
 def request_cards(status: Status) -> list[Card]:
     on_host = {(entry.product, entry.lane) for entry in status.web_addresses}
-    lanes = sorted({(each.product, each.lane) for each in status.requests} - on_host)
-    of = {lane: [each for each in status.requests if (each.product, each.lane) == lane] for lane in lanes}
+    requests = shown_requests(status)
+    lanes = sorted({(each.product, each.lane) for each in requests} - on_host)
+    of = {lane: [each for each in requests if (each.product, each.lane) == lane] for lane in lanes}
     return [
         Card(title=f"{product} · {lane}", pills=person_pills(of[product, lane]), rows=request_rows(of[product, lane]))
         for product, lane in lanes

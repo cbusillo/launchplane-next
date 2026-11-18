@@ -40,6 +40,7 @@ def bed_on(record: Record) -> Bed:
     proxy.route(WEB_ADDRESS, "a")
     lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
     worker = Worker(record, lanes, NO_SECRETS)
+    lanes.read_cancelled = record.recently_cancelled
     app = create_app(lanes.read_status, record, worker.wake, NO_SECRETS)
     return Bed(TestClient(app), proxy, record, worker, app)
 
@@ -47,10 +48,11 @@ def bed_on(record: Record) -> Bed:
 @pytest.fixture
 def bed(record: Record) -> Iterator[Bed]:
     made = bed_on(record)
-    thread = made.worker.start()
+    threads = made.worker.start()
     yield made
     made.worker.stop()
-    thread.join(timeout=5)
+    for thread in threads:
+        thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -214,14 +216,13 @@ def test_a_call_that_carries_a_secret_a_container_holds_is_refused_and_nothing_o
     assert (record.unfinished(), record.recently_ended()) == ([], [])
 
 
-def test_an_answer_says_nothing_was_changed_only_when_the_request_is_known_not_to_be_written() -> None:
-    unreachable = bed_on(PretendRecord(reachable=False)).client.post(MOVE, json=TO_B)
+def test_a_call_the_record_could_not_be_asked_about_is_not_told_nothing_was_changed_with_a_key_or_without() -> None:
     unconfirmed_record = PretendRecord(confirms_writes=False)
     unconfirmed = bed_on(unconfirmed_record).client.post(MOVE, json=TO_B, headers={"Idempotency-Key": "one-release"})
-    assert (unreachable.status_code, "was not written and nothing was changed" in unreachable.json()["error"]) == (503, True)
-    repeated = bed_on(PretendRecord(reachable=False)).client.post(MOVE, json=TO_B, headers={"Idempotency-Key": "one-release"})
-    assert (repeated.status_code, "nothing was changed" in repeated.json()["error"]) == (503, False)
-    assert "is not known" in repeated.json()["error"]
+    for key in ({}, {"Idempotency-Key": "one-release"}):
+        repeated = bed_on(PretendRecord(reachable=False)).client.post(MOVE, json=TO_B, headers=key)
+        assert (repeated.status_code, "nothing was changed" in repeated.json()["error"]) == (503, False)
+        assert "is not known" in repeated.json()["error"]
     assert (unconfirmed.status_code, "nothing was changed" in unconfirmed.json()["error"]) == (503, False)
     assert "is not known" in unconfirmed.json()["error"] and "GET /requests" in unconfirmed.json()["error"]
     assert len(unconfirmed_record.unfinished()) == 1

@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -29,7 +31,8 @@ def loaded_from(files: dict[PurePosixPath, str]) -> str:
     services: dict[str, object] = dict(INTERNAL_SERVICES)
     for path, text in files.items():
         if path.suffix == ".yml":
-            http = json.loads(text)["http"]
+            # As the proxy reads a routes file: a line that begins with # is a comment.
+            http = json.loads("".join(line for line in text.splitlines() if not line.startswith("#")))["http"]
             routers |= {f"{key}@file": router | {"status": "enabled"} for key, router in http["routers"].items()}
             services |= {f"{key}@file": service for key, service in http["services"].items()}
     return json.dumps({"routers": routers, "services": services})
@@ -95,6 +98,44 @@ def sends_visitors_to(host: ProxyHost) -> dict[str, str]:
 def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
     clock = iter(range(1000))
     return TraefikProxy(host, sleep=lambda _: host.load(), clock=lambda: next(clock), **seconds)
+
+
+def test_a_route_says_which_request_wrote_it_and_one_written_by_hand_or_before_says_none() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    proxy.write_route(OTHER, "b", 41)
+    seen = proxy.read()
+    assert (seen.route_of(OTHER).written_by, seen.route_of(WEB_ADDRESS).written_by) == (41, None)
+    assert (seen.route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == ("b", "b")
+
+
+def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_place() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    place, run_in, read_folder = host.place_file, host.run_in, host.read_folder
+    touched: list[str] = []
+
+    def place_slowly(container: str, path: PurePosixPath, content: str) -> None:
+        touched.append("placed")
+        time.sleep(0.1)
+        place(container, path, content)
+
+    def run_and_say(container: str, command: list[str]) -> CommandResult:
+        touched.extend(["put in place"] if command[0] == "mv" else [])
+        return run_in(container, command)
+
+    def read_and_say(container: str, folder: PurePosixPath) -> dict[str, FileRead]:
+        touched.append("read")
+        return read_folder(container, folder)
+
+    host.place_file, host.run_in, host.read_folder = place_slowly, run_and_say, read_and_say
+    other_lane = threading.Thread(target=proxy.write_route, args=(OTHER, "b"))
+    other_lane.start()
+    while not touched:
+        time.sleep(0.01)
+    read = proxy.read_written()
+    other_lane.join(timeout=5)
+    assert (touched, sorted(read)) == (["placed", "put in place", "read"], [OTHER, WEB_ADDRESS])
 
 
 UNEXPECTED_ANSWERS = {

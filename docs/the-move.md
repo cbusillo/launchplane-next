@@ -33,7 +33,7 @@ A move does not answer success while the lane's web address does not answer a re
 
 `did` lists every change the move made, whatever the outcome.
 
-A `503` means the host or proxy could not be read or changed. The move stopped where it was, its request has failed, and it is safe to ask again. One request works at a time; another waits its turn.
+A `503` means the host or proxy could not be read or changed. The move stopped where it was, its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move that has not switched yet: the instance it started is removed and the web address never moves.
 
 **The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error.
 
@@ -43,7 +43,9 @@ A `503` means the host or proxy could not be read or changed. The move stopped w
 
 The proxy's loaded routes are the only mark. A route sends one web address to one instance by its container name. `GET /running` gives each instance `receives_visitors_for`, and a move answers `container_receiving_visitors`.
 
-A route is written by renaming a new routes file for the lane into place, and Traefik loads it up to 2 s later. A move that finds the file and the loaded route disagreeing waits for the proxy, or answers `503` with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a route Launchplane did not write, stops the call with `503`.
+A route is written by renaming a new routes file for the lane into place, and Traefik loads it up to 2 s later. Its first line, which the proxy reads as a comment, is `# launchplane.request=<id>`, the [request](requests.md) that wrote it. A move that finds the file and the loaded route disagreeing waits for the proxy, or answers `503` with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a route Launchplane did not write, stops the call with `503`.
+
+No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the call stops with `503` and says so. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
 
 An instance that exists and does not receive visitors is left over from a move cut short. Asking for its build finishes the move; asking for the active build removes it. The web address points at exactly one instance the whole time.
 

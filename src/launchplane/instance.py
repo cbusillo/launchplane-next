@@ -26,6 +26,16 @@ class Mount(BaseModel):
     path: str
 
 
+class Unread(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    why: str
+
+
+# The request that made a part, where one did. A stamp that is not a request's id is unread, never taken for none.
+type Stamp = int | Unread | None
+
+
 class RunningInstance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -37,6 +47,7 @@ class RunningInstance(BaseModel):
     networks: tuple[str, ...]
     data_set: str | None = None
     mounts: tuple[Mount, ...] = ()
+    request: Stamp = None
 
 
 class RunningBackgroundService(BaseModel):
@@ -52,6 +63,7 @@ class RunningBackgroundService(BaseModel):
     instance: str | None
     mounts: tuple[Mount, ...] = ()
     data_set: str | None = None
+    request: Stamp = None
 
 
 class HostNetwork(BaseModel):
@@ -59,12 +71,6 @@ class HostNetwork(BaseModel):
 
     name: str
     is_quiet: bool
-
-
-class Unread(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    why: str
 
 
 class DataSetDatabase(BaseModel):
@@ -90,6 +96,8 @@ class DataSet(BaseModel):
     networks: tuple[HostNetwork, ...]
     volumes: tuple[str, ...]
     databases: tuple[DataSetDatabase, ...]
+    # Stamped on its network, the first part of it that is made.
+    request: Stamp = None
 
 
 class LaneBuild(BaseModel):
@@ -123,6 +131,7 @@ class LoadedRoute:
 class WrittenRoute:
     container: str
     written_at: datetime
+    request: int | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,8 @@ class LaneRoute:
     back_soon_since: datetime | None = None
     proxy_runs: bool = True
     back_soon_runs: bool = True
+    # The request that wrote the routes file, where the file says one did.
+    written_by: int | None = None
 
     # The mark is the lane's own route file, so it reads the same while the proxy is down.
     @property
@@ -161,6 +172,7 @@ class ProxySeen:
             back_soon_since=written.written_at if written is not None and written.container == BACK_SOON else None,
             proxy_runs=self.runs,
             back_soon_runs=self.back_soon_runs,
+            written_by=None if written is None else written.request,
         )
 
     def sends_visitors_to(self) -> dict[str, str]:

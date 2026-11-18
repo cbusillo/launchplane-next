@@ -2,13 +2,14 @@ import threading
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from launchplane.record import (
     ASKED_AGAIN,
     ENDED,
     GIVEN_UP,
+    MINUTES_A_CANCELLED_REQUEST_IS_SHOWN,
     MOST_ATTEMPTS,
     Asked,
     Attempt,
@@ -30,6 +31,7 @@ from launchplane.record import (
     said,
 )
 from launchplane.secret_boundary import JsonValue
+from launchplane.steps import PutBack
 from tests.given_secrets import GivenSecrets
 
 UNFINISHED = (Stands.WAITING, Stands.WORKING, Stands.NEEDS_A_PERSON)
@@ -61,13 +63,18 @@ class PretendRecord(Record):
     def cleaned(self, **values: JsonValue) -> dict[str, Any]:
         return {name: self.gate.clean(value) for name, value in values.items()}
 
+    # A copy, so one thread reads every request while another writes a new one.
+    def every(self) -> list[Kept]:
+        return list(self.kept.values())
+
     def change(self, request: int, **changes: object) -> Kept:
         self.kept[request] = self.kept[request].model_copy(update=changes)
         return self.kept[request]
 
     def same_as_written(self, asked: Asked, idempotency_key: str | None) -> Request | None:
         if idempotency_key is None:
-            return next((each for each in self.kept.values() if each.asked() == asked and each.stands in UNFINISHED[:2]), None)
+            unfinished = (each for each in self.every() if each.stands in UNFINISHED[:2] and each.cancel_asked_at is None)
+            return next((each for each in unfinished if each.asked() == asked), None)
         same_key = self.kept.get(self.keys.get(key_digest(idempotency_key) or "", 0))
         if same_key is not None and same_key.asked() != asked:
             raise key_reused(same_key)
@@ -90,20 +97,25 @@ class PretendRecord(Record):
         self.kept[new.id] = new
         if idempotency_key is not None:
             self.keys[key_digest(idempotency_key) or ""] = new.id
+        before = [
+            each.id
+            for each in self.every()
+            if (each.product, each.lane) == (new.product, new.lane) and each.id < new.id and each.asked() != asked
+        ]
+        self.cancel_each(before, f"request {new.id}")
         if not self.confirms_writes:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")
         return new
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-        if not self.reachable and idempotency_key is not None:
+        if not self.reachable:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: connection refused.")
-        self.reach("writing a request")
         self.gate.refuse(*said(asked), asked_by)
         with self.writing:
             same = self.same_as_written(asked, idempotency_key)
             if same is not None:
                 return same
-            of_lane = [each for each in self.kept.values() if (each.product, each.lane) == (asked.product, asked.lane)]
+            of_lane = [each for each in self.every() if (each.product, each.lane) == (asked.product, asked.lane)]
             stuck = next((each.id for each in of_lane if each.stands is Stands.NEEDS_A_PERSON), None)
             if stuck is not None:
                 raise lane_waits_on_a_person(asked, stuck)
@@ -115,18 +127,27 @@ class PretendRecord(Record):
 
     def unfinished(self) -> list[Kept]:
         self.reach("reading the requests not finished")
-        return [each for each in self.kept.values() if each.stands in UNFINISHED]
+        return [each for each in self.every() if each.stands in UNFINISHED]
 
     def recently_ended(self) -> list[Request]:
         self.reach("reading the requests that ended")
-        ended = list[Request](each for each in self.kept.values() if each.stands in ENDED)
+        ended = list[Request](each for each in self.every() if each.stands in ENDED)
         return sorted(ended, key=lambda each: each.id, reverse=True)[:20]
 
-    def next_up(self) -> Request | None:
-        self.reach("looking for the next request")
-        stuck = {(each.product, each.lane) for each in self.kept.values() if each.stands is Stands.NEEDS_A_PERSON}
-        waiting = (each for each in self.kept.values() if each.stands in UNFINISHED[:2] and (each.product, each.lane) not in stuck)
-        return next(waiting, None)
+    def recently_cancelled(self) -> list[Request]:
+        self.reach("reading the requests that were cancelled")
+        since = now() - timedelta(minutes=MINUTES_A_CANCELLED_REQUEST_IS_SHOWN)
+        cancelled = (each for each in self.every() if each.stands is Stands.CANCELLED and each.ended_at and each.ended_at > since)
+        return list[Request](cancelled)
+
+    def next_up(self) -> list[Request]:
+        self.reach("looking for the next requests")
+        stuck = {(each.product, each.lane) for each in self.every() if each.stands is Stands.NEEDS_A_PERSON}
+        oldest: dict[tuple[str, str], Request] = {}
+        for each in self.every():
+            if each.stands in UNFINISHED[:2] and (each.product, each.lane) not in stuck:
+                oldest.setdefault((each.product, each.lane), each)
+        return sorted(oldest.values(), key=lambda each: each.id)
 
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
         return self.turn_held(product, lane)
@@ -134,11 +155,12 @@ class PretendRecord(Record):
     @contextmanager
     def turn_held(self, product: str, lane: str) -> Generator[Held | None]:
         self.reach("taking a lane's turn")
-        if (product, lane) in self.turns:
+        holder = object()
+        with self.writing:
+            ours = self.turns.setdefault((product, lane), holder) is holder
+        if not ours:
             yield None
             return
-        holder = object()
-        self.turns[product, lane] = holder
         try:
             yield lambda: self.turns.get((product, lane)) is holder
         finally:
@@ -206,6 +228,37 @@ class PretendRecord(Record):
             again = self.write_new(found.asked(), asked_by, None)
             self.answered_by_a_person(request, ASKED_AGAIN.format(again=again.id))
             return again
+
+    def cancel_each(self, requests: list[int], by: str) -> None:
+        self.gate.refuse(by)
+        for request in requests:
+            found = self.kept.get(request)
+            if found is None or found.stands not in UNFINISHED[:2] or found.cancel_asked_at is not None:
+                continue
+            mark = {"cancel_asked_at": now(), "cancel_asked_by": by}
+            if found.stands is Stands.WAITING:
+                self.change(request, **mark, stands=Stands.CANCELLED, ended_at=now(), answer=PutBack().model_dump())
+            else:
+                self.change(request, **mark)
+
+    def cancel(self, request: int, by: str) -> Request | None:
+        self.reach("cancelling a request")
+        with self.writing:
+            self.cancel_each([request], by)
+            return self.kept.get(request)
+
+    def cancel_asked(self, request: int) -> bool:
+        self.reach("reading whether a cancel was asked of a request")
+        found = self.kept.get(request)
+        return found is not None and found.cancel_asked_at is not None
+
+    def refuse_cancel(self, attempt: int, why: str) -> None:
+        self.reach("writing why a request was not cancelled")
+        with self.writing:
+            request = self.open_attempts.get(attempt)
+            if request is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so why it was not cancelled was not written.")
+            self.change(request, **self.cleaned(cancel_refused=why))
 
 
 # What a lost connection does: every turn is free, and its holder has not been told.

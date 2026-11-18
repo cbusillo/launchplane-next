@@ -9,6 +9,7 @@ import urllib.request
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -114,7 +115,7 @@ def unfinished_requests() -> list[dict[str, Any]]:
 
 def request_ended(request: int) -> dict[str, Any]:
     def has_ended() -> bool:
-        return ask(f"/requests/{request}")[1]["stands"] in ("done", "failed")
+        return ask(f"/requests/{request}")[1]["stands"] in ("done", "failed", "cancelled")
 
     wait_for(has_ended, seconds=120)
     return ask(f"/requests/{request}")[1]
@@ -158,7 +159,7 @@ class RequestLoop:
             try:
                 self.answers.append(self.request_once())
             except (OSError, UnexpectedAnswer) as error:
-                self.failures.append(repr(error))
+                self.failures.append(f"{datetime.now(UTC):%H:%M:%S.%f} {error!r}")
             time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
 
     def answers_in_order(self) -> list[str]:

@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from collections.abc import Callable, Set
 from contextlib import suppress
@@ -35,6 +36,7 @@ from launchplane.docker_answers import (
     PART_LABEL,
     PRODUCT_LABEL,
     QUIET_GATEWAY_MODE,
+    REQUEST_LABEL,
     CommandResult,
     ContainerHostError,
     DockerContainerDetails,
@@ -150,6 +152,11 @@ def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> 
     return replace(options, labels=labels, environment=login)
 
 
+# What a request makes is stamped with its id as it is made, so the host shows what each request started.
+def stamp_of(request: int | None) -> dict[str, str]:
+    return {} if request is None else {REQUEST_LABEL: str(request)}
+
+
 def helper_options(helper: HelperContainer) -> RunOptions:
     return RunOptions(
         image=helper.image,
@@ -177,6 +184,9 @@ class ContainerHost:
         self.clock = clock
         self.secrets = HostSecrets()
         self.logins = HostLogins(client, address, self.secrets)
+        # Every lane shares the proxy, the back soon page and their networks. Each is looked for and made while this is
+        # held and no longer, so two lanes that find one missing do not both make it.
+        self.making_what_lanes_share = threading.RLock()
 
     @classmethod
     def from_environment(cls) -> ContainerHost:
@@ -295,11 +305,12 @@ class ContainerHost:
             self.client.networks.create(name, driver="bridge", labels=labels)
 
     def ensure_network(self, name: str, *, quiet: bool) -> None:
-        try:
-            found = self.client.networks.get(name)
-        except NotFound:
-            self.create_network(name, None, quiet=quiet)
-            return
+        with self.making_what_lanes_share:
+            try:
+                found = self.client.networks.get(name)
+            except NotFound:
+                self.create_network(name, None, quiet=quiet)
+                return
         if quiet and not is_quiet(checked(DOCKER_NETWORK, found.attrs, f"description of the network {name}")):
             raise ContainerHostError(
                 f"The network {name} exists and is not quiet: it lets what is attached to it reach out. "
@@ -329,17 +340,21 @@ class ContainerHost:
         ready = options if use is None else on_data_set(options, use, login_on(use))
         self.create(ready).start()
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
-            self.run_part(options, use, lambda on: self.logins.make(container, on))
+            self.run_part(
+                replace(options, labels=options.labels | stamp_of(request)), use, lambda on: self.logins.make(container, on)
+            )
 
-    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
+    def start_background_service(
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None:
         networks = [LANE_NETWORK] if use is None else [use.network]
         options = part_options(target, background_service_container_of(instance), "background-service", networks, command)
         with attempting(f"Starting the background service of the instance {instance}", self.address):
-            marked = replace(options, labels=options.labels | {INSTANCE_LABEL: instance})
+            marked = replace(options, labels=options.labels | {INSTANCE_LABEL: instance} | stamp_of(request))
             self.run_part(marked, use, lambda _on: self.logins.given_to(instance))
 
     def await_background_service(self, container: str, steady_seconds: float) -> None:
@@ -355,9 +370,10 @@ class ContainerHost:
                 )
             self.sleep(POLL_SECONDS)
 
-    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
+    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None:
         with attempting(f"Making the network of the data set {data_set}", self.address):
-            self.create_network(f"launchplane-data-{data_set}", data_set_labels(product, lane, data_set), quiet=True)
+            labels = data_set_labels(product, lane, data_set) | stamp_of(request)
+            self.create_network(f"launchplane-data-{data_set}", labels, quiet=True)
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
         with attempting(f"Making the volume of the data set {data_set}", self.address):
@@ -445,7 +461,7 @@ class ContainerHost:
             return found.logs(tail=LOG_TAIL_LINES).decode(errors="replace")
 
     def ensure_helper(self, helper: HelperContainer) -> None:
-        with attempting(f"Starting Launchplane's own container {helper.container}", self.address):
+        with attempting(f"Starting Launchplane's own container {helper.container}", self.address), self.making_what_lanes_share:
             found = self.find_container(helper.container)
             if found is None:
                 if helper.outside_network is not None:

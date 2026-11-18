@@ -1,8 +1,10 @@
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from importlib.resources import files
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -53,6 +55,8 @@ BACK_SOON_PAGE = HelperContainer(
 LOADED_ROUTES_URL = "http://127.0.0.1:8080/api/rawdata"
 FROM_ROUTES_FILE = "@file"
 HOST_RULE = re.compile(r"Host\(`(?P<web_address>[^`]+)`\)")
+WRITTEN_BY_PREFIX = "# launchplane.request="
+WRITTEN_BY = re.compile(rf"{re.escape(WRITTEN_BY_PREFIX)}(?P<request>[0-9]{{1,18}})\n")
 INSTANCE_URL = re.compile(rf"http://(?P<container>[^:/]+):{INSTANCE_PORT}")
 # noinspection HttpUrlsUsage
 WEB_ADDRESS_URL = f"http://127.0.0.1:{INSTANCE_PORT}/"
@@ -120,10 +124,13 @@ def instance_url(container: str) -> str:
     return f"http://{container}:{INSTANCE_PORT}"
 
 
-def route_text(web_address: str, container: str) -> str:
+# The routes file is what sends visitors somewhere, so it says which request wrote it: on a first line the proxy
+# reads as a comment.
+def route_text(web_address: str, container: str, request: int | None = None) -> str:
     router = {"rule": f"Host(`{web_address}`)", "entryPoints": [ENTRY_POINT], "service": web_address}
     target = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
-    return json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
+    written_by = "" if request is None else f"{WRITTEN_BY_PREFIX}{request}\n"
+    return written_by + json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
 
 
 def container_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
@@ -157,11 +164,12 @@ def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
     return lane_routes_by_web_address(routes)
 
 
-def written_route_from_file(text: str, web_address: str) -> str:
-    found = INSTANCE_URL.search(text)
-    if found is None or text != route_text(web_address, found["container"]):
+def written_route_from_file(text: str, web_address: str, written_at: datetime) -> WrittenRoute:
+    found, stamp = INSTANCE_URL.search(text), WRITTEN_BY.match(text)
+    request = None if stamp is None else int(stamp["request"])
+    if found is None or text != route_text(web_address, found["container"], request):
         raise ProxyError(f"The routes file {route_file_of(web_address)} is not the route Launchplane writes for {web_address}.")
-    return found["container"]
+    return WrittenRoute(found["container"], written_at, request)
 
 
 @dataclass(frozen=True)
@@ -172,6 +180,9 @@ class TraefikProxy:
     load_deadline_seconds: float = 10
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    # Every lane's routes file is in the one folder. It is held while the folder is read whole or a file in it is
+    # changed, and no longer, so no reading finds a file half put in place by another lane's worker.
+    routes_folder: threading.Lock = field(default_factory=threading.Lock, init=False, compare=False, repr=False)
 
     def start(self) -> None:
         self.host.ensure_helper(PROXY)
@@ -189,10 +200,12 @@ class TraefikProxy:
 
     def read_written(self) -> dict[str, WrittenRoute]:
         written: dict[str, WrittenRoute] = {}
-        for name, file in self.host.read_folder(PROXY_NAME, ROUTES_FOLDER).items():
+        with self.routes_folder:
+            files_read = self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
+        for name, file in files_read.items():
             if name.endswith(ROUTE_FILE_SUFFIX):
                 web_address = name.removesuffix(ROUTE_FILE_SUFFIX)
-                written[web_address] = WrittenRoute(written_route_from_file(file.text, web_address), file.changed_at)
+                written[web_address] = written_route_from_file(file.text, web_address, file.changed_at)
         return written
 
     # The route files are read from the proxy's container even while it is stopped; what it has loaded only while it runs.
@@ -221,18 +234,20 @@ class TraefikProxy:
             self.sleep(POLL_SECONDS)
 
     def remove_route(self, web_address: str) -> None:
-        self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
+        with self.routes_folder:
+            self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
 
     def loaded_container(self, web_address: str) -> str | None:
         route = self.read_loaded().get(web_address)
         return None if route is None else route.container
 
-    def write_route(self, web_address: str, container: str) -> None:
-        self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container))
-        self.run_or_fail(
-            ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
-            f"Putting the route of {web_address} in place",
-        )
+    def write_route(self, web_address: str, container: str, request: int | None = None) -> None:
+        with self.routes_folder:
+            self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container, request))
+            self.run_or_fail(
+                ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
+                f"Putting the route of {web_address} in place",
+            )
 
     def run_or_fail(self, command: list[str], attempt: str) -> None:
         result = self.host.run_in(PROXY_NAME, command)

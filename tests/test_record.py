@@ -1,4 +1,5 @@
 import threading
+import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
@@ -79,17 +80,16 @@ def test_two_calls_at_once_asking_the_same_write_one_request(record: Record) -> 
     assert len(set(written)) == 1
 
 
-def test_requests_are_next_up_in_the_order_they_came(record: Record) -> None:
-    first, second = record.write(MOVE_B, CALLER, None), record.write(RETIRE_OTHER, CALLER, None)
-    order: list[int] = []
-    for _ in range(2):
-        up = record.next_up()
-        assert up is not None
-        order.append(up.id)
-        attempt = record.take_up(up.id)
-        assert attempt is not None
-        record.end(attempt, Stands.DONE, None, None)
-    assert (order, record.next_up()) == ([first.id, second.id], None)
+def test_the_oldest_request_of_each_lane_is_next_up_and_a_later_one_of_a_lane_only_once_the_earlier_has_ended(
+    record: Record,
+) -> None:
+    first, other = record.write(MOVE_B, CALLER, None), record.write(RETIRE_OTHER, CALLER, None)
+    attempt = record.take_up(first.id)
+    later = record.write(MOVE_C, CALLER, None)
+    while_the_first_is_worked = [each.id for each in record.next_up()]
+    assert attempt is not None
+    record.end(attempt, Stands.DONE, None, None)
+    assert (while_the_first_is_worked, [each.id for each in record.next_up()]) == ([first.id, other.id], [other.id, later.id])
 
 
 def test_a_request_found_working_is_taken_up_as_interrupted_and_the_attempt_is_counted(record: Record) -> None:
@@ -132,15 +132,17 @@ def test_a_request_taken_up_three_times_without_ending_needs_a_person_and_says_w
 
 
 def test_a_lane_whose_request_needs_a_person_takes_no_other_request_and_another_lane_still_does(record: Record) -> None:
-    waiting_behind = record.write(MOVE_C, CALLER, "written-before-the-first-stopped")
     request = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, request.id)
+    assert record.take_up(request.id) is not None
+    waiting_behind = record.write(MOVE_C, CALLER, None)
+    assert [record.take_up(request.id) is None for _ in range(MOST_ATTEMPTS)] == [False] * (MOST_ATTEMPTS - 1) + [True]
     with pytest.raises(Refused, match="needs a person"):
         record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None)
-    assert record.next_up() is None
+    assert record.next_up() == []
     other = record.write(RETIRE_OTHER, CALLER, None)
-    up = record.next_up()
-    assert up is not None and (up.id, waiting_behind.stands) == (other.id, Stands.WAITING)
+    behind = record.read(waiting_behind.id)
+    assert behind is not None
+    assert ([each.id for each in record.next_up()], behind.stands) == ([other.id], Stands.WAITING)
 
 
 def test_giving_a_request_up_ends_it_as_failed_and_frees_its_lane(record: Record) -> None:
@@ -160,8 +162,7 @@ def test_asking_for_a_request_again_writes_a_new_request_for_the_same_thing_and_
     assert again is not None and old is not None and old.error is not None
     assert (again.asked(), again.stands, again.asked_by) == (MOVE_B, Stands.WAITING, "the address 192.0.2.9")
     assert (old.stands, f"as request {again.id}" in old.error) == (Stands.FAILED, True)
-    up = record.next_up()
-    assert up is not None and up.id == again.id
+    assert [each.id for each in record.next_up()] == [again.id]
 
 
 def test_only_a_request_that_needs_a_person_is_given_up_or_asked_for_again(record: Record) -> None:
@@ -203,9 +204,8 @@ def test_a_database_that_cannot_be_reached_is_said_as_such_and_not_waited_for_lo
     unreachable = PostgresRecord("postgresql://launchplane@127.0.0.1:1/launchplane", NO_SECRETS, seconds_to_reach=0.2)
     done = threading.Event()
     try:
-        with pytest.raises(RecordError, match="could not be reached while writing a request") as refused:
+        with pytest.raises(RecordError, match="could not be reached while writing a request"):
             unreachable.write(MOVE_B, CALLER, None)
-        assert not isinstance(refused.value, Unconfirmed)
         done.set()
     finally:
         unreachable.close()
@@ -371,10 +371,11 @@ def test_a_statement_given_values_the_gate_has_not_judged_is_not_run(postgres_re
         session.execute(record_module.Sql.SAME_KEY, unjudged)
 
 
-def test_a_repeated_key_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_its_request_is_written(
-    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("repeated", ["one-release", None], ids=["with a key", "with no key"])
+def test_a_repeated_call_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_its_request_is_written(
+    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch, repeated: str | None
 ) -> None:
-    first = postgres_record.write(MOVE_B, CALLER, "one-release")
+    first = postgres_record.write(MOVE_B, CALLER, repeated)
     same_as_written = record_module.same_as_written
 
     def find_it_then_lose_the_connection(
@@ -385,4 +386,31 @@ def test_a_repeated_key_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_it
 
     monkeypatch.setattr(record_module, "same_as_written", find_it_then_lose_the_connection)
     with pytest.raises(Unconfirmed, match="server closed the connection"):
-        postgres_record.write(MOVE_B, CALLER, "one-release")
+        postgres_record.write(MOVE_B, CALLER, repeated)
+
+
+def test_a_write_lost_after_the_record_said_it_holds_nothing_like_it_is_said_to_be_unwritten(
+    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def lose_the_connection(*_given: object) -> None:
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(record_module, "refuse_while_a_person_is_awaited", lose_the_connection)
+    with pytest.raises(RecordError, match="server closed the connection") as lost:
+        postgres_record.write(MOVE_B, CALLER, None)
+    assert not isinstance(lost.value, Unconfirmed)
+
+
+def test_a_reading_the_record_does_not_answer_in_time_is_given_up_on_and_said_as_such(migrated_database: str) -> None:
+    record = PostgresRecord(migrated_database, NO_SECRETS, seconds_to_reach=0.3)
+    began = time.monotonic()
+    try:
+        with psycopg.connect(migrated_database) as holder:
+            # noinspection SqlResolve
+            holder.execute("lock table request in access exclusive mode")
+            with pytest.raises(RecordError, match=r"did not answer within 0.6 s while reading the requests not finished"):
+                record.unfinished()
+            waited = time.monotonic() - began
+        assert (waited < 2, record.unfinished()) == (True, [])
+    finally:
+        record.close()

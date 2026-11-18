@@ -1,3 +1,4 @@
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -47,6 +48,24 @@ def test_with_its_database_stopped_launchplane_refuses_a_change_changes_nothing_
     assert builds_of_the_lane() == [BUILD_A]
     moved = move_lane(PRODUCT, LANE, BUILD_B)
     assert (moved[0], moved[1]["outcome"]) == (200, "switched"), moved
+
+
+@pytest.mark.usefixtures("lane_on_a")
+def test_with_its_database_frozen_launchplane_still_shows_the_host_within_seconds_and_says_the_record_did_not_answer() -> None:
+    on_control("pkill -STOP -u postgres")
+    try:
+        began = time.monotonic()
+        status, running = ask("/running", timeout=30)
+        took = time.monotonic() - began
+    finally:
+        on_control("pkill -CONT -u postgres")
+    wait_for(the_record_answers, seconds=30)
+    assert (status, "did not answer within 6 s" in running["record_error"], running["cards"][0]["title"]) == (
+        200,
+        True,
+        "Launchplane's record cannot be read",
+    ), running["record_error"]
+    assert (took < 12, builds_of_the_lane()) == (True, [BUILD_A]), took
 
 
 @pytest.mark.usefixtures("lane_on_a")

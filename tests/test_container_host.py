@@ -1,6 +1,10 @@
 import json
+import threading
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -18,10 +22,14 @@ from launchplane.instance import (
     LaneBuild,
     Mount,
     OnHost,
+    ProxySeen,
+    Reading,
     Unread,
 )
+from launchplane.judge import Kind, judge
 from launchplane.product import Product, ProductError, ProductFolder
-from tests.recording_docker import ExecResult, RecordingDocker
+from launchplane.proxy import PROXY
+from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 
 DATA_SET_LABELS = {"launchplane.product": "shop", "launchplane.lane": "testing", "launchplane.data-set": "d1"}
 QUIET_OPTIONS = {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}
@@ -224,6 +232,71 @@ def holding_a_login(docker: RecordingDocker, holder: str) -> None:
     docker.containers.create(
         "shop:a", name=holder, labels=labels, environment=LOGIN, volumes={}, restart_policy={"Name": ""}
     ).start()
+
+
+def test_a_password_made_for_a_lane_is_known_as_a_secret_before_docker_is_given_it_so_no_other_worker_can_write_it() -> None:
+    docker = RecordingDocker()
+    host = ContainerHost(docker.as_client(), "test")
+    create = docker.containers.create
+    known_when_given: list[bool] = []
+
+    def create_and_look(_image: str, _command: list[str] | None = None, **options: object) -> RecordingContainer:
+        given = cast("dict[str, str]", options["environment"])
+        known_when_given.extend(value in host.secrets_seen() for name, value in given.items() if name.endswith("PASSWORD"))
+        return create(_image, _command, **options)
+
+    docker.containers.create = create_and_look
+    host.create_database("shop", "testing", "d1", DATA_SET_NETWORK, VOLUME, "postgres:18-alpine")
+    docker.containers.by_name[DATABASE].answers = [
+        ExecResult(0, json.dumps(RULES_AS_READ).encode()),
+        ExecResult(0, b"[]"),
+        ExecResult(0),
+    ]
+    host.start_instance(TARGET, WEB, LINK)
+    assert known_when_given == [True, True]
+
+
+def test_an_instance_is_stamped_with_the_request_that_made_it_and_read_back_with_it() -> None:
+    docker = RecordingDocker()
+    host = ContainerHost(docker.as_client(), "test")
+    host.start_instance(TARGET, WEB, None, 41)
+    host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None)
+    assert {each.container: each.request for each in host.read().instances} == {WEB: 41, "shop-testing-bbbbbbbbbbbb": None}
+
+
+def test_a_request_label_that_is_no_request_id_is_read_as_unread_and_makes_only_that_instance_wrong() -> None:
+    longer_than_python_turns_into_a_number = "9" * 4301
+    marked = container("web", "web", []) | {
+        "Labels": DATA_SET_LABELS | {"launchplane.request": longer_than_python_turns_into_a_number}
+    }
+    [instance] = read([marked]).instances
+    judged = judge(
+        Reading(datetime.now(UTC), ProxySeen(runs=True, back_soon_runs=True), read([marked])).lane("shop", "testing"),
+        Product(),
+        None,
+    )
+    assert instance.request == Unread(why="its label launchplane.request, 4301 characters long, is not the id of a request")
+    assert [(finding.subject, finding.shown) for finding in judged.of_kind(Kind.STAMP_UNREAD)] == [("web", "wrong")]
+
+
+def test_two_lanes_that_find_the_proxy_missing_at_the_same_moment_make_it_once() -> None:
+    docker = RecordingDocker()
+    host = ContainerHost(docker.as_client(), "test")
+    create = docker.containers.create
+    made: list[str] = []
+
+    def create_slowly(_image: str, _command: list[str] | None = None, **options: object) -> RecordingContainer:
+        made.append(cast("str", options["name"]))
+        time.sleep(0.1)
+        return create(_image, _command, **options)
+
+    docker.containers.create = create_slowly
+    lanes = [threading.Thread(target=host.ensure_helper, args=(PROXY,)) for _ in range(2)]
+    for lane in lanes:
+        lane.start()
+    for lane in lanes:
+        lane.join(timeout=5)
+    assert (made, sorted(docker.networks.made)) == ([PROXY.container], sorted(PROXY.networks))
 
 
 def test_a_new_database_gets_its_set_up_before_it_first_starts_and_refuses_every_address_until_it_has_run() -> None:

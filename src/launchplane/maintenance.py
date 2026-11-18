@@ -2,11 +2,14 @@ from launchplane.instance import DataSetUse, InstanceState, LaneReading, LaneRou
 from launchplane.judge import Judgement, Kind
 from launchplane.plan import (
     Step,
+    StepBack,
     changes_so_far,
     check_or_problems,
     failure_report,
+    is_turned_back,
     left_for_a_move,
     prepared,
+    put_back_or_what_is_left,
     route_step,
     sentences,
 )
@@ -15,6 +18,7 @@ from launchplane.steps import (
     Action,
     AwaitBackgroundService,
     BackgroundServiceRefused,
+    Cancel,
     Check,
     CheckRefused,
     Done,
@@ -30,6 +34,7 @@ from launchplane.steps import (
     Stop,
     StopDatabase,
     StopPart,
+    TooLate,
     WriteRoute,
 )
 
@@ -76,11 +81,13 @@ def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None
     )
 
 
-def decide_begin(judged: Judgement, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
+def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | None = None) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
     route = lane.route
     if (step := route_step(judged, done)) is not None:
         return step
+    if cancel is not None and is_turned_back(cancel):
+        return begin_step_back(judged)
     if not route.in_maintenance:
         if route.written is None and has_nothing(lane):
             return Stop(
@@ -194,11 +201,40 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
     return step or WriteRoute(answer.web_address, instance.container)
 
 
-def decide_end(judged: Judgement, product: Product, done: tuple[Event, ...]) -> Step[MaintenanceResult]:
+def decide_end(
+    judged: Judgement, product: Product, done: tuple[Event, ...], cancel: Cancel | None = None
+) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
     if (step := route_step(judged, done)) is not None:
         return step
+    if cancel is not None and is_turned_back(cancel):
+        return end_step_back(judged)
     answer = answer_for(lane.product, lane.lane, lane.route, MaintenanceOutcome.ENDED)
     if lane.route.in_maintenance:
         return bring_back(judged, product, answer, done)
     return not_as_it_must_be(judged, done) or Done(answer)
+
+
+# The first thing beginning maintenance changes is what visitors get, and bringing a lane back is ending maintenance.
+def begin_step_back(judged: Judgement) -> StepBack:
+    lane = judged.lane
+    if not lane.route.in_maintenance:
+        return put_back_or_what_is_left(judged, None)
+    return TooLate(
+        f"{lane.web_address} already shows the back soon page, so beginning maintenance could not be cancelled and is "
+        f"finished as asked. POST /lanes/{lane.product}/{lane.lane}/maintenance/end brings the lane back."
+    )
+
+
+# Until the web address is switched back, what ending maintenance started is stopped again, as after a failed check.
+# The lane is then judged as one in maintenance is, so a part that did not stop cleanly is found.
+def end_step_back(judged: Judgement) -> StepBack:
+    lane = judged.lane
+    if lane.route.in_maintenance:
+        # Every part of the lane is stopped again, so the cancel answers for each of them as the host shows it.
+        parts = [*lane.instances, *lane.background_services, *lane.databases]
+        return next_to_stop(lane) or put_back_or_what_is_left(judged, None, {part.container for part in parts})
+    return TooLate(
+        f"{lane.web_address} already sends its visitors to {lane.route.written}, so ending maintenance could not be cancelled "
+        f"and is finished as asked. POST /lanes/{lane.product}/{lane.lane}/maintenance/begin puts the lane in maintenance again."
+    )

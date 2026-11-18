@@ -72,7 +72,12 @@ class PretendHost:
             self.data_sets[name] = found.model_copy(update={"databases": databases})
 
     def place(
-        self, target: LaneBuild, container: str, state: InstanceState = InstanceState.RUNNING, use: DataSetUse | None = None
+        self,
+        target: LaneBuild,
+        container: str,
+        state: InstanceState = InstanceState.RUNNING,
+        use: DataSetUse | None = None,
+        request: int | None = None,
     ) -> None:
         self.instances[container] = RunningInstance(
             product=target.product,
@@ -82,6 +87,7 @@ class PretendHost:
             state=state,
             networks=(LANE_NETWORK,) if use is None else (LANE_NETWORK, use.network),
             data_set=None if use is None else use.data_set,
+            request=request,
         )
 
     def attach(self, container: str, network: str, *, quiet: bool) -> None:
@@ -104,11 +110,13 @@ class PretendHost:
         self.change_database(database, unheld_logins=())
         self.record(f"remove logins from {database}")
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None:
-        self.place(target, container, use=use)
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
+        self.place(target, container, use=use, request=request)
         self.record(f"start {container}")
 
-    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
+    def start_background_service(
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None:
         container = background_service_container_of(instance)
         self.background_services[container] = RunningBackgroundService(
             product=target.product,
@@ -120,6 +128,7 @@ class PretendHost:
             running_for_seconds=0.0,
             instance=instance,
             data_set=None if use is None else use.data_set,
+            request=request,
         )
         self.most_background_services_running = max(self.most_background_services_running, len(self.background_services))
         self.record(f"start background service {instance} on {None if use is None else use.network} with {' '.join(command)}")
@@ -142,9 +151,10 @@ class PretendHost:
         )
         self.data_sets[data_set] = found.model_copy(update=parts)
 
-    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
+    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None:
         self.networks[f"network-{data_set}"] = True
-        self.change_data_set(product, lane, data_set, networks=(HostNetwork(name=f"network-{data_set}", is_quiet=True),))
+        network = HostNetwork(name=f"network-{data_set}", is_quiet=True)
+        self.change_data_set(product, lane, data_set, networks=(network,), request=request)
         self.record(f"network {data_set}")
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
@@ -223,6 +233,7 @@ class PretendProxy:
         self.back_soon_runs = True
         self.loaded: dict[str, LoadedRoute] = {}
         self.written: dict[str, str] = {}
+        self.written_by: dict[str, int | None] = {}
         self.failing: set[str] = set()
         self.not_answering: dict[str, str] = {}
         self.asked: list[str] = []
@@ -237,7 +248,10 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
+            written={
+                web_address: WrittenRoute(container, SINCE, self.written_by.get(web_address))
+                for web_address, container in self.written.items()
+            },
             loaded=dict(self.loaded) if self.running else {},
         )
 
@@ -247,6 +261,7 @@ class PretendProxy:
 
     def show_back_soon(self, web_address: str) -> None:
         self.written[web_address] = BACK_SOON
+        self.written_by[web_address] = None
         self.host.record("show back soon")
 
     def await_route(self, web_address: str, container: str | None) -> None:
@@ -255,8 +270,9 @@ class PretendProxy:
         self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()}
         self.while_awaiting()
 
-    def write_route(self, web_address: str, container: str) -> None:
+    def write_route(self, web_address: str, container: str, request: int | None = None) -> None:
         self.written[web_address] = container
+        self.written_by[web_address] = request
         self.host.record(f"route {container}")
 
     def remove_route(self, web_address: str) -> None:

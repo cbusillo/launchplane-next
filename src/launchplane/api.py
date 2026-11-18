@@ -37,6 +37,7 @@ from launchplane.record import (
     Stands,
     Unconfirmed,
     database,
+    how_cancelled,
 )
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
@@ -80,6 +81,7 @@ class RunningAnswer(BaseModel):
     web_addresses: list[WebAddressJudged]
     lanes: list[LaneAnswer]
     requests: list[Kept]
+    cancelled: list[KeptRequest]
     record_error: str | None
     cards: list[Card]
 
@@ -154,6 +156,7 @@ def running_answer(status: Status) -> RunningAnswer:
         web_addresses=status.web_addresses,
         lanes=[lane_answer(judged) for judged in status.lanes],
         requests=status.requests,
+        cancelled=status.cancelled,
         record_error=status.record_error,
         cards=cards(status),
     )
@@ -218,11 +221,15 @@ def asker(http: Request) -> str:
     return "an unknown address" if caller is None else f"the address {caller.host}"
 
 
-def read_until_ended(record: Record, request: int, seconds: float) -> Kept | None:
+def has_ended(kept: Kept) -> bool:
+    return kept.stands in ENDED
+
+
+def read_until(record: Record, request: int, seconds: float, settled: Callable[[Kept], bool] = has_ended) -> Kept | None:
     deadline = time.monotonic() + seconds
     while True:
         kept = record.read(request)
-        if kept is None or kept.stands in ENDED:
+        if kept is None or settled(kept):
             return kept
         if time.monotonic() >= deadline:
             return kept
@@ -231,6 +238,8 @@ def read_until_ended(record: Record, request: int, seconds: float) -> Kept | Non
 
 # The answer a call gave before requests were kept: the final answer, with the status that goes with it.
 def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: Response) -> Answer | NotFinished:
+    if kept.stands is Stands.CANCELLED:
+        return not_finished(response, HTTPStatus.CONFLICT, how_cancelled(kept))
     if kept.answer is None:
         return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, kept.error or f"Request {kept.id} failed and kept no error.")
     if kept.stands is Stands.FAILED:
@@ -266,7 +275,7 @@ class Calls:
         self.wake()
         response.headers["Location"] = f"/requests/{request.id}"
         try:
-            kept = read_until_ended(self.record, request.id, wait)
+            kept = read_until(self.record, request.id, wait)
         except RecordError as error:
             why = f"Request {request.id} is kept, and how it stands is not known: {error}"
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
@@ -302,6 +311,49 @@ class Calls:
             return kept
         why = f"Request {request} is {kept.stands}. Only a request that needs a person is asked for again or given up."
         return not_finished(response, HTTPStatus.CONFLICT, f"{why} Nothing was changed.")
+
+    def cancel(self, request: int, by: str, wait: float, response: Response) -> Kept | NotFinished:
+        try:
+            marked = self.record.cancel(request, by)
+        except CarriesASecret as error:
+            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, self.not_known(request, error))
+        if marked is None:
+            return self.none_such(request, response)
+        try:
+            kept = read_until(self.record, request, wait, is_cancel_settled)
+        except RecordError as error:
+            why = f"Request {request} is to be cancelled if it had not ended, and how it stands is not known: {error}"
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
+        if kept is None:
+            return self.none_such(request, response)
+        why_not = why_not_cancelled(kept)
+        if why_not is not None:
+            return not_finished(response, HTTPStatus.CONFLICT, why_not)
+        if kept.stands is not Stands.CANCELLED:
+            response.status_code = HTTPStatus.ACCEPTED
+        return kept
+
+
+# The answer to a cancel is known once it has ended the request, or once it is known that it will not.
+def is_cancel_settled(kept: Kept) -> bool:
+    return kept.stands is Stands.CANCELLED or why_not_cancelled(kept) is not None
+
+
+# One sentence for a request no cancel will end, or None while one has ended it or still may.
+def why_not_cancelled(kept: Kept) -> str | None:
+    ended = f"Request {kept.id} ended as {kept.stands}"
+    if kept.cancel_refused is not None:
+        return f"{kept.cancel_refused} {ended}." if kept.stands in ENDED else kept.cancel_refused
+    if kept.stands is Stands.NEEDS_A_PERSON:
+        return (
+            f"Request {kept.id} needs a person, so it was not cancelled and nothing was changed. Look at the lane, then ask "
+            f"for it again with POST /requests/{kept.id}/retry or give it up with POST /requests/{kept.id}/give-up."
+        )
+    if kept.stands in (Stands.DONE, Stands.FAILED):
+        return f"{ended}, so it was not cancelled. Nothing was changed by this call."
+    return None
 
 
 WAIT = Query(ge=0, le=MOST_SECONDS_WAITED, description="Seconds to wait for the request to end before answering 202.")
@@ -388,6 +440,12 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
         return calls.answered_by_a_person(request, given_up, response)
 
 
+def add_cancel_call(app: FastAPI, calls: Calls) -> None:
+    @app.post("/requests/{request}/cancel", responses=responses((HTTPStatus.ACCEPTED, Kept), NOT_FOUND, *NOT_KEPT))
+    def cancel_request(request: int, http: Request, response: Response, wait: Annotated[float, WAIT] = 0) -> Kept | NotFinished:
+        return calls.cancel(request, f"a call from {asker(http)}", wait, response)
+
+
 def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
@@ -409,6 +467,7 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
     calls = Calls(record, wake)
     add_lane_calls(app, calls)
     add_request_calls(app, calls)
+    add_cancel_call(app, calls)
     return app
 
 
@@ -426,7 +485,7 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     record = PostgresRecord(database(), host)
-    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished)
+    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_cancelled=record.recently_cancelled)
     worker = Worker(record, lanes, host)
     worker.start()
     app = create_app(lanes.read_status, record, worker.wake, host)

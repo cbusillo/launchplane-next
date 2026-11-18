@@ -31,9 +31,22 @@ from launchplane.judge import (
 )
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.record import Kept, RecordError, Stands
-from launchplane.steps import Action, Done, Event, FreshNames, MaintenanceOutcome, MaintenanceResult, MoveResult, RetireResult, Stop
-from launchplane.telling import NOBODY, Witness, named, told
+from launchplane.record import Kept, RecordError, Request, Stands
+from launchplane.steps import (
+    Action,
+    Cancel,
+    Done,
+    Event,
+    FreshNames,
+    MaintenanceOutcome,
+    MaintenanceResult,
+    MoveResult,
+    PutBack,
+    RetireResult,
+    Stop,
+    TooLate,
+)
+from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -41,10 +54,12 @@ type Lane = tuple[str, str]
 
 class InstanceHost(Protocol):
     def read(self, lane: Lane | None = None) -> OnHost: ...
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None) -> None: ...
-    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None: ...
+    def start_background_service(
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
-    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
+    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
@@ -63,7 +78,7 @@ class Proxy(Protocol):
     def start(self) -> None: ...
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None) -> None: ...
-    def write_route(self, web_address: str, container: str) -> None: ...
+    def write_route(self, web_address: str, container: str, request: int | None = None) -> None: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
     def show_back_soon(self, web_address: str) -> None: ...
@@ -72,10 +87,18 @@ class Proxy(Protocol):
 
 type ProductReader = Callable[[str], Product]
 type KeptReader = Callable[[], list[Kept]]
+type CancelledReader = Callable[[], list[Request]]
 
 
 class Stopped(Exception):
     pass
+
+
+# A cancel was carried out and the lane is put back, so the call has no answer of its own to give.
+class Cancelled(Exception):
+    def __init__(self, put_back: PutBack) -> None:
+        super().__init__("The call was cancelled and its lane put back.")
+        self.put_back = put_back
 
 
 # What a caller needs read. A reading never holds more than was asked for, and never stands for what was not.
@@ -98,6 +121,7 @@ class Status:
     web_addresses: list[WebAddressJudged]
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
+    cancelled: list[Request] = field(default_factory=list[Request])
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -109,9 +133,11 @@ type Take = Callable[[InstanceHost, Proxy, Any], None]
 TAKE: dict[type, Take] = {
     steps.StartProxy: lambda _host, proxy, _step: proxy.start(),
     steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container),
-    steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container),
+    steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container, step.request),
     steps.RemoveRoute: lambda _host, proxy, step: proxy.remove_route(step.web_address),
-    steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(step.product, step.lane, step.data_set),
+    steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(
+        step.product, step.lane, step.data_set, step.request
+    ),
     steps.CreateDataSetVolume: lambda host, _proxy, step: host.create_data_set_volume(step.product, step.lane, step.data_set),
     steps.CreateDatabase: lambda host, _proxy, step: host.create_database(
         step.product, step.lane, step.data_set, step.network, step.volume, step.image
@@ -119,9 +145,9 @@ TAKE: dict[type, Take] = {
     steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
     steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),
     steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
-    steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use),
+    steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use, step.request),
     steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
-        step.target, step.instance, step.use, list(step.command)
+        step.target, step.instance, step.use, list(step.command), step.request
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
@@ -132,29 +158,50 @@ TAKE: dict[type, Take] = {
 }
 
 
-def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness) -> Event:
+# A change that puts a lane back is told before it is made, so it is in the record even if the record is lost just after.
+def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness, *, back: bool) -> Event:
     witness.hold()
     tell = witness.tell
+    told_before = back and plan.change_made_by(action) is not None
+    if told_before:
+        tell(f"{named(action)}{TO_PUT_BACK}", None)
     try:
         event = take(action)
     except (ContainerHostError, ProxyError) as error:
         tell(named(action), str(error))
         raise
-    tell(*told(action, event))
+    if not told_before:
+        tell(*told(action, event))
     return event
 
 
+type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], Action | Done[Answer] | Done[PutBack] | Stop | TooLate]
+
+
+# A cancel is read between actions. From then on the same planner takes the steps back, with the lane read and judged
+# for that, and the call ends by saying so; unless the host shows it is too late: then the cancel is refused and the
+# call goes on as asked.
 def settle[Answer](
-    read_judged: Callable[[], Judgement],
-    next_step: Callable[[Judgement, tuple[Event, ...]], Action | Done[Answer] | Stop],
+    read_judged: Callable[[bool], Judgement],
+    next_step: Decide[Answer],
     take: Callable[[Action], Event],
     witness: Witness,
 ) -> Answer:
     done: list[Event] = []
+    cancel: Cancel | None = None
     while True:
-        judged = read_judged()
-        step = next_step(judged, tuple(done))
+        if cancel is None and witness.cancel_asked():
+            cancel = Cancel()
+        back = plan.is_turned_back(cancel)
+        judged = read_judged(back)
+        step = next_step(judged, tuple(done), cancel)
+        if isinstance(step, TooLate):
+            witness.refuse_cancel(step.reason)
+            cancel = Cancel(refused=True)
+            continue
         if isinstance(step, Done):
+            if isinstance(step.answer, PutBack):
+                raise Cancelled(step.answer)
             return step.answer
         if isinstance(step, Stop):
             raise Stopped(step.reason)
@@ -163,7 +210,7 @@ def settle[Answer](
                 f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
             )
-        done.append(taken_and_told(step, take, witness))
+        done.append(taken_and_told(step, take, witness, back=back))
 
 
 class Lanes:
@@ -174,12 +221,14 @@ class Lanes:
         read_product: ProductReader = lambda _product: Product(),
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
+        read_cancelled: CancelledReader = lambda: [],
     ) -> None:
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
         self.name_fresh = name_fresh
         self.read_unfinished = read_unfinished
+        self.read_cancelled = read_cancelled
 
     # The containers are read before the proxy, so what is secret on the host is known before anything can be said of it.
     def read(self, scope: Scope) -> Reading:
@@ -207,17 +256,22 @@ class Lanes:
         except ProductError as error:
             return error
 
-    def unfinished(self) -> tuple[list[Kept], str | None]:
+    @staticmethod
+    def kept_or_why_not[Read](read: Callable[[], list[Read]], unread: str | None = None) -> tuple[list[Read], str | None]:
+        if unread is not None:
+            return [], unread
         try:
-            return self.read_unfinished(), None
+            return read(), None
         except RecordError as error:
             return [], str(error)
 
     def read_status(self) -> Status:
         # A request taken up or ended while the host is read is at work on what was read.
-        before, unread_before = self.unfinished()
+        before, unread_before = self.kept_or_why_not(self.read_unfinished)
         reading = self.read(EVERY_LANE)
-        requests, record_error = ([], unread_before) if unread_before else self.unfinished()
+        requests, unread_after = self.kept_or_why_not(self.read_unfinished, unread_before)
+        cancelled, record_error = self.kept_or_why_not(self.read_cancelled, unread_after)
+        requests = [] if record_error else requests
         at_work = {(each.product, each.lane): each.work for each in (*before, *requests) if each.stands is Stands.WORKING}
         # With either reading of the record missing, which lane a request is at work on is not known for any lane.
         unread = None if record_error is None else WorkUnread(record_error)
@@ -226,13 +280,15 @@ class Lanes:
             judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
-        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error)
+        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancelled)
 
     def move(self, target: LaneBuild, witness: Witness = NOBODY) -> MoveResult:
         product = self.read_product(target.product)
         return settle(
             self.judging(target.product, target.lane, product, Work.MOVE),
-            lambda judged, done: plan.decide_move(judged, target, product, self.name_fresh(target), done),
+            lambda judged, done, cancel: plan.decide_move(
+                judged, target, product, self.name_fresh(target), done, cancel, witness.request
+            ),
             self.take,
             witness,
         )
@@ -240,7 +296,7 @@ class Lanes:
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
         return settle(
             self.judging(product, lane, self.description_of(product), Work.RETIRE),
-            lambda judged, done: plan.decide_retire(judged, delete_data_set, done),
+            lambda judged, done, cancel: plan.decide_retire(judged, delete_data_set, done, cancel),
             self.take,
             witness,
         )
@@ -259,18 +315,36 @@ class Lanes:
             return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
         description = self.read_product(product)
         return settle(
-            self.judging(product, lane, description, Work.END_MAINTENANCE),
-            lambda judged, done: maintenance.decide_end(judged, description, done),
+            # Turned back, it is stopping the lane again, and the lane is judged as one going into maintenance.
+            self.judging(product, lane, description, Work.END_MAINTENANCE, Work.BEGIN_MAINTENANCE),
+            lambda judged, done, cancel: maintenance.decide_end(judged, description, done, cancel),
             self.take_behind_back_soon,
             witness,
         )
 
     # A move answers from what the status call sees, so it asks its lane's web address too.
-    def judging(self, product: str, lane: str, description: Product | ProductError, work: Work) -> Callable[[], Judgement]:
+    def judging(
+        self, product: str, lane: str, description: Product | ProductError, work: Work, turned_back: Work | None = None
+    ) -> Callable[[bool], Judgement]:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
-        return lambda: judge(self.read(scope).lane(product, lane), description, work)
+        return lambda back: judge(self.read(scope).lane(product, lane), description, (turned_back or work) if back else work)
+
+    # A check of its own, whatever the step was decided from: read from the routes the proxy has loaded at the moment
+    # of the action, and from no stamp or mark. A retire has removed the route by then, and the old instance of a
+    # move is retired once the proxy has loaded the switch, so neither is stopped by it.
+    def refuse_to_take_from_visitors(self, action: Action) -> None:
+        if not isinstance(action, steps.Retire | steps.RemoveInstance | steps.StopPart):
+            return
+        loaded = self.proxy.read().loaded
+        sent_here = sorted(web_address for web_address, route in loaded.items() if route.container == action.container)
+        if sent_here:
+            raise Stopped(
+                f"Launchplane was about to {named(action)}, and the proxy sends the visitors of {', '.join(sent_here)} to it, "
+                "so it was left running. Nothing more was done."
+            )
 
     def take(self, action: Action) -> Event:
+        self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path)
         if isinstance(action, steps.AwaitBackgroundService):

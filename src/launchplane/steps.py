@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
@@ -63,12 +63,23 @@ class MaintenanceResult(BaseModel):
     error: str | None = None
 
 
+# The answer of a request that a cancel ended: what was done to put its lane back as it was.
+class PutBack(BaseModel):
+    put_back: list[str] = []
+    # Data sets the request made. Putting a lane back never deletes data, so they stay.
+    data_sets_kept: list[str] = []
+    # What was found on the lane when the cancel ended, whoever left it.
+    findings: list[str] = []
+
+
 @dataclass(frozen=True)
 class FreshNames:
     container: str
     data_set: str
 
 
+# The `request` of a step is the stamp put on what it makes. It is not part of which step it is, so a step a call has
+# taken is found among what it has done whoever asked.
 @dataclass(frozen=True)
 class StartProxy:
     pass
@@ -85,6 +96,7 @@ class CreateDataSetNetwork:
     product: str
     lane: str
     data_set: str
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -119,6 +131,7 @@ class StartInstance:
     target: LaneBuild
     container: str
     use: DataSetUse | None = None
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -131,6 +144,7 @@ class Check:
 class WriteRoute:
     web_address: str
     container: str
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -139,6 +153,7 @@ class StartBackgroundService:
     instance: str
     use: DataSetUse | None
     command: tuple[str, ...]
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -230,6 +245,18 @@ class Done[Answer]:
 @dataclass(frozen=True)
 class Stop:
     reason: str
+
+
+# A cancel that came after the point where the lane can be put back. The call goes on as asked.
+@dataclass(frozen=True)
+class TooLate:
+    reason: str
+
+
+# A cancel was asked of the call. `refused` is whether the host has shown it was too late.
+@dataclass(frozen=True)
+class Cancel:
+    refused: bool = False
 
 
 type Action = (

@@ -156,5 +156,6 @@ Nothing below is decided. Do not build past one of Chris's questions. Each names
 ## What exists today
 
 - The test bed is two containers. The control container runs Launchplane as the systemd service `launchplane`. The scratch container is a plain Docker host for the pretend products. A fresh Dokploy is installed on the control container and is not used. Neither container is connected to anything real.
+- Launchplane keeps a PostgreSQL database on the control machine. It holds what was asked, each attempt, and what was done. It is not yet backed up.
 - The pretend website and pretend Odoo product do not exist yet. Creating their repositories needs Chris.
 - An earlier build of an Odoo system usually cannot run on a database a later build has updated. Going back after a switch will often find it cannot, and then the choice is Chris's.
