@@ -276,9 +276,11 @@ class Sql:
     """
     CANCEL_ASKED: Final = "select cancel_asked_at is not null as asked from request where id = %s"
     REFUSE_CANCEL: Final = "update request set cancel_refused = %s where id = %s and cancel_refused is null"
-    # Locks the request, so a cancel is either marked before this is read or finds the request ended.
+    # Locks the request, so a cancel is either marked before this is read or finds the request ended. Only a move
+    # answers every cancel from the host, so only a move waits for the answer.
     OPEN_ATTEMPT: Final = """
-    select request.cancel_asked_at is not null and request.cancel_refused is null as cancel_unanswered
+    select request.work = 'moving' and request.cancel_asked_at is not null and request.cancel_refused is null
+        as cancel_unanswered
     from request, attempt where attempt.id = %s and attempt.ended is null and request.id = attempt.request
     for update of request
     """
@@ -541,7 +543,7 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
-    # A request does not end as done over a cancel nobody has answered: its call answers the cancel first.
+    # A move does not end as done over a cancel nobody has answered: its call answers the cancel first.
     def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> bool:
         with self.session("writing how a request ended") as session:
             open_attempt = session.execute(Sql.OPEN_ATTEMPT, self.gate.made(attempt)).fetchone()

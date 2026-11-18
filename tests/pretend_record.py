@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from launchplane.instance import new_generation
+from launchplane.judge import Work
 from launchplane.record import (
     ASKED_AGAIN,
     ENDED,
@@ -206,7 +207,8 @@ class PretendRecord(Record):
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
             found = self.kept[request]
-            if stands is Stands.DONE and found.cancel_asked_at is not None and found.cancel_refused is None:
+            unanswered = found.cancel_asked_at is not None and found.cancel_refused is None
+            if stands is Stands.DONE and found.work is Work.MOVE and unanswered:
                 return False
             del self.open_attempts[attempt]
             attempts = self.kept[request].attempts

@@ -153,7 +153,8 @@ class Worker:
 
         return Witness(tell, hold, cancel_asked, refuse_cancel)
 
-    # A cancel asked while the call was answering is answered by the call, from the host, before the request ends.
+    # A cancel asked of a move while the call was answering is answered by the call, from the host, before the request
+    # ends: the record does not end the request as done until then.
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         witness = self.witness_of(request, attempt, held)
         while not self.carried_to_an_end(request, attempt, witness):

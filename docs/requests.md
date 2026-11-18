@@ -58,7 +58,7 @@ A request is `done` when its call would have answered `200`, `failed` when it wo
 - **A retire, or beginning or ending maintenance, being worked:** the request is marked in the record. Its worker reads the mark before its next action and puts the lane back, or finds it too late and says why in `cancel_refused`.
 - **Ended, or needing a person:** nothing changes.
 
-A request never ends as `done` over a cancel nobody has answered. When a cancel is recorded while the worker is making its answer, the worker looks at the host again and answers the cancel first. So a move to the build already active that is cancelled before its result is saved ends as `cancelled`, and one that had renamed the routes file ends as `done` with `cancel_refused`.
+A move never ends as `done` over a cancel nobody has answered. When a cancel is recorded while the worker is making its answer, the worker looks at the host again and answers the cancel first. So a move to the build already active that is cancelled before its result is saved ends as `cancelled`, and one that had renamed the routes file ends as `done` with `cancel_refused`.
 
 If putting back fails, or leaves a part wrong, such as a database server that had to be killed to stop it, the request ends as `failed` and `error` says which.
 
@@ -151,7 +151,7 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **A data set carries its generation on its network only,** the first part of it that is made.
 - **A part made before generations carries none,** so a cancel leaves it.
 - **An instance left by an earlier request that a move retired before it was cancelled is not brought back.** It received no visitors.
-- **A request that fails while a cancel is unanswered ends as `failed`.** The cancel call then answers `409` and says how it ended.
+- **A request that fails while a cancel is unanswered ends as `failed`,** and a retire or a maintenance call that ends between the cancel and its worker's next reading ends as it would have. The cancel call then answers `409` and says how it ended.
 - **A cancel that wins against a request whose record is then lost leaves its mark on the host.** The next cancel of the lane, or its retire, removes it.
 - **Only the move passes the gate.** A second Launchplane on the same host is held off each lane by the lane's turn. The rename of a release and its cancel are held off each other on the host. The proxy, the back soon page and readings of the routes folder are protected in the process only.
 - **A reading given up on keeps its connection until the record answers.** At most 4 readings wait at once, so the workers keep connections.

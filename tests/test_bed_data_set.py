@@ -499,7 +499,7 @@ def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of
     run_sql(new, "DROP TABLE made_by_old; DROP TABLE made_by_new")
     move(BUILD_B)
     finished = assert_lane_finished_on(BUILD_B)
-    assert logins_on(finished.data_sets[0]) == [environment_of(new)["PGUSER"]]
+    assert logins_on(finished.data_sets[0]) == [environment_of(finished.receiving()["container"])["PGUSER"]]
 
 
 def files_holding(volume: str, text: str) -> list[str]:

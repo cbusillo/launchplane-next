@@ -4,10 +4,13 @@ from collections.abc import Callable
 from typing import Any, NoReturn
 
 import pytest
+from fastapi.testclient import TestClient
 
 from launchplane.act import Lanes
+from launchplane.api import create_app
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus
 from launchplane.judge import Work
+from launchplane.proxy import ProxyError
 from launchplane.record import Asked, Record, RecordError, Refused, Request, Stands
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
@@ -681,3 +684,69 @@ def test_a_first_move_cancelled_just_after_its_database_server_was_made_waits_fo
         "await database-data-1",
         {},
     )
+
+
+def host_that_cannot_be_reached(_product: str, _lane: str, _generation: str) -> NoReturn:
+    raise ProxyError("Marking the release of testing.site.test as cancelled failed: connection refused")
+
+
+def test_a_cancel_that_cannot_reach_the_gate_says_so_and_the_worker_carries_it_there_and_puts_the_lane_back(
+    record: Record,
+) -> None:
+    worker, lanes, proxy = serving_a(record)
+    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, host_that_cannot_be_reached))
+    asked = client.post(MOVE, json=TO_B).json()["id"]
+    answers: list[tuple[int, str]] = []
+
+    def cancel_while_checking(_container: str) -> None:
+        answer = client.post(f"/requests/{asked}/cancel")
+        answers.append((answer.status_code, answer.json()["error"]))
+
+    proxy.while_checking = cancel_while_checking
+    assert worker.work_next() is True
+    [(status, error)] = answers
+    assert (status, "whether that came in time is not known yet" in error, "Its worker carries the cancel on" in error) == (
+        503,
+        True,
+        True,
+    )
+    assert (kept_of(record, asked).stands, proxy.abandoned, list(proxy.host.instances)) == (
+        Stands.CANCELLED,
+        {WEB_ADDRESS: kept_of(record, asked).generation},
+        ["a"],
+    )
+
+
+def test_a_newer_request_is_still_written_and_answered_when_the_gate_cannot_be_reached_for_the_older(record: Record) -> None:
+    worker, lanes, proxy = serving_a(record)
+    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, host_that_cannot_be_reached))
+    older = client.post(MOVE, json=TO_B).json()["id"]
+    newer: list[int] = []
+
+    def ask_for_c_while_b_is_checked(_container: str) -> None:
+        if not newer:
+            answer = client.post(MOVE, json={"build": "site:c"})
+            newer.append(answer.json()["id"] if answer.status_code == 202 else -1)
+
+    proxy.while_checking = ask_for_c_while_b_is_checked
+    while worker.work_next():
+        pass
+    assert (kept_of(record, older).stands, kept_of(record, newer[0]).stands) == (Stands.CANCELLED, Stands.DONE)
+    assert [each.build for each in proxy.host.instances.values()] == ["site:c"]
+
+
+def test_ending_maintenance_on_a_lane_already_out_ends_as_it_would_have_over_a_cancel_recorded_just_before(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    request = record.write(END, CALLER, None)
+    end = record.end
+
+    def end_just_after_a_cancel(attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> bool:
+        record.cancel(request.id, BY_HAND)
+        return end(attempt, stands, answer, error)
+
+    record.end = end_just_after_a_cancel
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    assert (kept.stands, kept.cancel_asked_by, kept.cancel_refused, proxy.host.actions) == (Stands.DONE, BY_HAND, None, [])
