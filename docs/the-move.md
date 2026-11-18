@@ -95,6 +95,8 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - Changing one lane's routes file while a second lane's stayed: 120 changes, about 9,300 requests, none failed at the proxy. Each change loaded in 0.64 to 2.27 s. Two requests failed in the Mac's lookup of `docker-lp-scratch.shiny`, before reaching the proxy.
 - After `docker restart launchplane-proxy` the lane's web address answered again within 115 ms with the same route.
 - Caddy 2.11.9 was tried first. Reloading its routes dropped 3 of 3,407 requests over 30 switches; Traefik dropped 0 of 3,426.
+- On November 18, the 111 cases of `tests/test_bed_interruptions.py`, each a move held at one point and interrupted one way, passed in 35 minutes. No probe of a web address failed in any of them, and the lane beside was never touched.
+- A cancel sent while a release was held just after its rename was answered `409` while the old build still answered visitors.
 - The Docker SDK over the certificate connection gave everything the move needed. Nothing was missing that a container manager such as Dokploy would have given.
 
 ## On the test bed
