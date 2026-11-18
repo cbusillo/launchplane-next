@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from launchplane.proxy import PROXY_NAME, route_file_of, route_text, staged_route_file_of
+from launchplane.proxy import PROXY_NAME, instance_url, route_file_of, route_text, staged_route_file_of
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -82,7 +82,7 @@ def copy_of_build_b_is_on_scratch() -> bool:
 
 def copy_of_build_b_answers_the_proxy() -> bool:
     container = lane_copies()[BUILD_B]["container"]
-    return on_scratch(f"docker exec {PROXY_NAME} wget -q -O /dev/null -T 2 http://{container}:80/ && echo yes || true") != ""
+    return on_scratch(f"docker exec {PROXY_NAME} wget -q -O /dev/null -T 2 {instance_url(container)}/ && echo yes || true") != ""
 
 
 def kill_launchplane_once_build_b_has_started(kill: Callable[[], None] = kill_launchplane_and_end_what_was_asked) -> int:
