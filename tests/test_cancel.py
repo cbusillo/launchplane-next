@@ -6,7 +6,7 @@ from typing import Any, NoReturn
 import pytest
 
 from launchplane.act import Lanes
-from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, RouteStatus
+from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus
 from launchplane.judge import Work
 from launchplane.record import Asked, Record, RecordError, Refused, Request, Stands
 from launchplane.worker import Worker
@@ -615,3 +615,46 @@ def test_the_cancel_call_says_so_when_it_is_too_late_or_the_request_had_ended_or
     assert "already renamed for this release" in too_late[0][1]["error"]
     assert f"Request {asked} ended as done" in ended.json()["error"]
     assert f"POST /requests/{stuck}/give-up" in needs_a_person.json()["error"]
+
+
+def test_a_cancel_recorded_while_the_host_is_read_for_the_switch_is_seen_before_the_switch_is_decided(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    request = record.write(MOVE_B, CALLER, None)
+    read, cancelled = proxy.host.read, list[bool]()
+
+    def read_while_a_cancel_is_recorded(lane: tuple[str, str] | None = None) -> OnHost:
+        on_host = read(lane)
+        if proxy.host.actions[-1:] == [f"check {NEW}/"] and not cancelled:
+            cancelled.append(True)
+            record.cancel(request.id, BY_HAND)
+        return on_host
+
+    proxy.host.read = read_while_a_cancel_is_recorded
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    assert (kept.stands, proxy.written, list(proxy.host.instances)) == (Stands.CANCELLED, {WEB_ADDRESS: "a"}, ["a"])
+
+
+def test_a_proxy_slow_to_load_a_renamed_route_is_waited_for_again_and_never_fails_the_release(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    request = record.write(MOVE_B, CALLER, None)
+    proxy.holds_delivery = True
+    read, readings_while_held = proxy.host.read, list[str]()
+
+    def read_and_let_the_proxy_load_after_three_waits(lane: tuple[str, str] | None = None) -> OnHost:
+        if proxy.written_by.get(WEB_ADDRESS) is not None:
+            readings_while_held.append(proxy.loaded[WEB_ADDRESS].container)
+            proxy.holds_delivery = len(readings_while_held) < 4
+        return read(lane)
+
+    proxy.host.read = read_and_let_the_proxy_load_after_three_waits
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    waits = [event for event in kept.events if event.did.startswith("wait for the proxy to send")]
+    assert kept.answer is not None
+    assert (kept.stands, kept.answer["outcome"], [bool(event.error) for event in waits]) == (
+        Stands.DONE,
+        "switched",
+        [True, True, True, False],
+    )
+    assert (readings_while_held[:4], list(proxy.host.instances)) == (["a"] * 4, [NEW])

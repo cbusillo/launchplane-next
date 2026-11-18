@@ -151,9 +151,9 @@ def test_a_release_keeps_the_data_set_and_stops_the_old_background_service_befor
         f"check {new}/health",
         f"route {new}",
         f"retire {background_service_container_of(old)}",
-        f"retire {old}",
         f"start background service {new} on network-data-1 with work",
         f"await background service {background_service_container_of(new)}",
+        f"retire {old}",
     ]
     assert result.data_set == "data-1"
     assert proxy.host.most_background_services_running == 1

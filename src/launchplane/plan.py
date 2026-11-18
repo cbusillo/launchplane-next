@@ -315,8 +315,7 @@ class Move:
         return answer.model_copy(update=update)
 
 
-# Every part of the lane but the instance kept and its background service: background services first, since only one
-# of a lane runs at a time.
+# Every part of the lane but the instance kept and its background service, background services first.
 def old_parts(lane: LaneReading, kept: str | None) -> list[str]:
     return [
         *sorted(running.container for running in lane.background_services if running.instance != kept),
@@ -390,31 +389,41 @@ def background_service_step(move: Move, serving: RunningInstance, use: DataSetUs
     return AwaitBackgroundService(own.container) if watched else Retire(own.container)
 
 
-def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
-    judged, done = move.judged, move.done
-    use = prepared(judged, serving.data_set, None, move.product, done)
+# Around the instance that serves: first no background service of another instance, since only one of a lane runs at a
+# time, then its own, and only then no other instance.
+def clear_around(move: Move, serving: RunningInstance) -> Action | Stop | None:
+    old = old_parts(move.lane, serving.container)
+    if old and any(running.container == old[0] for running in move.lane.background_services):
+        return Retire(old[0])
+    use = prepared(move.judged, serving.data_set, None, move.product, move.done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    if (step := background_service_step(move, serving, use)) is not None:
+    return background_service_step(move, serving, use) or (Retire(old[0]) if old else None)
+
+
+def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
+    if (step := clear_around(move, serving)) is not None:
         return step
-    refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
+    refused = next((event for event in move.done if isinstance(event, BackgroundServiceRefused)), None)
     if refused is not None:
         return Done(move.answer(outcome=Outcome.BACKGROUND_SERVICE_FAILED, error=refused.report))
-    left = left_for_a_move(judged, serving)
+    left = left_for_a_move(move.judged, serving)
     if left:
-        return Stop(f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(done)}")
+        return Stop(
+            f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(move.done)}"
+        )
     return Done(move.answer())
 
 
-# What anything earlier left is cleaned up first. An instance already receiving visitors on this build, with nothing
-# wrong, is the lane as asked: no candidate is made beside it.
+# An instance already receiving visitors on this build, with nothing wrong, is the lane as asked: no candidate is made
+# beside it. Otherwise what anything earlier left is cleaned up first.
 def make_candidate(move: Move) -> Step[MoveResult]:
     lane, receiving = move.lane, move.named
+    if receiving is not None and is_fit(move.judged, receiving, move.target):
+        return finish(move, receiving)
     old = old_parts(lane, lane.route.written)
     if old:
         return Retire(old[0])
-    if receiving is not None and is_fit(move.judged, receiving, move.target):
-        return finish(move, receiving)
     data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)
     if isinstance(data_set, Stop):
         return data_set
@@ -445,11 +454,6 @@ def switch(move: Move) -> Step[MoveResult]:
 
 def await_load(move: Move) -> Step[MoveResult]:
     return loading_step(move.judged, switched=True) or finish_switched(move)
-
-
-def retire_old(move: Move) -> Step[MoveResult]:
-    old = old_parts(move.lane, move.lane.route.written)
-    return Retire(old[0]) if old else finish_switched(move)
 
 
 def finish_switched(move: Move) -> Step[MoveResult]:
@@ -509,7 +513,7 @@ MOVE: dict[Phase, Row] = {
     Phase.CANDIDATE_REFUSED: Row(nothing_more, remove_refused, cancel_wins),
     Phase.CANDIDATE_CHECKED: Row(fit_to_switch, switch, cancel_wins),
     Phase.RENAMED: Row(nothing_more, await_load, cancel_is_too_late),
-    Phase.LOADED: Row(switched_to_is_there, retire_old, cancel_is_too_late),
+    Phase.LOADED: Row(switched_to_is_there, finish_switched, cancel_is_too_late),
     Phase.OLD_GONE: Row(switched_to_is_there, finish_switched, cancel_is_too_late),
 }
 

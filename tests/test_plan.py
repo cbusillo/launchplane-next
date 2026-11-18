@@ -392,11 +392,8 @@ DATA_MOVES = {
     "the old background service stops before the new one starts": DataCase(
         (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), Retire("old-background-service"), (background_service_of(OLD_ON_D1),)
     ),
-    "the old instance retires before the new background service starts": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), Retire("old")
-    ),
-    "the new background service starts once nothing of the old instance is left": DataCase(
-        (NEW_ON_D1,), "new", (D1,), (), STARTED_NEW_BACKGROUND_SERVICE
+    "the new background service starts once no other background service runs, before the old instance retires": DataCase(
+        (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), STARTED_NEW_BACKGROUND_SERVICE
     ),
     "a background service read as running less than its watch is waited on, whoever started it": DataCase(
         (NEW_ON_D1,),

@@ -19,8 +19,8 @@ Where a move stands is one row of this table, picked from what the host shows an
 | a candidate that failed its check | | Remove it, then answer `check failed`. | wins |
 | a candidate that passed its check in this attempt | the same, and nothing wrong is found with the candidate or its data set | Rename the routes file to it, through [the gate](#the-gate). | wins |
 | the routes file renamed for it, and the proxy not yet on it | | Start the proxy if it is not running. Wait for it to load the file. | too late |
-| the proxy on it, and something else of the lane still there | The instance the file names is on the host and its route is enabled. | Retire the rest: background services first, then instances. | too late |
-| nothing else left | the same | Start the background service where the product has one and watch it, remove the logins no container holds, and answer. | too late |
+| the proxy on it, and something else of the lane still there | The instance the file names is on the host and its route is enabled. | Retire the background service of any other instance. Start the new instance's, where the product has one, and watch it. Then retire the other instances. | too late |
+| nothing else left | the same | Remove the logins no container holds, and answer. | too late |
 
 - **A release always makes its own candidate.** An instance left by an earlier request, or by an earlier attempt of this request, is retired and never switched to.
 - **The rename is the one moment a release becomes real.** Whether a release has switched is read from the first line of the routes file, whoever asks and whichever attempt renamed it. It is never read from the events or from what one attempt did.
@@ -118,8 +118,8 @@ Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:
 | M2 | a request of the check not yet answered; the check passed |
 | M3 | before the gate; the routes file staged and the rename not yet sent |
 | M4 | the rename done and its reply not yet had, with the proxy held on A; the worker waiting for a proxy held on A |
-| M5 | the rename done and its reply not yet had, with the proxy on B; before the old instance is retired; and with data, before the old background service is retired and after the new one is started |
-| M6 | the old instance gone; and with data, the new background service being watched, and before the logins no container holds are removed |
+| M5 | the rename done and its reply not yet had, with the proxy on B; before the old instance is retired; and with data, before the old background service is retired, after the new one is started, and while it is watched |
+| M6 | the old instance gone; and with data, before the logins no container holds are removed |
 | Z | before the result is saved; after it is saved; and a move to the build already active, cancelled before its result is saved |
 
 While those tests run, the service `launchplane` on the control container is stopped and `launchplane-held` runs in its place: `tests/held_launchplane.py`, which starts the same Launchplane with nothing changed in what it does. Every call it makes on the container host, the proxy and its record can be held, before the call is forwarded or after it has taken effect and before its caller has the reply. The holds answer on port 8701 and are files, so they outlast a kill:

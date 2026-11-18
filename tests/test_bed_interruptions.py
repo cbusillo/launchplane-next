@@ -113,7 +113,7 @@ LEDGER_PAUSES = {
     "M1, the database server of a new data set made": Pause("after.host.create_database", from_nothing=True),
     "M5, before the old background service is retired": Pause("before.host.retire_instance", renamed=True),
     "M5, the new background service started": Pause("after.host.start_background_service", renamed=True),
-    "M6, the new background service being watched": Pause("before.host.await_background_service", renamed=True),
+    "M5, the new background service being watched": Pause("before.host.await_background_service", renamed=True),
     "M6, before the logins no container holds are removed": Pause("before.host.remove_unheld_logins", renamed=True),
 }
 
