@@ -348,6 +348,17 @@ def test_a_background_service_the_cancelled_request_started_is_retired_and_the_i
     )
 
 
+def test_a_background_service_a_request_started_that_stops_is_answered_as_failed_and_not_started_over_and_over(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.background_services_that_stop.add("site:b")
+    request = record.write(MOVE_B, CALLER, None)
+    assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None and (kept.stands, kept.answer["outcome"]) == (Stands.FAILED, "background service failed")
+
+
 def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_after_the_first_removed_it() -> None:
     record = PretendRecord()
     worker, _, proxy = serving_a(record)

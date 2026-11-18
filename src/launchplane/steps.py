@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
@@ -78,6 +78,8 @@ class FreshNames:
     data_set: str
 
 
+# The `request` of a step is the stamp put on what it makes. It is not part of which step it is, so a step a call has
+# taken is found among what it has done whoever asked.
 @dataclass(frozen=True)
 class StartProxy:
     pass
@@ -94,7 +96,7 @@ class CreateDataSetNetwork:
     product: str
     lane: str
     data_set: str
-    request: int | None = None
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -129,7 +131,7 @@ class StartInstance:
     target: LaneBuild
     container: str
     use: DataSetUse | None = None
-    request: int | None = None
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -150,7 +152,7 @@ class StartBackgroundService:
     instance: str
     use: DataSetUse | None
     command: tuple[str, ...]
-    request: int | None = None
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
