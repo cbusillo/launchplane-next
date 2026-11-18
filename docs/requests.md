@@ -31,13 +31,14 @@ Each of the four calls writes a request and answers `202` with the request and a
 | Field | Meaning |
 | --- | --- |
 | `id`, `product`, `lane` | Which request, and its lane. |
+| `generation` | The number of the release this request is, stamped on what it makes: see [the move](the-move.md#what-it-does). No other request has it, also after the record is lost and made again. |
 | `work` | `moving`, `retiring`, `beginning maintenance` or `ending maintenance`. |
 | `build`, `delete_data_set` | Exactly what was asked: the build of a move, the data set a retire named for deleting. |
 | `asked_by`, `asked_at` | The address the call came from, and when. Nobody is known by name yet. |
 | `stands` | `waiting`, `working`, `done`, `failed`, `cancelled` or `needs a person`. |
 | `ended_at`, `answer`, `error` | When it ended; the result the call answers with `?wait=`, or for a cancelled request what [cancelling](#cancelling) left; the real error of a request that failed or needs a person. |
 | `cancel_asked_at`, `cancel_asked_by` | When a cancel was asked, and by what: `request <id>`, a newer request for the lane, or `a call from the address <address>`. `null` when none was asked. |
-| `cancel_refused` | Why a cancel that was asked was not carried out, written once the worker has read the host: see [cancelling](#cancelling). |
+| `cancel_refused` | Why a cancel that was asked was not carried out: see [cancelling](#cancelling). For a move it is written by whoever learns it at the gate, the call that cancels or the worker. |
 | `attempts` | Each time a worker took the request up: `number`, `began_at`, `ended_at`, and `ended` as `done`, `failed`, `cancelled` or `interrupted`. |
 | `events` | One line for each thing Launchplane did or was refused, in order: `at`, the `attempt` it belongs to, `did`, and `error` with the real error where it was refused. |
 
@@ -50,17 +51,24 @@ A request is `done` when its call would have answered `200`, `failed` when it wo
 `POST /requests/<id>/cancel` cancels one request, and a newer request for a lane cancels the older ones the same way. What it means depends only on where the request is:
 
 - **Waiting:** it ends as `cancelled`. Nothing was done.
-- **Working, before its point of no return:** the request is marked in the record. Its worker is never killed: it reads the mark before its next action and puts the lane back, by the same judged and checked steps as the call itself. The request ends as `cancelled` when nothing it made remains on the host and each part it put back is as it must be. That is read from the host when the cancel ends, whichever attempt put the part back. If putting back fails, or leaves a part wrong, such as a database server that had to be killed to stop it, the request ends as `failed` and `error` says which.
-- **Working, past that point:** it is too late. The request is finished as asked and ends as it would have. `cancel_refused` says why.
+- **A move being worked:** the call itself carries the cancel to [the gate](the-move.md#the-gate) on the container host before it answers, and there either the cancel or the rename of the routes file wins, never both.
+  - **The cancel wins** when the routes file is not renamed for the request's generation. The gate keeps a mark on the host, the rename is refused from then on, and the worker puts the lane back: it removes what the generation made and nothing else, by the same judged and checked steps as the call itself. The request ends as `cancelled`. The mark is on the host, so a Launchplane killed just after the cancel won, also before the call was answered, puts the lane back when it takes the request up again.
+  - **The cancel is too late** from the rename on, also while the proxy has not loaded the renamed file and the old build still answers. The call answers `409` at once, `cancel_refused` says the rename was the boundary, and the release is finished as asked, also after a kill.
+  - **The call cannot reach the container host:** it answers `503`. The cancel stays asked in the record, and the worker of the request carries it to the gate before its next action.
+- **A retire, or beginning or ending maintenance, being worked:** the request is marked in the record. Its worker reads the mark before its next action and puts the lane back, or finds it too late and says why in `cancel_refused`.
 - **Ended, or needing a person:** nothing changes.
+
+A request never ends as `done` over a cancel nobody has answered. When a cancel is recorded while the worker is making its answer, the worker looks at the host again and answers the cancel first. So a move to the build already active that is cancelled before its result is saved ends as `cancelled`, and one that had renamed the routes file ends as `done` with `cancel_refused`.
+
+If putting back fails, or leaves a part wrong, such as a database server that had to be killed to stop it, the request ends as `failed` and `error` says which.
 
 The answer of a cancelled request has `put_back`, each thing done to put the lane back; `data_sets_kept`, the data sets the request made, which stay; and `findings`, every sentence the judgement had for the lane when the cancel ended. What else is wrong or unfinished on the lane is not the cancel's verdict: it is in `findings` and on the page. `put_back` is told from the events of every attempt, each written before the change it names, so it survives a record lost in between. It is history and decides nothing.
 
-Where the point is, and what the request made, are read from the host each time, never from the events. An instance, a background service and a data set's network carry the label `launchplane.request` with the id of the request that made them, so nothing an earlier request left is touched. A lane's routes file says which request wrote it, on a first line the proxy reads as a comment, so whether a request has switched visitors is read from the file that sends them, also after a restart and when the instance it switched to was left by an earlier request. A routes file the proxy has not loaded yet is waited for first, so the instance the proxy sends visitors to is known before anything is removed.
+Where the point is, and what the request made, are read from the host each time, never from the events. What a release made carries its generation, so nothing an earlier request left is taken for it.
 
 | Request | Too late once | Put back before that |
 | --- | --- | --- |
-| A move | This request wrote the routes file the proxy has loaded: visitors have been switched. A move to the build already serving that is cancelled before it changed anything is not too late, and changes nothing. | Each background service and each instance this request made is removed, as after a failed check, and then the logins no container holds. In a lane in maintenance a move makes nothing, so nothing is removed. |
+| A move | The routes file is renamed for this request's generation. Whether the proxy has loaded it yet makes no difference. A move to the build already active is never too late, and a cancel of it changes nothing. | Each background service and each instance of this generation is removed, as after a failed check, and then the logins no container holds. In a lane in maintenance a move makes nothing, so nothing is removed. |
 | A retire | The lane's routes file is gone. Removing it is the first thing a retire changes, and nothing after it can be put back: the containers are removed, and Launchplane does not make a removed instance again by itself. The rest is finished as asked, except that a data set named for deleting is kept when the cancel came before it was deleted: `cancel_refused` says so, and the answer lists it in `kept_data_sets`. | Nothing: nothing was changed. |
 | Beginning maintenance | The routes file points at the back soon page. That is its first change too. Ending maintenance brings the lane back. | Nothing: nothing was changed. |
 | Ending maintenance | The routes file points at the instance again. | What it started is stopped again, the database server last, as after a failed check. Every part of the lane is then stopped, and the cancel answers for each of them. |
@@ -70,11 +78,12 @@ Putting a lane back never deletes data: a data set the request made, and a datab
 | Status | Body | Meaning |
 | --- | --- | --- |
 | `200` | the request | It is cancelled, now or before. |
-| `202` | the request | It is being worked and is marked. `cancel_asked_by` says by what. |
-| `409` | `error` | It is not cancelled and will not be: the worker found it too late and says why, or it had ended as `done` or `failed`, or it needs a person. Nothing was changed by this call. |
+| `202` | the request | It is being worked. For a move the cancel has won at the gate and the lane is being put back. For another call it is marked, and may still be found too late. `cancel_asked_by` says by what. |
+| `409` | `error` | It is not cancelled and will not be: it was too late and the answer says why, or it had ended as `done` or `failed`, or it needs a person. Nothing was changed by this call. |
 | `404` | `error` | The record holds no such request. |
+| `503` | `error` | The record could not be reached, or the cancel is recorded and could not be carried to the gate. The answer says which. |
 
-With `?wait=<seconds>` the call answers as soon as the answer is known: the request is cancelled, its cancel was refused, it has ended, or it needs a person. The mark is kept in the record, so after a restart the worker that takes the request up still puts its lane back.
+With `?wait=<seconds>` the call answers as soon as the answer is known: the request is cancelled and its lane put back, its cancel was refused, it has ended, or it needs a person.
 
 ## The workers
 
@@ -94,7 +103,7 @@ A worker acts only on its own lane's containers, data sets and routes file. What
 | Shared | What protects it |
 | --- | --- |
 | The proxy and back soon page containers, the `launchplane-lanes` network and the proxy's outside network | One lock in the Launchplane process, held while one of them is looked for and made. Two lanes that find the proxy missing make it once. |
-| The folder of routes files | Each lane has its own file, put in place by a rename. One lock in the process is held while the folder is read whole, and while one file is placed and renamed or removed. |
+| The folder of routes files | Each lane has its own file, put in place by a rename. One lock in the process is held while the folder is read whole, and while one file is placed and renamed or removed. The rename of a release and a cancel of it are held off each other on the host, by [the gate](the-move.md#the-gate). |
 | What the proxy has loaded | Only read. Traefik loads every lane's file itself. |
 | Images | Docker, which pulls one image once for two callers. |
 | The secrets Launchplane cleans from what it says | One set for every worker and call. A password is added to it as it is made, before Docker or a database server is given it, so no worker can write another's secret to the record or a log. |
@@ -115,8 +124,8 @@ A value is judged as an answer is: on the value itself, whatever characters the 
 
 ## On the page
 
-- A lane's card has a row for each of its requests that has not ended: what was asked, how it stands, and for the one being worked what it has done so far and how many times it was taken up. One that is marked to be cancelled says by what, or why the cancel was refused.
-- A request that was cancelled stays on its lane's card for 10 minutes after it ended, as `cancelled`, with by what and what was put back. `/running` has these in `cancelled`.
+- A lane's card has a row for each of its requests that has not ended: what was asked, how it stands, and for the one being worked what it has done so far and how many times it was taken up. One a cancel was asked of says by what, and whether the cancel won before the switch, read from the gate's mark on the host, or why it was refused.
+- A request a cancel was asked of stays on its lane's card for 10 minutes after it ended, however it ended: as `cancelled` with by what and what was put back, or as `done` or `failed` with why the cancel was not carried out. `/running` has these in `cancels`.
 - A request that needs a person is red, with the reason and the two calls under it, and its card has a red `needs a person` pill.
 - A request for a lane with nothing on the host yet has a card of its own.
 - A lane is `work under way` while a request for it stands as working in the record. `work` and `a_move_is_at_work` in `/running` come from there too.
@@ -129,24 +138,23 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - The login has no password and is not a superuser. It is used through the local socket by the system user `launchplane` only. It owns the database, and no other login but the superuser `postgres` may connect to it.
 - PostgreSQL listens on `127.0.0.1` and `::1` only.
 - `LAUNCHPLANE_DATABASE` names the database, by default `postgresql:///launchplane?host=/var/run/postgresql`.
-- A migration is a file in `migrations/versions`, written as SQL. The one that turned keys into digests cannot be undone, and going down past it refuses and says why. Undoing the one that added `cancelled` turns each cancelled request into a failed one.
+- A migration is a file in `migrations/versions`, written as SQL. The one that turned keys into digests cannot be undone, and going down past it refuses and says why. Undoing the one that added `cancelled` turns each cancelled request into a failed one. The one that added `generation` gives each request written before it a generation made from chance.
 
 ## Known and not fixed
 
 - **The database is not backed up.** Losing it loses the requests and their history, and no lane: what runs is on the host.
 - **`asked_by` is an address, not a person.** Who may ask is not settled yet.
 - **Who may cancel is not settled.** Any caller can, as any caller can ask.
-- **A cancel waits for the action under way.** The mark is read between actions, and one action can take as long as a check, 20 s, or a stop, 30 s.
+- **A lane is put back after the action under way.** Who wins is decided at once at the gate. The worker reads the gate's mark between actions, and one action can take as long as a check, 20 s, or a stop, 30 s.
 - **A cancel asked of a retire keeps the data set it named, also when the rest was too late to cancel.** The direction session chose this as the safe side; Chris may reverse it.
 - **Ending maintenance that is cancelled answers for every part of the lane,** also one that was wrong before it began: which of them it started, the host cannot show, since a start changes no label.
-- **A routes file written before routes said who wrote them says nobody did.** A move that wrote one and is cancelled is taken not to have switched. It then ends as `failed` and removes nothing: no action removes the instance the proxy sends visitors to, see [the move](the-move.md#which-instance-receives-visitors).
-- **A data set is stamped on its network only,** the first part of it that is made.
-- **A part made before stamps carries none,** so a cancel leaves it.
+- **A data set carries its generation on its network only,** the first part of it that is made.
+- **A part made before generations carries none,** so a cancel leaves it.
 - **An instance left by an earlier request that a move retired before it was cancelled is not brought back.** It received no visitors.
-- **A request that ends between the cancel and its worker's next reading ends as it would have.** The cancel call then answers `409` and says how it ended.
-- **The locks on what lanes share are in the process.** A second Launchplane on the same host is held off each lane by the lane's turn, and not off the proxy or the routes folder.
+- **A request that fails while a cancel is unanswered ends as `failed`.** The cancel call then answers `409` and says how it ended.
+- **A cancel that wins against a request whose record is then lost leaves its mark on the host.** The next cancel of the lane, or its retire, removes it.
+- **Only the move passes the gate.** A second Launchplane on the same host is held off each lane by the lane's turn. The rename of a release and its cancel are held off each other on the host. The proxy, the back soon page and readings of the routes folder are protected in the process only.
 - **A reading given up on keeps its connection until the record answers.** At most 4 readings wait at once, so the workers keep connections.
-- **The fresh names of a move are made anew in each attempt.** An instance started by an interrupted attempt is found on the host by its build and taken as the one to check.
 - **A request that needs a person is not told to anyone.** It shows on the page and in `GET /requests`.
 - **A worker can lose its lane's turn while one action on the host is under way.** The turn is asked before each action, not during it. An action can take as long as a check, 20 s, or a stop, 30 s. If the lock's connection ends in that time and another Launchplane takes the lane, that one action still finishes. With one worker in one process this needs a lost connection and a second Launchplane.
 - **A secret no container holds any more is not known to be one.** A caller who sends the password of a container already removed has it stored as sent, in a build or a data set name.

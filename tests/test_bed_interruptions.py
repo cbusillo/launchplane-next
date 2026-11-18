@@ -1,7 +1,9 @@
 import http.client
+import socket
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 
 import pytest
@@ -35,7 +37,7 @@ KILL_THEN_CANCEL, CANCEL_THEN_KILL = "a kill, then a cancel", "a cancel, then a 
 INTERRUPTIONS = (CANCEL, NEWER, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 CANCELS = (CANCEL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 TOO_LATE = "already renamed for this release"
-THE_RENAME = "host.run_in?only=mv%20"
+THE_RENAME = "proxy.pass_gate?only=mv%20"
 TURN, TAKE_UP, GATE_ANSWER = "before.record.turn", "before.record.take_up", "after.proxy.abandon"
 UNTOUCHED = "untouched"
 NOTHING = "no lane"
@@ -116,8 +118,14 @@ LEDGER_PAUSES = {
 }
 
 
+# Looked up once: a lookup that fails on the machine that probes is not an answer of the lane.
+@cache
+def scratch_ip() -> str:
+    return socket.gethostbyname(SCRATCH_ADDRESS)
+
+
 def answering(lane: Lane) -> str:
-    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
+    connection = http.client.HTTPConnection(scratch_ip(), 80, timeout=5)
     try:
         connection.request("GET", "/", headers={"Host": lane.web_address})
         response = connection.getresponse()
@@ -160,14 +168,14 @@ def retire_with_its_data(lane: Lane) -> None:
 
 
 def write_row(lane: Lane, text: str) -> None:
-    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
+    connection = http.client.HTTPConnection(scratch_ip(), 80, timeout=5)
     connection.request("POST", "/rows", body=text, headers={"Host": lane.web_address})
     assert connection.getresponse().status == 201
     connection.close()
 
 
 def rows_of(lane: Lane) -> str:
-    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
+    connection = http.client.HTTPConnection(scratch_ip(), 80, timeout=5)
     connection.request("GET", "/rows", headers={"Host": lane.web_address})
     rows = connection.getresponse().read().decode()
     connection.close()

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import pytest
@@ -16,15 +16,17 @@ from launchplane.instance import (
     Unread,
 )
 from launchplane.judge import Work
-from launchplane.plan import decide_move, decide_retire
+from launchplane.plan import MOVE, Move, Phase, decide_move, decide_retire, phase_of, too_late_to_cancel
 from launchplane.product import Product
 from launchplane.steps import (
+    Abandon,
     Action,
     AwaitBackgroundService,
     AwaitDatabase,
     AwaitRoute,
     AwaitSwitch,
     BackgroundServiceRefused,
+    Cancel,
     Check,
     CheckRefused,
     CreateDatabase,
@@ -36,6 +38,7 @@ from launchplane.steps import (
     FreshNames,
     MoveResult,
     Outcome,
+    PutBack,
     RemoveInstance,
     RemoveLogins,
     RemoveRoute,
@@ -49,9 +52,11 @@ from launchplane.steps import (
     Stop,
     Switch,
     Switched,
+    TooLate,
 )
 from tests.pretend_host import (
     D1,
+    EARLIER,
     GENERATION,
     NEW,
     NEW_BACKGROUND_SERVICE,
@@ -134,9 +139,6 @@ MOVES = {
     "a route renamed for this release and not loaded is waited for as long as it takes": Case(
         (OLD, NEW), ("old", "new"), (), AwaitSwitch(WEB_ADDRESS, "new"), switched=True
     ),
-    "a switch whose candidate lost at the gate is made again by nobody: the candidate is still only checked": Case(
-        (OLD, NEW), ("old", "old"), (STARTED_NEW, Check("new"), Switched("new", won=False)), Switch(WEB_ADDRESS, "new", GENERATION)
-    ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Retire("stray")),
     "a finished cleanup answers repaired, with what it did": Case(
@@ -183,6 +185,81 @@ def next_retire_step(case: Case) -> object:
 @pytest.mark.parametrize("case", MOVES.values(), ids=MOVES.keys())
 def test_a_move_takes_this_step_next(case: Case) -> None:
     assert next_move_step(case) == case.step
+
+
+MADE_NEW = changed(NEW, generation=GENERATION)
+REMOVE_NEW = RemoveInstance("new")
+NOTHING_TO_PUT_BACK = Done(PutBack(findings=[]))
+
+
+# One row of the move's table: the reading that shows it, what a cancel is answered there, and what is done once the
+# gate holds the cancel's mark.
+@dataclass(frozen=True)
+class RowCase:
+    phase: Phase
+    case: Case
+    cancel_asked: object
+    cancel_marked: object
+
+
+TOO_LATE = TooLate(too_late_to_cancel(WEB_ADDRESS))
+CARRIED_TO_THE_GATE = Abandon(WEB_ADDRESS, GENERATION)
+ROWS = [
+    RowCase(Phase.NOTHING_MADE, Case((OLD,), ("old", "old"), (), None), CARRIED_TO_THE_GATE, NOTHING_TO_PUT_BACK),
+    RowCase(Phase.CANDIDATE_MADE, Case((OLD, MADE_NEW), ("old", "old"), (STARTED_NEW,), None), CARRIED_TO_THE_GATE, REMOVE_NEW),
+    RowCase(
+        Phase.CANDIDATE_REFUSED, Case((OLD, MADE_NEW), ("old", "old"), (STARTED_NEW, REFUSED), None), CARRIED_TO_THE_GATE, REMOVE_NEW
+    ),
+    RowCase(
+        Phase.CANDIDATE_CHECKED,
+        Case((OLD, MADE_NEW), ("old", "old"), (STARTED_NEW, Check("new")), None),
+        CARRIED_TO_THE_GATE,
+        REMOVE_NEW,
+    ),
+    RowCase(
+        Phase.RENAMED, Case((OLD, MADE_NEW), ("old", "new"), (), None, switched=True), TOO_LATE, AwaitSwitch(WEB_ADDRESS, "new")
+    ),
+    RowCase(Phase.LOADED, Case((OLD, MADE_NEW), ("new", "new"), (), None, switched=True), TOO_LATE, Retire("old")),
+    RowCase(Phase.OLD_GONE, Case((MADE_NEW,), ("new", "new"), (), None, switched=True), TOO_LATE, answer(Outcome.SWITCHED, "new")),
+]
+
+
+def row_step(row: RowCase, cancel: Cancel | None = None, abandoned: str | None = None) -> object:
+    judged = replace(given(row.case), abandoned=abandoned).judged(Work.MOVE, Product())
+    return decide_move(judged, TARGET, Product(), FRESH_NAMES, row.case.done, GENERATION, cancel)
+
+
+def test_the_table_has_one_row_for_every_state_a_move_can_be_found_in() -> None:
+    assert [row.phase for row in ROWS] == list(Phase) == list(MOVE)
+
+
+@pytest.mark.parametrize("row", ROWS, ids=[row.phase for row in ROWS])
+def test_each_state_of_a_move_is_found_from_the_reading_and_a_cancel_asked_there_wins_or_is_too_late(row: RowCase) -> None:
+    judged = given(row.case).judged(Work.MOVE, Product())
+    assert phase_of(Move(judged, TARGET, Product(), FRESH_NAMES, row.case.done, GENERATION)) is row.phase
+    assert row_step(row, Cancel()) == row.cancel_asked
+
+
+@pytest.mark.parametrize("row", ROWS, ids=[row.phase for row in ROWS])
+def test_once_the_gate_holds_the_cancel_only_what_the_generation_made_is_removed_and_a_renamed_release_goes_on(
+    row: RowCase,
+) -> None:
+    assert row_step(row, abandoned=GENERATION) == row.cancel_marked
+
+
+@pytest.mark.parametrize("row", ROWS, ids=[row.phase for row in ROWS])
+def test_a_cancel_the_gate_holds_against_another_generation_changes_nothing_of_this_release(row: RowCase) -> None:
+    assert row_step(row, abandoned=EARLIER) == row_step(row)
+
+
+def test_putting_back_leaves_an_instance_of_the_build_that_another_generation_made() -> None:
+    row = RowCase(Phase.NOTHING_MADE, Case((OLD, changed(NEW, generation=EARLIER)), ("old", "old"), (), None), None, None)
+    assert row_step(row, abandoned=GENERATION) == Done(PutBack(findings=["The instance new runs beside the active one"]))
+
+
+def test_a_cancel_asked_while_the_proxy_is_down_starts_it_first_since_the_gate_is_a_command_in_its_container() -> None:
+    judged = Given((OLD,), (None, "old"), proxy_runs=False).judged(Work.MOVE, Product())
+    assert decide_move(judged, TARGET, Product(), FRESH_NAMES, (), GENERATION, Cancel()) == StartProxy()
 
 
 @pytest.mark.parametrize("status", [RouteStatus.DISABLED, RouteStatus.WARNING])

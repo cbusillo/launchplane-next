@@ -476,11 +476,14 @@ def put_back(move: Move) -> Step[PutBack]:
 
 
 # Before the rename a cancel wins: once the gate holds its mark the lane is put back, and until then the cancel is
-# carried there, where it may still lose to a rename already on its way.
+# carried there, where it may still lose to a rename already on its way. The gate is a command in the proxy's container.
 def cancel_wins(move: Move, asked: bool) -> StepBack | None:
-    if move.lane.route.abandoned == move.generation:
+    route = move.lane.route
+    if route.abandoned == move.generation:
         return put_back(move)
-    return Abandon(move.lane.web_address, move.generation) if asked else None
+    if not asked:
+        return None
+    return Abandon(move.lane.web_address, move.generation) if route.proxy_runs else StartProxy()
 
 
 def cancel_is_too_late(move: Move, asked: bool) -> StepBack | None:
