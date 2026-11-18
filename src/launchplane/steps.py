@@ -167,6 +167,9 @@ class Discard:
     container: str
     # The generation that made the instance, where one did: the gate is asked about that release.
     generation: str | None = None
+    # Whether the instance is of the release being worked. Only then does a rename the gate says it won keep it: an
+    # instance an earlier release was renamed to is that release's past, and goes once a later one serves.
+    of_this_release: bool = False
 
 
 @dataclass(frozen=True)
@@ -273,22 +276,23 @@ class LogRead:
     unreadable: str | None = None
 
 
+# What a part answered when it would not do as asked, with the real error.
 @dataclass(frozen=True)
-class StartRefused:
+class Refused:
     container: str
     report: str
 
 
-@dataclass(frozen=True)
-class CheckRefused:
-    container: str
-    report: str
+class StartRefused(Refused):
+    pass
 
 
-@dataclass(frozen=True)
-class BackgroundServiceRefused:
-    container: str
-    report: str
+class CheckRefused(Refused):
+    pass
+
+
+class BackgroundServiceRefused(Refused):
+    pass
 
 
 @dataclass(frozen=True)

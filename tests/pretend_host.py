@@ -240,7 +240,7 @@ class PretendProxy:
         self.written: dict[str, str] = {}
         self.written_by: dict[str, str | None] = {}
         self.abandoned: dict[str, frozenset[str]] = {}
-        self.committed: set[str] = set()
+        self.committed: dict[str, str] = {}
         self.discarded: set[str] = set()
         self.unread: dict[str, str] = {}
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
@@ -303,7 +303,7 @@ class PretendProxy:
             return self.verdict_of(web_address, generation)
         self.written[web_address] = container
         self.written_by[web_address] = generation
-        self.committed.add(generation)
+        self.committed[generation] = container
         self.at_the_gate("after the switch")
         self.host.record(f"route {container}")
         return Verdict.COMMITTED
@@ -314,7 +314,7 @@ class PretendProxy:
         return self.verdict_of(web_address, generation)
 
     def discard(self, web_address: str, container: str, made_by: str) -> Verdict:
-        if self.written.get(web_address) == container and made_by in self.committed:
+        if self.committed.get(made_by) == container:
             return Verdict.COMMITTED
         self.discarded.add(container)
         return Verdict.NONE

@@ -409,10 +409,11 @@ class Lanes:
         # An instance no release made has no rename that could be on its way to it.
         made_by = action.generation
         verdict = Verdict.NONE if made_by is None else self.proxy.discard(action.web_address, action.container, made_by)
-        if verdict is not Verdict.COMMITTED:
+        kept = verdict is Verdict.COMMITTED and action.of_this_release
+        if not kept:
             self.refuse_to_take_from_visitors(steps.Retire(action.container))
             self.host.retire_instance(action.container)
-        return steps.Discarded(action.container, verdict)
+        return steps.Discarded(action.container, Verdict.COMMITTED if kept else Verdict.NONE)
 
     def await_switch(self, action: steps.AwaitSwitch) -> Event:
         try:

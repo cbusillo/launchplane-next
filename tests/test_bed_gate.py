@@ -9,7 +9,7 @@ import pytest
 from launchplane.docker_answers import CommandResult, ContainerHostError
 from launchplane.gate import GATE_FOLDER_NAME, LOCK_NAME, Answer, Gate, GateError
 from launchplane.instance import Verdict, new_generation
-from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of, route_text
+from launchplane.proxy import INSTANCE_URL, PROXY_NAME, ROUTES_FOLDER, route_file_of, route_text
 from tests.bed import SCRATCH_SHELL, needs_test_bed, on_scratch, wait_for
 
 pytestmark = needs_test_bed
@@ -62,6 +62,11 @@ def route_inode() -> str:
     return in_proxy(f"stat -c %i {ROUTE} 2>/dev/null || echo none").strip()
 
 
+def routed_to() -> str:
+    found = INSTANCE_URL.search(in_proxy(f"cat {ROUTE} 2>/dev/null || true"))
+    return "" if found is None else found["container"]
+
+
 @dataclass
 class Proof:
     host: ScratchHost
@@ -92,9 +97,6 @@ class Proof:
     def renames(self) -> int:
         self.look()
         return len(self.inodes) - 1
-
-    def routed_to(self) -> str:
-        return in_proxy(f"grep -o 'http://[^:]*:80' {ROUTE} 2>/dev/null || true").strip().removeprefix("http://").removesuffix(":80")
 
     def evidence(self, generation: str | None = None) -> list[str]:
         prefix = f"{WEB}.{generation or self.generation}."
@@ -134,7 +136,7 @@ def test_a_rename_whose_host_command_is_killed_just_after_it_is_committed_with_n
     proof.host.held_after_the_rename = False
     assert [type(answer) for answer in proof.answers] == [GateError], "the killed command gave its sender no verdict"
     assert (proof.gate.verdict(WEB, proof.generation), proof.evidence()) == (committed("b"), ["armed"])
-    assert (proof.switch("b"), proof.switch("c", attempt=2), proof.renames(), proof.routed_to()) == (
+    assert (proof.switch("b"), proof.switch("c", attempt=2), proof.renames(), routed_to()) == (
         committed("b"),
         committed("b"),
         1,
@@ -147,7 +149,7 @@ def test_a_rename_whose_reply_alone_is_lost_is_committed_when_asked_again_and_ha
     with pytest.raises(ContainerHostError):
         proof.switch("b")
     asked_again = [proof.gate.verdict(WEB, proof.generation), proof.switch("b"), proof.switch("c", attempt=2)]
-    assert (asked_again, proof.renames(), proof.routed_to(), proof.evidence()) == ([committed("b")] * 3, 1, "b", ["armed"])
+    assert (asked_again, proof.renames(), routed_to(), proof.evidence()) == ([committed("b")] * 3, 1, "b", ["armed"])
 
 
 def test_a_switch_accepted_and_held_before_the_lock_renames_nothing_once_its_candidate_was_discarded_meanwhile(
@@ -166,7 +168,7 @@ def test_a_switch_accepted_and_held_before_the_lock_renames_nothing_once_its_can
     in_proxy(f"kill -CONT {stale}")
     sender.join(timeout=30)
     assert (discarded, proof.answers, proof.renames(), proof.evidence()) == (NONE, [NONE], 0, ["b.revoked"])
-    assert (proof.switch("b", attempt=2), proof.switch("b2", attempt=2), proof.renames(), proof.routed_to()) == (
+    assert (proof.switch("b", attempt=2), proof.switch("b2", attempt=2), proof.renames(), routed_to()) == (
         NONE,
         committed("b2"),
         1,
@@ -194,4 +196,4 @@ def test_nothing_done_for_one_generation_of_a_lane_changes_what_the_other_is_ans
     ]
     assert sent_again == [committed("b"), ABANDONED, committed("b"), ABANDONED]
     assert (proof.gate.verdict(WEB, earlier), proof.gate.verdict(WEB, later)) == (committed("b"), ABANDONED)
-    assert (proof.renames(), proof.routed_to(), proof.evidence(earlier), proof.evidence(later)) == (1, "b", ["armed"], ["abandoned"])
+    assert (proof.renames(), routed_to(), proof.evidence(earlier), proof.evidence(later)) == (1, "b", ["armed"], ["abandoned"])

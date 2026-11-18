@@ -337,7 +337,8 @@ def phase_of(move: Move) -> tuple[Phase, RunningInstance | None]:
 
 # Every part of the lane but the instance kept and its background service, background services first. An instance goes
 # through the gate, so a rename still on its way to it is refused before it is removed.
-def old_part_step(lane: LaneReading, kept: str | None, *, background_services_only: bool = False) -> Action | None:
+def old_part_step(move: Move, kept: str | None, *, background_services_only: bool = False) -> Action | None:
+    lane = move.lane
     background_services = sorted(running.container for running in lane.background_services if running.instance != kept)
     instances = sorted((each for each in lane.instances if each.container != kept), key=lambda each: each.container)
     if background_services:
@@ -345,7 +346,8 @@ def old_part_step(lane: LaneReading, kept: str | None, *, background_services_on
     if not instances or background_services_only:
         return None
     made_by = instances[0].generation
-    return Discard(lane.web_address, instances[0].container, made_by if isinstance(made_by, str) else None)
+    generation = made_by if isinstance(made_by, str) else None
+    return Discard(lane.web_address, instances[0].container, generation, generation == move.generation)
 
 
 def in_service(move: Move, _candidate: RunningInstance | None) -> Action | Stop | None:
@@ -393,13 +395,13 @@ def background_service_step(move: Move, serving: RunningInstance, use: DataSetUs
 # Around the instance that serves: first no background service of another instance, since only one of a lane runs at a
 # time, then its own, and only then no other instance. Then the answer.
 def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
-    judged, done, lane = move.judged, move.done, move.lane
-    if (step := old_part_step(lane, serving.container, background_services_only=True)) is not None:
+    judged, done = move.judged, move.done
+    if (step := old_part_step(move, serving.container, background_services_only=True)) is not None:
         return step
     use = prepared(judged, serving.data_set, None, move.product, done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    step = background_service_step(move, serving, use) or old_part_step(lane, serving.container)
+    step = background_service_step(move, serving, use) or old_part_step(move, serving.container)
     if step is not None:
         return step
     refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
@@ -417,7 +419,7 @@ def make_candidate(move: Move, receiving: RunningInstance | None) -> Step[MoveRe
     lane = move.lane
     if receiving is not None and is_fit(move.judged, receiving, move.target):
         return finish(move, receiving)
-    if (step := old_part_step(lane, lane.route.written)) is not None:
+    if (step := old_part_step(move, lane.route.written)) is not None:
         return step
     data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)
     if isinstance(data_set, Stop):
