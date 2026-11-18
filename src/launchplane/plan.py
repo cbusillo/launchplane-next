@@ -416,7 +416,7 @@ def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
 
 
 # An instance already receiving visitors on this build, with nothing wrong, is the lane as asked: no candidate is made
-# beside it. Otherwise what anything earlier left is cleaned up first.
+# beside it. Otherwise, what anything earlier left is cleaned up first.
 def make_candidate(move: Move) -> Step[MoveResult]:
     lane, receiving = move.lane, move.named
     if receiving is not None and is_fit(move.judged, receiving, move.target):
@@ -457,7 +457,8 @@ def await_load(move: Move) -> Step[MoveResult]:
 
 
 def finish_switched(move: Move) -> Step[MoveResult]:
-    return not_there(move) if move.named is None else finish(move, move.named)
+    serving = move.named
+    return not_there(move) if serving is None else finish(move, serving)
 
 
 def too_late_to_cancel(web_address: str) -> str:
@@ -468,7 +469,7 @@ def too_late_to_cancel(web_address: str) -> str:
 
 
 # What the generation made is read from the stamp on each part: its background service, then its instance. Data stays.
-def put_back(move: Move) -> Step[PutBack]:
+def put_lane_back(move: Move) -> Step[PutBack]:
     lane = move.lane
     background_services = sorted(each.container for each in lane.background_services if each.generation == move.generation)
     instances = sorted(each.container for each in lane.instances if each.generation == move.generation)
@@ -476,15 +477,19 @@ def put_back(move: Move) -> Step[PutBack]:
         return Retire(background_services[0])
     if instances:
         return RemoveInstance(instances[0])
+    # A server the release had only just made is waited for, so its logins can be read and its data set is kept whole.
+    starting = sorted(finding.subject for finding in move.judged.of_kind(Kind.NOT_ACCEPTING))
+    if starting:
+        return AwaitDatabase(starting[0])
     return with_logins_settled(put_back_or_what_is_left(move.judged, move.generation), move.judged, move.done)
 
 
-# Before the rename a cancel wins: once the gate holds its mark the lane is put back, and until then the cancel is
-# carried there, where it may still lose to a rename already on its way. The gate is a command in the proxy's container.
+# A cancel wins before the rename. With its mark at the gate, the lane is put back. Without it, a cancel that was asked
+# is carried to the gate, where a rename already sent may still win. The gate is a command in the proxy's container.
 def cancel_wins(move: Move, asked: bool) -> StepBack | None:
     route = move.lane.route
     if route.abandoned == move.generation:
-        return put_back(move)
+        return put_lane_back(move)
     if not asked:
         return None
     return Abandon(move.lane.web_address, move.generation) if route.proxy_runs else StartProxy()

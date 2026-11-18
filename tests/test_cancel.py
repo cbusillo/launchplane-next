@@ -658,3 +658,26 @@ def test_a_proxy_slow_to_load_a_renamed_route_is_waited_for_again_and_never_fail
         [True, True, True, False],
     )
     assert (readings_while_held[:4], list(proxy.host.instances)) == (["a"] * 4, [NEW])
+
+
+def test_a_first_move_cancelled_just_after_its_database_server_was_made_waits_for_the_server_and_ends_as_cancelled(
+    record: Record,
+) -> None:
+    proxy = PretendProxy(PretendHost())
+    request = record.write(MOVE_B, CALLER, None)
+    create = proxy.host.create_database
+
+    def create_then_a_cancel_comes(product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
+        create(product, lane, data_set, network, volume, image)
+        record.cancel(request.id, BY_HAND)
+
+    proxy.host.create_database = create_then_a_cancel_comes
+    assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None
+    assert (kept.stands, kept.answer["data_sets_kept"], proxy.host.actions[-1], proxy.host.instances) == (
+        Stands.CANCELLED,
+        ["data-1"],
+        "await database-data-1",
+        {},
+    )

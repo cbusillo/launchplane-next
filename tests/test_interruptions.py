@@ -142,13 +142,17 @@ class Held:
         return sum(action.startswith("route ") for action in self.proxy.host.actions)
 
 
-def held(record: Record, pause: Pause, interruption: str) -> Held:
+def launchplane_serving_a(record: Record) -> tuple[PretendProxy, Lanes, Worker, TestClient]:
     proxy = PretendProxy(PretendHost())
     proxy.host.place(LaneBuild(product="site", lane="testing", build=A), "a")
     proxy.route(WEB_ADDRESS, "a")
     lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
     worker = Worker(record, lanes, NO_SECRETS)
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes.abandon))
+    return proxy, lanes, worker, TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes.abandon))
+
+
+def held(record: Record, pause: Pause, interruption: str) -> Held:
+    proxy, lanes, worker, client = launchplane_serving_a(record)
     run = Held(proxy, client, worker, record, pause, interruption, lanes.take)
     lanes.take = run.take
     run.run()
@@ -271,12 +275,7 @@ def test_a_result_already_recorded_stands_whatever_comes_after_it(record: Record
 def test_a_move_to_the_build_already_serving_that_is_cancelled_before_its_result_is_saved_ends_as_cancelled(
     record: Record,
 ) -> None:
-    proxy = PretendProxy(PretendHost())
-    proxy.host.place(LaneBuild(product="site", lane="testing", build=A), "a")
-    proxy.route(WEB_ADDRESS, "a")
-    lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
-    worker = Worker(record, lanes, NO_SECRETS)
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes.abandon))
+    proxy, _, worker, client = launchplane_serving_a(record)
     asked = client.post(MOVE, json={"build": A}).json()["id"]
     end, cancels = record.end, list[int]()
 

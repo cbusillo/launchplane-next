@@ -1,15 +1,9 @@
 """Launchplane as it is, with every call it makes on the container host, the proxy and the record able to be held.
 
-This is test harness, run on the control container in place of the service: `python -m tests.held_launchplane`. It
-changes nothing Launchplane does. A hold stops one call before it is forwarded, or after it has taken effect and before
-its caller has the reply, for as long as the hold stands. Holds are files, so they outlast a kill of Launchplane.
-
-    PUT    /holds/before.proxy.switch        hold every call of that name
-    PUT    /holds/after.host.run_in?only=mv  hold only a call whose arguments have that text
-    PUT    /holds/proxy-delivery             the proxy goes on serving and loads no changed routes file
-    GET    /holds                            what is held, and which holds a call is stopped at now
-    DELETE /holds/<point>, DELETE /holds     let go of one, or of all
-    POST   /kill                             kill Launchplane as `kill -9` does
+A test harness, run on the control container in place of the service: `python -m tests.held_launchplane`. It changes
+nothing Launchplane does. A hold stops one call for as long as the hold stands: before the call is forwarded, or after
+it has taken effect and before its caller has the reply. Holds are files, so they outlast a kill of Launchplane.
+The calls that set a hold and let go of it are in docs/the-move.md.
 """
 
 import inspect
@@ -62,9 +56,9 @@ def held_around(point: str, call: Callable[..., Any]) -> Callable[..., Any]:
     def held(*arguments: object, **named: object) -> object:
         given = repr((arguments, named))
         pause(f"before.{point}", given)
-        answer = call(*arguments, **named)
+        reply = call(*arguments, **named)
         pause(f"after.{point}", given)
-        return answer
+        return reply
 
     return held
 
@@ -135,9 +129,6 @@ def let_go(host: ContainerHost, point: str) -> None:
 
 def holds_handler(host: ContainerHost) -> type[BaseHTTPRequestHandler]:
     class Holds(BaseHTTPRequestHandler):
-        def log_message(self, format: str, *args: object) -> None:
-            pass
-
         # noinspection PyPep8Naming
         def do_GET(self) -> None:
             answer(self, HTTPStatus.OK, what_is_held())
