@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from launchplane.act import Lanes
-from launchplane.instance import BACK_SOON, InstanceState, LaneBuild, LoadedRoute, RouteStatus
+from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, RouteStatus
 from launchplane.judge import Work
 from launchplane.record import Asked, Record, RecordError, Refused, Request, Stands
 from launchplane.telling import Witness
@@ -348,15 +348,26 @@ def test_a_background_service_the_cancelled_request_started_is_retired_and_the_i
     )
 
 
-def test_a_background_service_a_request_started_that_stops_is_answered_as_failed_and_not_started_over_and_over(
+def test_a_background_service_a_request_started_that_has_stopped_by_the_next_reading_is_watched_and_not_started_again(
     record: Record,
 ) -> None:
     proxy = lane_brought_up_with_a()
     proxy.host.background_services_that_stop.add("site:b")
+    start = proxy.host.start_background_service
+
+    def start_one_that_stops_at_once(
+        target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None:
+        start(target, instance, use, command, request)
+        proxy.host.change_part(f"{instance}-background-service", InstanceState.RESTARTING)
+
+    proxy.host.start_background_service = start_one_that_stops_at_once
     request = record.write(MOVE_B, CALLER, None)
     assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
     kept = kept_of(record, request.id)
-    assert kept.answer is not None and (kept.stands, kept.answer["outcome"]) == (Stands.FAILED, "background service failed")
+    started = [action for action in proxy.host.actions if action.startswith("start background service")]
+    assert kept.answer is not None
+    assert (kept.stands, kept.answer["outcome"], len(started)) == (Stands.FAILED, "background service failed", 1)
 
 
 def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_after_the_first_removed_it() -> None:
