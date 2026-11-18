@@ -316,6 +316,7 @@ class PretendProxy:
     def discard(self, web_address: str, container: str, made_by: str) -> Verdict:
         if self.committed.get(made_by) == container:
             return Verdict.COMMITTED
+        assert self.written.get(web_address) != container, "the routes file names an instance the gate did not rename to"
         self.discarded.add(container)
         return Verdict.NONE
 
