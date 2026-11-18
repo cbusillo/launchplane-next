@@ -29,10 +29,13 @@ from launchplane.instance import (
 )
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
-from launchplane.proxy import CheckFailed
+from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.steps import FreshNames
 
 WEB_ADDRESS = "testing.site.test"
+# The generations of a release under test and of one before it.
+GENERATION = "01a1ef36-c51d-74d9-86a1-ff0199cf7a3d"
+EARLIER = "01a1ef36-0000-7000-8000-000000000001"
 SINCE = datetime(2026, 11, 16, 14, 2, tzinfo=UTC)
 QUIET = {LANE_NETWORK: True, "network-d1": True, "network-d2": True, "bridge": False}
 WITH_DATA = Product(
@@ -77,7 +80,7 @@ class PretendHost:
         container: str,
         state: InstanceState = InstanceState.RUNNING,
         use: DataSetUse | None = None,
-        request: int | None = None,
+        generation: str | None = None,
     ) -> None:
         self.instances[container] = RunningInstance(
             product=target.product,
@@ -87,7 +90,7 @@ class PretendHost:
             state=state,
             networks=(LANE_NETWORK,) if use is None else (LANE_NETWORK, use.network),
             data_set=None if use is None else use.data_set,
-            request=request,
+            generation=generation,
         )
 
     def attach(self, container: str, network: str, *, quiet: bool) -> None:
@@ -110,12 +113,12 @@ class PretendHost:
         self.change_database(database, unheld_logins=())
         self.record(f"remove logins from {database}")
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
-        self.place(target, container, use=use, request=request)
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+        self.place(target, container, use=use, generation=generation)
         self.record(f"start {container}")
 
     def start_background_service(
-        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
     ) -> None:
         container = background_service_container_of(instance)
         self.background_services[container] = RunningBackgroundService(
@@ -128,7 +131,7 @@ class PretendHost:
             running_for_seconds=0.0,
             instance=instance,
             data_set=None if use is None else use.data_set,
-            request=request,
+            generation=generation,
         )
         self.most_background_services_running = max(self.most_background_services_running, len(self.background_services))
         self.record(f"start background service {instance} on {None if use is None else use.network} with {' '.join(command)}")
@@ -151,10 +154,10 @@ class PretendHost:
         )
         self.data_sets[data_set] = found.model_copy(update=parts)
 
-    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None:
+    def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None:
         self.networks[f"network-{data_set}"] = True
         network = HostNetwork(name=f"network-{data_set}", is_quiet=True)
-        self.change_data_set(product, lane, data_set, networks=(network,), request=request)
+        self.change_data_set(product, lane, data_set, networks=(network,), generation=generation)
         self.record(f"network {data_set}")
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
@@ -233,7 +236,11 @@ class PretendProxy:
         self.back_soon_runs = True
         self.loaded: dict[str, LoadedRoute] = {}
         self.written: dict[str, str] = {}
-        self.written_by: dict[str, int | None] = {}
+        self.written_by: dict[str, str | None] = {}
+        self.abandoned: dict[str, str] = {}
+        # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
+        self.holds_delivery = False
+        self.at_the_gate: Callable[[str], None] = lambda _passing: None
         self.failing: set[str] = set()
         self.not_answering: dict[str, str] = {}
         self.asked: list[str] = []
@@ -253,6 +260,7 @@ class PretendProxy:
                 for web_address, container in self.written.items()
             },
             loaded=dict(self.loaded) if self.running else {},
+            abandoned=dict(self.abandoned),
         )
 
     def route(self, web_address: str, container: str) -> None:
@@ -267,16 +275,36 @@ class PretendProxy:
     def await_route(self, web_address: str, container: str | None) -> None:
         written = self.written.get(web_address)
         assert written == container, f"awaited {web_address} at {container}, written to {written}"
+        if self.holds_delivery:
+            raise ProxyError(f"The proxy did not load the routes file of {web_address} within 10 s.")
         self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()}
         self.while_awaiting()
 
-    def write_route(self, web_address: str, container: str, request: int | None = None) -> None:
+    def write_route(self, web_address: str, container: str) -> None:
         self.written[web_address] = container
-        self.written_by[web_address] = request
+        self.written_by[web_address] = None
         self.host.record(f"route {container}")
+
+    # As on the host, the two that pass the gate exclude each other: one finds what the other did.
+    def switch(self, web_address: str, container: str, generation: str) -> bool:
+        self.at_the_gate("before the switch")
+        if self.abandoned.get(web_address) == generation:
+            return False
+        self.written[web_address] = container
+        self.written_by[web_address] = generation
+        self.at_the_gate("after the switch")
+        self.host.record(f"route {container}")
+        return True
+
+    def abandon(self, web_address: str, generation: str) -> bool:
+        if self.written_by.get(web_address) == generation:
+            return False
+        self.abandoned[web_address] = generation
+        return True
 
     def remove_route(self, web_address: str) -> None:
         del self.written[web_address]
+        self.abandoned.pop(web_address, None)
         self.host.record("unroute")
 
     def check_instance(self, container: str, health_path: str) -> None:
@@ -384,6 +412,9 @@ class Given:
     proxy_runs: bool = True
     back_soon_runs: bool = True
     web_address_fails: str | None = None
+    # The generation the routes file says it was renamed for, and the one the gate holds a cancel against.
+    written_by: str | None = None
+    abandoned: str | None = None
 
     def proxy(self) -> PretendProxy:
         host = PretendHost()
@@ -398,6 +429,9 @@ class Given:
             proxy.loaded[WEB_ADDRESS] = LoadedRoute(loaded, RouteStatus.ENABLED) if isinstance(loaded, str) else loaded
         if written is not None:
             proxy.written[WEB_ADDRESS] = written
+            proxy.written_by[WEB_ADDRESS] = self.written_by
+        if self.abandoned is not None:
+            proxy.abandoned[WEB_ADDRESS] = self.abandoned
         return proxy
 
     # Read as the status call reads: every lane, and the web address asked where the proxy sends it to a product.

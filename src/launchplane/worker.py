@@ -33,7 +33,7 @@ type Lane = tuple[str, str]
 
 
 class Carries(Protocol):
-    def move(self, target: LaneBuild, witness: Witness, /) -> MoveResult: ...
+    def move(self, target: LaneBuild, generation: str, witness: Witness, /) -> MoveResult: ...
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
     def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
@@ -45,7 +45,7 @@ def carried_out(lanes: Carries, request: Request, witness: Witness) -> Answer:
         case Work.MOVE:
             if request.build is None:
                 raise Stopped("The request names no build to move to. Nothing was changed.")
-            return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), witness)
+            return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), request.generation, witness)
         case Work.RETIRE:
             return lanes.retire(product, lane, request.delete_data_set, witness)
         case Work.BEGIN_MAINTENANCE:
@@ -149,15 +149,18 @@ class Worker:
             return self.record.cancel_asked(request.id)
 
         def refuse_cancel(why: str) -> None:
-            self.record.refuse_cancel(attempt, why)
+            self.record.refuse_cancel(request.id, why)
 
-        return Witness(tell, hold, cancel_asked, refuse_cancel, request.id)
+        return Witness(tell, hold, cancel_asked, refuse_cancel)
 
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
-            answer = carried_out(self.lanes, request, self.witness_of(request, attempt, held))
+            witness = self.witness_of(request, attempt, held)
+            # A cancel asked while the call was answering is answered by the call, from the host, before the request ends.
+            while not self.ended_with(attempt, carried_out(self.lanes, request, witness)):
+                pass
         except Cancelled as cancelled:
             self.end_cancelled(request, attempt, cancelled.put_back)
         except STOPPED as error:
@@ -169,18 +172,16 @@ class Worker:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
             self.end(attempt, Stands.FAILED, None, why)
-        else:
-            self.end_with(attempt, answer)
 
     def end_cancelled(self, request: Request, attempt: int, answer: PutBack) -> None:
         kept = self.record.read(request.id)
         told = [] if kept is None else put_back_told(kept)
         self.end(attempt, Stands.CANCELLED, answer.model_copy(update={"put_back": told}), None)
 
-    def end_with(self, attempt: int, answer: Answer) -> None:
+    def ended_with(self, attempt: int, answer: Answer) -> bool:
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
-        self.end(attempt, Stands.FAILED if failed else Stands.DONE, answer, error if failed else None)
+        return self.end(attempt, Stands.FAILED if failed else Stands.DONE, answer, error if failed else None)
 
-    def end(self, attempt: int, stands: Stands, answer: BaseModel | None, error: str | None) -> None:
-        self.record.end(attempt, stands, None if answer is None else answer.model_dump(mode="json"), error)
+    def end(self, attempt: int, stands: Stands, answer: BaseModel | None, error: str | None) -> bool:
+        return self.record.end(attempt, stands, None if answer is None else answer.model_dump(mode="json"), error)

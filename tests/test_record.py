@@ -88,7 +88,7 @@ def test_the_oldest_request_of_each_lane_is_next_up_and_a_later_one_of_a_lane_on
     later = record.write(MOVE_C, CALLER, None)
     while_the_first_is_worked = [each.id for each in record.next_up()]
     assert attempt is not None
-    record.end(attempt, Stands.DONE, None, None)
+    record.end(attempt, Stands.FAILED, None, "stopped")
     assert (while_the_first_is_worked, [each.id for each in record.next_up()]) == ([first.id, other.id], [other.id, later.id])
 
 

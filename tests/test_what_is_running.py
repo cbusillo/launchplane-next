@@ -91,7 +91,7 @@ def app_reading(
     def read_status() -> Status:
         return status_of(read(), proxy or proxy_sending(routes), failures)
 
-    return TestClient(create_app(read_status, PretendRecord(), no_wake, NO_SECRETS))
+    return TestClient(create_app(read_status, PretendRecord(), no_wake, NO_SECRETS, lambda _product, _lane, _generation: None))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:

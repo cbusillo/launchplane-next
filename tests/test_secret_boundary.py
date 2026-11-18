@@ -64,8 +64,8 @@ def unreadable_host() -> Status:
     raise ContainerHostError(f"Docker refused: {SECRET}")
 
 
-def move_answering(outcome: Outcome) -> Callable[[LaneBuild, Witness], MoveResult]:
-    def move(target: LaneBuild, _witness: Witness) -> MoveResult:
+def move_answering(outcome: Outcome) -> Callable[[LaneBuild, str, Witness], MoveResult]:
+    def move(target: LaneBuild, _generation: str, _witness: Witness) -> MoveResult:
         return MoveResult(
             product=target.product,
             lane=target.lane,
@@ -79,7 +79,7 @@ def move_answering(outcome: Outcome) -> Callable[[LaneBuild, Witness], MoveResul
     return move
 
 
-def move_stopped(_target: LaneBuild, _witness: Witness) -> MoveResult:
+def move_stopped(_target: LaneBuild, _generation: str, _witness: Witness) -> MoveResult:
     raise Stopped(f"The lane is not as it must be: {SECRET}")
 
 
@@ -120,7 +120,7 @@ class Asked:
     status: int
     body: dict[str, Any] | None = None
     read: Callable[[], Status] = running_with_leaks
-    move: Callable[[LaneBuild, Witness], MoveResult] = move_stopped
+    move: Callable[[LaneBuild, str, Witness], MoveResult] = move_stopped
     retire: Callable[[str, str, str | None, Witness], RetireResult] = retire_stopped
     maintenance: Callable[[str, str, Witness], MaintenanceResult] = maintenance_stopped
 
@@ -134,7 +134,7 @@ class Asked:
 # Each request is worked within the call that asked for it, so the call answers with how it ended.
 def app_working_at_once(read: Callable[[], Status], lanes: Carries, secrets: Secrets) -> FastAPI:
     record = PretendRecord()
-    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets)
+    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets, lambda _product, _lane, _generation: None)
 
 
 STOPPED = Asked("POST", "/", 503)
@@ -186,7 +186,7 @@ def test_no_answer_is_made_when_the_secrets_to_clean_it_of_cannot_be_read(asked:
 
 
 def test_nothing_is_moved_when_the_secrets_cannot_be_read() -> None:
-    def move(target: LaneBuild, _witness: Witness) -> MoveResult:
+    def move(target: LaneBuild, _generation: str, _witness: Witness) -> MoveResult:
         raise AssertionError(f"Moved to {target.build} with no way to clean the answer")
 
     asked = Asked("POST", MOVE, 503, {"build": "site:b"}, move=move)

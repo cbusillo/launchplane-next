@@ -4,11 +4,12 @@ from launchplane.plan import (
     Step,
     StepBack,
     changes_so_far,
-    check_or_problems,
     failure_report,
+    is_checked,
     is_turned_back,
     left_for_a_move,
     prepared,
+    problems_switching_to,
     put_back_or_what_is_left,
     route_step,
     sentences,
@@ -188,9 +189,9 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
     start = StartStopped(instance.container)
     if instance.state == InstanceState.STOPPED and start not in done:
         return start
-    problems = check_or_problems(judged, instance, product, done)
-    if isinstance(problems, Check):
-        return problems
+    if not is_checked(instance, product, done):
+        return Check(instance.container, product.health_path)
+    problems = problems_switching_to(judged, instance)
     if problems:
         return Stop(
             f"The instance {instance.container} passed its check and the lane is not as it must be to switch back to it, so "

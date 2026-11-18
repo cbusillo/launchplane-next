@@ -19,6 +19,8 @@ from launchplane.product import Product, ProductError
 from launchplane.record import Asked, Kept, RecordError, Stands
 from launchplane.steps import MaintenanceOutcome, Outcome, RetireOutcome
 from tests.pretend_host import (
+    EARLIER,
+    GENERATION,
     SINCE,
     WEB_ADDRESS,
     WITH_DATA,
@@ -43,7 +45,7 @@ def lanes_serving(build: LaneBuild, container: str) -> tuple[Lanes, PretendProxy
 
 def test_a_move_reads_again_after_each_step_and_switches_in_order() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
-    result = lanes.move(BUILD_B)
+    result = lanes.move(BUILD_B, GENERATION)
     new = result.container_receiving_visitors
     assert proxy.host.actions == [f"start {new}", f"check {new}/", f"route {new}", "retire a"]
     assert (result.outcome, list(proxy.host.instances)) == (Outcome.SWITCHED, [new])
@@ -54,7 +56,7 @@ def test_an_instance_that_stops_while_its_route_is_awaited_is_replaced() -> None
     proxy.host.place(BUILD_B, "b")
     proxy.written[WEB_ADDRESS] = "b"
     proxy.while_awaiting = lambda: proxy.host.place(BUILD_B, "b", InstanceState.STOPPED)
-    result = lanes.move(BUILD_B)
+    result = lanes.move(BUILD_B, GENERATION)
     assert result.outcome == Outcome.SWITCHED
     assert [(instance.container, instance.state) for instance in proxy.host.instances.values()] == [
         (result.container_receiving_visitors, InstanceState.RUNNING)
@@ -65,7 +67,7 @@ def test_an_instance_that_stops_while_its_route_is_awaited_is_replaced() -> None
 def test_a_failed_check_is_answered_as_check_failed_with_the_log_and_the_instance_removed() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
     proxy.failing.add("site-testing-0")
-    result = lanes.move(BUILD_B)
+    result = lanes.move(BUILD_B, GENERATION)
     assert (result.outcome, result.container_receiving_visitors) == (Outcome.CHECK_FAILED, "a")
     assert result.error is not None
     assert "Connection refused" in result.error
@@ -79,14 +81,14 @@ def test_a_move_to_the_serving_build_does_not_answer_success_over_a_web_address_
     proxy.not_answering[WEB_ADDRESS] = "HTTP/1.1 500 Internal Server Error"
     [said_by_the_status_call] = [finding.sentence for judged in lanes.read_status().lanes for finding in judged.findings]
     with pytest.raises(Stopped) as stopped:
-        lanes.move(BUILD_A)
+        lanes.move(BUILD_A, GENERATION)
     assert said_by_the_status_call in str(stopped.value)
     assert proxy.host.actions == []
 
 
 def test_the_first_move_starts_the_proxy_then_moves() -> None:
     proxy = PretendProxy(PretendHost(), running=False)
-    result = Lanes(proxy.host, proxy, name_fresh=numbered_names()).move(BUILD_B)
+    result = Lanes(proxy.host, proxy, name_fresh=numbered_names()).move(BUILD_B, GENERATION)
     assert proxy.host.actions[0] == "start proxy"
     assert result.outcome == Outcome.SWITCHED
 
@@ -94,7 +96,7 @@ def test_the_first_move_starts_the_proxy_then_moves() -> None:
 def test_a_proxy_that_never_runs_stops_the_move_with_an_error_not_a_loop() -> None:
     proxy = PretendProxy(PretendHost(), running=False, starts=False)
     with pytest.raises(Stopped, match="StartProxy"):
-        Lanes(proxy.host, proxy).move(BUILD_B)
+        Lanes(proxy.host, proxy).move(BUILD_B, GENERATION)
     assert proxy.host.instances == {}
 
 
@@ -116,14 +118,14 @@ def test_a_retire_that_finishes_on_its_last_allowed_step_answers_retired_not_sto
 
 def lane_brought_up_with_a() -> PretendProxy:
     proxy = PretendProxy(PretendHost())
-    lanes_on(proxy).move(BUILD_A)
+    lanes_on(proxy).move(BUILD_A, EARLIER)
     proxy.host.actions.clear()
     return proxy
 
 
 def test_a_lane_with_data_is_brought_up_data_set_first_and_background_service_last() -> None:
     proxy = PretendProxy(PretendHost())
-    result = lanes_on(proxy).move(BUILD_A)
+    result = lanes_on(proxy).move(BUILD_A, GENERATION)
     new = proxy.written[WEB_ADDRESS]
     assert (result.outcome, result.data_set) == (Outcome.SWITCHED, "data-1")
     assert proxy.host.actions == [
@@ -142,16 +144,16 @@ def test_a_lane_with_data_is_brought_up_data_set_first_and_background_service_la
 def test_a_release_keeps_the_data_set_and_stops_the_old_background_service_before_the_new_one_starts() -> None:
     proxy = lane_brought_up_with_a()
     old = proxy.written[WEB_ADDRESS]
-    result = lanes_on(proxy).move(BUILD_B)
+    result = lanes_on(proxy).move(BUILD_B, GENERATION)
     new = proxy.written[WEB_ADDRESS]
     assert proxy.host.actions == [
         f"start {new}",
         f"check {new}/health",
         f"route {new}",
         f"retire {background_service_container_of(old)}",
+        f"retire {old}",
         f"start background service {new} on network-data-1 with work",
         f"await background service {background_service_container_of(new)}",
-        f"retire {old}",
     ]
     assert result.data_set == "data-1"
     assert proxy.host.most_background_services_running == 1
@@ -171,7 +173,7 @@ def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_th
     proxy = lane_brought_up_with_a()
     proxy.host.actions.clear()
     proxy.host.change_database("database-data-1", unheld_logins=("i_left",))
-    moved = lanes_on(proxy).move(BUILD_A)
+    moved = lanes_on(proxy).move(BUILD_A, GENERATION)
     proxy.host.change_database("database-data-1", unheld_logins=("i_left_again",))
     retired = lanes_on(proxy).retire("site", "testing")
     assert (moved.outcome, proxy.host.actions[0], proxy.host.actions[-1]) == (
@@ -198,7 +200,7 @@ def test_a_retry_after_a_crash_before_the_background_service_was_watched_watches
     proxy.host.background_services[background_service] = proxy.host.background_services[background_service].model_copy(
         update={"running_for_seconds": 0.5}
     )
-    result = lanes_on(proxy).move(BUILD_A)
+    result = lanes_on(proxy).move(BUILD_A, GENERATION)
     assert proxy.host.actions == [f"await background service {background_service}"]
     assert result.outcome == Outcome.UNCHANGED
 
@@ -235,7 +237,7 @@ def test_the_status_call_reads_every_lane_once_and_a_call_reads_only_its_own_lan
     proxy.host.place(LaneBuild(product="broken", lane="other", build="broken:a"), "broken-1")
     proxy.host.lanes_read.clear()
     lanes_on(proxy).read_status()
-    lanes_on(proxy).move(BUILD_A)
+    lanes_on(proxy).move(BUILD_A, GENERATION)
     assert proxy.host.lanes_read == [None, ("site", "testing")]
 
 
@@ -252,6 +254,7 @@ def test_a_request_taken_up_or_ended_while_the_host_is_read_is_at_work_on_what_w
     working = Kept(
         **MOVE_B.model_dump(),
         id=1,
+        generation=GENERATION,
         asked_by="the address 192.0.2.1",
         asked_at=SINCE,
         stands=Stands.WORKING,
@@ -278,6 +281,7 @@ def test_a_record_unread_on_either_reading_leaves_what_a_request_would_explain_n
     working = Kept(
         **MOVE_B.model_dump(),
         id=1,
+        generation=GENERATION,
         asked_by="the address 192.0.2.1",
         asked_at=SINCE,
         stands=Stands.WORKING,
@@ -392,7 +396,7 @@ def test_a_lane_comes_out_of_maintenance_database_first_and_its_web_address_swit
         f"route {web}",
     ]
     assert (result.outcome, result.in_maintenance) == (MaintenanceOutcome.ENDED, False)
-    assert lanes_on(proxy).move(BUILD_A).outcome == Outcome.UNCHANGED
+    assert lanes_on(proxy).move(BUILD_A, GENERATION).outcome == Outcome.UNCHANGED
 
 
 def test_ending_maintenance_removes_a_login_no_container_holds_before_the_lane_comes_back_so_asking_again_hides_nothing() -> None:

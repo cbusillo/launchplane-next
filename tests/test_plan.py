@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from launchplane.steps import (
     AwaitBackgroundService,
     AwaitDatabase,
     AwaitRoute,
+    AwaitSwitch,
     BackgroundServiceRefused,
     Check,
     CheckRefused,
@@ -45,10 +47,12 @@ from launchplane.steps import (
     StartInstance,
     StartProxy,
     Stop,
-    WriteRoute,
+    Switch,
+    Switched,
 )
 from tests.pretend_host import (
     D1,
+    GENERATION,
     NEW,
     NEW_BACKGROUND_SERVICE,
     NEW_ON_D1,
@@ -71,7 +75,8 @@ FRESH = "site-testing-fresh"
 FRESH_NAMES = FreshNames(FRESH, "fresh-data")
 
 STOPPED_NEW = lane_instance("new", "b", InstanceState.STOPPED)
-STARTED_NEW = StartInstance(TARGET, "new")
+STARTED_NEW = StartInstance(TARGET, "new", None, GENERATION)
+SWITCHED_TO_NEW = Switched("new", won=True)
 REFUSED = CheckRefused("new", "Connection refused")
 
 
@@ -81,6 +86,8 @@ class Case:
     route: tuple[str | LoadedRoute | None, str | None]
     done: tuple[Event, ...]
     step: object
+    # Whether the routes file says it was renamed for this release.
+    switched: bool = False
 
 
 def answer(outcome: Outcome, receiving: str | None, error: str | None = None, did: tuple[str, ...] = ()) -> Done[MoveResult]:
@@ -103,43 +110,54 @@ MOVES = {
     "a route written and not loaded is waited for before anything else": Case(
         (OLD, NEW), ("old", "new"), (), AwaitRoute(WEB_ADDRESS, "new")
     ),
-    "a first move starts an instance": Case((), (None, None), (), StartInstance(TARGET, FRESH)),
+    "a first move starts an instance": Case((), (None, None), (), StartInstance(TARGET, FRESH, None, GENERATION)),
     "an instance this call started is checked before any route names it": Case((NEW,), (None, None), (STARTED_NEW,), Check("new")),
     "an instance that passed its check is routed": Case(
-        (OLD, NEW), ("old", "old"), (STARTED_NEW, Check("new")), WriteRoute(WEB_ADDRESS, "new")
+        (OLD, NEW), ("old", "old"), (STARTED_NEW, Check("new")), Switch(WEB_ADDRESS, "new", GENERATION)
     ),
     "an instance that stopped after passing is checked again, not routed": Case(
         (OLD, STOPPED_NEW), ("old", "old"), (STARTED_NEW, Check("new")), Check("new")
     ),
     "the old instance retires only once the route to the new one has loaded": Case(
-        (OLD, NEW), ("new", "new"), (STARTED_NEW, Check("new"), WriteRoute(WEB_ADDRESS, "new")), Retire("old")
+        (OLD, NEW), ("new", "new"), (STARTED_NEW, Check("new"), SWITCHED_TO_NEW), Retire("old"), switched=True
     ),
     "a finished switch answers switched": Case(
         (NEW,),
         ("new", "new"),
-        (STARTED_NEW, Check("new"), WriteRoute(WEB_ADDRESS, "new"), Retire("old")),
+        (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Retire("old")),
         answer(Outcome.SWITCHED, "new", did=("started the instance new", "wrote the route to new", "retired old")),
+        switched=True,
+    ),
+    "a switch found in the routes file answers switched, though this attempt did none of it": Case(
+        (NEW,), ("new", "new"), (), answer(Outcome.SWITCHED, "new"), switched=True
+    ),
+    "a route renamed for this release and not loaded is waited for as long as it takes": Case(
+        (OLD, NEW), ("old", "new"), (), AwaitSwitch(WEB_ADDRESS, "new"), switched=True
+    ),
+    "a switch whose candidate lost at the gate is made again by nobody: the candidate is still only checked": Case(
+        (OLD, NEW), ("old", "old"), (STARTED_NEW, Check("new"), Switched("new", won=False)), Switch(WEB_ADDRESS, "new", GENERATION)
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Retire("stray")),
     "a finished cleanup answers repaired, with what it did": Case(
         (NEW,), ("new", "new"), (Retire("stray"),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
     ),
-    "a running instance left before the switch is checked, not started again": Case((OLD, NEW), ("old", "old"), (), Check("new")),
-    "an instance neither serving nor about to be checked is retired first": Case(
-        (OLD, NEW, STRAY), ("old", "old"), (), Retire("stray")
+    "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
+        (OLD, NEW), ("old", "old"), (), Retire("new")
     ),
+    "what anything earlier left is retired before a candidate is made": Case((OLD, STRAY), ("old", "old"), (), Retire("stray")),
     "a stopped instance left before the switch is retired, then replaced": Case(
         (OLD, STOPPED_NEW), ("old", "old"), (), Retire("new")
     ),
-    "a stopped serving instance is replaced, never checked": Case((STOPPED_NEW,), ("new", "new"), (), StartInstance(TARGET, FRESH)),
+    "a stopped serving instance is replaced, never checked": Case(
+        (STOPPED_NEW,), ("new", "new"), (), StartInstance(TARGET, FRESH, None, GENERATION)
+    ),
     "a serving instance that stopped while its route was awaited is replaced, not kept": Case(
         (OLD, STOPPED_NEW), ("new", "new"), (AwaitRoute(WEB_ADDRESS, "new"),), Retire("old")
     ),
-    "an instance this call routed that then stopped is replaced": Case(
-        (STOPPED_NEW,), ("new", "new"), (STARTED_NEW, Check("new"), WriteRoute(WEB_ADDRESS, "new")), StartInstance(TARGET, FRESH)
+    "a route to an instance that is gone is not taken as serving": Case(
+        (), ("gone", "gone"), (), StartInstance(TARGET, FRESH, None, GENERATION)
     ),
-    "a route to an instance that is gone is not taken as serving": Case((), ("gone", "gone"), (), StartInstance(TARGET, FRESH)),
     "an instance that failed its check is removed": Case((OLD, NEW), ("old", "old"), (STARTED_NEW, REFUSED), RemoveInstance("new")),
     "a failed check answers check failed, never switched": Case(
         (OLD,),
@@ -151,11 +169,11 @@ MOVES = {
 
 
 def given(case: Case) -> Given:
-    return Given(case.instances, case.route, proxy_runs=case.step != StartProxy())
+    return Given(case.instances, case.route, proxy_runs=case.step != StartProxy(), written_by=GENERATION if case.switched else None)
 
 
 def next_move_step(case: Case) -> object:
-    return decide_move(given(case).judged(Work.MOVE, Product()), TARGET, Product(), FRESH_NAMES, case.done)
+    return decide_move(given(case).judged(Work.MOVE, Product()), TARGET, Product(), FRESH_NAMES, case.done, GENERATION)
 
 
 def next_retire_step(case: Case) -> object:
@@ -176,8 +194,8 @@ def test_a_move_stops_and_says_so_when_the_loaded_route_is_not_enabled(status: R
 
 
 def test_a_move_stopped_by_a_disabled_route_it_wrote_says_what_it_changed() -> None:
-    done = (STARTED_NEW, Check("new"), WriteRoute(WEB_ADDRESS, "new"), AwaitRoute(WEB_ADDRESS, "new"))
-    step = next_move_step(Case((OLD, NEW), (LoadedRoute("new", RouteStatus.DISABLED), "new"), done, None))
+    done = (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, AwaitSwitch(WEB_ADDRESS, "new"))
+    step = next_move_step(Case((OLD, NEW), (LoadedRoute("new", RouteStatus.DISABLED), "new"), done, None, switched=True))
     assert isinstance(step, Stop)
     assert "started the instance new, wrote the route to new" in step.reason
     assert "Nothing was changed" not in step.reason
@@ -242,11 +260,12 @@ OUTSIDE_AND_STOPPED = with_database(data_set_named("d1", InstanceState.STOPPED),
 RENAMED_STOPPED = data_set_named("d1", databases=("renamed-database",), state=InstanceState.STOPPED)
 STOPPED_NEW_BACKGROUND_SERVICE = background_service_of(NEW_ON_D1, running_for=None)
 USE_D1 = DataSetUse("d1", "network-d1", "database-d1")
-STARTED_NEW_BACKGROUND_SERVICE = StartBackgroundService(TARGET, "new", USE_D1, ("work",))
+STARTED_NEW_BACKGROUND_SERVICE = StartBackgroundService(TARGET, "new", USE_D1, ("work",), GENERATION)
+STARTED_NEW_ON_D1 = StartInstance(TARGET, "new", USE_D1, GENERATION)
 
 DATA_MOVES = {
     "a lane with no data set gets a fresh network before anything else": DataCase(
-        (), None, (), (), CreateDataSetNetwork("site", "testing", "fresh-data")
+        (), None, (), (), CreateDataSetNetwork("site", "testing", "fresh-data", GENERATION)
     ),
     "a data set with a network and no volume gets its volume": DataCase(
         (), None, (data_set_named("d1", None, volume=False),), (), CreateDataSetVolume("site", "testing", "d1")
@@ -265,19 +284,19 @@ DATA_MOVES = {
         (), None, (data_set_named("d1", accepts=False),), (), AwaitDatabase("database-d1")
     ),
     "an instance starts on the data set once its database is read accepting connections": DataCase(
-        (), None, (D1,), (), StartInstance(TARGET, FRESH, USE_D1)
+        (), None, (D1,), (), StartInstance(TARGET, FRESH, USE_D1, GENERATION)
     ),
     "a release uses the data set of the instance receiving visitors, even beside another": DataCase(
-        (OLD_ON_D1,), "old", (D1, data_set_named("d2")), (), StartInstance(TARGET, FRESH, USE_D1)
+        (OLD_ON_D1,), "old", (D1, data_set_named("d2")), (), StartInstance(TARGET, FRESH, USE_D1, GENERATION)
     ),
     "the new instance is checked at the product's health path": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (StartInstance(TARGET, "new", USE_D1),), Check("new", "/health")
+        (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (STARTED_NEW_ON_D1,), Check("new", "/health")
     ),
-    "an instance left by an interrupted release waits on its database as read before its check": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", accepts=False),), (), AwaitDatabase("database-d1")
+    "an instance left by an interrupted attempt is retired before its data set is waited on": DataCase(
+        (OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", accepts=False),), (), Retire("new")
     ),
     "a checked instance attached only to its own quiet networks is switched to": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (Check("new", "/health"),), WriteRoute(WEB_ADDRESS, "new")
+        (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (STARTED_NEW_ON_D1, Check("new", "/health")), Switch(WEB_ADDRESS, "new", GENERATION)
     ),
     "a running instance of the build on another data set is retired, not switched to": DataCase(
         (OLD_ON_D1, NEW_ON_D2), "old", (D1, data_set_named("d2")), (), Retire("new")
@@ -290,14 +309,17 @@ DATA_MOVES = {
         "new",
         (D1, data_set_named("d2")),
         (),
-        StartInstance(TARGET, FRESH, USE_D1),
+        StartInstance(TARGET, FRESH, USE_D1, GENERATION),
         (NEW_BACKGROUND_SERVICE,),
     ),
     "the old background service stops before the new one starts": DataCase(
         (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), Retire("old-background-service"), (background_service_of(OLD_ON_D1),)
     ),
-    "the new background service starts once no other background service runs, before the old instance retires": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), STARTED_NEW_BACKGROUND_SERVICE
+    "the old instance retires before the new background service starts": DataCase(
+        (OLD_ON_D1, NEW_ON_D1), "new", (D1,), (), Retire("old")
+    ),
+    "the new background service starts once nothing of the old instance is left": DataCase(
+        (NEW_ON_D1,), "new", (D1,), (), STARTED_NEW_BACKGROUND_SERVICE
     ),
     "a background service read as running less than its watch is waited on, whoever started it": DataCase(
         (NEW_ON_D1,),
@@ -364,7 +386,8 @@ def given_data(case: DataCase) -> Given:
 
 
 def next_data_move_step(case: DataCase) -> Action | Done[MoveResult] | Stop:
-    return decide_move(given_data(case).judged(Work.MOVE), TARGET, WITH_DATA, FRESH_NAMES, case.done)
+    step = decide_move(given_data(case).judged(Work.MOVE), TARGET, WITH_DATA, FRESH_NAMES, case.done, GENERATION)
+    return cast("Action | Done[MoveResult] | Stop", step)
 
 
 @pytest.mark.parametrize("case", DATA_MOVES.values(), ids=DATA_MOVES.keys())
@@ -433,7 +456,7 @@ def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:
 
 def test_a_background_service_that_stops_during_its_watch_answers_background_service_failed_with_why_not_switched() -> None:
     refused = BackgroundServiceRefused("new-background-service", "The background service new-background-service is not running.")
-    done = (STARTED_NEW_BACKGROUND_SERVICE, refused, WriteRoute(WEB_ADDRESS, "new"))
+    done = (STARTED_NEW_BACKGROUND_SERVICE, refused, SWITCHED_TO_NEW)
     step = next_data_move_step(DataCase((NEW_ON_D1,), "new", (D1,), done, None, (STOPPED_NEW_BACKGROUND_SERVICE,)))
     assert isinstance(step, Done)
     assert (step.answer.outcome, step.answer.error) == (Outcome.BACKGROUND_SERVICE_FAILED, refused.report)
@@ -445,8 +468,8 @@ DATA_STOPS = {
         "cannot tell which",
     ),
     "a data set whose network is not quiet": (DataCase((), None, (data_set_named("d1", quiet=False),), (), None), "not quiet"),
-    "a left-over instance on a data set whose network is not quiet": (
-        DataCase((OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", quiet=False),), (), None),
+    "a release on a data set whose network is not quiet": (
+        DataCase((OLD_ON_D1,), "old", (data_set_named("d1", quiet=False),), (), None),
         "not quiet",
     ),
     "a database that keeps restarting": (

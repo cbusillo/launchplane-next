@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
@@ -78,8 +78,7 @@ class FreshNames:
     data_set: str
 
 
-# The `request` of a step is the stamp put on what it makes. It is not part of which step it is, so a step a call has
-# taken is found among what it has done whoever asked.
+# The `generation` of a step is the stamp put on what it makes.
 @dataclass(frozen=True)
 class StartProxy:
     pass
@@ -96,7 +95,7 @@ class CreateDataSetNetwork:
     product: str
     lane: str
     data_set: str
-    request: int | None = field(default=None, compare=False)
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,7 +130,7 @@ class StartInstance:
     target: LaneBuild
     container: str
     use: DataSetUse | None = None
-    request: int | None = field(default=None, compare=False)
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,7 +143,41 @@ class Check:
 class WriteRoute:
     web_address: str
     container: str
-    request: int | None = field(default=None, compare=False)
+
+
+# The rename of a release, through the gate. `Switched` is what it is once taken, with whether it won there.
+@dataclass(frozen=True)
+class Switch:
+    web_address: str
+    container: str
+    generation: str
+
+
+@dataclass(frozen=True)
+class Switched:
+    container: str
+    won: bool
+
+
+# A cancel carried to the gate.
+@dataclass(frozen=True)
+class Abandon:
+    web_address: str
+    generation: str
+
+
+# Waiting for the proxy to load a route that is already renamed: the release is real, so not loading yet is waited
+# for again and is never its failure.
+@dataclass(frozen=True)
+class AwaitSwitch:
+    web_address: str
+    container: str
+
+
+@dataclass(frozen=True)
+class NotLoadedYet:
+    container: str
+    report: str
 
 
 @dataclass(frozen=True)
@@ -153,7 +186,7 @@ class StartBackgroundService:
     instance: str
     use: DataSetUse | None
     command: tuple[str, ...]
-    request: int | None = field(default=None, compare=False)
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +296,9 @@ type Action = (
     StartProxy
     | AwaitRoute
     | WriteRoute
+    | Switch
+    | Abandon
+    | AwaitSwitch
     | RemoveRoute
     | CreateDataSetNetwork
     | CreateDataSetVolume
@@ -283,4 +319,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead
+type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | NotLoadedYet

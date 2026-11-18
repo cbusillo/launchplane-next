@@ -45,6 +45,9 @@ from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from launchplane.worker import Worker
 
 type StatusReader = Callable[[], Status]
+# Carries the cancel of a move to the gate: why it came too late, or None when it won there.
+type Abandon = Callable[[str, str, str], str | None]
+log = logging.getLogger(__name__)
 
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
 UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
@@ -81,7 +84,7 @@ class RunningAnswer(BaseModel):
     web_addresses: list[WebAddressJudged]
     lanes: list[LaneAnswer]
     requests: list[Kept]
-    cancelled: list[KeptRequest]
+    cancels: list[KeptRequest]
     record_error: str | None
     cards: list[Card]
 
@@ -156,7 +159,7 @@ def running_answer(status: Status) -> RunningAnswer:
         web_addresses=status.web_addresses,
         lanes=[lane_answer(judged) for judged in status.lanes],
         requests=status.requests,
-        cancelled=status.cancelled,
+        cancels=status.cancels,
         record_error=status.record_error,
         cards=cards(status),
     )
@@ -254,9 +257,28 @@ NOT_CONFIRMED = (
 
 
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object]) -> None:
+    def __init__(self, record: Record, wake: Callable[[], object], abandon: Abandon) -> None:
         self.record = record
         self.wake = wake
+        self.abandon = abandon
+
+    # A cancel of a move being worked is decided at the gate, and the call that asks carries it there itself.
+    def carry_to_the_gate(self, request: KeptRequest) -> None:
+        marked = request.stands is Stands.WORKING and request.cancel_asked_at is not None and request.cancel_refused is None
+        if request.work is Work.MOVE and marked:
+            too_late = self.abandon(request.product, request.lane, request.generation)
+            if too_late is not None:
+                self.record.refuse_cancel(request.id, too_late)
+
+    # A newer request takes the path of a cancel. Where the gate cannot be reached, the worker of the older request
+    # carries the cancel there before its next action.
+    def cancel_what_came_before(self, new: KeptRequest) -> None:
+        try:
+            for older in self.record.unfinished():
+                if (older.product, older.lane, older.id < new.id) == (new.product, new.lane, True):
+                    self.carry_to_the_gate(older)
+        except (RecordError, *UNREADABLE) as error:
+            log.warning("Request %s did not carry the cancel of an older request to the gate: %s", new.id, error)
 
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
@@ -272,6 +294,7 @@ class Calls:
         except RecordError as error:
             why = f"{error} The request was not written and nothing was changed, and asking again is safe."
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
+        self.cancel_what_came_before(request)
         self.wake()
         response.headers["Location"] = f"/requests/{request.id}"
         try:
@@ -321,6 +344,14 @@ class Calls:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, self.not_known(request, error))
         if marked is None:
             return self.none_such(request, response)
+        try:
+            self.carry_to_the_gate(marked)
+        except (RecordError, *UNREADABLE) as error:
+            why = (
+                f"Request {request} is marked to be cancelled, and whether that came in time is not known yet: {error} "
+                f"Its worker carries the cancel on. Read it with GET /requests/{request}."
+            )
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
         try:
             kept = read_until(self.record, request, wait, is_cancel_settled)
         except RecordError as error:
@@ -446,7 +477,7 @@ def add_cancel_call(app: FastAPI, calls: Calls) -> None:
         return calls.cancel(request, f"a call from {asker(http)}", wait, response)
 
 
-def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets) -> FastAPI:
+def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, abandon: Abandon) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 
@@ -464,7 +495,7 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    calls = Calls(record, wake)
+    calls = Calls(record, wake, abandon)
     add_lane_calls(app, calls)
     add_request_calls(app, calls)
     add_cancel_call(app, calls)
@@ -485,8 +516,8 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     record = PostgresRecord(database(), host)
-    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_cancelled=record.recently_cancelled)
+    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_cancels=record.cancels_answered)
     worker = Worker(record, lanes, host)
     worker.start()
-    app = create_app(lanes.read_status, record, worker.wake, host)
+    app = create_app(lanes.read_status, record, worker.wake, host, lanes.abandon)
     uvicorn.Server(server_config(app, address, port, host)).run()

@@ -1,4 +1,5 @@
 import secrets
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,8 +33,8 @@ class Unread(BaseModel):
     why: str
 
 
-# The request that made a part, where one did. A stamp that is not a request's id is unread, never taken for none.
-type Stamp = int | Unread | None
+# The generation that made a part, where one did. A stamp that is not a generation is unread, never taken for none.
+type Stamp = str | Unread | None
 
 
 class RunningInstance(BaseModel):
@@ -47,7 +48,7 @@ class RunningInstance(BaseModel):
     networks: tuple[str, ...]
     data_set: str | None = None
     mounts: tuple[Mount, ...] = ()
-    request: Stamp = None
+    generation: Stamp = None
 
 
 class RunningBackgroundService(BaseModel):
@@ -63,7 +64,7 @@ class RunningBackgroundService(BaseModel):
     instance: str | None
     mounts: tuple[Mount, ...] = ()
     data_set: str | None = None
-    request: Stamp = None
+    generation: Stamp = None
 
 
 class HostNetwork(BaseModel):
@@ -97,7 +98,7 @@ class DataSet(BaseModel):
     volumes: tuple[str, ...]
     databases: tuple[DataSetDatabase, ...]
     # Stamped on its network, the first part of it that is made.
-    request: Stamp = None
+    generation: Stamp = None
 
 
 class LaneBuild(BaseModel):
@@ -131,7 +132,7 @@ class LoadedRoute:
 class WrittenRoute:
     container: str
     written_at: datetime
-    request: int | None = None
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,8 +142,10 @@ class LaneRoute:
     back_soon_since: datetime | None = None
     proxy_runs: bool = True
     back_soon_runs: bool = True
-    # The request that wrote the routes file, where the file says one did.
-    written_by: int | None = None
+    # The generation whose release renamed the routes file into place, where the file says one did.
+    written_by: str | None = None
+    # The generation a cancel won against at the gate: its release will never be switched to.
+    abandoned: str | None = None
 
     # The mark is the lane's own route file, so it reads the same while the proxy is down.
     @property
@@ -163,6 +166,7 @@ class ProxySeen:
     back_soon_runs: bool
     written: Mapping[str, WrittenRoute] = field(default_factory=dict[str, WrittenRoute])
     loaded: Mapping[str, LoadedRoute] = field(default_factory=dict[str, LoadedRoute])
+    abandoned: Mapping[str, str] = field(default_factory=dict[str, str])
 
     def route_of(self, web_address: str) -> LaneRoute:
         written = self.written.get(web_address)
@@ -172,7 +176,8 @@ class ProxySeen:
             back_soon_since=written.written_at if written is not None and written.container == BACK_SOON else None,
             proxy_runs=self.runs,
             back_soon_runs=self.back_soon_runs,
-            written_by=None if written is None else written.request,
+            written_by=None if written is None else written.generation,
+            abandoned=self.abandoned.get(web_address),
         )
 
     def sends_visitors_to(self) -> dict[str, str]:
@@ -272,6 +277,19 @@ def new_container_name(target: LaneBuild) -> str:
 
 def new_data_set_name() -> str:
     return secrets.token_hex(6)
+
+
+# A number no release has had before, also when Launchplane's own record is lost: it is made from the time and from chance,
+# never counted up from what the record or the host holds.
+def new_generation() -> str:
+    return str(uuid.uuid7())
+
+
+def is_generation(text: str) -> bool:
+    try:
+        return str(uuid.UUID(text)) == text
+    except ValueError:
+        return False
 
 
 def new_password() -> str:

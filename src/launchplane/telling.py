@@ -26,14 +26,12 @@ def refuse_to_nobody(_why: str) -> None:
 
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
-# `request` is stamped on what the call makes.
 @dataclass(frozen=True)
 class Witness:
     tell: Tell = tell_nobody
     hold: Callable[[], None] = hold_nothing
     cancel_asked: Callable[[], bool] = never_cancelled
     refuse_cancel: Callable[[str], None] = refuse_to_nobody
-    request: int | None = None
 
 
 NOBODY = Witness()
@@ -46,6 +44,9 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.StartProxy: lambda _step: "start the proxy",
     steps.AwaitRoute: lambda step: f"wait for the proxy to load the route of {step.web_address}",
     steps.WriteRoute: lambda step: f"write the route of {step.web_address} to {step.container}",
+    steps.Switch: lambda step: f"switch {step.web_address} to {step.container}",
+    steps.Abandon: lambda step: f"mark the release of {step.web_address} as cancelled",
+    steps.AwaitSwitch: lambda step: f"wait for the proxy to send {step.web_address} to {step.container}",
     steps.RemoveRoute: lambda step: f"remove the route of {step.web_address} to {step.container}",
     steps.CreateDataSetNetwork: lambda step: f"make the network of the data set {step.data_set}",
     steps.CreateDataSetVolume: lambda step: f"make the volume of the data set {step.data_set}",
@@ -79,5 +80,9 @@ def told(action: Action, event: Event) -> tuple[str, str | None]:
             return named(action), report
         case steps.LogRead(unreadable=unreadable):
             return named(action), unreadable
+        case steps.NotLoadedYet(report=report):
+            return named(action), report
+        case steps.Switched(won=False):
+            return named(action), "A cancel had won against this release, so the routes file was not renamed."
         case _:
             return named(action), None

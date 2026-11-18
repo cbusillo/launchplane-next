@@ -5,11 +5,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from launchplane.instance import new_generation
 from launchplane.record import (
     ASKED_AGAIN,
     ENDED,
     GIVEN_UP,
-    MINUTES_A_CANCELLED_REQUEST_IS_SHOWN,
+    MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN,
     MOST_ATTEMPTS,
     Asked,
     Attempt,
@@ -85,6 +86,7 @@ class PretendRecord(Record):
         new = Kept(
             **asked.model_dump(),
             id=len(self.kept) + 1,
+            generation=new_generation(),
             asked_by=asked_by,
             asked_at=now(),
             stands=Stands.WAITING,
@@ -134,11 +136,11 @@ class PretendRecord(Record):
         ended = list[Request](each for each in self.every() if each.stands in ENDED)
         return sorted(ended, key=lambda each: each.id, reverse=True)[:20]
 
-    def recently_cancelled(self) -> list[Request]:
-        self.reach("reading the requests that were cancelled")
-        since = now() - timedelta(minutes=MINUTES_A_CANCELLED_REQUEST_IS_SHOWN)
-        cancelled = (each for each in self.every() if each.stands is Stands.CANCELLED and each.ended_at and each.ended_at > since)
-        return list[Request](cancelled)
+    def cancels_answered(self) -> list[Request]:
+        self.reach("reading the requests a cancel was asked of")
+        since = now() - timedelta(minutes=MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
+        ended = (each for each in self.every() if each.stands in ENDED and each.ended_at and each.ended_at > since)
+        return list[Request](each for each in ended if each.cancel_asked_at is not None)
 
     def next_up(self) -> list[Request]:
         self.reach("looking for the next requests")
@@ -197,16 +199,21 @@ class PretendRecord(Record):
             event = Event(at=now(), attempt=len(found.attempts), **self.cleaned(did=did, error=error))
             self.change(request, events=[*found.events, event])
 
-    def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
+    def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> bool:
         self.reach("writing how a request ended")
         with self.writing:
-            request = self.open_attempts.pop(attempt, None)
+            request = self.open_attempts.get(attempt)
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
+            found = self.kept[request]
+            if stands is Stands.DONE and found.cancel_asked_at is not None and found.cancel_refused is None:
+                return False
+            del self.open_attempts[attempt]
             attempts = self.kept[request].attempts
             ended = attempts[-1].model_copy(update={"ended": stands.value, "ended_at": now()})
             kept = self.cleaned(answer=answer, error=error)
             self.change(request, attempts=[*attempts[:-1], ended], stands=stands, ended_at=now(), **kept)
+            return True
 
     def answered_by_a_person(self, request: int, how: str) -> Request | None:
         found = self.kept.get(request)
@@ -252,13 +259,11 @@ class PretendRecord(Record):
         found = self.kept.get(request)
         return found is not None and found.cancel_asked_at is not None
 
-    def refuse_cancel(self, attempt: int, why: str) -> None:
+    def refuse_cancel(self, request: int, why: str) -> None:
         self.reach("writing why a request was not cancelled")
         with self.writing:
-            request = self.open_attempts.get(attempt)
-            if request is None:
-                raise Interrupted(f"Attempt {attempt} has ended in the record, so why it was not cancelled was not written.")
-            self.change(request, **self.cleaned(cancel_refused=why))
+            if request in self.kept and self.kept[request].cancel_refused is None:
+                self.change(request, **self.cleaned(cancel_refused=why))
 
 
 # What a lost connection does: every turn is free, and its holder has not been told.

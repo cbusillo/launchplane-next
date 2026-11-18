@@ -2,7 +2,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.resources import files
@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
-from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute
+from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute, is_generation
 
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
@@ -55,8 +55,8 @@ BACK_SOON_PAGE = HelperContainer(
 LOADED_ROUTES_URL = "http://127.0.0.1:8080/api/rawdata"
 FROM_ROUTES_FILE = "@file"
 HOST_RULE = re.compile(r"Host\(`(?P<web_address>[^`]+)`\)")
-WRITTEN_BY_PREFIX = "# launchplane.request="
-WRITTEN_BY = re.compile(rf"{re.escape(WRITTEN_BY_PREFIX)}(?P<request>[0-9]{{1,18}})\n")
+WRITTEN_BY_PREFIX = "# launchplane.generation="
+WRITTEN_BY = re.compile(rf"{re.escape(WRITTEN_BY_PREFIX)}(?P<generation>[0-9a-f-]{{36}})\n")
 INSTANCE_URL = re.compile(rf"http://(?P<container>[^:/]+):{INSTANCE_PORT}")
 # noinspection HttpUrlsUsage
 WEB_ADDRESS_URL = f"http://127.0.0.1:{INSTANCE_PORT}/"
@@ -115,8 +115,25 @@ def route_file_of(web_address: str) -> PurePosixPath:
     return ROUTES_FOLDER / f"{web_address}{ROUTE_FILE_SUFFIX}"
 
 
-def staged_route_file_of(web_address: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}.next"
+def staged_route_file_of(web_address: str, generation: str | None = None) -> PurePosixPath:
+    return ROUTES_FOLDER / (f"{web_address}.next" if generation is None else f"{web_address}.{generation}.next")
+
+
+ABANDONED_SUFFIX = ".abandoned"
+
+
+def abandoned_mark_of(web_address: str, generation: str) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}.{generation}{ABANDONED_SUFFIX}"
+
+
+# The gate. A switch and a cancel each run as one command on the container host, holding the one lock file there, so the
+# second of the two finds what the first did whichever Launchplane sent it: a switch finds the mark and renames nothing,
+# or a cancel finds the routes file renamed for this generation and marks nothing. Each answers LOST then.
+GATE = ROUTES_FOLDER / ".gate"
+LOST = 3
+SWITCH = f'if [ -e "$1" ]; then rm -f "$2"; exit {LOST}; fi; mv "$2" "$3"'
+ABANDON = f'if head -n 1 "$1" 2>/dev/null | grep -qxF "$2"; then exit {LOST}; fi; rm -f "$3" "$4".*{ABANDONED_SUFFIX}; : > "$5"'
+REMOVE = f'rm -f "$1" "$2".*{ABANDONED_SUFFIX}'
 
 
 # noinspection HttpUrlsUsage
@@ -124,12 +141,16 @@ def instance_url(container: str) -> str:
     return f"http://{container}:{INSTANCE_PORT}"
 
 
-# The routes file is what sends visitors somewhere, so it says which request wrote it: on a first line the proxy
-# reads as a comment.
-def route_text(web_address: str, container: str, request: int | None = None) -> str:
+def stamp_line(generation: str) -> str:
+    return f"{WRITTEN_BY_PREFIX}{generation}"
+
+
+# The routes file is what sends visitors somewhere, so it says which generation it was renamed into place for: on a first
+# line the proxy reads as a comment.
+def route_text(web_address: str, container: str, generation: str | None = None) -> str:
     router = {"rule": f"Host(`{web_address}`)", "entryPoints": [ENTRY_POINT], "service": web_address}
     target = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
-    written_by = "" if request is None else f"{WRITTEN_BY_PREFIX}{request}\n"
+    written_by = "" if generation is None else f"{stamp_line(generation)}\n"
     return written_by + json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
 
 
@@ -166,10 +187,15 @@ def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
 
 def written_route_from_file(text: str, web_address: str, written_at: datetime) -> WrittenRoute:
     found, stamp = INSTANCE_URL.search(text), WRITTEN_BY.match(text)
-    request = None if stamp is None else int(stamp["request"])
-    if found is None or text != route_text(web_address, found["container"], request):
+    generation = None if stamp is None else stamp["generation"]
+    if found is None or text != route_text(web_address, found["container"], generation):
         raise ProxyError(f"The routes file {route_file_of(web_address)} is not the route Launchplane writes for {web_address}.")
-    return WrittenRoute(found["container"], written_at, request)
+    return WrittenRoute(found["container"], written_at, generation)
+
+
+def abandoned_from(file_names: Iterable[str]) -> dict[str, str]:
+    marks = (name.removesuffix(ABANDONED_SUFFIX).rpartition(".") for name in file_names if name.endswith(ABANDONED_SUFFIX))
+    return {web_address: generation for web_address, _, generation in marks if is_generation(generation)}
 
 
 @dataclass(frozen=True)
@@ -198,24 +224,26 @@ class TraefikProxy:
             raise ProxyError(f"Reading the proxy's loaded routes failed: {result.output}")
         return loaded_routes_from_answer(result.output)
 
-    def read_written(self) -> dict[str, WrittenRoute]:
-        written: dict[str, WrittenRoute] = {}
+    def read_folder(self) -> dict[str, FileRead]:
         with self.routes_folder:
-            files_read = self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
-        for name, file in files_read.items():
-            if name.endswith(ROUTE_FILE_SUFFIX):
-                web_address = name.removesuffix(ROUTE_FILE_SUFFIX)
-                written[web_address] = written_route_from_file(file.text, web_address, file.changed_at)
-        return written
+            return self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
 
     # The route files are read from the proxy's container even while it is stopped; what it has loaded only while it runs.
     def read(self) -> ProxySeen:
         runs = self.host.is_running(PROXY_NAME)
+        files_read = self.read_folder()
         return ProxySeen(
             runs=runs,
             back_soon_runs=self.host.is_running(BACK_SOON),
-            written=self.read_written(),
+            written={
+                (web_address := name.removesuffix(ROUTE_FILE_SUFFIX)): written_route_from_file(
+                    file.text, web_address, file.changed_at
+                )
+                for name, file in files_read.items()
+                if name.endswith(ROUTE_FILE_SUFFIX)
+            },
             loaded=self.read_loaded() if runs else {},
+            abandoned=abandoned_from(files_read),
         )
 
     def show_back_soon(self, web_address: str) -> None:
@@ -234,20 +262,50 @@ class TraefikProxy:
             self.sleep(POLL_SECONDS)
 
     def remove_route(self, web_address: str) -> None:
+        route = str(route_file_of(web_address))
         with self.routes_folder:
-            self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
+            self.run_or_fail(
+                ["sh", "-c", REMOVE, "sh", route, route.removesuffix(ROUTE_FILE_SUFFIX)], f"Removing the route of {web_address}"
+            )
 
     def loaded_container(self, web_address: str) -> str | None:
         route = self.read_loaded().get(web_address)
         return None if route is None else route.container
 
-    def write_route(self, web_address: str, container: str, request: int | None = None) -> None:
+    def write_route(self, web_address: str, container: str) -> None:
         with self.routes_folder:
-            self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container, request))
+            self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container))
             self.run_or_fail(
                 ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
                 f"Putting the route of {web_address} in place",
             )
+
+    # Whether the command won at the gate. The lock is the host's, so the command is decided there and not here.
+    def pass_gate(self, script: str, arguments: Iterable[PurePosixPath | str], attempt: str) -> bool:
+        with self.routes_folder:
+            result = self.host.run_in(PROXY_NAME, ["flock", str(GATE), "sh", "-c", script, "sh", *map(str, arguments)])
+        if result.exit_code not in (0, LOST):
+            raise ProxyError(f"{attempt} failed: {result.output}")
+        return result.succeeded
+
+    # The rename is the one moment a release becomes real. It is not made once a cancel has won against the generation.
+    def switch(self, web_address: str, container: str, generation: str) -> bool:
+        staged = staged_route_file_of(web_address, generation)
+        self.host.place_file(PROXY_NAME, staged, route_text(web_address, container, generation))
+        arguments = [abandoned_mark_of(web_address, generation), staged, route_file_of(web_address)]
+        return self.pass_gate(SWITCH, arguments, f"Putting the route of {web_address} in place")
+
+    # A cancel wins unless the routes file was already renamed for the generation. Winning again changes nothing.
+    def abandon(self, web_address: str, generation: str) -> bool:
+        route = route_file_of(web_address)
+        arguments = [
+            route,
+            stamp_line(generation),
+            staged_route_file_of(web_address, generation),
+            str(route).removesuffix(ROUTE_FILE_SUFFIX),
+            abandoned_mark_of(web_address, generation),
+        ]
+        return self.pass_gate(ABANDON, arguments, f"Marking the release of {web_address} as cancelled")
 
     def run_or_fail(self, command: list[str], attempt: str) -> None:
         result = self.host.run_in(PROXY_NAME, command)

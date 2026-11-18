@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from launchplane.act import Status
 from launchplane.instance import InstanceState, PartOfLane
 from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
-from launchplane.record import Kept, Request, Stands, how_cancelled
+from launchplane.record import ENDED, Kept, Request, Stands, how_cancelled
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -24,6 +24,7 @@ STANDS_TONE = {
     Stands.WORKING: Standing.ON_PURPOSE,
     Stands.NEEDS_A_PERSON: Standing.WRONG,
     Stands.CANCELLED: Standing.ON_PURPOSE,
+    Stands.DONE: Standing.GOOD,
 }
 RECORD_UNREAD = "Launchplane's record cannot be read"
 NOT_KNOWN_AT_WORK = (
@@ -93,31 +94,37 @@ def done_so_far(request: Kept) -> str:
     return f"{taken_up}So far: {'; '.join(lines)}." if lines else f"{taken_up}Nothing done so far."
 
 
-def being_cancelled(request: Kept) -> str:
+# Whether a cancel won is read from the gate's mark on the host, as the worker reads it.
+def being_cancelled(request: Kept, abandoned: str | None) -> str:
     if request.cancel_refused is not None:
         return f" {request.cancel_refused}"
     if request.cancel_asked_by is None:
         return ""
-    return f" To be cancelled by {request.cancel_asked_by}: its worker reads that before its next action."
+    if abandoned == request.generation:
+        return f" Cancelled by {request.cancel_asked_by} before the switch: its worker is putting the lane back."
+    return f" To be cancelled by {request.cancel_asked_by}: its worker puts the lane back, unless it is found too late."
 
 
-def request_note(request: Request) -> str | None:
+def request_note(request: Request, abandoned: str | None) -> str | None:
     if request.stands is Stands.NEEDS_A_PERSON:
         return request.error
     if request.stands is Stands.CANCELLED:
         return how_cancelled(request)
+    if request.stands in ENDED:
+        why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} came after it had ended."
+        return f"{why} It ended as {request.stands}."
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
-        return f"{done_so_far(request)}{being_cancelled(request)}"
+        return f"{done_so_far(request)}{being_cancelled(request, abandoned)}"
     return None
 
 
-def request_rows(requests: Sequence[Request]) -> list[Row]:
+def request_rows(requests: Sequence[Request], abandoned: str | None = None) -> list[Row]:
     return [
         Row(
             name=f"Request {request.id}",
             value=[Piece(text=asked_for(request))],
             pills=[Pill(text=request.stands, tone=STANDS_TONE.get(request.stands, Standing.WRONG))],
-            note=request_note(request),
+            note=request_note(request, abandoned),
         )
         for request in sorted(requests, key=lambda each: each.id)
     ]
@@ -157,7 +164,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests),
+            *request_rows(requests, None if judged is None else judged.lane.route.abandoned),
             *([] if judged is None else finding_rows(judged)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])
@@ -212,9 +219,9 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
-# Every request that has not ended, then those a cancel ended a short while ago.
+# Every request that has not ended, then those a cancel was asked of that ended a short while ago.
 def shown_requests(status: Status) -> list[Request]:
-    return [*status.requests, *status.cancelled]
+    return [*status.requests, *status.cancels]
 
 
 # A request for a lane with nothing on the host yet has no card of the host's to show on.

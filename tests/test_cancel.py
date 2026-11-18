@@ -1,7 +1,7 @@
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -9,10 +9,9 @@ from launchplane.act import Lanes
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, RouteStatus
 from launchplane.judge import Work
 from launchplane.record import Asked, Record, RecordError, Refused, Request, Stands
-from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
-from tests.pretend_host import WEB_ADDRESS, WITH_DATA, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
+from tests.pretend_host import EARLIER, WEB_ADDRESS, WITH_DATA, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
 from tests.pretend_record import PretendRecord
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_record import taken_up_until_it_needs_a_person
@@ -88,7 +87,7 @@ def test_a_move_cancelled_after_the_switch_is_finished_as_asked_and_says_the_can
         {WEB_ADDRESS: NEW},
         [NEW],
     )
-    assert f"already sends its visitors to {NEW}" in kept.cancel_refused and "finished as asked" in kept.cancel_refused
+    assert "already renamed for this release" in kept.cancel_refused and "finished as asked" in kept.cancel_refused
 
 
 @pytest.mark.parametrize("events_deleted", [False, True], ids=["with its events", "with every event deleted"])
@@ -115,13 +114,13 @@ def test_a_move_killed_just_after_the_switch_is_too_late_to_cancel_though_no_eve
     request = taken_up_and_left(record, MOVE_B)
     proxy.host.killed_after = len(["start", "check", "route"])
     with pytest.raises(LaunchplaneKilled):
-        lanes.move(TO_BUILD_B, Witness(request=request))
+        lanes.move(TO_BUILD_B, kept_of(record, request).generation)
     proxy.host.killed_after = None
     record.cancel(request, BY_HAND)
     assert worker.work_next() is True
     kept = kept_of(record, request)
-    assert kept.cancel_refused is not None and "already sends its visitors" in kept.cancel_refused
-    assert (kept.stands, list(proxy.host.instances)) == (Stands.DONE, [NEW])
+    assert kept.cancel_refused is not None and "already renamed for this release" in kept.cancel_refused
+    assert (kept.stands, kept.answer and kept.answer["outcome"], list(proxy.host.instances)) == (Stands.DONE, "switched", [NEW])
 
 
 def test_a_newer_request_cancels_the_one_being_worked_and_the_lane_ends_on_the_newer_build_with_visitors_never_on_the_older(
@@ -292,18 +291,21 @@ def test_cancelling_never_removes_the_instance_the_proxy_still_sends_visitors_to
     record.cancel(request, BY_HAND)
     assert worker.work_next() is True
     kept = kept_of(record, request)
-    assert kept.answer is not None and kept.answer["findings"] == ["The instance a runs beside the active one"]
+    assert kept.answer is not None and kept.answer["findings"] == [
+        f"The proxy has not loaded the routes file of {WEB_ADDRESS}: the file sends it to b and the proxy to a",
+        "The instance b runs beside the active one",
+    ]
     assert (kept.stands, sorted(proxy.host.instances), proxy.loaded[WEB_ADDRESS]) == (
         Stands.CANCELLED,
         ["a", "b"],
-        LoadedRoute("b", RouteStatus.ENABLED),
+        LoadedRoute("a", RouteStatus.ENABLED),
     )
 
 
 def test_cancelling_a_move_leaves_an_instance_of_its_build_that_an_earlier_request_started(record: Record) -> None:
     worker, lanes, proxy = serving_a(record)
     request = killed_while_checking(record, lanes, proxy)
-    proxy.host.instances[NEW] = proxy.host.instances[NEW].model_copy(update={"request": request - 1})
+    proxy.host.instances[NEW] = proxy.host.instances[NEW].model_copy(update={"generation": EARLIER})
     record.cancel(request, BY_HAND)
     assert worker.work_next() is True
     assert (kept_of(record, request).stands, sorted(proxy.host.instances), proxy.host.actions) == (Stands.CANCELLED, ["a", NEW], [])
@@ -356,9 +358,9 @@ def test_a_background_service_a_request_started_that_has_stopped_by_the_next_rea
     start = proxy.host.start_background_service
 
     def start_one_that_stops_at_once(
-        target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+        target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
     ) -> None:
-        start(target, instance, use, command, request)
+        start(target, instance, use, command, generation)
         proxy.host.change_part(f"{instance}-background-service", InstanceState.RESTARTING)
 
     proxy.host.start_background_service = start_one_that_stops_at_once
@@ -368,25 +370,6 @@ def test_a_background_service_a_request_started_that_has_stopped_by_the_next_rea
     started = [action for action in proxy.host.actions if action.startswith("start background service")]
     assert kept.answer is not None
     assert (kept.stands, kept.answer["outcome"], len(started)) == (Stands.FAILED, "background service failed", 1)
-
-
-def test_a_request_that_switched_to_an_instance_an_earlier_request_left_is_too_late_to_cancel_after_a_restart(
-    record: Record,
-) -> None:
-    proxy = lane_brought_up_with_a()
-    lanes = lanes_on(proxy)
-    proxy.host.place(TO_BUILD_B, "left", use=DataSetUse("data-1", "network-data-1", "database-data-1"), request=0)
-    request = taken_up_and_left(record, MOVE_B)
-    proxy.host.killed_after = len(proxy.host.actions) + len(["check", "route", "retire", "retire", "start background service"])
-    with pytest.raises(LaunchplaneKilled):
-        lanes.move(TO_BUILD_B, Witness(request=request))
-    proxy.host.killed_after = None
-    [started] = proxy.host.background_services
-    record.cancel(request, BY_HAND)
-    assert Worker(record, lanes, NO_SECRETS).work_next() is True
-    kept = kept_of(record, request)
-    assert kept.cancel_refused is not None and "where this request switched them" in kept.cancel_refused
-    assert (kept.stands, proxy.written[WEB_ADDRESS], list(proxy.host.background_services)) == (Stands.DONE, "left", [started])
 
 
 def test_a_cancel_that_killed_a_database_while_stopping_it_again_still_fails_when_another_attempt_ends_it(
@@ -399,7 +382,7 @@ def test_a_cancel_that_killed_a_database_while_stopping_it_again_still_fails_whe
     proxy.while_checking = cancelling(record, request.id)
     end = record.end
 
-    def launchplane_is_killed_once(attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
+    def launchplane_is_killed_once(attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> NoReturn:
         record.end = end
         raise LaunchplaneKilled(attempt, stands, answer, error)
 
@@ -421,7 +404,7 @@ def test_a_cancel_that_killed_a_database_while_stopping_it_again_still_fails_whe
 def test_no_cancel_removes_the_instance_the_proxy_sends_visitors_to_though_its_route_names_no_request(record: Record) -> None:
     worker, _, proxy = serving_a(record)
     request = taken_up_and_left(record, MOVE_B)
-    proxy.host.place(TO_BUILD_B, "switched-to", request=request)
+    proxy.host.place(TO_BUILD_B, "switched-to", generation=kept_of(record, request).generation)
     proxy.route(WEB_ADDRESS, "switched-to")
     record.cancel(request, BY_HAND)
     assert worker.work_next() is True
@@ -437,7 +420,7 @@ def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_a
     proxy.while_checking = cancelling(record, request.id)
     end = record.end
 
-    def lose_the_record_once(attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
+    def lose_the_record_once(attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> NoReturn:
         record.end = end
         raise RecordError(
             f"Launchplane's record could not be reached while writing how a request ended: {attempt} {stands} {answer} {error}"
@@ -544,7 +527,7 @@ def test_a_cancelled_request_shows_on_its_lanes_card_and_among_the_ended_with_wh
     assert (
         marked,
         pills_meanwhile,
-        note_meanwhile.endswith(f"To be cancelled by {by}: its worker reads that before its next action."),
+        note_meanwhile.endswith(f"Cancelled by {by} before the switch: its worker is putting the lane back."),
     ) == (
         202,
         ["working"],
@@ -555,7 +538,7 @@ def test_a_cancelled_request_shows_on_its_lanes_card_and_among_the_ended_with_wh
         f"The move of testing of site to site:b was cancelled by {by}. Done to put the lane back: remove {NEW}.",
     )
     assert (ended["stands"], ended["answer"]["put_back"], ended["cancel_asked_by"]) == ("cancelled", [f"remove {NEW}"], by)
-    assert bed.client.get("/running").json()["cancelled"][0]["id"] == asked
+    assert bed.client.get("/running").json()["cancels"][0]["id"] == asked
 
 
 def held_check(bed: Bed) -> tuple[threading.Event, threading.Event]:
@@ -629,6 +612,6 @@ def test_the_cancel_call_says_so_when_it_is_too_late_or_the_request_had_ended_or
     taken_up_until_it_needs_a_person(record, stuck)
     needs_a_person = bed.client.post(f"/requests/{stuck}/cancel")
     assert [too_late[0][0], ended.status_code, needs_a_person.status_code] == [409, 409, 409]
-    assert "already sends its visitors" in too_late[0][1]["error"]
+    assert "already renamed for this release" in too_late[0][1]["error"]
     assert f"Request {asked} ended as done" in ended.json()["error"]
     assert f"POST /requests/{stuck}/give-up" in needs_a_person.json()["error"]
