@@ -131,6 +131,7 @@ class LoadedRoute:
 class WrittenRoute:
     container: str
     written_at: datetime
+    request: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,8 @@ class LaneRoute:
     back_soon_since: datetime | None = None
     proxy_runs: bool = True
     back_soon_runs: bool = True
+    # The request that wrote the routes file, where the file says one did.
+    written_by: int | None = None
 
     # The mark is the lane's own route file, so it reads the same while the proxy is down.
     @property
@@ -169,6 +172,7 @@ class ProxySeen:
             back_soon_since=written.written_at if written is not None and written.container == BACK_SOON else None,
             proxy_runs=self.runs,
             back_soon_runs=self.back_soon_runs,
+            written_by=None if written is None else written.request,
         )
 
     def sends_visitors_to(self) -> dict[str, str]:

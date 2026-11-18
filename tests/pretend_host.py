@@ -233,6 +233,7 @@ class PretendProxy:
         self.back_soon_runs = True
         self.loaded: dict[str, LoadedRoute] = {}
         self.written: dict[str, str] = {}
+        self.written_by: dict[str, int | None] = {}
         self.failing: set[str] = set()
         self.not_answering: dict[str, str] = {}
         self.asked: list[str] = []
@@ -247,7 +248,10 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
+            written={
+                web_address: WrittenRoute(container, SINCE, self.written_by.get(web_address))
+                for web_address, container in self.written.items()
+            },
             loaded=dict(self.loaded) if self.running else {},
         )
 
@@ -257,6 +261,7 @@ class PretendProxy:
 
     def show_back_soon(self, web_address: str) -> None:
         self.written[web_address] = BACK_SOON
+        self.written_by[web_address] = None
         self.host.record("show back soon")
 
     def await_route(self, web_address: str, container: str | None) -> None:
@@ -265,8 +270,9 @@ class PretendProxy:
         self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()}
         self.while_awaiting()
 
-    def write_route(self, web_address: str, container: str) -> None:
+    def write_route(self, web_address: str, container: str, request: int | None = None) -> None:
         self.written[web_address] = container
+        self.written_by[web_address] = request
         self.host.record(f"route {container}")
 
     def remove_route(self, web_address: str) -> None:

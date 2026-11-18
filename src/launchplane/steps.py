@@ -144,6 +144,7 @@ class Check:
 class WriteRoute:
     web_address: str
     container: str
+    request: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -252,11 +253,9 @@ class TooLate:
     reason: str
 
 
-# A cancel was asked of the call. `back` is what the call has done since it read that, and `refused` is whether the
-# host showed it was too late.
+# A cancel was asked of the call. `refused` is whether the host has shown it was too late.
 @dataclass(frozen=True)
 class Cancel:
-    back: tuple[Event, ...] = ()
     refused: bool = False
 
 

@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from dataclasses import replace
 from typing import overload
 
@@ -302,60 +303,42 @@ def is_turned_back(cancel: Cancel | None) -> bool:
     return cancel is not None and not cancel.refused
 
 
-# What an event of putting back touched, by the name it is judged under.
-def touched_by(event: Event) -> str | None:
-    match event:
-        case RemoveLogins(database=database):
-            return database
-        case RemoveInstance(container=container) | Retire(container=container):
-            return container
-        case StopPart(container=container) | StopDatabase(container=container):
-            return container
-        case _:
-            return None
-
-
-# The one end of every cancel, and its verdict is about this request alone: each thing it did to put the lane back
-# left the part it touched as it must be. What else is found on the lane is carried in the answer and is not
-# the cancel's to answer for. A data set the request made stays, and is named.
-def put_back_or_what_is_left(judged: Judgement, back: tuple[Event, ...], request: int | None) -> Done[PutBack] | Stop:
+# The one end of every cancel, and its verdict is about this request alone, read from the host as it now is: nothing it
+# made remains, and each part it put back is as it must be. What else is found on the lane is carried in the answer and
+# is not the cancel's to answer for. A data set the request made stays, and is named.
+def put_back_or_what_is_left(judged: Judgement, request: int | None, put_back: Collection[str] = ()) -> Done[PutBack] | Stop:
     lane = judged.lane
-    left = judged.about({touched for touched in map(touched_by, back) if touched is not None})
+    left = judged.about(put_back)
     if left:
         return Stop(
-            f"The cancel was carried out, and putting {lane.lane} of {lane.product} back left what it touched not as it "
-            f"must be, so the request does not end as cancelled: {sentences(left)}. {changes_so_far(back)}"
+            f"The cancel was carried out, and putting {lane.lane} of {lane.product} back left a part not as it must be, so "
+            f"the request does not end as cancelled: {sentences(left)}."
         )
     kept = sorted(found.data_set for found in lane.data_sets if request is not None and found.request == request)
     return Done(PutBack(data_sets_kept=kept, findings=[finding.sentence for finding in judged.findings]))
 
 
-# It is too late once the proxy sends visitors to an instance this request made, or to one this call switched to.
-def has_switched(lane: LaneReading, receiving: RunningInstance, request: int | None, done: tuple[Event, ...]) -> bool:
-    return is_made_by(receiving.request, request) or WriteRoute(lane.web_address, receiving.container) in done
-
-
-# The same checked steps as the move: the route is waited for first, so the instance the proxy sends visitors to is
-# known before anything is removed. What this request made is read from the stamp on each part.
-def move_step_back(judged: Judgement, request: int | None, done: tuple[Event, ...], back: tuple[Event, ...]) -> StepBack:
+# The same checked steps as the move: the route is waited for first, so what the proxy sends visitors by is the routes
+# file. That file says which request wrote it, and it is too late once this request did. What this request made is
+# read from the stamp on each part.
+def move_step_back(judged: Judgement, request: int | None, done: tuple[Event, ...]) -> StepBack:
     lane = judged.lane
     # A move makes nothing in a lane in maintenance.
     if lane.route.in_maintenance:
-        return put_back_or_what_is_left(judged, back, request)
+        return put_back_or_what_is_left(judged, request)
     if (step := route_step(judged, done)) is not None:
         return step
-    receiving = next((instance for instance in lane.instances if instance.container == lane.route.written), None)
-    if receiving is not None and has_switched(lane, receiving, request, done):
+    if request is not None and lane.route.written_by == request:
         return TooLate(
-            f"{lane.web_address} already sends its visitors to {receiving.container}, the instance of {receiving.build} this "
-            "request switched to, so the move could not be cancelled and is finished as asked. Moving the lane to its "
-            "earlier build puts that build back."
+            f"{lane.web_address} already sends its visitors to {lane.route.written}, where this request switched them, so "
+            "the move could not be cancelled and is finished as asked. Moving the lane to its earlier build puts that "
+            "build back."
         )
     made = sorted(part.container for part in (*lane.background_services, *lane.instances) if is_made_by(part.request, request))
     background_services = {running.container for running in lane.background_services}
     if made:
         return Retire(made[0]) if made[0] in background_services else RemoveInstance(made[0])
-    return put_back_or_what_is_left(judged, back, request)
+    return put_back_or_what_is_left(judged, request)
 
 
 def is_made_by(stamp: Stamp, request: int | None) -> bool:
@@ -363,7 +346,7 @@ def is_made_by(stamp: Stamp, request: int | None) -> bool:
 
 
 def stamped[Decided](step: Decided, request: int | None) -> Decided:
-    if isinstance(step, StartInstance | StartBackgroundService | CreateDataSetNetwork):
+    if isinstance(step, StartInstance | StartBackgroundService | CreateDataSetNetwork | WriteRoute):
         return replace(step, request=request)
     return step
 
@@ -392,7 +375,7 @@ def decide_move(
     request: int | None = None,
 ) -> Step[MoveResult] | StepBack:
     if cancel is not None and is_turned_back(cancel):
-        back = move_step_back(judged, request, done, cancel.back)
+        back = move_step_back(judged, request, done)
         return back if isinstance(back, TooLate) else with_logins_settled(back, judged, done)
     return stamped(with_logins_settled(move_step(judged, target, product, fresh, done), judged, done), request)
 
@@ -475,7 +458,7 @@ def decide_retire(
     judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...], cancel: Cancel | None = None
 ) -> Step[RetireResult] | StepBack:
     if cancel is not None and is_turned_back(cancel):
-        return retire_step_back(judged, delete_data_set, cancel.back)
+        return retire_step_back(judged, delete_data_set)
     return with_logins_settled(retire_step(judged, None if cancel else delete_data_set, done), judged, done)
 
 
@@ -488,12 +471,12 @@ def retire_route_step(judged: Judgement) -> Action | None:
 
 
 # The first thing a retire changes is the route, and nothing it removes after that can be put back.
-def retire_step_back(judged: Judgement, delete_data_set: str | None, back: tuple[Event, ...]) -> StepBack:
+def retire_step_back(judged: Judgement, delete_data_set: str | None) -> StepBack:
     lane = judged.lane
     if (step := retire_route_step(judged)) is not None:
         return step
     if lane.route.written is not None:
-        return put_back_or_what_is_left(judged, back, None)
+        return put_back_or_what_is_left(judged, None)
     kept = lane.data_set(delete_data_set)
     saved = (
         "" if kept is None else f" The data set {kept.data_set}, named for deleting, is kept: the cancel came before it was deleted."

@@ -43,7 +43,7 @@ A `503` means the host or proxy could not be read or changed. The move stopped w
 
 The proxy's loaded routes are the only mark. A route sends one web address to one instance by its container name. `GET /running` gives each instance `receives_visitors_for`, and a move answers `container_receiving_visitors`.
 
-A route is written by renaming a new routes file for the lane into place, and Traefik loads it up to 2 s later. A move that finds the file and the loaded route disagreeing waits for the proxy, or answers `503` with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a route Launchplane did not write, stops the call with `503`.
+A route is written by renaming a new routes file for the lane into place, and Traefik loads it up to 2 s later. Its first line, which the proxy reads as a comment, is `# launchplane.request=<id>`, the [request](requests.md) that wrote it. A move that finds the file and the loaded route disagreeing waits for the proxy, or answers `503` with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a route Launchplane did not write, stops the call with `503`.
 
 An instance that exists and does not receive visitors is left over from a move cut short. Asking for its build finishes the move; asking for the active build removes it. The web address points at exactly one instance the whole time.
 

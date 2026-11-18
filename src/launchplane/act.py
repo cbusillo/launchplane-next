@@ -78,7 +78,7 @@ class Proxy(Protocol):
     def start(self) -> None: ...
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None) -> None: ...
-    def write_route(self, web_address: str, container: str) -> None: ...
+    def write_route(self, web_address: str, container: str, request: int | None = None) -> None: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
     def show_back_soon(self, web_address: str) -> None: ...
@@ -133,7 +133,7 @@ type Take = Callable[[InstanceHost, Proxy, Any], None]
 TAKE: dict[type, Take] = {
     steps.StartProxy: lambda _host, proxy, _step: proxy.start(),
     steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container),
-    steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container),
+    steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container, step.request),
     steps.RemoveRoute: lambda _host, proxy, step: proxy.remove_route(step.web_address),
     steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(
         step.product, step.lane, step.data_set, step.request
@@ -188,18 +188,16 @@ def settle[Answer](
     witness: Witness,
 ) -> Answer:
     done: list[Event] = []
-    turned_at: int | None = None
-    refused = False
+    cancel: Cancel | None = None
     while True:
-        if turned_at is None and witness.cancel_asked():
-            turned_at = len(done)
-        cancel = None if turned_at is None else Cancel(tuple(done[turned_at:]), refused)
+        if cancel is None and witness.cancel_asked():
+            cancel = Cancel()
         back = plan.is_turned_back(cancel)
         judged = read_judged(back)
         step = next_step(judged, tuple(done), cancel)
         if isinstance(step, TooLate):
             witness.refuse_cancel(step.reason)
-            refused = True
+            cancel = Cancel(refused=True)
             continue
         if isinstance(step, Done):
             if isinstance(step.answer, PutBack):

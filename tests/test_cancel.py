@@ -370,6 +370,54 @@ def test_a_background_service_a_request_started_that_has_stopped_by_the_next_rea
     assert (kept.stands, kept.answer["outcome"], len(started)) == (Stands.FAILED, "background service failed", 1)
 
 
+def test_a_request_that_switched_to_an_instance_an_earlier_request_left_is_too_late_to_cancel_after_a_restart(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+    lanes = lanes_on(proxy)
+    proxy.host.place(TO_BUILD_B, "left", use=DataSetUse("data-1", "network-data-1", "database-data-1"), request=0)
+    request = taken_up_and_left(record, MOVE_B)
+    proxy.host.killed_after = len(proxy.host.actions) + len(["check", "route", "retire", "retire", "start background service"])
+    with pytest.raises(LaunchplaneKilled):
+        lanes.move(TO_BUILD_B, Witness(request=request))
+    proxy.host.killed_after = None
+    [started] = proxy.host.background_services
+    record.cancel(request, BY_HAND)
+    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    kept = kept_of(record, request)
+    assert kept.cancel_refused is not None and "where this request switched them" in kept.cancel_refused
+    assert (kept.stands, proxy.written[WEB_ADDRESS], list(proxy.host.background_services)) == (Stands.DONE, "left", [started])
+
+
+def test_a_cancel_that_killed_a_database_while_stopping_it_again_still_fails_when_another_attempt_ends_it(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    lanes = lanes_on(proxy)
+    proxy.host.databases_that_must_be_killed.add("database-data-1")
+    request = record.write(END, CALLER, None)
+    proxy.while_checking = cancelling(record, request.id)
+    end = record.end
+
+    def launchplane_is_killed_once(attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> None:
+        record.end = end
+        raise LaunchplaneKilled(attempt, stands, answer, error)
+
+    record.end = launchplane_is_killed_once
+    worker = Worker(record, lanes, NO_SECRETS)
+    with pytest.raises(LaunchplaneKilled):
+        worker.work_next()
+    proxy.host.actions.clear()
+    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.error is not None and "exited with code 137" in kept.error
+    assert (kept.stands, [each.ended for each in kept.attempts], proxy.host.actions) == (
+        Stands.FAILED,
+        ["interrupted", "failed"],
+        [],
+    )
+
+
 def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_after_the_first_removed_it() -> None:
     record = PretendRecord()
     worker, _, proxy = serving_a(record)
@@ -404,7 +452,7 @@ def test_ending_maintenance_cancelled_over_a_database_that_had_to_be_killed_does
     proxy.while_checking = cancelling(record, request.id)
     assert Worker(record, lanes_on(proxy), NO_SECRETS).work_next() is True
     kept = kept_of(record, request.id)
-    assert kept.error is not None and "left what it touched not as it must be" in kept.error and "exited with code 137" in kept.error
+    assert kept.error is not None and "left a part not as it must be" in kept.error and "exited with code 137" in kept.error
     assert (kept.stands, proxy.written) == (Stands.FAILED, {WEB_ADDRESS: BACK_SOON})
 
 
