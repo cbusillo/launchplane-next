@@ -386,7 +386,8 @@ def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
     use = prepared(judged, serving.data_set, None, move.product, done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    if (step := background_service_step(move, serving, use) or old_part_step(lane, serving.container)) is not None:
+    step = background_service_step(move, serving, use) or old_part_step(lane, serving.container)
+    if step is not None:
         return step
     refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
     if refused is not None:

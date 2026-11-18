@@ -222,14 +222,27 @@ def kill_held_launchplane() -> None:
     wait_for(holds_answer, seconds=30)
 
 
+def plain_launchplane_answers() -> bool:
+    try:
+        holds()
+    except OSError:
+        return launchplane_answers()
+    return False
+
+
+# The one port serves either, so each is stopped before the other is started, and the bed is handed back only once the
+# plain service answers and the held one is gone.
 @contextmanager
 def launchplane_held() -> Generator[None]:
-    on_control(f"install -m 644 {HELD_UNIT} /etc/systemd/system/ && systemctl daemon-reload && systemctl start launchplane-held")
+    on_control(
+        f"install -m 644 {HELD_UNIT} /etc/systemd/system/ && systemctl daemon-reload && "
+        "systemctl stop launchplane && systemctl start launchplane-held"
+    )
     wait_for(holds_answer, seconds=30)
     let_go()
     try:
         yield
     finally:
         let_go()
-        on_control("systemctl start launchplane")
-        wait_for(launchplane_answers, seconds=30)
+        on_control("systemctl stop launchplane-held && systemctl start launchplane")
+        wait_for(plain_launchplane_answers, seconds=30)

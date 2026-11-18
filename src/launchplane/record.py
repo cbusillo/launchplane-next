@@ -544,7 +544,8 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
-    # A move does not end over a cancel its call never saw, unless as cancelled: the call sees it and ends again.
+    # A move does not end over a cancel its call never saw, unless the cancel is what ends it: the call sees the cancel
+    # and ends again.
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
     ) -> bool:

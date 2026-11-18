@@ -515,11 +515,11 @@ def rename_in_flight_and_launchplane_killed() -> Iterator[RenameInFlight]:
 def test_a_rename_in_flight_when_launchplane_is_killed_that_reaches_the_gate_first_is_honoured_and_finished(
     rename_in_flight_and_launchplane_killed: RenameInFlight,
 ) -> None:
-    held = rename_in_flight_and_launchplane_killed
+    flight = rename_in_flight_and_launchplane_killed
     in_proxy(f"rm -f {GATE_HELD}")
-    wait_for(lambda: route_file_stamp(SITE) == stamp_line(held.asked["generation"]), seconds=30)
+    wait_for(lambda: route_file_stamp(SITE) == stamp_line(flight.asked["generation"]), seconds=30)
     let_go()
-    ended = request_ended(held.asked["id"])
+    ended = request_ended(flight.asked["id"])
     assert (ended["stands"], ended["answer"]["outcome"], builds_of(SITE)) == ("done", "switched", [SITE.builds[1]])
     assert [attempt["ended"] for attempt in ended["attempts"]] == ["interrupted", "done"]
 
@@ -527,13 +527,13 @@ def test_a_rename_in_flight_when_launchplane_is_killed_that_reaches_the_gate_fir
 def test_a_rename_in_flight_that_reaches_the_gate_after_its_candidate_was_cleaned_up_renames_nothing(
     rename_in_flight_and_launchplane_killed: RenameInFlight,
 ) -> None:
-    held = rename_in_flight_and_launchplane_killed
+    flight = rename_in_flight_and_launchplane_killed
     [left] = [each["container"] for each in instances_of(SITE) if each["build"] == SITE.builds[1]]
-    in_proxy(f"kill -STOP {held.process}; rm -f {GATE_HELD}")
+    in_proxy(f"kill -STOP {flight.process}; rm -f {GATE_HELD}")
     let_go()
-    ended = request_ended(held.asked["id"])
+    ended = request_ended(flight.asked["id"])
     [serving] = instances_of(SITE)
-    in_proxy(f"kill -CONT {held.process}")
+    in_proxy(f"kill -CONT {flight.process}")
     wait_for(lambda: not rename_waiting_at_the_gate(), seconds=30)
     assert (ended["stands"], ended["answer"]["outcome"], serving["build"], serving["container"] != left) == (
         "done",
@@ -541,5 +541,5 @@ def test_a_rename_in_flight_that_reaches_the_gate_after_its_candidate_was_cleane
         SITE.builds[1],
         True,
     )
-    assert (instances_of(SITE), route_file_stamp(SITE)) == ([serving], stamp_line(held.asked["generation"]))
+    assert (instances_of(SITE), route_file_stamp(SITE)) == ([serving], stamp_line(flight.asked["generation"]))
     assert ask("/running")[1]["web_addresses"] and answering(SITE) == SITE.answers[1]

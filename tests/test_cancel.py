@@ -759,33 +759,6 @@ def test_ending_maintenance_on_a_lane_already_out_ends_as_it_would_have_over_a_c
     assert (kept.stands, kept.cancel_asked_by, kept.cancel_refused, proxy.host.actions) == (Stands.DONE, BY_HAND, None, [])
 
 
-def test_a_cancel_that_wins_while_a_failed_check_is_about_to_be_saved_ends_the_move_as_cancelled_not_failed(
-    record: Record,
-) -> None:
-    worker, lanes, proxy = serving_a(record)
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes.abandon))
-    proxy.failing.add(NEW)
-    asked = client.post(MOVE, json=TO_B).json()["id"]
-    end, cancels = record.end, list[int]()
-
-    def cancel_just_before_failed_is_saved(
-        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
-    ) -> bool:
-        if not cancels:
-            cancels.append(client.post(f"/requests/{asked}/cancel").status_code)
-        return end(attempt, stands, answer, error, cancel_seen=cancel_seen)
-
-    record.end = cancel_just_before_failed_is_saved
-    assert worker.work_next() is True
-    kept = kept_of(record, asked)
-    assert (kept.stands, cancels, client.post(f"/requests/{asked}/cancel").status_code, list(proxy.host.instances)) == (
-        Stands.CANCELLED,
-        [202],
-        200,
-        ["a"],
-    )
-
-
 def test_a_renamed_release_whose_proxy_stays_held_far_past_the_step_limit_is_still_waited_for_and_then_finished(
     record: Record,
 ) -> None:

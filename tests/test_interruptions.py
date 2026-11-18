@@ -272,11 +272,19 @@ def test_a_result_already_recorded_stands_whatever_comes_after_it(record: Record
     assert run.visitors_got == ([A, B, C] if interruption == NEWER else [A, B])
 
 
-def test_a_move_to_the_build_already_serving_that_is_cancelled_before_its_result_is_saved_ends_as_cancelled(
-    record: Record,
+ENDINGS_A_CANCEL_COMES_BEFORE = {
+    "a move to the build already serving, about to be saved as done": (A, False),
+    "a move whose check failed, about to be saved as failed": (B, True),
+}
+
+
+@pytest.mark.parametrize(("build", "fails_its_check"), ENDINGS_A_CANCEL_COMES_BEFORE.values(), ids=ENDINGS_A_CANCEL_COMES_BEFORE)
+def test_a_cancel_that_wins_just_before_the_result_of_a_move_is_saved_ends_it_as_cancelled_whatever_was_about_to_be_saved(
+    record: Record, build: str, fails_its_check: bool
 ) -> None:
     proxy, _, worker, client = launchplane_serving_a(record)
-    asked = client.post(MOVE, json={"build": A}).json()["id"]
+    proxy.failing = {"site-testing-0"} if fails_its_check else set()
+    asked = client.post(MOVE, json={"build": build}).json()["id"]
     end, cancels = record.end, list[int]()
 
     def cancel_just_before_the_result_is_saved(
@@ -290,4 +298,4 @@ def test_a_move_to_the_build_already_serving_that_is_cancelled_before_its_result
     assert worker.work_next() is True
     kept = kept_of(record, asked)
     assert (kept.stands, cancels, client.post(f"/requests/{asked}/cancel").status_code) == (Stands.CANCELLED, [202], 200)
-    assert (proxy.host.actions, list(proxy.host.instances)) == ([], ["a"])
+    assert (proxy.written, list(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a"])
