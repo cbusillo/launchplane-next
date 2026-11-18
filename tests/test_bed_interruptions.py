@@ -8,7 +8,8 @@ from typing import Any
 
 import pytest
 
-from launchplane.proxy import GATE, PROXY_NAME, abandoned_mark_of, route_file_of, stamp_line
+from launchplane.gate import GATE_FOLDER_NAME, LOCK_NAME
+from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of, stamp_line
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -37,7 +38,7 @@ KILL_THEN_CANCEL, CANCEL_THEN_KILL = "a kill, then a cancel", "a cancel, then a 
 INTERRUPTIONS = (CANCEL, NEWER, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 CANCELS = (CANCEL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 TOO_LATE = "already renamed for this release"
-THE_RENAME = "proxy.pass_gate?only=mv%20"
+THE_RENAME = "proxy.switch"
 TURN, TAKE_UP, GATE_ANSWER = "before.record.turn", "before.record.take_up", "after.proxy.abandon"
 UNTOUCHED = "untouched"
 NOTHING = "no lane"
@@ -100,8 +101,7 @@ SITE_PAUSES = {
     "M1, candidate started and not yet checked": Pause("after.host.start_instance"),
     "M2, its check under way": Pause("before.proxy.request_instance", once=NEWER),
     "M2, check passed": Pause("after.proxy.check_instance"),
-    "M3, before the gate": Pause("before.proxy.switch", once=KILL_THEN_CANCEL),
-    "M3, staged, the rename not yet sent": Pause(f"before.{THE_RENAME}"),
+    "M3, before the gate": Pause(f"before.{THE_RENAME}"),
     "M4, renamed, its reply not yet had, proxy still on A": Pause(f"after.{THE_RENAME}", renamed=True, proxy_held=True),
     "M4, renamed, waiting for a proxy still on A": Pause(
         "before.proxy.await_route", renamed=True, proxy_held=True, once=CANCEL_THEN_KILL
@@ -211,7 +211,7 @@ class Held:
 
     # A cancel has no winner until it reaches the gate, so the release is held until the gate's mark is on the host.
     def cancel_is_answered_or_has_won_at_the_gate(self) -> bool:
-        mark = abandoned_mark_of(self.lane.web_address, self.asked["generation"])
+        mark = ROUTES_FOLDER / GATE_FOLDER_NAME / f"{self.lane.web_address}.{self.asked['generation']}.abandoned"
         return bool(self.cancel_answers) or bool(on_scratch(f"docker exec {PROXY_NAME} sh -c 'test -e {mark} && echo won || true'"))
 
     # What the host shows at the pause: the routes file names this release, and the proxy still sends visitors to A.
@@ -463,7 +463,7 @@ def test_a_move_to_the_build_already_active_cancelled_before_its_result_is_saved
 
 
 GATE_HELD = "/tmp/launchplane-gate-held"  # noqa: S108 a file inside the proxy's container
-HOLD_THE_GATE = f"touch {GATE_HELD}; flock {GATE} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
+HOLD_THE_GATE = f"touch {GATE_HELD}; flock {ROUTES_FOLDER / LOCK_NAME} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
 
 
 def in_proxy(command: str, flags: str = "") -> str:

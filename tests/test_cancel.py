@@ -794,11 +794,11 @@ def test_a_left_over_instance_the_gate_says_is_committed_and_the_proxy_already_s
     generation = kept_of(record, request).generation
     discard = proxy.discard
 
-    def the_rename_sent_before_the_kill_lands_first(web_address: str, container: str) -> Verdict:
+    def the_rename_sent_before_the_kill_lands_first(web_address: str, container: str, made_by: str) -> Verdict:
         if proxy.written[web_address] == "a":
             proxy.switch(web_address, NEW, generation)
             proxy.loaded[web_address] = LoadedRoute(NEW, RouteStatus.ENABLED)
-        return discard(web_address, container)
+        return discard(web_address, container, made_by)
 
     proxy.discard = the_rename_sent_before_the_kill_lands_first
     assert worker.work_next() is True

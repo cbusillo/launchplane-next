@@ -313,8 +313,8 @@ class PretendProxy:
             self.abandoned[web_address] = self.abandoned.get(web_address, frozenset()) | {generation}
         return self.verdict_of(web_address, generation)
 
-    def discard(self, web_address: str, container: str) -> Verdict:
-        if self.written.get(web_address) == container:
+    def discard(self, web_address: str, container: str, made_by: str) -> Verdict:
+        if self.written.get(web_address) == container and made_by in self.committed:
             return Verdict.COMMITTED
         self.discarded.add(container)
         return Verdict.NONE

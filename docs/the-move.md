@@ -67,19 +67,31 @@ An instance that exists and does not receive visitors is left over from a move c
 
 ## The gate
 
-Everything that settles a release passes one gate on the container host. Each is one command, run in the proxy's container while it holds a lock on the file `.gate` in the routes folder:
+The gate is the one place that answers, for a generation, `none`, `committed` or `abandoned`, and the answer is for good. Everything that settles a release is one command, run in the proxy's container while it holds a lock on the file `.gate` in the routes folder. What it decides is kept in the folder `gate` inside the routes folder, as files named for the web address and the generation:
 
-- **The switch** renames the candidate's staged routes file into place and writes the mark `<web address>.<generation>.committed`. It renames nothing when the generation already has a verdict, either mark, or when the candidate's staged file is gone. So a generation is renamed for once, and a whole switch sent again for it changes nothing.
-- **A cancel** writes the generation's `.abandoned` mark. It marks nothing, and is told it is too late, when the generation's `.committed` mark is there or the first line of the routes file names the generation.
-- **Cleaning up an instance that receives no visitors** takes its staged routes file away. It does nothing, and the instance stays, when the routes file sends visitors to that instance.
+| File | Says |
+| --- | --- |
+| `<candidate>.next` | the candidate's routes file, staged |
+| `armed` | the attempt and the one candidate allowed to be renamed to |
+| `<candidate>.revoked` | this candidate may never be armed |
+| `fenced` | no attempt up to this number may arm |
+| `abandoned` | a cancel won |
 
-Each command answers with the verdict as it stands when the command is done: `committed`, `abandoned` or `none`. Whoever asked acts on that answer and on nothing else, whatever it had meant to do. An instance about to be cleaned up whose release the gate says is committed is kept, and the release is finished as a committed one. The gate is asked before the instance is looked at for visitors, so a rename that landed a moment earlier is learnt from the gate. A reading that does not show what the gate said was done is not acted on.
+- **The switch proves itself.** Under the lock the staged file is finished and made durable, then the `armed` mark, and then the routes file is put in place by renaming the staged file. While a generation is armed, only that rename takes its staged file away. Armed with the staged file there is `none`. Armed with the staged file gone is `committed` to that candidate. Nothing is written after the rename, and no reply has to arrive: a command killed just after the rename, and one whose reply is lost, are answered `committed` when asked again.
+- **A cancel** makes the generation `abandoned` if it has no verdict, and takes its arming and its staged file away.
+- **A discard** names the generation, the attempt and the exact candidate. In the one command it either learns that the candidate was renamed to, and the answer is `committed` to it, or it takes away the permission to switch to it, and then the candidate may be removed.
+- **A fence** confirms `none` and refuses every switch of an attempt up to a number, also one still on its way.
+- **Asking** for a generation's verdict changes nothing.
 
-A verdict is a file of the generation's own. It is written once, by the command that won, and nothing done for another generation replaces or removes it: a late or repeated command for one release cannot change the outcome of another. The staged file is named for the candidate, so a rename that Docker accepted before a kill either reaches the gate before the candidate is cleaned up, and is then honoured and finished, or reaches it after, and renames nothing.
+Every command answers with the verdict as it then holds. Whatever takes permission away keeps the revocation first, then removes the arming, then the staged file, and a command cut short and sent again goes in the same order. A command sent again returns the first verdict and stages nothing. A generation with a verdict is never renamed for again, a discarded candidate is never armed again, and another candidate is armed only by a later attempt.
 
-Whoever sends a command finds what the earlier ones did, because the look and the change are one command under one lock on the host. Nothing is decided inside Launchplane, so a second Launchplane process, and the call that cancels while a worker is at work, are held off by the same lock as the worker. A command that was sent runs to its end on the host also when Launchplane is killed just after sending it.
+A file that cannot be looked for is never taken as absent: the command then fails, and its sender has no answer, which is not `none`.
 
-The lock is held for that one command only. Making and checking a candidate never holds it. The marks of a lane stay until the lane is retired.
+Nothing is decided inside Launchplane, so a second Launchplane process, and the call that cancels while a worker is at work, are held off by the same lock as the worker. The lock is held for the one command only. Making and checking a candidate never holds it.
+
+**Where the evidence is kept, and for how long.** The folder `gate` is not removed when a lane is retired, and a later release of the lane changes nothing in an earlier generation's files. Nothing removes them yet. A generation's files are safe to remove once its request has ended in the record and no command for it can still arrive: no Launchplane process is working it, and no command for it is left running in the proxy's container, which a restart of that container ends.
+
+**What uses the gate in this step.** The worker, the planner and the record are not built on it yet. They go through three calls that each ask the gate one question: the switch, the cancel, and the discard before an instance is removed. Those calls give the time as the attempt. The cancels that won are still read for the planner from the names in the folder.
 
 ## The proxy
 
@@ -101,7 +113,9 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **A gate command waits for the lock for as long as something holds it.** Docker's client gives up after 5 s, the request then fails, and the command it sent may still run once the lock is free. Only a test holds the lock for long.
 - **A release whose rename the proxy never loads keeps its worker and its lane.** It stays `working`, a cancel is told too late, and a newer request waits behind it. Nobody is told.
 - **A release that is renamed can still end as `failed` for another reason:** its instance stops answering, its background service does not stay up, or the host cannot be reached. The routes file then names it and the old instance may still be there. Asking for the build again finishes it.
-- **The marks of a lane are never cleaned up while the lane lives.** Each release that was switched to or cancelled leaves one empty file in the routes folder.
+- **What the gate keeps is never cleaned up.** Each release leaves one or two small files in the folder `gate`, also after its lane is retired.
+- **The gate's verdict is not yet what every caller follows.** A release that was renamed for can still be recorded as `failed`, and a cancel that won can still end as `failed`: the worker, the planner and the last write to the record are wired to the gate in the next pass.
+- **Two gate commands of one Launchplane go one after the other,** by a lock in the process that also keeps a reading of the routes folder from finding a file half put in place. A cancel so waits behind a switch that is waiting for the host's lock.
 - **Untried:** HTTPS, long-lived connections, two Launchplane processes at once.
 
 ## Measured
@@ -134,7 +148,7 @@ Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:
 | M0 | before the lane's turn is taken; before the first action |
 | M1 | the candidate created and not started; started and not checked; and on a lane with data, after the network, the volume and the database server of a new data set are each made |
 | M2 | a request of the check not yet answered; the check passed |
-| M3 | before the gate; the routes file staged and the rename not yet sent |
+| M3 | before the gate |
 | M4 | the rename done and its reply not yet had, with the proxy held on A; the worker waiting for a proxy held on A |
 | M5 | the rename done and its reply not yet had, with the proxy on B; before the old instance passes the gate to be retired; and with data, before the old background service is retired, after the new one is started, and while it is watched |
 | M6 | the old instance gone; and with data, before the logins no container holds are removed |
@@ -144,14 +158,14 @@ While those tests run, the service `launchplane` on the control container is sto
 
 ```
 curl -X PUT    http://launchplane.shiny:8701/holds/before.proxy.switch
-curl -X PUT   "http://launchplane.shiny:8701/holds/after.proxy.pass_gate?only=mv%20"
+curl -X PUT    http://launchplane.shiny:8701/holds/after.proxy.switch
 curl -X PUT    http://launchplane.shiny:8701/holds/proxy-delivery
 curl           http://launchplane.shiny:8701/holds
 curl -X DELETE http://launchplane.shiny:8701/holds
 curl -X POST   http://launchplane.shiny:8701/kill
 ```
 
-- A hold is `before.` or `after.`, then `host`, `proxy` or `record`, then the name of the method. `?only=<text>` holds only a call whose arguments have that text: `mv ` picks the switch out of the two commands that pass the gate.
+- A hold is `before.` or `after.`, then `host`, `proxy` or `record`, then the name of the method. `?only=<text>` holds only a call whose arguments have that text.
 - `GET /holds` answers `held`, and `stopped_at`: the holds a call is stopped at now.
 - `proxy-delivery` puts a file Traefik cannot read into the routes folder. Traefik then loads no change to any routes file and goes on serving the routes it has, and its API goes on answering. Letting go removes the file, and Traefik loads what is there. Measured on Traefik v3.7.18.
 - `POST /kill` kills Launchplane as `kill -9` does, and systemd starts it again.
@@ -164,6 +178,8 @@ ssh root@launchplane.shiny systemctl start launchplane
 
   The first puts the bed into holding mode and the second puts it back. A deploy puts it back too. The older test-bed tests need the plain service: some of them stop and start `launchplane` by name.
 
-A hold on a call inside the lock Launchplane keeps on the routes folder stops every reading of that folder, the status page with it. The switch is held at `proxy.pass_gate`, just outside that lock.
+A hold on a call inside the lock Launchplane keeps on the routes folder stops every reading of that folder, the status page with it. The switch is held at `proxy.switch`, outside that lock: `before.` it nothing is staged, and `after.` it the rename is done and its reply not yet had.
+
+`tests/test_bed_gate.py` proves the gate alone on the real host, with no worker: it sends the gate's own commands to the proxy's container and counts the renames by the inode of the routes file. Its five cases are a command killed just after the rename, a reply lost after the rename, a switch held before the lock whose candidate is discarded meanwhile, a cancel and a switch each sent again after the cancel won, and two generations on one lane. They take 13 s. `tests/test_gate.py` runs the gate's command against a folder on the machine that tests.
 
 `tests/test_interruptions.py` runs the same rows against the pretend host, whose proxy can hold a written route unloaded, and against the pretend record and PostgreSQL. It needs no test bed and takes seconds.

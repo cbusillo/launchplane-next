@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
+from launchplane.gate import Gate
 from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, Verdict, WrittenRoute, is_generation
 
 PROXY_NAME = "launchplane-proxy"
@@ -115,38 +116,11 @@ def route_file_of(web_address: str) -> PurePosixPath:
     return ROUTES_FOLDER / f"{web_address}{ROUTE_FILE_SUFFIX}"
 
 
-# A routes file waiting to be renamed into place: a release's is named for its candidate, so removing it refuses a
-# rename already sent for that candidate and for no other.
-def staged_route_file_of(web_address: str, container: str | None = None) -> PurePosixPath:
-    return ROUTES_FOLDER / (f"{web_address}.next" if container is None else f"{web_address}.{container}.next")
+def staged_route_file_of(web_address: str) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}.next"
 
 
-ABANDONED_SUFFIX, COMMITTED_SUFFIX = ".abandoned", ".committed"
-
-
-def abandoned_mark_of(web_address: str, generation: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}.{generation}{ABANDONED_SUFFIX}"
-
-
-def committed_mark_of(web_address: str, generation: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}.{generation}{COMMITTED_SUFFIX}"
-
-
-# The gate. Everything that settles a release runs as one command on the container host, holding the one lock file
-# there, so each finds what any earlier one did, whichever Launchplane sent it and however late it arrives. A verdict is
-# a file of the generation's own, made once and replaced by nothing done for another generation. Every command answers
-# with the verdict as it stands when it is done, and that answer is what its sender acts on.
-GATE = ROUTES_FOLDER / ".gate"
-VERDICT = 'if [ -e "$2" ]; then echo committed; elif [ -e "$1" ]; then echo abandoned; else echo none; fi'
-# Renames for a candidate, only while its generation has no verdict and the candidate's staged file is still there.
-SWITCH = f'set -e; if [ ! -e "$1" ] && [ ! -e "$2" ] && [ -e "$3" ]; then mv "$3" "$4"; : > "$2"; else rm -f "$3"; fi; {VERDICT}'
-# Marks a generation abandoned, unless the routes file was renamed for it, now or ever.
-ABANDON = (
-    f'set -e; if [ ! -e "$2" ] && head -n 1 "$3" 2>/dev/null | grep -qxF "$4"; then : > "$2"; fi; [ -e "$2" ] || : > "$1"; {VERDICT}'
-)
-# Takes a candidate's staged file away, unless the routes file sends visitors to the candidate: its release is committed.
-DISCARD = 'set -e; if grep -qF "$2" "$1" 2>/dev/null; then echo committed; else rm -f "$3"; echo none; fi'
-REMOVE = f'rm -f "$1" "$2".*{ABANDONED_SUFFIX} "$2".*{COMMITTED_SUFFIX} "$2".*.next'
+ABANDONED_SUFFIX = ".abandoned"
 
 
 # noinspection HttpUrlsUsage
@@ -288,12 +262,10 @@ class TraefikProxy:
                 )
             self.sleep(POLL_SECONDS)
 
+    # The gate's files are not the lane's to remove: a command for one of its releases may still arrive.
     def remove_route(self, web_address: str) -> None:
-        route = str(route_file_of(web_address))
         with self.routes_folder:
-            self.run_or_fail(
-                ["sh", "-c", REMOVE, "sh", route, route.removesuffix(ROUTE_FILE_SUFFIX)], f"Removing the route of {web_address}"
-            )
+            self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
 
     def loaded_container(self, web_address: str) -> str | None:
         route = self.read_loaded().get(web_address)
@@ -307,33 +279,23 @@ class TraefikProxy:
                 f"Putting the route of {web_address} in place",
             )
 
-    # The verdict the gate gives. The lock is the host's, so the command is decided there and not here.
-    def pass_gate(self, script: str, arguments: Iterable[PurePosixPath | str], attempt: str) -> Verdict:
-        with self.routes_folder:
-            result = self.host.run_in(PROXY_NAME, ["flock", str(GATE), "sh", "-c", script, "sh", *map(str, arguments)])
-        if not result.succeeded or result.output not in Verdict:
-            raise ProxyError(f"{attempt} failed: {result.output}")
-        return Verdict(result.output)
+    @property
+    def gate(self) -> Gate:
+        return Gate(self.host, PROXY_NAME, ROUTES_FOLDER, self.routes_folder)
 
-    # The rename is the one moment a release becomes real. It is made once for a generation: never after a cancel has
-    # won against it, after it was made before, or after the candidate was discarded.
+    # The calls the move was built on, each now one question to the gate. A caller that knows no attempt gives the
+    # time, so a later call for a generation counts as a later attempt.
     def switch(self, web_address: str, container: str, generation: str) -> Verdict:
-        staged = staged_route_file_of(web_address, container)
-        self.host.place_file(PROXY_NAME, staged, route_text(web_address, container, generation))
-        marks = abandoned_mark_of(web_address, generation), committed_mark_of(web_address, generation)
-        return self.pass_gate(SWITCH, [*marks, staged, route_file_of(web_address)], f"Putting the route of {web_address} in place")
+        text = route_text(web_address, container, generation)
+        return self.gate.switch(web_address, generation, time.time_ns(), container, text, route_file_of(web_address)).verdict
 
-    # A cancel wins unless the routes file was renamed for the generation. Winning again changes nothing.
     def abandon(self, web_address: str, generation: str) -> Verdict:
-        marks = abandoned_mark_of(web_address, generation), committed_mark_of(web_address, generation)
-        arguments = [*marks, route_file_of(web_address), stamp_line(generation)]
-        return self.pass_gate(ABANDON, arguments, f"Marking the release of {web_address} as cancelled")
+        return self.gate.abandon(web_address, generation).verdict
 
-    # Before an instance that receives no visitors is removed: a rename still on its way to it is refused from here on,
-    # or has already happened. Then the answer is committed, and the instance is the one the routes file names.
-    def discard(self, web_address: str, container: str) -> Verdict:
-        arguments = [route_file_of(web_address), f'"{instance_url(container)}"', staged_route_file_of(web_address, container)]
-        return self.pass_gate(DISCARD, arguments, f"Refusing a switch of {web_address} to {container}")
+    # Committed only when the gate says the generation was renamed to this very instance.
+    def discard(self, web_address: str, container: str, made_by: str) -> Verdict:
+        answer = self.gate.discard(web_address, made_by, time.time_ns(), container)
+        return Verdict.COMMITTED if answer.candidate == container else Verdict.NONE
 
     def run_or_fail(self, command: list[str], attempt: str) -> None:
         result = self.host.run_in(PROXY_NAME, command)

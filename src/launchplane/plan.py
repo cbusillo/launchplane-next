@@ -339,10 +339,13 @@ def phase_of(move: Move) -> tuple[Phase, RunningInstance | None]:
 # through the gate, so a rename still on its way to it is refused before it is removed.
 def old_part_step(lane: LaneReading, kept: str | None, *, background_services_only: bool = False) -> Action | None:
     background_services = sorted(running.container for running in lane.background_services if running.instance != kept)
-    instances = sorted(instance.container for instance in lane.instances if instance.container != kept)
+    instances = sorted((each for each in lane.instances if each.container != kept), key=lambda each: each.container)
     if background_services:
         return Retire(background_services[0])
-    return Discard(lane.web_address, instances[0]) if instances and not background_services_only else None
+    if not instances or background_services_only:
+        return None
+    made_by = instances[0].generation
+    return Discard(lane.web_address, instances[0].container, made_by if isinstance(made_by, str) else None)
 
 
 def in_service(move: Move, _candidate: RunningInstance | None) -> Action | Stop | None:

@@ -165,6 +165,8 @@ class Switched:
 class Discard:
     web_address: str
     container: str
+    # The generation that made the instance, where one did: the gate is asked about that release.
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
