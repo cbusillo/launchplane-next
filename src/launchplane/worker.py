@@ -1,6 +1,6 @@
 import logging
 import threading
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -12,7 +12,7 @@ from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, PutBack, RetireResult
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 from launchplane.telling import Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -37,6 +37,13 @@ class Carries(Protocol):
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
     def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
+
+
+type Ending = tuple[Stands, dict[str, Any] | None, str | None]
+
+
+def ending(stands: Stands, answer: BaseModel | None, error: str | None = None) -> Ending:
+    return stands, None if answer is None else answer.model_dump(mode="json"), error
 
 
 def carried_out(lanes: Carries, request: Request, witness: Witness) -> Answer:
@@ -135,8 +142,9 @@ class Worker:
         finally:
             self.let_go(lane)
 
-    # What a call is given to say what it did, to ask before each action, and to ask between actions.
-    def witness_of(self, request: Request, attempt: int, held: Held) -> Witness:
+    # What a call is given to say what it did, to ask before each action, and to ask between actions. `seen` is told when
+    # the call learns a cancel was asked of it.
+    def witness_of(self, request: Request, attempt: int, held: Held, seen: threading.Event) -> Witness:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
 
@@ -146,47 +154,42 @@ class Worker:
                 raise Interrupted(f"The turn of {request.lane} of {request.product} is no longer held, so nothing more was done.")
 
         def cancel_asked() -> bool:
-            return self.record.cancel_asked(request.id)
+            asked = self.record.cancel_asked(request.id)
+            if asked:
+                seen.set()
+            return asked
 
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
         return Witness(tell, hold, cancel_asked, refuse_cancel)
 
-    # A cancel asked of a move while the call was answering is answered by the call, from the host, before the request
-    # ends: the record does not end the request as done until then.
+    # A move does not end, however it would, over a cancel its call never saw: the record refuses that ending, and the
+    # call goes through once more, sees the cancel at its first reading and answers it from the host.
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
-        witness = self.witness_of(request, attempt, held)
-        while not self.carried_to_an_end(request, attempt, witness):
+        seen = threading.Event()
+        witness = self.witness_of(request, attempt, held, seen)
+        while not self.record.end(attempt, *self.ending_of(request, witness), cancel_seen=seen.is_set()):
             pass
 
-    def carried_to_an_end(self, request: Request, attempt: int, witness: Witness) -> bool:
+    def ending_of(self, request: Request, witness: Witness) -> Ending:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
             answer = carried_out(self.lanes, request, witness)
         except Cancelled as cancelled:
-            return self.end_cancelled(request, attempt, cancelled.put_back)
+            kept = self.record.read(request.id)
+            told = [] if kept is None else put_back_told(kept)
+            return ending(Stands.CANCELLED, cancelled.put_back.model_copy(update={"put_back": told}))
         except STOPPED as error:
-            return self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
+            return ending(Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
         except Interrupted, RecordError:
             raise
         except Exception as error:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
-            return self.end(attempt, Stands.FAILED, None, why)
-        return self.ended_with(attempt, answer)
-
-    def end_cancelled(self, request: Request, attempt: int, answer: PutBack) -> bool:
-        kept = self.record.read(request.id)
-        told = [] if kept is None else put_back_told(kept)
-        return self.end(attempt, Stands.CANCELLED, answer.model_copy(update={"put_back": told}), None)
-
-    def ended_with(self, attempt: int, answer: Answer) -> bool:
+            return ending(Stands.FAILED, None, why)
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
-        return self.end(attempt, Stands.FAILED if failed else Stands.DONE, answer, error if failed else None)
-
-    def end(self, attempt: int, stands: Stands, answer: BaseModel | None, error: str | None) -> bool:
-        return self.record.end(attempt, stands, None if answer is None else answer.model_dump(mode="json"), error)
+        return ending(Stands.FAILED if failed else Stands.DONE, answer, error if failed else None)

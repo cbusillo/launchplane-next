@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from launchplane.proxy import PROXY_NAME, abandoned_mark_of, route_file_of, stamp_line
+from launchplane.proxy import GATE, PROXY_NAME, abandoned_mark_of, route_file_of, stamp_line
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -88,33 +88,38 @@ class Pause:
     saved: bool = False
     # The lane has nothing on the host when the move is asked.
     from_nothing: bool = False
+    # The one interruption this pause is proven with on the bed. A pause with none stands for its row and has all five.
+    # The whole table runs against the pretend host in tests/test_interruptions.py.
+    once: str | None = None
 
 
 SITE_PAUSES = {
     "M0, waiting for its lane's turn": Pause(TURN),
-    "M0, taken up, before its first action": Pause("before.host.start_instance"),
-    "M1, candidate created and not started": Pause("after.host.create"),
+    "M0, taken up, before its first action": Pause("before.host.start_instance", once=CANCEL),
+    "M1, candidate created and not started": Pause("after.host.create", once=KILL),
     "M1, candidate started and not yet checked": Pause("after.host.start_instance"),
-    "M2, its check under way": Pause("before.proxy.request_instance"),
+    "M2, its check under way": Pause("before.proxy.request_instance", once=NEWER),
     "M2, check passed": Pause("after.proxy.check_instance"),
-    "M3, before the gate": Pause("before.proxy.switch"),
+    "M3, before the gate": Pause("before.proxy.switch", once=KILL_THEN_CANCEL),
     "M3, staged, the rename not yet sent": Pause(f"before.{THE_RENAME}"),
     "M4, renamed, its reply not yet had, proxy still on A": Pause(f"after.{THE_RENAME}", renamed=True, proxy_held=True),
-    "M4, renamed, waiting for a proxy still on A": Pause("before.proxy.await_route", renamed=True, proxy_held=True),
-    "M5, proxy on B, the reply to the rename not yet had": Pause(f"after.{THE_RENAME}", renamed=True, proxy_on_b=True),
-    "M5, proxy on B, old instance still up": Pause("before.host.retire_instance", renamed=True),
+    "M4, renamed, waiting for a proxy still on A": Pause(
+        "before.proxy.await_route", renamed=True, proxy_held=True, once=CANCEL_THEN_KILL
+    ),
+    "M5, proxy on B, the reply to the rename not yet had": Pause(f"after.{THE_RENAME}", renamed=True, proxy_on_b=True, once=CANCEL),
+    "M5, proxy on B, old instance still up": Pause("before.proxy.discard", renamed=True),
     "M6, old instance gone": Pause("after.host.retire_instance", renamed=True),
     "Z, before its result is saved": Pause("before.record.end", renamed=True),
     "Z, result saved": Pause("after.record.end", renamed=True, saved=True),
 }
 LEDGER_PAUSES = {
-    "M1, the network of a new data set made": Pause("after.host.create_data_set_network", from_nothing=True),
-    "M1, the volume of a new data set made": Pause("after.host.create_data_set_volume", from_nothing=True),
-    "M1, the database server of a new data set made": Pause("after.host.create_database", from_nothing=True),
-    "M5, before the old background service is retired": Pause("before.host.retire_instance", renamed=True),
-    "M5, the new background service started": Pause("after.host.start_background_service", renamed=True),
-    "M5, the new background service being watched": Pause("before.host.await_background_service", renamed=True),
-    "M6, before the logins no container holds are removed": Pause("before.host.remove_unheld_logins", renamed=True),
+    "M1, the network of a new data set made": Pause("after.host.create_data_set_network", from_nothing=True, once=CANCEL),
+    "M1, the volume of a new data set made": Pause("after.host.create_data_set_volume", from_nothing=True, once=KILL),
+    "M1, the database server of a new data set made": Pause("after.host.create_database", from_nothing=True, once=NEWER),
+    "M5, before the old background service is retired": Pause("before.host.retire_instance", renamed=True, once=KILL_THEN_CANCEL),
+    "M5, the new background service started": Pause("after.host.start_background_service", renamed=True, once=CANCEL_THEN_KILL),
+    "M5, the new background service being watched": Pause("before.host.await_background_service", renamed=True, once=KILL),
+    "M6, before the logins no container holds are removed": Pause("before.host.remove_unheld_logins", renamed=True, once=CANCEL),
 }
 
 
@@ -338,7 +343,7 @@ def cells(pauses: dict[str, Pause], interruptions: tuple[str, ...], lane: Lane, 
         pytest.param(lane, pause, each, id=f"{'ledger: ' if lane.has_data else ''}{name}: {each}")
         for name, pause in pauses.items()
         for each in interruptions
-        if (pause.renamed, pause.saved) == (renamed, saved)
+        if (pause.renamed, pause.saved) == (renamed, saved) and pause.once in (None, each)
     ]
 
 
@@ -455,3 +460,86 @@ def test_a_move_to_the_build_already_active_cancelled_before_its_result_is_saved
         let_go()
     assert (marked[0], ended["stands"], ask(f"/requests/{asked['id']}/cancel", {})[0]) == (202, "cancelled", 200)
     assert (instances_of(SITE), loop.failures, loop.answers_in_order()) == (before, [], [SITE.answers[0]])
+
+
+GATE_HELD = "/tmp/launchplane-gate-held"  # noqa: S108 a file inside the proxy's container
+HOLD_THE_GATE = f"touch {GATE_HELD}; flock {GATE} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
+
+
+def in_proxy(command: str, flags: str = "") -> str:
+    return on_scratch(f'docker exec {flags} {PROXY_NAME} sh -c "{command}"')
+
+
+def processes_whose(file: str, text: str) -> set[str]:
+    found = in_proxy(f"grep -l {text} /proc/[0-9]*/{file} 2>/dev/null || true").split()
+    return {path.split("/")[2] for path in found}
+
+
+# The process of a rename that Docker has accepted and that waits for the gate's lock, inside the gate: the one flock
+# whose command names a mark, which the test's own hold of the gate does not.
+def rename_waiting_at_the_gate() -> str:
+    return next(iter(processes_whose("comm", "flock") & processes_whose("cmdline", "abandoned")), "")
+
+
+@dataclass
+class RenameInFlight:
+    asked: dict[str, Any]
+    process: str
+    loop: RequestLoop
+
+
+# A release whose rename Docker has accepted and that is held inside the gate, and Launchplane killed there. No worker
+# recovers until the test lets go of the request's take-up.
+@pytest.fixture
+def rename_in_flight_and_launchplane_killed() -> Iterator[RenameInFlight]:
+    let_go()
+    assert move_lane(SITE.product, SITE.lane, SITE.builds[0])[0] == 200
+    in_proxy(HOLD_THE_GATE, flags="--detach")
+    process = ""
+    try:
+        with request_loop(lambda: answering(SITE)) as loop:
+            status, asked = ask(f"/lanes/{SITE.product}/{SITE.lane}/move", {"build": SITE.builds[1]})
+            assert status == 202, asked
+            hold(TAKE_UP)
+            wait_for(lambda: bool(rename_waiting_at_the_gate()), seconds=60)
+            process = rename_waiting_at_the_gate()
+            kill_held_launchplane()
+            wait_until_stopped_at(TAKE_UP)
+            assert route_file_stamp(SITE) != stamp_line(asked["generation"]), "the rename is still inside the gate"
+            yield RenameInFlight(asked, process, loop)
+    finally:
+        in_proxy(f"rm -f {GATE_HELD}; kill -CONT {process} 2>/dev/null || true")
+        let_go()
+
+
+def test_a_rename_in_flight_when_launchplane_is_killed_that_reaches_the_gate_first_is_honoured_and_finished(
+    rename_in_flight_and_launchplane_killed: RenameInFlight,
+) -> None:
+    held = rename_in_flight_and_launchplane_killed
+    in_proxy(f"rm -f {GATE_HELD}")
+    wait_for(lambda: route_file_stamp(SITE) == stamp_line(held.asked["generation"]), seconds=30)
+    let_go()
+    ended = request_ended(held.asked["id"])
+    assert (ended["stands"], ended["answer"]["outcome"], builds_of(SITE)) == ("done", "switched", [SITE.builds[1]])
+    assert [attempt["ended"] for attempt in ended["attempts"]] == ["interrupted", "done"]
+
+
+def test_a_rename_in_flight_that_reaches_the_gate_after_its_candidate_was_cleaned_up_renames_nothing(
+    rename_in_flight_and_launchplane_killed: RenameInFlight,
+) -> None:
+    held = rename_in_flight_and_launchplane_killed
+    [left] = [each["container"] for each in instances_of(SITE) if each["build"] == SITE.builds[1]]
+    in_proxy(f"kill -STOP {held.process}; rm -f {GATE_HELD}")
+    let_go()
+    ended = request_ended(held.asked["id"])
+    [serving] = instances_of(SITE)
+    in_proxy(f"kill -CONT {held.process}")
+    wait_for(lambda: not rename_waiting_at_the_gate(), seconds=30)
+    assert (ended["stands"], ended["answer"]["outcome"], serving["build"], serving["container"] != left) == (
+        "done",
+        "switched",
+        SITE.builds[1],
+        True,
+    )
+    assert (instances_of(SITE), route_file_stamp(SITE)) == ([serving], stamp_line(held.asked["generation"]))
+    assert ask("/running")[1]["web_addresses"] and answering(SITE) == SITE.answers[1]

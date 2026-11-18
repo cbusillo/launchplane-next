@@ -95,30 +95,30 @@ def done_so_far(request: Kept) -> str:
 
 
 # Whether a cancel won is read from the gate's mark on the host, as the worker reads it.
-def being_cancelled(request: Kept, abandoned: str | None) -> str:
+def being_cancelled(request: Kept, abandoned: frozenset[str]) -> str:
     if request.cancel_refused is not None:
         return f" {request.cancel_refused}"
     if request.cancel_asked_by is None:
         return ""
-    if abandoned == request.generation:
+    if request.generation in abandoned:
         return f" Cancelled by {request.cancel_asked_by} before the switch: its worker is putting the lane back."
     return f" To be cancelled by {request.cancel_asked_by}: its worker puts the lane back, unless it is found too late."
 
 
-def request_note(request: Request, abandoned: str | None) -> str | None:
+def request_note(request: Request, abandoned: frozenset[str]) -> str | None:
     if request.stands is Stands.NEEDS_A_PERSON:
         return request.error
     if request.stands is Stands.CANCELLED:
         return how_cancelled(request)
     if request.stands in ENDED:
-        why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} came after it had ended."
+        why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return f"{why} It ended as {request.stands}."
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
         return f"{done_so_far(request)}{being_cancelled(request, abandoned)}"
     return None
 
 
-def request_rows(requests: Sequence[Request], abandoned: str | None = None) -> list[Row]:
+def request_rows(requests: Sequence[Request], abandoned: frozenset[str] = frozenset()) -> list[Row]:
     return [
         Row(
             name=f"Request {request.id}",
@@ -164,7 +164,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests, None if judged is None else judged.lane.route.abandoned),
+            *request_rows(requests, frozenset() if judged is None else judged.lane.route.abandoned),
             *([] if judged is None else finding_rows(judged)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])

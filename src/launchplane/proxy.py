@@ -115,25 +115,36 @@ def route_file_of(web_address: str) -> PurePosixPath:
     return ROUTES_FOLDER / f"{web_address}{ROUTE_FILE_SUFFIX}"
 
 
-def staged_route_file_of(web_address: str, generation: str | None = None) -> PurePosixPath:
-    return ROUTES_FOLDER / (f"{web_address}.next" if generation is None else f"{web_address}.{generation}.next")
+# A routes file waiting to be renamed into place: a release's is named for its candidate, so removing it refuses a
+# rename already sent for that candidate and for no other.
+def staged_route_file_of(web_address: str, container: str | None = None) -> PurePosixPath:
+    return ROUTES_FOLDER / (f"{web_address}.next" if container is None else f"{web_address}.{container}.next")
 
 
-ABANDONED_SUFFIX = ".abandoned"
+ABANDONED_SUFFIX, COMMITTED_SUFFIX = ".abandoned", ".committed"
 
 
 def abandoned_mark_of(web_address: str, generation: str) -> PurePosixPath:
     return ROUTES_FOLDER / f"{web_address}.{generation}{ABANDONED_SUFFIX}"
 
 
-# The gate. A switch and a cancel each run as one command on the container host, holding the one lock file there, so the
-# second of the two finds what the first did whichever Launchplane sent it: a switch finds the mark and renames nothing,
-# or a cancel finds the routes file renamed for this generation and marks nothing. Each answers LOST then.
+def committed_mark_of(web_address: str, generation: str) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}.{generation}{COMMITTED_SUFFIX}"
+
+
+# The gate. Everything that settles a release runs as one command on the container host, holding the one lock file
+# there, so each finds what any earlier one did, whichever Launchplane sent it and however late it arrives. A verdict is
+# a file of the generation's own, made once and replaced by nothing done for another generation. Each answers LOST when
+# what it finds has settled the matter against it.
 GATE = ROUTES_FOLDER / ".gate"
 LOST = 3
-SWITCH = f'if [ -e "$1" ]; then rm -f "$2"; exit {LOST}; fi; mv "$2" "$3"'
-ABANDON = f'if head -n 1 "$1" 2>/dev/null | grep -qxF "$2"; then exit {LOST}; fi; rm -f "$3" "$4".*{ABANDONED_SUFFIX}; : > "$5"'
-REMOVE = f'rm -f "$1" "$2".*{ABANDONED_SUFFIX}'
+# Renames for a candidate, unless its generation is abandoned or the candidate's staged file was taken away.
+SWITCH = f'if [ -e "$1" ] || [ ! -e "$2" ]; then rm -f "$2"; exit {LOST}; fi; mv "$2" "$3" && : > "$4"'
+# Marks a generation abandoned, unless the routes file was renamed for it, now or ever.
+ABANDON = f'if [ -e "$1" ] || head -n 1 "$2" 2>/dev/null | grep -qxF "$3"; then exit {LOST}; fi; : > "$4"'
+# Takes a candidate's staged file away, unless the routes file sends visitors to the candidate.
+DISCARD = f'if grep -qF "$2" "$1" 2>/dev/null; then exit {LOST}; fi; rm -f "$3"'
+REMOVE = f'rm -f "$1" "$2".*{ABANDONED_SUFFIX} "$2".*{COMMITTED_SUFFIX} "$2".*.next'
 
 
 # noinspection HttpUrlsUsage
@@ -185,17 +196,28 @@ def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
     return lane_routes_by_web_address(routes)
 
 
-def written_route_from_file(text: str, web_address: str, written_at: datetime) -> WrittenRoute:
-    found, stamp = INSTANCE_URL.search(text), WRITTEN_BY.match(text)
-    generation = None if stamp is None else stamp["generation"]
-    if found is None or text != route_text(web_address, found["container"], generation):
-        raise ProxyError(f"The routes file {route_file_of(web_address)} is not the route Launchplane writes for {web_address}.")
-    return WrittenRoute(found["container"], written_at, generation)
+STAMP_PREFIX = "# launchplane."
 
 
-def abandoned_from(file_names: Iterable[str]) -> dict[str, str]:
+# A first line that is a stamp of any kind is a comment to the proxy. One that names a generation says which release the
+# file was renamed for. An older stamp, or none, is a route no release of this code renamed, and is a route all the same.
+def written_route_from_file(text: str, web_address: str, written_at: datetime) -> WrittenRoute | str:
+    stamp = WRITTEN_BY.match(text)
+    first, _, rest = text.partition("\n")
+    body = rest if first.startswith(STAMP_PREFIX) else text
+    found = INSTANCE_URL.search(body)
+    if found is None or body != route_text(web_address, found["container"]):
+        return f"The routes file {route_file_of(web_address)} is not the route Launchplane writes for {web_address}"
+    return WrittenRoute(found["container"], written_at, None if stamp is None else stamp["generation"])
+
+
+def abandoned_from(file_names: Iterable[str]) -> dict[str, frozenset[str]]:
     marks = (name.removesuffix(ABANDONED_SUFFIX).rpartition(".") for name in file_names if name.endswith(ABANDONED_SUFFIX))
-    return {web_address: generation for web_address, _, generation in marks if is_generation(generation)}
+    abandoned: dict[str, frozenset[str]] = {}
+    for web_address, _, generation in marks:
+        if is_generation(generation):
+            abandoned[web_address] = abandoned.get(web_address, frozenset()) | {generation}
+    return abandoned
 
 
 @dataclass(frozen=True)
@@ -229,21 +251,24 @@ class TraefikProxy:
             return self.host.read_folder(PROXY_NAME, ROUTES_FOLDER)
 
     # The route files are read from the proxy's container even while it is stopped; what it has loaded only while it runs.
+    # A file that is not a route Launchplane writes is its own lane's fault, and no other lane's reading fails over it.
     def read(self) -> ProxySeen:
         runs = self.host.is_running(PROXY_NAME)
         files_read = self.read_folder()
+        routes = {
+            name.removesuffix(ROUTE_FILE_SUFFIX): written_route_from_file(
+                file.text, name.removesuffix(ROUTE_FILE_SUFFIX), file.changed_at
+            )
+            for name, file in files_read.items()
+            if name.endswith(ROUTE_FILE_SUFFIX)
+        }
         return ProxySeen(
             runs=runs,
             back_soon_runs=self.host.is_running(BACK_SOON),
-            written={
-                (web_address := name.removesuffix(ROUTE_FILE_SUFFIX)): written_route_from_file(
-                    file.text, web_address, file.changed_at
-                )
-                for name, file in files_read.items()
-                if name.endswith(ROUTE_FILE_SUFFIX)
-            },
+            written={web_address: route for web_address, route in routes.items() if isinstance(route, WrittenRoute)},
             loaded=self.read_loaded() if runs else {},
             abandoned=abandoned_from(files_read),
+            unread={web_address: why for web_address, why in routes.items() if isinstance(why, str)},
         )
 
     def show_back_soon(self, web_address: str) -> None:
@@ -288,24 +313,26 @@ class TraefikProxy:
             raise ProxyError(f"{attempt} failed: {result.output}")
         return result.succeeded
 
-    # The rename is the one moment a release becomes real. It is not made once a cancel has won against the generation.
+    # The rename is the one moment a release becomes real. It is not made once a cancel has won against the generation,
+    # or once the candidate was discarded.
     def switch(self, web_address: str, container: str, generation: str) -> bool:
-        staged = staged_route_file_of(web_address, generation)
+        staged = staged_route_file_of(web_address, container)
         self.host.place_file(PROXY_NAME, staged, route_text(web_address, container, generation))
-        arguments = [abandoned_mark_of(web_address, generation), staged, route_file_of(web_address)]
+        marks = abandoned_mark_of(web_address, generation), committed_mark_of(web_address, generation)
+        arguments = [marks[0], staged, route_file_of(web_address), marks[1]]
         return self.pass_gate(SWITCH, arguments, f"Putting the route of {web_address} in place")
 
-    # A cancel wins unless the routes file was already renamed for the generation. Winning again changes nothing.
+    # A cancel wins unless the routes file was renamed for the generation. Winning again changes nothing.
     def abandon(self, web_address: str, generation: str) -> bool:
-        route = route_file_of(web_address)
-        arguments = [
-            route,
-            stamp_line(generation),
-            staged_route_file_of(web_address, generation),
-            str(route).removesuffix(ROUTE_FILE_SUFFIX),
-            abandoned_mark_of(web_address, generation),
-        ]
+        marks = committed_mark_of(web_address, generation), abandoned_mark_of(web_address, generation)
+        arguments = [marks[0], route_file_of(web_address), stamp_line(generation), marks[1]]
         return self.pass_gate(ABANDON, arguments, f"Marking the release of {web_address} as cancelled")
+
+    # Before an instance that receives no visitors is removed: a rename still on its way to it is refused from here on,
+    # or has already happened, and then the instance is the one the routes file names and is not removed.
+    def discard(self, web_address: str, container: str) -> bool:
+        arguments = [route_file_of(web_address), f'"{instance_url(container)}"', staged_route_file_of(web_address, container)]
+        return self.pass_gate(DISCARD, arguments, f"Refusing a switch of {web_address} to {container}")
 
     def run_or_fail(self, command: list[str], attempt: str) -> None:
         result = self.host.run_in(PROXY_NAME, command)

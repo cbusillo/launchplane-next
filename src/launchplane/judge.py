@@ -48,6 +48,7 @@ class Kind(StrEnum):
     PROXY_STOPPED = "the proxy is not running"
     ROUTE_NOT_LOADED = "the proxy has not loaded the routes file"
     ROUTE_DISABLED = "the proxy reports the route not enabled"
+    ROUTE_UNREAD = "the routes file is not one Launchplane writes"
     NOT_ANSWERING = "the web address does not answer"
     BACK_SOON_STOPPED = "the back soon page is not running"
     NO_BUILD = "no build label"
@@ -494,7 +495,9 @@ def route_findings(lane: LaneReading) -> list[Found]:
     page = f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"
     page_down = lane.route.in_maintenance and not lane.route.back_soon_runs
     active, failure = lane.active, lane.web_address_failure
+    unread = lane.route.unread
     return [
+        *([] if unread is None else [Found(Weight.FAULT, lane.web_address, Kind.ROUTE_UNREAD, unread)]),
         *proxy_findings(lane),
         *([Found(Weight.FAULT, BACK_SOON, Kind.BACK_SOON_STOPPED, page)] if page_down else []),
         *(

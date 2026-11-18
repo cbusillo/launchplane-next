@@ -21,6 +21,8 @@ from launchplane.steps import (
     CreateDataSetNetwork,
     CreateDataSetVolume,
     DeleteDataSet,
+    Discard,
+    Discarded,
     Done,
     Event,
     FreshNames,
@@ -87,7 +89,7 @@ def change_made_by(event: Event) -> str | None:
             return f"wrote the route to {container}"
         case StartBackgroundService(instance=instance):
             return f"started the background service of {instance}"
-        case Retire(container=container):
+        case Retire(container=container) | Discarded(container=container, won=True):
             return f"retired {container}"
         case RemoveInstance(container=container):
             return f"removed {container}"
@@ -263,11 +265,9 @@ class Phase(StrEnum):
     CANDIDATE_CHECKED = "candidate checked"
     RENAMED = "renamed, not yet loaded"
     LOADED = "loaded"
-    OLD_GONE = "old instance gone"
 
 
-# One release of a lane as one reading finds it. Its candidate is the instance this attempt started: a release makes
-# its own, and one that anything earlier left is never taken for it.
+# One release of a lane as one reading finds it.
 @dataclass(frozen=True)
 class Move:
     judged: Judgement
@@ -290,14 +290,11 @@ class Move:
     def named(self) -> RunningInstance | None:
         return next((instance for instance in self.lane.instances if instance.container == self.lane.route.written), None)
 
+    # The instance this attempt started: a release makes its own, and one anything earlier left is never taken for it.
     @property
     def candidate(self) -> RunningInstance | None:
         started = {event.container for event in self.done if isinstance(event, StartInstance)}
         return next((instance for instance in self.lane.instances if instance.container in started), None)
-
-    @property
-    def refused(self) -> CheckRefused | None:
-        return next((event for event in self.done if isinstance(event, CheckRefused)), None)
 
     def answer(self, **update: object) -> MoveResult:
         named, done = self.named, self.done
@@ -315,29 +312,30 @@ class Move:
         return answer.model_copy(update=update)
 
 
-# Every part of the lane but the instance kept and its background service, background services first.
-def old_parts(lane: LaneReading, kept: str | None) -> list[str]:
-    return [
-        *sorted(running.container for running in lane.background_services if running.instance != kept),
-        *sorted(instance.container for instance in lane.instances if instance.container != kept),
-    ]
-
-
-def phase_of(move: Move) -> Phase:
-    route = move.lane.route
+# The phase, and the instance its row acts on: the candidate before the rename, the instance the routes file names
+# from it on.
+def phase_of(move: Move) -> tuple[Phase, RunningInstance | None]:
+    route, candidate = move.lane.route, move.candidate
     if move.is_switched:
-        if not (route.proxy_runs and is_loaded_as_written(route)):
-            return Phase.RENAMED
-        return Phase.LOADED if old_parts(move.lane, route.written) else Phase.OLD_GONE
-    if move.refused is not None:
-        return Phase.CANDIDATE_REFUSED
-    candidate = move.candidate
+        return (Phase.LOADED if route.proxy_runs and is_loaded_as_written(route) else Phase.RENAMED), move.named
+    if any(isinstance(event, CheckRefused) for event in move.done):
+        return Phase.CANDIDATE_REFUSED, candidate
     if candidate is None:
-        return Phase.NOTHING_MADE
-    return Phase.CANDIDATE_CHECKED if is_checked(candidate, move.product, move.done) else Phase.CANDIDATE_MADE
+        return Phase.NOTHING_MADE, move.named
+    return (Phase.CANDIDATE_CHECKED if is_checked(candidate, move.product, move.done) else Phase.CANDIDATE_MADE), candidate
 
 
-def in_service(move: Move) -> Action | Stop | None:
+# Every part of the lane but the instance kept and its background service, background services first. An instance goes
+# through the gate, so a rename still on its way to it is refused before it is removed.
+def old_part_step(lane: LaneReading, kept: str | None, *, background_services_only: bool = False) -> Action | None:
+    background_services = sorted(running.container for running in lane.background_services if running.instance != kept)
+    instances = sorted(instance.container for instance in lane.instances if instance.container != kept)
+    if background_services:
+        return Retire(background_services[0])
+    return Discard(lane.web_address, instances[0]) if instances and not background_services_only else None
+
+
+def in_service(move: Move, _candidate: RunningInstance | None) -> Action | Stop | None:
     lane, target = move.lane, move.target
     if lane.route.in_maintenance:
         return Stop(
@@ -345,29 +343,19 @@ def in_service(move: Move) -> Action | Stop | None:
             f"soon page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was "
             "changed."
         )
+    if lane.route.unread is not None:
+        return Stop(f"{lane.route.unread}, so the lane is not moved. Retiring the lane removes the file. Nothing was changed.")
     return route_step(move.judged, move.done)
 
 
-def fit_to_switch(move: Move) -> Action | Stop | None:
-    candidate = move.candidate
+def fit_to_switch(move: Move, candidate: RunningInstance | None) -> Action | Stop | None:
     problems = [] if candidate is None else problems_switching_to(move.judged, candidate)
     if candidate is None or not problems:
-        return in_service(move)
+        return in_service(move, candidate)
     return Stop(
         f"The instance {candidate.container} passed its check and the lane is not as it must be to switch to it, so the "
         f"web address was not switched: {'; '.join(problems)}. {changes_so_far(move.done)} Asking again replaces the instance."
     )
-
-
-def not_there(move: Move) -> Stop:
-    return Stop(
-        f"{move.lane.web_address} was switched to {move.lane.route.written} for this release, and that instance is not on "
-        f"the host. {changes_so_far(move.done)} Asking for the build again starts a new one."
-    )
-
-
-def switched_to_is_there(move: Move) -> Action | Stop | None:
-    return not_there(move) if move.named is None else route_step(move.judged, move.done)
 
 
 # The background service of the instance that serves: started where the product has one, watched while it comes up,
@@ -390,40 +378,33 @@ def background_service_step(move: Move, serving: RunningInstance, use: DataSetUs
 
 
 # Around the instance that serves: first no background service of another instance, since only one of a lane runs at a
-# time, then its own, and only then no other instance.
-def clear_around(move: Move, serving: RunningInstance) -> Action | Stop | None:
-    old = old_parts(move.lane, serving.container)
-    if old and any(running.container == old[0] for running in move.lane.background_services):
-        return Retire(old[0])
-    use = prepared(move.judged, serving.data_set, None, move.product, move.done)
+# time, then its own, and only then no other instance. Then the answer.
+def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
+    judged, done, lane = move.judged, move.done, move.lane
+    if (step := old_part_step(lane, serving.container, background_services_only=True)) is not None:
+        return step
+    use = prepared(judged, serving.data_set, None, move.product, done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    return background_service_step(move, serving, use) or (Retire(old[0]) if old else None)
-
-
-def finish(move: Move, serving: RunningInstance) -> Step[MoveResult]:
-    if (step := clear_around(move, serving)) is not None:
+    if (step := background_service_step(move, serving, use) or old_part_step(lane, serving.container)) is not None:
         return step
-    refused = next((event for event in move.done if isinstance(event, BackgroundServiceRefused)), None)
+    refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
     if refused is not None:
         return Done(move.answer(outcome=Outcome.BACKGROUND_SERVICE_FAILED, error=refused.report))
-    left = left_for_a_move(move.judged, serving)
+    left = left_for_a_move(judged, serving)
     if left:
-        return Stop(
-            f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(move.done)}"
-        )
+        return Stop(f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(done)}")
     return Done(move.answer())
 
 
 # An instance already receiving visitors on this build, with nothing wrong, is the lane as asked: no candidate is made
 # beside it. Otherwise, what anything earlier left is cleaned up first.
-def make_candidate(move: Move) -> Step[MoveResult]:
-    lane, receiving = move.lane, move.named
+def make_candidate(move: Move, receiving: RunningInstance | None) -> Step[MoveResult]:
+    lane = move.lane
     if receiving is not None and is_fit(move.judged, receiving, move.target):
         return finish(move, receiving)
-    old = old_parts(lane, lane.route.written)
-    if old:
-        return Retire(old[0])
+    if (step := old_part_step(lane, lane.route.written)) is not None:
+        return step
     data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)
     if isinstance(data_set, Stop):
         return data_set
@@ -433,32 +414,28 @@ def make_candidate(move: Move) -> Step[MoveResult]:
     return StartInstance(move.target, move.fresh.container, use, move.generation)
 
 
-def check(move: Move) -> Step[MoveResult]:
-    candidate = move.candidate
-    return make_candidate(move) if candidate is None else Check(candidate.container, move.product.health_path)
-
-
-def remove_refused(move: Move) -> Step[MoveResult]:
-    refused = move.refused
-    if refused is None:
-        return make_candidate(move)
-    if any(instance.container == refused.container for instance in move.lane.instances):
-        return RemoveInstance(refused.container)
+def remove_refused(move: Move, candidate: RunningInstance | None) -> Step[MoveResult]:
+    refused = next(event for event in move.done if isinstance(event, CheckRefused))
+    if candidate is not None:
+        return RemoveInstance(candidate.container)
     return Done(move.answer(outcome=Outcome.CHECK_FAILED, error=refused.report))
 
 
-def switch(move: Move) -> Step[MoveResult]:
-    candidate = move.candidate
-    return make_candidate(move) if candidate is None else Switch(move.lane.web_address, candidate.container, move.generation)
+def await_load(move: Move, serving: RunningInstance) -> Step[MoveResult]:
+    return loading_step(move.judged, switched=True) or finish(move, serving)
 
 
-def await_load(move: Move) -> Step[MoveResult]:
-    return loading_step(move.judged, switched=True) or finish_switched(move)
+# A row acts on an instance the reading found. One that is gone since the phase was read stops the call and says so.
+def on(act: Callable[[Move, RunningInstance], Step[MoveResult]]) -> Callable[[Move, RunningInstance | None], Step[MoveResult]]:
+    def act_on(move: Move, instance: RunningInstance | None) -> Step[MoveResult]:
+        if instance is not None:
+            return act(move, instance)
+        return Stop(
+            f"The instance of this release that {move.lane.web_address} is to go to is not on the host. "
+            f"{changes_so_far(move.done)} Asking for the build again starts a new one."
+        )
 
-
-def finish_switched(move: Move) -> Step[MoveResult]:
-    serving = move.named
-    return not_there(move) if serving is None else finish(move, serving)
+    return act_on
 
 
 def too_late_to_cancel(web_address: str) -> str:
@@ -488,7 +465,7 @@ def put_lane_back(move: Move) -> Step[PutBack]:
 # is carried to the gate, where a rename already sent may still win. The gate is a command in the proxy's container.
 def cancel_wins(move: Move, asked: bool) -> StepBack | None:
     route = move.lane.route
-    if route.abandoned == move.generation:
+    if move.generation in route.abandoned:
         return put_lane_back(move)
     if not asked:
         return None
@@ -499,27 +476,24 @@ def cancel_is_too_late(move: Move, asked: bool) -> StepBack | None:
     return TooLate(too_late_to_cancel(move.lane.web_address)) if asked else None
 
 
-def nothing_more(_move: Move) -> None:
-    return None
-
-
 # What must be true answers None when it is, or the step that waits for it, or why it is not.
 @dataclass(frozen=True)
 class Row:
-    must_be_true: Callable[[Move], Action | Stop | None]
-    act: Callable[[Move], Step[MoveResult]]
+    must_be_true: Callable[[Move, RunningInstance | None], Action | Stop | None]
+    act: Callable[[Move, RunningInstance | None], Step[MoveResult]]
     cancel: Callable[[Move, bool], StepBack | None]
 
 
 # The move, one row for each state the host and this attempt can show. The phase picks the row and nothing else does.
 MOVE: dict[Phase, Row] = {
     Phase.NOTHING_MADE: Row(in_service, make_candidate, cancel_wins),
-    Phase.CANDIDATE_MADE: Row(in_service, check, cancel_wins),
-    Phase.CANDIDATE_REFUSED: Row(nothing_more, remove_refused, cancel_wins),
-    Phase.CANDIDATE_CHECKED: Row(fit_to_switch, switch, cancel_wins),
-    Phase.RENAMED: Row(nothing_more, await_load, cancel_is_too_late),
-    Phase.LOADED: Row(switched_to_is_there, finish_switched, cancel_is_too_late),
-    Phase.OLD_GONE: Row(switched_to_is_there, finish_switched, cancel_is_too_late),
+    Phase.CANDIDATE_MADE: Row(in_service, on(lambda move, new: Check(new.container, move.product.health_path)), cancel_wins),
+    Phase.CANDIDATE_REFUSED: Row(lambda _move, _new: None, remove_refused, cancel_wins),
+    Phase.CANDIDATE_CHECKED: Row(
+        fit_to_switch, on(lambda move, new: Switch(move.lane.web_address, new.container, move.generation)), cancel_wins
+    ),
+    Phase.RENAMED: Row(lambda _move, _new: None, on(await_load), cancel_is_too_late),
+    Phase.LOADED: Row(lambda move, _new: route_step(move.judged, move.done), on(finish), cancel_is_too_late),
 }
 
 
@@ -533,11 +507,12 @@ def decide_move(
     cancel: Cancel | None = None,
 ) -> Step[MoveResult] | StepBack:
     move = Move(judged, target, product, fresh, done, generation)
-    row = MOVE[phase_of(move)]
+    phase, instance = phase_of(move)
+    row = MOVE[phase]
     back = row.cancel(move, is_turned_back(cancel))
     if back is not None:
         return back
-    return with_logins_settled(row.must_be_true(move) or row.act(move), judged, done)
+    return with_logins_settled(row.must_be_true(move, instance) or row.act(move, instance), judged, done)
 
 
 def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
@@ -582,6 +557,9 @@ def retire_step_back(judged: Judgement, delete_data_set: str | None) -> StepBack
 def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
     lane = judged.lane
     route, web_address = lane.route, lane.web_address
+    # A file that is no route of Launchplane's is never loaded as one, so it is removed before anything is waited for.
+    if route.unread is not None:
+        return RemoveRoute(web_address, None)
     if (step := loading_step(judged)) is not None:
         return step
     if route.written is not None:
@@ -593,6 +571,7 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     named = lane.data_set(delete_data_set)
     if named is not None:
         return DeleteDataSet(named)
+    route_removed = any(isinstance(event, RemoveRoute) for event in done)
     route_removed_to = next((event.container for event in done if isinstance(event, RemoveRoute)), None)
     retired = [event.container for event in done if isinstance(event, Retire)]
     cleaned = any(isinstance(event, RemoveLogins) for event in done)
@@ -602,7 +581,7 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
             product=lane.product,
             lane=lane.lane,
             web_address=web_address,
-            outcome=retire_outcome(route_removed_to is not None or bool(retired) or cleaned, deleted),
+            outcome=retire_outcome(route_removed or bool(retired) or cleaned, deleted),
             route_removed_to_container=route_removed_to,
             retired_containers=retired,
             deleted_data_set=deleted,

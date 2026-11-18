@@ -321,6 +321,8 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
         return Stands.DONE
     if hint is int:
         return number
+    if hint is bool:
+        return True
     if str in kinds:
         return f"said with {HELD} in it"
     if any(get_origin(kind) is dict for kind in kinds):

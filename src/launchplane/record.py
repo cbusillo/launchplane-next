@@ -173,7 +173,9 @@ class Record(Protocol):
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
     def take_up(self, request: int) -> int | None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
-    def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> bool: ...
+    def end(
+        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+    ) -> bool: ...
     def give_up(self, request: int) -> Request | None: ...
     def retry(self, request: int, asked_by: str) -> Request | None: ...
     def cancel(self, request: int, by: str) -> Request | None: ...
@@ -277,10 +279,9 @@ class Sql:
     CANCEL_ASKED: Final = "select cancel_asked_at is not null as asked from request where id = %s"
     REFUSE_CANCEL: Final = "update request set cancel_refused = %s where id = %s and cancel_refused is null"
     # Locks the request, so a cancel is either marked before this is read or finds the request ended. Only a move
-    # answers every cancel from the host, so only a move waits for the answer.
+    # answers every cancel from the host, so only a move's ending waits for its call to have seen the cancel.
     OPEN_ATTEMPT: Final = """
-    select request.work = 'moving' and request.cancel_asked_at is not null and request.cancel_refused is null
-        as cancel_unanswered
+    select request.work = 'moving' and request.cancel_asked_at is not null as move_with_a_cancel
     from request, attempt where attempt.id = %s and attempt.ended is null and request.id = attempt.request
     for update of request
     """
@@ -543,13 +544,15 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
-    # A move does not end as done over a cancel nobody has answered: its call answers the cancel first.
-    def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> bool:
+    # A move does not end over a cancel its call never saw, unless as cancelled: the call sees it and ends again.
+    def end(
+        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+    ) -> bool:
         with self.session("writing how a request ended") as session:
             open_attempt = session.execute(Sql.OPEN_ATTEMPT, self.gate.made(attempt)).fetchone()
             if open_attempt is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
-            if stands is Stands.DONE and open_attempt["cancel_unanswered"]:
+            if open_attempt["move_with_a_cancel"] and not cancel_seen and stands is not Stands.CANCELLED:
                 return False
             session.execute(Sql.END, self.gate.made(stands.value, attempt, stands.value, answer, error))
             return True

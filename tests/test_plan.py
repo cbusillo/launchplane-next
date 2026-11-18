@@ -10,12 +10,13 @@ from launchplane.instance import (
     LaneBuild,
     LoadedRoute,
     Mount,
+    Reading,
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
     Unread,
 )
-from launchplane.judge import Work
+from launchplane.judge import Kind, Work, judge
 from launchplane.plan import MOVE, Move, Phase, decide_move, decide_retire, phase_of, too_late_to_cancel
 from launchplane.product import Product
 from launchplane.steps import (
@@ -33,6 +34,8 @@ from launchplane.steps import (
     CreateDataSetNetwork,
     CreateDataSetVolume,
     DeleteDataSet,
+    Discard,
+    Discarded,
     Done,
     Event,
     FreshNames,
@@ -63,6 +66,7 @@ from tests.pretend_host import (
     NEW_ON_D1,
     OLD,
     OLD_ON_D1,
+    SINCE,
     STRAY,
     WEB_ADDRESS,
     WITH_DATA,
@@ -124,12 +128,12 @@ MOVES = {
         (OLD, STOPPED_NEW), ("old", "old"), (STARTED_NEW, Check("new")), Check("new")
     ),
     "the old instance retires only once the route to the new one has loaded": Case(
-        (OLD, NEW), ("new", "new"), (STARTED_NEW, Check("new"), SWITCHED_TO_NEW), Retire("old"), switched=True
+        (OLD, NEW), ("new", "new"), (STARTED_NEW, Check("new"), SWITCHED_TO_NEW), Discard(WEB_ADDRESS, "old"), switched=True
     ),
     "a finished switch answers switched": Case(
         (NEW,),
         ("new", "new"),
-        (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Retire("old")),
+        (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", won=True)),
         answer(Outcome.SWITCHED, "new", did=("started the instance new", "wrote the route to new", "retired old")),
         switched=True,
     ),
@@ -140,22 +144,24 @@ MOVES = {
         (OLD, NEW), ("old", "new"), (), AwaitSwitch(WEB_ADDRESS, "new"), switched=True
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
-    "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Retire("stray")),
+    "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), Discard(WEB_ADDRESS, "stray")),
     "a finished cleanup answers repaired, with what it did": Case(
-        (NEW,), ("new", "new"), (Retire("stray"),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
+        (NEW,), ("new", "new"), (Discarded("stray", won=True),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
     ),
     "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
-        (OLD, NEW), ("old", "old"), (), Retire("new")
+        (OLD, NEW), ("old", "old"), (), Discard(WEB_ADDRESS, "new")
     ),
-    "what anything earlier left is retired before a candidate is made": Case((OLD, STRAY), ("old", "old"), (), Retire("stray")),
+    "what anything earlier left is retired before a candidate is made": Case(
+        (OLD, STRAY), ("old", "old"), (), Discard(WEB_ADDRESS, "stray")
+    ),
     "a stopped instance left before the switch is retired, then replaced": Case(
-        (OLD, STOPPED_NEW), ("old", "old"), (), Retire("new")
+        (OLD, STOPPED_NEW), ("old", "old"), (), Discard(WEB_ADDRESS, "new")
     ),
     "a stopped serving instance is replaced, never checked": Case(
         (STOPPED_NEW,), ("new", "new"), (), StartInstance(TARGET, FRESH, None, GENERATION)
     ),
     "a serving instance that stopped while its route was awaited is replaced, not kept": Case(
-        (OLD, STOPPED_NEW), ("new", "new"), (AwaitRoute(WEB_ADDRESS, "new"),), Retire("old")
+        (OLD, STOPPED_NEW), ("new", "new"), (AwaitRoute(WEB_ADDRESS, "new"),), Discard(WEB_ADDRESS, "old")
     ),
     "a route to an instance that is gone is not taken as serving": Case(
         (), ("gone", "gone"), (), StartInstance(TARGET, FRESH, None, GENERATION)
@@ -219,8 +225,7 @@ ROWS = [
     RowCase(
         Phase.RENAMED, Case((OLD, MADE_NEW), ("old", "new"), (), None, switched=True), TOO_LATE, AwaitSwitch(WEB_ADDRESS, "new")
     ),
-    RowCase(Phase.LOADED, Case((OLD, MADE_NEW), ("new", "new"), (), None, switched=True), TOO_LATE, Retire("old")),
-    RowCase(Phase.OLD_GONE, Case((MADE_NEW,), ("new", "new"), (), None, switched=True), TOO_LATE, answer(Outcome.SWITCHED, "new")),
+    RowCase(Phase.LOADED, Case((OLD, MADE_NEW), ("new", "new"), (), None, switched=True), TOO_LATE, Discard(WEB_ADDRESS, "old")),
 ]
 
 
@@ -236,7 +241,7 @@ def test_the_table_has_one_row_for_every_state_a_move_can_be_found_in() -> None:
 @pytest.mark.parametrize("row", ROWS, ids=[row.phase for row in ROWS])
 def test_each_state_of_a_move_is_found_from_the_reading_and_a_cancel_asked_there_wins_or_is_too_late(row: RowCase) -> None:
     judged = given(row.case).judged(Work.MOVE, Product())
-    assert phase_of(Move(judged, TARGET, Product(), FRESH_NAMES, row.case.done, GENERATION)) is row.phase
+    assert phase_of(Move(judged, TARGET, Product(), FRESH_NAMES, row.case.done, GENERATION))[0] is row.phase
     assert row_step(row, Cancel()) == row.cancel_asked
 
 
@@ -370,16 +375,16 @@ DATA_MOVES = {
         (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (STARTED_NEW_ON_D1,), Check("new", "/health")
     ),
     "an instance left by an interrupted attempt is retired before its data set is waited on": DataCase(
-        (OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", accepts=False),), (), Retire("new")
+        (OLD_ON_D1, NEW_ON_D1), "old", (data_set_named("d1", accepts=False),), (), Discard(WEB_ADDRESS, "new")
     ),
     "a checked instance attached only to its own quiet networks is switched to": DataCase(
         (OLD_ON_D1, NEW_ON_D1), "old", (D1,), (STARTED_NEW_ON_D1, Check("new", "/health")), Switch(WEB_ADDRESS, "new", GENERATION)
     ),
     "a running instance of the build on another data set is retired, not switched to": DataCase(
-        (OLD_ON_D1, NEW_ON_D2), "old", (D1, data_set_named("d2")), (), Retire("new")
+        (OLD_ON_D1, NEW_ON_D2), "old", (D1, data_set_named("d2")), (), Discard(WEB_ADDRESS, "new")
     ),
     "a left-over instance that can reach out is retired, not switched to": DataCase(
-        (OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (), Retire("new")
+        (OLD_ON_D1, on_data(NEW, "d1", "bridge")), "old", (D1,), (), Discard(WEB_ADDRESS, "new")
     ),
     "a serving instance attached to another data set's quiet network is replaced, not kept": DataCase(
         (on_data(NEW, "d1", "network-d2"),),
@@ -630,3 +635,14 @@ def test_a_retire_stops_background_services_first_and_deletes_every_part_of_the_
     kept = step((), (), None)
     assert isinstance(kept, Done)
     assert kept.answer.kept_data_sets == ["d1", "d2"]
+
+
+def test_a_routes_file_launchplane_did_not_write_is_that_lanes_fault_stops_its_move_and_is_removed_by_its_retire() -> None:
+    proxy = Given((OLD,), ("old", None)).proxy()
+    proxy.unread[WEB_ADDRESS] = "The routes file is not the route Launchplane writes"
+    lane = Reading(SINCE, proxy.read(), proxy.host.read(), {WEB_ADDRESS: None}).lane("site", "testing")
+    judged = judge(lane, Product(), Work.MOVE)
+    step = decide_move(judged, TARGET, Product(), FRESH_NAMES, (), GENERATION)
+    assert [finding.shown for finding in judged.of_kind(Kind.ROUTE_UNREAD)] == ["wrong"]
+    assert isinstance(step, Stop) and "Retiring the lane removes the file" in step.reason
+    assert decide_retire(judge(lane, Product(), Work.RETIRE), None, ()) == RemoveRoute(WEB_ADDRESS, None)

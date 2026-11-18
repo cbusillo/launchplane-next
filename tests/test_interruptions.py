@@ -45,8 +45,8 @@ PAUSES = {
     "M3, before the rename": Pause("before", steps.Switch),
     "M4, renamed and its reply not yet had, proxy still on A": Pause("after", steps.Switch, renamed=True, proxy_held=True),
     "M4, renamed, waiting for a proxy still on A": Pause("before", steps.AwaitSwitch, renamed=True, proxy_held=True),
-    "M5, proxy on B, old instance still up": Pause("before", steps.Retire, renamed=True),
-    "M6, old instance gone": Pause("after", steps.Retire, renamed=True),
+    "M5, proxy on B, old instance still up": Pause("before", steps.Discard, renamed=True),
+    "M6, old instance gone": Pause("after", steps.Discard, renamed=True),
     "Z, answered": Pause("ended", renamed=True),
 }
 
@@ -280,11 +280,11 @@ def test_a_move_to_the_build_already_serving_that_is_cancelled_before_its_result
     end, cancels = record.end, list[int]()
 
     def cancel_just_before_the_result_is_saved(
-        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None
+        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
     ) -> bool:
         if not cancels:
             cancels.append(client.post(f"/requests/{asked}/cancel").status_code)
-        return end(attempt, stands, answer, error)
+        return end(attempt, stands, answer, error, cancel_seen=cancel_seen)
 
     record.end = cancel_just_before_the_result_is_saved
     assert worker.work_next() is True

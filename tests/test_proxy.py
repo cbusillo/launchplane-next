@@ -21,7 +21,6 @@ from launchplane.proxy import (
     abandoned_mark_of,
     route_file_of,
     route_text,
-    staged_route_file_of,
 )
 from tests.pretend_host import EARLIER, GENERATION
 
@@ -132,7 +131,7 @@ def test_a_cancel_that_reaches_the_gate_first_wins_and_the_switch_of_that_genera
     proxy = TraefikProxy(host)
     assert (proxy.abandon(WEB_ADDRESS, GENERATION), proxy.switch(WEB_ADDRESS, "b", GENERATION)) == (True, False)
     route = proxy.read().route_of(WEB_ADDRESS)
-    assert (route.written, route.written_by, route.abandoned) == ("a", None, GENERATION)
+    assert (route.written, route.written_by, route.abandoned) == ("a", None, {GENERATION})
     assert sorted(host.files) == [abandoned_mark_of(WEB_ADDRESS, GENERATION), route_file_of(WEB_ADDRESS)]
 
 
@@ -141,7 +140,7 @@ def test_a_switch_that_reaches_the_gate_first_wins_and_a_cancel_of_that_generati
     proxy = TraefikProxy(host)
     assert (proxy.switch(WEB_ADDRESS, "b", GENERATION), proxy.abandon(WEB_ADDRESS, GENERATION)) == (True, False)
     route = proxy.read().route_of(WEB_ADDRESS)
-    assert (route.written, route.written_by, route.abandoned) == ("b", GENERATION, None)
+    assert (route.written, route.written_by, route.abandoned) == ("b", GENERATION, frozenset())
 
 
 def test_a_cancel_won_twice_is_still_won_and_one_of_an_earlier_generation_does_not_stop_a_later_switch() -> None:
@@ -152,17 +151,63 @@ def test_a_cancel_won_twice_is_still_won_and_one_of_an_earlier_generation_does_n
     assert proxy.read().route_of(WEB_ADDRESS).written_by == GENERATION
 
 
-def test_a_cancel_removes_what_its_generation_staged_and_the_mark_of_an_earlier_cancel_of_the_lane_and_no_other_lanes() -> None:
+def test_a_verdict_is_its_generations_own_and_a_late_cancel_of_another_generation_replaces_nothing() -> None:
     host = ProxyHost({WEB_ADDRESS: "a", OTHER: "p"})
     proxy = TraefikProxy(host)
-    host.files[staged_route_file_of(WEB_ADDRESS, GENERATION)] = route_text(WEB_ADDRESS, "b", GENERATION)
-    proxy.abandon(OTHER, EARLIER)
-    proxy.abandon(WEB_ADDRESS, EARLIER)
-    proxy.abandon(WEB_ADDRESS, GENERATION)
-    assert sorted(path.name for path in host.files if path.suffix != ".yml") == sorted(
-        [abandoned_mark_of(OTHER, EARLIER).name, abandoned_mark_of(WEB_ADDRESS, GENERATION).name]
+    assert [proxy.abandon(OTHER, EARLIER), proxy.abandon(WEB_ADDRESS, GENERATION), proxy.abandon(WEB_ADDRESS, EARLIER)] == [True] * 3
+    assert proxy.switch(WEB_ADDRESS, "b", GENERATION) is False
+    seen = proxy.read()
+    assert dict(seen.abandoned) == {WEB_ADDRESS: {GENERATION, EARLIER}, OTHER: {EARLIER}}
+    assert seen.route_of(WEB_ADDRESS).written == "a"
+
+
+def test_a_generation_that_was_once_switched_to_stays_too_late_to_cancel_after_a_later_generation_switched() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    assert (proxy.switch(WEB_ADDRESS, "b", EARLIER), proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (True, True)
+    assert (proxy.abandon(WEB_ADDRESS, EARLIER), proxy.read().route_of(WEB_ADDRESS).written) == (False, "c")
+
+
+def test_a_rename_sent_before_its_candidate_was_discarded_and_arriving_after_renames_nothing() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    run_in, sent = host.run_in, list[list[str]]()
+
+    def accept_and_do_not_run_yet(container: str, command: list[str]) -> CommandResult:
+        sent.append(command)
+        return CommandResult(0, f"held for {container}")
+
+    host.run_in = accept_and_do_not_run_yet
+    proxy.switch(WEB_ADDRESS, "b", GENERATION)
+    host.run_in = run_in
+    assert proxy.discard(WEB_ADDRESS, "b") is True
+    late = run_in(PROXY_NAME, sent[0])
+    assert (late.exit_code, proxy.read().route_of(WEB_ADDRESS).written, proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (3, "a", True)
+
+
+def test_a_candidate_the_routes_file_already_names_is_not_discarded_so_a_rename_that_happened_is_honoured() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    assert (proxy.switch(WEB_ADDRESS, "b", GENERATION), proxy.discard(WEB_ADDRESS, "b"), proxy.discard(WEB_ADDRESS, "a")) == (
+        True,
+        False,
+        True,
     )
-    assert dict(proxy.read().abandoned) == {WEB_ADDRESS: GENERATION, OTHER: EARLIER}
+
+
+def test_a_replayed_rename_of_a_generation_changes_nothing_once_another_generation_has_switched() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    run_in, sent = host.run_in, list[list[str]]()
+
+    def run_and_keep(container: str, command: list[str]) -> CommandResult:
+        sent.append(command)
+        return run_in(container, command)
+
+    host.run_in = run_and_keep
+    assert (proxy.switch(WEB_ADDRESS, "b", EARLIER), proxy.switch(WEB_ADDRESS, "c", GENERATION)) == (True, True)
+    replayed = run_in(PROXY_NAME, next(command for command in sent if "flock" in command))
+    assert (replayed.exit_code, proxy.read().route_of(WEB_ADDRESS).written) == (3, "c")
 
 
 def test_a_gate_command_the_host_fails_is_an_error_and_is_taken_neither_as_won_nor_as_lost() -> None:
@@ -172,6 +217,8 @@ def test_a_gate_command_the_host_fails_is_an_error_and_is_taken_neither_as_won_n
         TraefikProxy(host).switch(WEB_ADDRESS, "b", GENERATION)
     with pytest.raises(ProxyError, match="Read-only file system"):
         TraefikProxy(host).abandon(WEB_ADDRESS, GENERATION)
+    with pytest.raises(ProxyError, match="Read-only file system"):
+        TraefikProxy(host).discard(WEB_ADDRESS, "b")
 
 
 def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_place() -> None:
@@ -261,11 +308,30 @@ FOREIGN_LANE_FILES = {
 
 
 @pytest.mark.parametrize("text", FOREIGN_LANE_FILES.values(), ids=FOREIGN_LANE_FILES.keys())
-def test_a_lane_file_that_is_not_exactly_the_route_launchplane_writes_is_an_error(text: str) -> None:
-    host = ProxyHost({})
+def test_a_lane_file_that_is_not_the_route_launchplane_writes_is_that_lanes_fault_and_every_other_lane_is_still_read(
+    text: str,
+) -> None:
+    host = ProxyHost({OTHER: "site-p1"})
     host.files[route_file_of(WEB_ADDRESS)] = text
-    with pytest.raises(ProxyError, match="not the route Launchplane writes"):
-        lane_route(host)
+    seen = TraefikProxy(host).read()
+    assert (seen.route_of(OTHER).written, seen.route_of(WEB_ADDRESS).written) == ("site-p1", None)
+    assert "not the route Launchplane writes" in (seen.route_of(WEB_ADDRESS).unread or "")
+
+
+STAMPS_OF_NO_RELEASE = {
+    "a stamp of the code before generations": "# launchplane.request=41\n",
+    "no stamp": "",
+    "a stamp whose text is not a generation": "# launchplane.generation=41\n",
+}
+
+
+@pytest.mark.parametrize("stamp", STAMPS_OF_NO_RELEASE.values(), ids=STAMPS_OF_NO_RELEASE.keys())
+def test_a_route_with_this_first_line_is_a_route_all_the_same_renamed_for_no_release(stamp: str) -> None:
+    host = ProxyHost({})
+    host.files[route_file_of(WEB_ADDRESS)] = stamp + route_text(WEB_ADDRESS, "site-t1")
+    host.load()
+    route = lane_route(host)
+    assert (route.written, route.written_by, route.unread, route.sends_visitors_to) == ("site-t1", None, None, "site-t1")
 
 
 def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visitors() -> None:

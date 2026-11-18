@@ -159,6 +159,20 @@ class Switched:
     won: bool
 
 
+# An instance that receives no visitors, taken through the gate and then retired: a rename on its way to it is refused
+# from there on. Where the rename had already happened, it lost: the routes file names the instance, and it stays.
+@dataclass(frozen=True)
+class Discard:
+    web_address: str
+    container: str
+
+
+@dataclass(frozen=True)
+class Discarded:
+    container: str
+    won: bool
+
+
 # A cancel carried to the gate.
 @dataclass(frozen=True)
 class Abandon:
@@ -197,7 +211,7 @@ class AwaitBackgroundService:
 @dataclass(frozen=True)
 class RemoveRoute:
     web_address: str
-    container: str
+    container: str | None
 
 
 @dataclass(frozen=True)
@@ -297,6 +311,7 @@ type Action = (
     | AwaitRoute
     | WriteRoute
     | Switch
+    | Discard
     | Abandon
     | AwaitSwitch
     | RemoveRoute
@@ -319,4 +334,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | NotLoadedYet
+type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | NotLoadedYet

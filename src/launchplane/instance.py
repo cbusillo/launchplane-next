@@ -144,8 +144,10 @@ class LaneRoute:
     back_soon_runs: bool = True
     # The generation whose release renamed the routes file into place, where the file says one did.
     written_by: str | None = None
-    # The generation a cancel won against at the gate: its release will never be switched to.
-    abandoned: str | None = None
+    # The generations a cancel won against at the gate: their releases will never be switched to.
+    abandoned: frozenset[str] = frozenset()
+    # Why the lane's routes file is not a route Launchplane writes, where it is not.
+    unread: str | None = None
 
     # The mark is the lane's own route file, so it reads the same while the proxy is down.
     @property
@@ -166,7 +168,8 @@ class ProxySeen:
     back_soon_runs: bool
     written: Mapping[str, WrittenRoute] = field(default_factory=dict[str, WrittenRoute])
     loaded: Mapping[str, LoadedRoute] = field(default_factory=dict[str, LoadedRoute])
-    abandoned: Mapping[str, str] = field(default_factory=dict[str, str])
+    abandoned: Mapping[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
+    unread: Mapping[str, str] = field(default_factory=dict[str, str])
 
     def route_of(self, web_address: str) -> LaneRoute:
         written = self.written.get(web_address)
@@ -177,7 +180,8 @@ class ProxySeen:
             proxy_runs=self.runs,
             back_soon_runs=self.back_soon_runs,
             written_by=None if written is None else written.generation,
-            abandoned=self.abandoned.get(web_address),
+            abandoned=self.abandoned.get(web_address, frozenset()),
+            unread=self.unread.get(web_address),
         )
 
     def sends_visitors_to(self) -> dict[str, str]:

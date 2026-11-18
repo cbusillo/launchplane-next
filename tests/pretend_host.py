@@ -238,7 +238,10 @@ class PretendProxy:
         self.loaded: dict[str, LoadedRoute] = {}
         self.written: dict[str, str] = {}
         self.written_by: dict[str, str | None] = {}
-        self.abandoned: dict[str, str] = {}
+        self.abandoned: dict[str, frozenset[str]] = {}
+        self.committed: set[str] = set()
+        self.discarded: set[str] = set()
+        self.unread: dict[str, str] = {}
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
         self.holds_delivery = False
         self.at_the_gate: Callable[[str], None] = lambda _passing: None
@@ -262,6 +265,7 @@ class PretendProxy:
             },
             loaded=dict(self.loaded) if self.running else {},
             abandoned=dict(self.abandoned),
+            unread=dict(self.unread),
         )
 
     def route(self, web_address: str, container: str) -> None:
@@ -289,18 +293,25 @@ class PretendProxy:
     # As on the host, the two that pass the gate exclude each other: one finds what the other did.
     def switch(self, web_address: str, container: str, generation: str) -> bool:
         self.at_the_gate("before the switch")
-        if self.abandoned.get(web_address) == generation:
+        if generation in self.abandoned.get(web_address, ()) or container in self.discarded:
             return False
         self.written[web_address] = container
         self.written_by[web_address] = generation
+        self.committed.add(generation)
         self.at_the_gate("after the switch")
         self.host.record(f"route {container}")
         return True
 
     def abandon(self, web_address: str, generation: str) -> bool:
-        if self.written_by.get(web_address) == generation:
+        if generation in self.committed:
             return False
-        self.abandoned[web_address] = generation
+        self.abandoned[web_address] = self.abandoned.get(web_address, frozenset()) | {generation}
+        return True
+
+    def discard(self, web_address: str, container: str) -> bool:
+        if self.written.get(web_address) == container:
+            return False
+        self.discarded.add(container)
         return True
 
     def remove_route(self, web_address: str) -> None:
@@ -432,7 +443,7 @@ class Given:
             proxy.written[WEB_ADDRESS] = written
             proxy.written_by[WEB_ADDRESS] = self.written_by
         if self.abandoned is not None:
-            proxy.abandoned[WEB_ADDRESS] = self.abandoned
+            proxy.abandoned[WEB_ADDRESS] = frozenset({self.abandoned})
         return proxy
 
     # Read as the status call reads: every lane, and the web address asked where the proxy sends it to a product.

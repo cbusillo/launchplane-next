@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -47,7 +47,7 @@ from launchplane.steps import (
     Stop,
     TooLate,
 )
-from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, told
+from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, tell_nobody, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -82,6 +82,7 @@ class Proxy(Protocol):
     def write_route(self, web_address: str, container: str) -> None: ...
     def switch(self, web_address: str, container: str, generation: str) -> bool: ...
     def abandon(self, web_address: str, generation: str) -> bool: ...
+    def discard(self, web_address: str, container: str) -> bool: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
     def show_back_soon(self, web_address: str) -> None: ...
@@ -215,7 +216,13 @@ def settle[Answer](
                 f"{lane.lane} of {lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
             )
-        done.append(taken_and_told(step, take, witness, back=back))
+        # A release that is renamed and not yet loaded is waited for as long as it takes: the wait is no step of the
+        # call's count and is told once, however often it is taken.
+        waiting = isinstance(step, steps.AwaitSwitch) and isinstance(done[-1] if done else None, steps.NotLoadedYet)
+        event = taken_and_told(step, take, replace(witness, tell=tell_nobody) if waiting else witness, back=back)
+        if waiting and isinstance(event, steps.NotLoadedYet):
+            continue
+        done.append(event)
 
 
 class Lanes:
@@ -347,7 +354,7 @@ class Lanes:
     # of the action, and from no stamp or mark. A retire has removed the route by then, and the old instance of a
     # move is retired once the proxy has loaded the switch, so neither is stopped by it.
     def refuse_to_take_from_visitors(self, action: Action) -> None:
-        if not isinstance(action, steps.Retire | steps.RemoveInstance | steps.StopPart):
+        if not isinstance(action, steps.Retire | steps.Discard | steps.RemoveInstance | steps.StopPart):
             return
         loaded = self.proxy.read().loaded
         sent_here = sorted(web_address for web_address, route in loaded.items() if route.container == action.container)
@@ -369,8 +376,16 @@ class Lanes:
             return steps.Switched(action.container, self.proxy.switch(action.web_address, action.container, action.generation))
         if isinstance(action, steps.AwaitSwitch):
             return self.await_switch(action)
+        if isinstance(action, steps.Discard):
+            return self.discard(action)
         TAKE[type(action)](self.host, self.proxy, action)
         return action
+
+    def discard(self, action: steps.Discard) -> Event:
+        won = self.proxy.discard(action.web_address, action.container)
+        if won:
+            self.host.retire_instance(action.container)
+        return steps.Discarded(action.container, won)
 
     def await_switch(self, action: steps.AwaitSwitch) -> Event:
         try:

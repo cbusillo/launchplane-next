@@ -1,3 +1,4 @@
+import http.client
 import json
 import os
 import shlex
@@ -158,7 +159,8 @@ class RequestLoop:
         while self.running:
             try:
                 self.answers.append(self.request_once())
-            except (OSError, UnexpectedAnswer) as error:
+            # Every answer that is not whole counts: one cut off mid-body is no OSError.
+            except (OSError, http.client.HTTPException, UnexpectedAnswer) as error:
                 self.failures.append(f"{datetime.now(UTC):%H:%M:%S.%f} {error!r}")
             time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
 

@@ -200,15 +200,17 @@ class PretendRecord(Record):
             event = Event(at=now(), attempt=len(found.attempts), **self.cleaned(did=did, error=error))
             self.change(request, events=[*found.events, event])
 
-    def end(self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None) -> bool:
+    def end(
+        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+    ) -> bool:
         self.reach("writing how a request ended")
         with self.writing:
             request = self.open_attempts.get(attempt)
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
             found = self.kept[request]
-            unanswered = found.cancel_asked_at is not None and found.cancel_refused is None
-            if stands is Stands.DONE and found.work is Work.MOVE and unanswered:
+            unseen = found.work is Work.MOVE and found.cancel_asked_at is not None and not cancel_seen
+            if unseen and stands is not Stands.CANCELLED:
                 return False
             del self.open_attempts[attempt]
             attempts = self.kept[request].attempts
