@@ -35,7 +35,7 @@ Each of the four calls writes a request and answers `202` with the request and a
 | `build`, `delete_data_set` | Exactly what was asked: the build of a move, the data set a retire named for deleting. |
 | `asked_by`, `asked_at` | The address the call came from, and when. Nobody is known by name yet. |
 | `stands` | `waiting`, `working`, `done`, `failed`, `cancelled` or `needs a person`. |
-| `ended_at`, `answer`, `error` | When it ended; the result the call answers with `?wait=`, or for a cancelled request `{"put_back": [...]}`, what was done to put its lane back; the real error of a request that failed or needs a person. |
+| `ended_at`, `answer`, `error` | When it ended; the result the call answers with `?wait=`, or for a cancelled request what [cancelling](#cancelling) left; the real error of a request that failed or needs a person. |
 | `cancel_asked_at`, `cancel_asked_by` | When a cancel was asked, and by what: `request <id>`, a newer request for the lane, or `a call from the address <address>`. `null` when none was asked. |
 | `cancel_refused` | Why a cancel that was asked was not carried out, written once the worker has read the host: see [cancelling](#cancelling). |
 | `attempts` | Each time a worker took the request up: `number`, `began_at`, `ended_at`, and `ended` as `done`, `failed`, `cancelled` or `interrupted`. |
@@ -50,20 +50,22 @@ A request is `done` when its call would have answered `200`, `failed` when it wo
 `POST /requests/<id>/cancel` cancels one request, and a newer request for a lane cancels the older ones the same way. What it means depends only on where the request is:
 
 - **Waiting:** it ends as `cancelled`. Nothing was done.
-- **Working, before its point of no return:** the request is marked in the record. Its worker is never killed: it reads the mark before its next action and puts the lane back, by the same judged and checked steps as the call itself. The request ends as `cancelled` only when the judgement then finds the lane as it must be, and `answer.put_back` lists what was done. If something is left wrong or unfinished, the request ends as `failed` and `error` says what.
+- **Working, before its point of no return:** the request is marked in the record. Its worker is never killed: it reads the mark before its next action and puts the lane back, by the same judged and checked steps as the call itself. The request ends as `cancelled` when nothing it made remains on the host and each thing done to put the lane back left the part it touched as it must be. If one of them fails, or leaves that part wrong, such as a database server that had to be killed to stop it, the request ends as `failed` and `error` says which.
 - **Working, past that point:** it is too late. The request is finished as asked and ends as it would have. `cancel_refused` says why.
 - **Ended, or needing a person:** nothing changes.
 
-Where the point is, and what the request started, are read from the host each time, never from the events. An instance carries the label `launchplane.request` with the id of the request that made it, so nothing an earlier request left is touched. A routes file the proxy has not loaded yet is waited for first, so the instance the proxy sends visitors to is known before anything is removed.
+The answer of a cancelled request has `put_back`, each thing done to put the lane back; `data_sets_kept`, the data sets the request made, which stay; and `findings`, every sentence the judgement had for the lane when the cancel ended. What else is wrong or unfinished on the lane is not the cancel's verdict: it is in `findings` and on the page. `put_back` is told from the events of every attempt, each written before the change it names, so it survives a record lost in between. It is history and decides nothing.
+
+Where the point is, and what the request made, are read from the host each time, never from the events. An instance, a background service and a data set's network carry the label `launchplane.request` with the id of the request that made them, so nothing an earlier request left is touched. A routes file the proxy has not loaded yet is waited for first, so the instance the proxy sends visitors to is known before anything is removed.
 
 | Request | Too late once | Put back before that |
 | --- | --- | --- |
-| A move | The proxy sends the web address to an instance of the build asked for: visitors have been switched. | Each instance this request started is removed, as after a failed check, and then the logins no container holds. In a lane in maintenance a move starts nothing, so nothing is removed. |
+| A move | The proxy sends the web address to an instance this request made, or to one this call switched to: visitors have been switched. A move to the build already serving that is cancelled before it changed anything is not too late, and changes nothing. | Each background service and each instance this request made is removed, as after a failed check, and then the logins no container holds. In a lane in maintenance a move makes nothing, so nothing is removed. |
 | A retire | The lane's routes file is gone. Removing it is the first thing a retire changes, and nothing after it can be put back: the containers are removed, and Launchplane does not make a removed instance again by itself. The rest is finished as asked, except that a data set named for deleting is kept when the cancel came before it was deleted: `cancel_refused` says so, and the answer lists it in `kept_data_sets`. | Nothing: nothing was changed. |
 | Beginning maintenance | The routes file points at the back soon page. That is its first change too. Ending maintenance brings the lane back. | Nothing: nothing was changed. |
 | Ending maintenance | The routes file points at the instance again. | What it started is stopped again, the database server last, as after a failed check. |
 
-Putting a lane back never deletes data: a data set the request made, and a database server it started, stay, as retiring leaves them. A lane left with a data set and no instance is not as it must be, so a first move with data that is cancelled ends as `failed` and says so.
+Putting a lane back never deletes data: a data set the request made, and a database server it started, stay, as retiring leaves them. A cancelled first move of a product with data is still `cancelled`, and names the data set in `data_sets_kept`.
 
 | Status | Body | Meaning |
 | --- | --- | --- |
@@ -136,8 +138,9 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **Who may cancel is not settled.** Any caller can, as any caller can ask.
 - **A cancel waits for the action under way.** The mark is read between actions, and one action can take as long as a check, 20 s, or a stop, 30 s.
 - **A cancel asked of a retire keeps the data set it named, also when the rest was too late to cancel.** The direction session chose this as the safe side; Chris may reverse it.
-- **A cancelled request over a lane that was already unfinished ends as `failed`,** though the request changed nothing: the judgement is of the lane, not of what the request did.
-- **Only an instance is stamped with its request.** A background service and the parts of a data set are not: putting back removes neither.
+- **A move that switched to an instance an earlier request left, was killed, and is cancelled before it is taken up again ends as `cancelled`,** though visitors were switched: that instance carries the earlier request's stamp, and the call that switched is gone. Within one attempt the call knows it switched, and it is too late.
+- **A data set is stamped on its network only,** the first part of it that is made.
+- **A part made before stamps carries none,** so a cancel leaves it.
 - **An instance left by an earlier request that a move retired before it was cancelled is not brought back.** It received no visitors.
 - **A request that ends between the cancel and its worker's next reading ends as it would have.** The cancel call then answers `409` and says how it ended.
 - **The locks on what lanes share are in the process.** A second Launchplane on the same host is held off each lane by the lane's turn, and not off the proxy or the routes folder.

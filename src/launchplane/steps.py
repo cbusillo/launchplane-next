@@ -66,6 +66,10 @@ class MaintenanceResult(BaseModel):
 # The answer of a request that a cancel ended: what was done to put its lane back as it was.
 class PutBack(BaseModel):
     put_back: list[str] = []
+    # Data sets the request made. Putting a lane back never deletes data, so they stay.
+    data_sets_kept: list[str] = []
+    # What was found on the lane when the cancel ended, whoever left it.
+    findings: list[str] = []
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,7 @@ class CreateDataSetNetwork:
     product: str
     lane: str
     data_set: str
+    request: int | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,7 @@ class StartBackgroundService:
     instance: str
     use: DataSetUse | None
     command: tuple[str, ...]
+    request: int | None = None
 
 
 @dataclass(frozen=True)

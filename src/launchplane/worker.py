@@ -10,9 +10,9 @@ from launchplane.instance import LaneBuild
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands
+from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, PutBack, RetireResult
 from launchplane.telling import Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -159,7 +159,7 @@ class Worker:
             self.secrets.read_secrets()
             answer = carried_out(self.lanes, request, self.witness_of(request, attempt, held))
         except Cancelled as cancelled:
-            self.end(attempt, Stands.CANCELLED, cancelled.put_back, None)
+            self.end_cancelled(request, attempt, cancelled.put_back)
         except STOPPED as error:
             self.end(attempt, Stands.FAILED, None, f"{request.attempted()} stopped, and is safe to ask again: {error}")
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
@@ -171,6 +171,11 @@ class Worker:
             self.end(attempt, Stands.FAILED, None, why)
         else:
             self.end_with(attempt, answer)
+
+    def end_cancelled(self, request: Request, attempt: int, answer: PutBack) -> None:
+        kept = self.record.read(request.id)
+        told = [] if kept is None else put_back_told(kept)
+        self.end(attempt, Stands.CANCELLED, answer.model_copy(update={"put_back": told}), None)
 
     def end_with(self, attempt: int, answer: Answer) -> None:
         failed = answer.outcome in NOT_A_SUCCESS

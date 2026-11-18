@@ -6,7 +6,6 @@ from launchplane.plan import (
     changes_so_far,
     check_or_problems,
     failure_report,
-    has_nothing,
     is_turned_back,
     left_for_a_move,
     prepared,
@@ -55,6 +54,10 @@ def next_to_stop(lane: LaneReading) -> Action | None:
         if database.state != InstanceState.STOPPED:
             return StopDatabase(database.container)
     return None
+
+
+def has_nothing(lane: LaneReading) -> bool:
+    return not (lane.instances or lane.background_services or lane.data_sets)
 
 
 def answer_for(product: str, lane: str, route: LaneRoute, outcome: MaintenanceOutcome) -> MaintenanceResult:
@@ -216,7 +219,7 @@ def decide_end(
 def begin_step_back(judged: Judgement, back: tuple[Event, ...]) -> StepBack:
     lane = judged.lane
     if not lane.route.in_maintenance:
-        return put_back_or_what_is_left(judged, back)
+        return put_back_or_what_is_left(judged, back, None)
     return TooLate(
         f"{lane.web_address} already shows the back soon page, so beginning maintenance could not be cancelled and is "
         f"finished as asked. POST /lanes/{lane.product}/{lane.lane}/maintenance/end brings the lane back."
@@ -228,7 +231,7 @@ def begin_step_back(judged: Judgement, back: tuple[Event, ...]) -> StepBack:
 def end_step_back(judged: Judgement, back: tuple[Event, ...]) -> StepBack:
     lane = judged.lane
     if lane.route.in_maintenance:
-        return next_to_stop(lane) or put_back_or_what_is_left(judged, back)
+        return next_to_stop(lane) or put_back_or_what_is_left(judged, back, None)
     return TooLate(
         f"{lane.web_address} already sends its visitors to {lane.route.written}, so ending maintenance could not be cancelled "
         f"and is finished as asked. POST /lanes/{lane.product}/{lane.lane}/maintenance/begin puts the lane in maintenance again."

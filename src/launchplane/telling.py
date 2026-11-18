@@ -38,6 +38,9 @@ class Witness:
 
 NOBODY = Witness()
 
+# Ends the line written before a change that puts a lane back. What a cancel put back is told from these lines.
+TO_PUT_BACK = ", to put the lane back"
+
 
 NAMED: dict[type, Callable[[Any], str]] = {
     steps.StartProxy: lambda _step: "start the proxy",

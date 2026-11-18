@@ -46,7 +46,7 @@ from launchplane.steps import (
     Stop,
     TooLate,
 )
-from launchplane.telling import NOBODY, Witness, named, told
+from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -55,9 +55,11 @@ type Lane = tuple[str, str]
 class InstanceHost(Protocol):
     def read(self, lane: Lane | None = None) -> OnHost: ...
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None: ...
-    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None: ...
+    def start_background_service(
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
-    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None: ...
+    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
@@ -95,7 +97,7 @@ class Stopped(Exception):
 # A cancel was carried out and the lane is put back, so the call has no answer of its own to give.
 class Cancelled(Exception):
     def __init__(self, put_back: PutBack) -> None:
-        super().__init__(f"The call was cancelled: {put_back.put_back or 'nothing had to be put back'}.")
+        super().__init__("The call was cancelled and its lane put back.")
         self.put_back = put_back
 
 
@@ -133,7 +135,9 @@ TAKE: dict[type, Take] = {
     steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container),
     steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container),
     steps.RemoveRoute: lambda _host, proxy, step: proxy.remove_route(step.web_address),
-    steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(step.product, step.lane, step.data_set),
+    steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(
+        step.product, step.lane, step.data_set, step.request
+    ),
     steps.CreateDataSetVolume: lambda host, _proxy, step: host.create_data_set_volume(step.product, step.lane, step.data_set),
     steps.CreateDatabase: lambda host, _proxy, step: host.create_database(
         step.product, step.lane, step.data_set, step.network, step.volume, step.image
@@ -143,7 +147,7 @@ TAKE: dict[type, Take] = {
     steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
     steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use, step.request),
     steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
-        step.target, step.instance, step.use, list(step.command)
+        step.target, step.instance, step.use, list(step.command), step.request
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
@@ -154,15 +158,20 @@ TAKE: dict[type, Take] = {
 }
 
 
-def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness) -> Event:
+# A change that puts a lane back is told before it is made, so it is in the record even if the record is lost just after.
+def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness, *, back: bool) -> Event:
     witness.hold()
     tell = witness.tell
+    told_before = back and plan.change_made_by(action) is not None
+    if told_before:
+        tell(f"{named(action)}{TO_PUT_BACK}", None)
     try:
         event = take(action)
     except (ContainerHostError, ProxyError) as error:
         tell(named(action), str(error))
         raise
-    tell(*told(action, event))
+    if not told_before:
+        tell(*told(action, event))
     return event
 
 
@@ -185,7 +194,8 @@ def settle[Answer](
         if turned_at is None and witness.cancel_asked():
             turned_at = len(done)
         cancel = None if turned_at is None else Cancel(tuple(done[turned_at:]), refused)
-        judged = read_judged(plan.is_turned_back(cancel))
+        back = plan.is_turned_back(cancel)
+        judged = read_judged(back)
         step = next_step(judged, tuple(done), cancel)
         if isinstance(step, TooLate):
             witness.refuse_cancel(step.reason)
@@ -202,7 +212,7 @@ def settle[Answer](
                 f"{judged.lane.lane} of {judged.lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
             )
-        done.append(taken_and_told(step, take, witness))
+        done.append(taken_and_told(step, take, witness, back=back))
 
 
 class Lanes:

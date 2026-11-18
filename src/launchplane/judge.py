@@ -19,6 +19,8 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
+    Stamp,
+    Unread,
     web_address_of,
 )
 from launchplane.product import Product, ProductError
@@ -41,6 +43,7 @@ class WorkUnread:
 
 class Kind(StrEnum):
     UNREAD = "could not be read"
+    STAMP_UNREAD = "says a request made it that is none"
     NO_VISITORS = "no instance receives visitors"
     PROXY_STOPPED = "the proxy is not running"
     ROUTE_NOT_LOADED = "the proxy has not loaded the routes file"
@@ -236,6 +239,13 @@ def data_set_label_findings(part: str, instance: RunningInstance, of: Judged) ->
     return [] if sentence is None else [Found(Weight.WRONG, instance.container, Kind.WRONG_DATA_SET, sentence)]
 
 
+# A stamp that is not a request's id is a fault of the part that carries it, and of nothing else on the host.
+def stamp_findings(part: str, subject: str, stamp: Stamp) -> list[Found]:
+    if not isinstance(stamp, Unread):
+        return []
+    return [Found(Weight.FAULT, subject, Kind.STAMP_UNREAD, f"{part} does not say which request made it: {stamp.why}")]
+
+
 def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
     part, subject = f"The instance {instance.container}", instance.container
     serves = of.serving is not None and of.serving.container == subject
@@ -243,6 +253,7 @@ def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
     beside = active is not None and active.container != subject
     return [
         *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
+        *stamp_findings(part, subject, instance.request),
         *state_findings(part, instance, of, Weight.WRONG if serves else Weight.UNFINISHED),
         *data_set_label_findings(part, instance, of),
         *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
@@ -301,6 +312,7 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         if not parts
     ]
     return [
+        *stamp_findings(part, subject, found.request),
         *[
             Found(Weight.WRONG, subject, Kind.DOUBLED, f"{part} has {doubled} where it must have one")
             for doubled in doubled_parts(found)
@@ -370,7 +382,13 @@ def one_background_service_findings(running: RunningBackgroundService, of: Judge
     connected = [] if beside is None else connection_findings(running, beside, of)
     belonging = belonging_findings(part, running, owner, of)
     of_the_serving_instance = of.serving is not None and not belonging
-    return [*belonging, *still_up, *connected, *(steadiness_findings(part, running, of) if of_the_serving_instance else [])]
+    return [
+        *stamp_findings(part, running.container, running.request),
+        *belonging,
+        *still_up,
+        *connected,
+        *(steadiness_findings(part, running, of) if of_the_serving_instance else []),
+    ]
 
 
 def background_service_count_findings(containers: list[str], of: Judged) -> list[Found]:

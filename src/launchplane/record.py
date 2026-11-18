@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 from launchplane.judge import Work
 from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
 from launchplane.steps import PutBack
+from launchplane.telling import TO_PUT_BACK
 
 MOST_ATTEMPTS = 3
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
@@ -196,9 +197,18 @@ def needs_a_person(request: Request) -> str:
 
 
 def how_cancelled(request: Request) -> str:
-    put_back = PutBack.model_validate(request.answer or {}).put_back
-    did = f"To put the lane back, Launchplane {', '.join(put_back)}." if put_back else "Nothing on the host had to be put back."
-    return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}"
+    answer = PutBack.model_validate(request.answer or {})
+    did = (
+        f"Done to put the lane back: {'; '.join(answer.put_back)}." if answer.put_back else "Nothing on the host had to be put back."
+    )
+    kept = f" It made the data set {', '.join(answer.data_sets_kept)}, which is kept." if answer.data_sets_kept else ""
+    return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}{kept}"
+
+
+# What every attempt said it was about to do to put the lane back. It is history: nothing is decided from it.
+def put_back_told(kept: Kept) -> list[str]:
+    told = [event.did.removesuffix(TO_PUT_BACK) for event in kept.events if event.did.endswith(TO_PUT_BACK)]
+    return list(dict.fromkeys(told))
 
 
 GIVEN_UP = " A person gave it up."

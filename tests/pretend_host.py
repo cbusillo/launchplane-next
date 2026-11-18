@@ -114,7 +114,9 @@ class PretendHost:
         self.place(target, container, use=use, request=request)
         self.record(f"start {container}")
 
-    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
+    def start_background_service(
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None:
         container = background_service_container_of(instance)
         self.background_services[container] = RunningBackgroundService(
             product=target.product,
@@ -126,6 +128,7 @@ class PretendHost:
             running_for_seconds=0.0,
             instance=instance,
             data_set=None if use is None else use.data_set,
+            request=request,
         )
         self.most_background_services_running = max(self.most_background_services_running, len(self.background_services))
         self.record(f"start background service {instance} on {None if use is None else use.network} with {' '.join(command)}")
@@ -148,9 +151,10 @@ class PretendHost:
         )
         self.data_sets[data_set] = found.model_copy(update=parts)
 
-    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
+    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None:
         self.networks[f"network-{data_set}"] = True
-        self.change_data_set(product, lane, data_set, networks=(HostNetwork(name=f"network-{data_set}", is_quiet=True),))
+        network = HostNetwork(name=f"network-{data_set}", is_quiet=True)
+        self.change_data_set(product, lane, data_set, networks=(network,), request=request)
         self.record(f"network {data_set}")
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:

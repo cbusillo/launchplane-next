@@ -16,7 +16,7 @@ Only containers carrying `launchplane.product` are Launchplane's. Any other cont
 | `launchplane.part` | `web`, `background-service` or `database`; a container without it is `web` |
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a background service, the container of its instance's web part |
-| `launchplane.request` | on a web part, the id of the [request](requests.md) that made it |
+| `launchplane.request` | on a web part, a background service and a data set's network, the id of the [request](requests.md) that made it. One that is not a request's id makes that part wrong, and nothing else. |
 | `launchplane.secret-variables` | on a web part, background service or database server given a secret, the environment variables that hold one, separated by commas |
 
 Data set networks and volumes carry the product, lane and data set labels too.

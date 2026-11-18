@@ -152,6 +152,11 @@ def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> 
     return replace(options, labels=labels, environment=login)
 
 
+# What a request makes is stamped with its id as it is made, so the host shows what each request started.
+def stamp_of(request: int | None) -> dict[str, str]:
+    return {} if request is None else {REQUEST_LABEL: str(request)}
+
+
 def helper_options(helper: HelperContainer) -> RunOptions:
     return RunOptions(
         image=helper.image,
@@ -335,19 +340,21 @@ class ContainerHost:
         ready = options if use is None else on_data_set(options, use, login_on(use))
         self.create(ready).start()
 
-    # An instance is stamped with the request that makes it, so the host shows what a request started.
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
-            stamp = {} if request is None else {REQUEST_LABEL: str(request)}
-            self.run_part(replace(options, labels=options.labels | stamp), use, lambda on: self.logins.make(container, on))
+            self.run_part(
+                replace(options, labels=options.labels | stamp_of(request)), use, lambda on: self.logins.make(container, on)
+            )
 
-    def start_background_service(self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str]) -> None:
+    def start_background_service(
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+    ) -> None:
         networks = [LANE_NETWORK] if use is None else [use.network]
         options = part_options(target, background_service_container_of(instance), "background-service", networks, command)
         with attempting(f"Starting the background service of the instance {instance}", self.address):
-            marked = replace(options, labels=options.labels | {INSTANCE_LABEL: instance})
+            marked = replace(options, labels=options.labels | {INSTANCE_LABEL: instance} | stamp_of(request))
             self.run_part(marked, use, lambda _on: self.logins.given_to(instance))
 
     def await_background_service(self, container: str, steady_seconds: float) -> None:
@@ -363,9 +370,10 @@ class ContainerHost:
                 )
             self.sleep(POLL_SECONDS)
 
-    def create_data_set_network(self, product: str, lane: str, data_set: str) -> None:
+    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None:
         with attempting(f"Making the network of the data set {data_set}", self.address):
-            self.create_network(f"launchplane-data-{data_set}", data_set_labels(product, lane, data_set), quiet=True)
+            labels = data_set_labels(product, lane, data_set) | stamp_of(request)
+            self.create_network(f"launchplane-data-{data_set}", labels, quiet=True)
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
         with attempting(f"Making the volume of the data set {data_set}", self.address):

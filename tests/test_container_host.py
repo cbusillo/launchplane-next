@@ -2,6 +2,7 @@ import json
 import threading
 import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -21,8 +22,11 @@ from launchplane.instance import (
     LaneBuild,
     Mount,
     OnHost,
+    ProxySeen,
+    Reading,
     Unread,
 )
+from launchplane.judge import Kind, judge
 from launchplane.product import Product, ProductError, ProductFolder
 from launchplane.proxy import PROXY
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
@@ -258,6 +262,21 @@ def test_an_instance_is_stamped_with_the_request_that_made_it_and_read_back_with
     host.start_instance(TARGET, WEB, None, 41)
     host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None)
     assert {each.container: each.request for each in host.read().instances} == {WEB: 41, "shop-testing-bbbbbbbbbbbb": None}
+
+
+def test_a_request_label_that_is_no_request_id_is_read_as_unread_and_makes_only_that_instance_wrong() -> None:
+    longer_than_python_turns_into_a_number = "9" * 4301
+    marked = container("web", "web", []) | {
+        "Labels": DATA_SET_LABELS | {"launchplane.request": longer_than_python_turns_into_a_number}
+    }
+    [instance] = read([marked]).instances
+    judged = judge(
+        Reading(datetime.now(UTC), ProxySeen(runs=True, back_soon_runs=True), read([marked])).lane("shop", "testing"),
+        Product(),
+        None,
+    )
+    assert instance.request == Unread(why="its label launchplane.request, 4301 characters long, is not the id of a request")
+    assert [(finding.subject, finding.shown) for finding in judged.of_kind(Kind.STAMP_UNREAD)] == [("web", "wrong")]
 
 
 def test_two_lanes_that_find_the_proxy_missing_at_the_same_moment_make_it_once() -> None:
