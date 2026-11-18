@@ -524,6 +524,21 @@ def test_a_rename_in_flight_when_launchplane_is_killed_that_reaches_the_gate_fir
     assert [attempt["ended"] for attempt in ended["attempts"]] == ["interrupted", "done"]
 
 
+def test_a_rename_that_lands_and_is_loaded_after_recovery_has_planned_to_clean_its_candidate_up_is_finished_not_failed(
+    rename_in_flight_and_launchplane_killed: RenameInFlight,
+) -> None:
+    flight = rename_in_flight_and_launchplane_killed
+    hold("before.proxy.discard")
+    let_go(TAKE_UP)
+    wait_until_stopped_at("before.proxy.discard")
+    in_proxy(f"rm -f {GATE_HELD}")
+    wait_for(lambda: flight.loop.answers[-1] == SITE.answers[1], seconds=30)
+    let_go()
+    ended = request_ended(flight.asked["id"])
+    assert (ended["stands"], ended["answer"]["outcome"], builds_of(SITE)) == ("done", "switched", [SITE.builds[1]])
+    assert (route_file_stamp(SITE), flight.loop.failures) == (stamp_line(flight.asked["generation"]), [])
+
+
 def test_a_rename_in_flight_that_reaches_the_gate_after_its_candidate_was_cleaned_up_renames_nothing(
     rename_in_flight_and_launchplane_killed: RenameInFlight,
 ) -> None:
