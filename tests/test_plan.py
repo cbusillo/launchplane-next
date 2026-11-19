@@ -70,6 +70,7 @@ from tests.pretend_host import (
     NO_GENERATION,
     NOT_LAUNCHPLANES_ROUTE,
     OLD,
+    OLD_BACKGROUND_SERVICE,
     OLD_ON_D1,
     SINCE,
     STRAY,
@@ -593,6 +594,14 @@ def test_a_move_that_has_done_everything_else_waits_and_does_not_stop_over_unrea
     assert isinstance(step, Wait)
     assert unread.sentence == "The logins of the database database-d1 could not be read: psql: no such database"
     assert unread.sentence in step.reason
+
+
+@pytest.mark.parametrize("found", UNKNOWN_LOGINS.values(), ids=UNKNOWN_LOGINS.keys())
+def test_a_cancel_that_won_ends_as_put_back_and_names_in_what_it_found_a_running_server_that(found: DataSet) -> None:
+    judged = Given((OLD_ON_D1,), ("old", "old"), (OLD_BACKGROUND_SERVICE,), (found,)).judged(Work.MOVE)
+    step = decide_move(a_move(judged, (Abandon(WEB_ADDRESS, GENERATION),), ABANDONED, WITH_DATA))
+    assert isinstance(step, Done) and isinstance(step.answer, PutBack)
+    assert any("database-d1" in finding for finding in step.answer.findings)
 
 
 def test_a_move_neither_waits_nor_stops_over_unread_logins_of_a_data_set_it_does_not_serve_from() -> None:

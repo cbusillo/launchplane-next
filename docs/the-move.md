@@ -138,9 +138,12 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_move.py -v
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_interruptions.py -v
 uv run pytest tests/test_interruptions.py -v
+LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_host_answers.py -v
 ```
 
 Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
+
+`tests/test_bed_host_answers.py` runs under the same harness as the interruptions below, with the product `test-bed-answers`. It refuses the reading of a database server's logins after a repaired background service has passed its watch, and reads that service's container and the rows it writes from the scratch container while the request stays `working`. It puts a database server on another volume in a data set's place, asks for a start and then a retire. And it puts a second routes file into the proxy's folder, once with a router listed before the lane's own and once after.
 
 ### Holding a move and interrupting it
 
