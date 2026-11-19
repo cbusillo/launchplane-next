@@ -98,9 +98,9 @@ def test_a_repair_whose_login_read_is_refused_keeps_its_background_service_writi
     let_go(WATCHED)
 
     def left_working_over_the_login_read() -> bool:
-        kept = ask(f"/requests/{asked['id']}")[1]
-        assert kept["stands"] == "working", kept
-        return "The logins of the database" in (kept["error"] or "")
+        now = ask(f"/requests/{asked['id']}")[1]
+        assert now["stands"] == "working", now
+        return "The logins of the database" in (now["error"] or "")
 
     wait_for(left_working_over_the_login_read, seconds=30)
     [repaired] = of_lane(running()["background_services"])

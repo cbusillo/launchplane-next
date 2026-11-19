@@ -214,11 +214,8 @@ class ProxySeen:
         return LaneRoute(self.loaded.get(web_address), self.written.get(web_address), self.runs, self.back_soon_runs)
 
     def sends_visitors_to(self) -> dict[str, str]:
-        return {
-            web_address: route.container
-            for web_address, route in self.loaded.items()
-            if isinstance(route, LoadedRoute) and route.status == RouteStatus.ENABLED
-        }
+        one = {web_address: route for web_address, route in self.loaded.items() if isinstance(route, LoadedRoute)}
+        return {web_address: route.container for web_address, route in one.items() if route.status == RouteStatus.ENABLED}
 
 
 def web_address_of(product: str, lane: str) -> str:

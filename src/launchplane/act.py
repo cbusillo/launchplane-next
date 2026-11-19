@@ -211,7 +211,7 @@ type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], De
 # The host is read first and the cancel after it, so no step is decided from a reading older than the cancel it missed.
 # From a cancel on, the same planner takes the steps back, with the lane judged for that, and the call ends by saying so;
 # unless the host shows it is too late: then the cancel is refused and the call goes on as asked.
-def settle[Answer: steps.Result](
+def settle[Answer](
     read: Callable[[], LaneReading],
     judged_as: Callable[[LaneReading, bool], Judgement],
     next_step: Decide[Answer],
@@ -225,8 +225,7 @@ def settle[Answer: steps.Result](
         # Two answers where a lane has room for one hold it: no winner is chosen, neither is touched, no call answers success.
         if isinstance(lane.route.loaded, Conflicting):
             raise Waiting(f"{lane.route.loaded}. The lane is held as it is until the proxy has one. Nothing more was done.")
-        if cancel is None and witness.cancel_asked():
-            cancel = Cancel()
+        cancel = cancel or (Cancel() if witness.cancel_asked() else None)
         back = plan.is_turned_back(cancel)
         judged = judged_as(lane, back)
         step = next_step(judged, tuple(done), cancel)
@@ -237,8 +236,9 @@ def settle[Answer: steps.Result](
         if isinstance(step, Done):
             if isinstance(step.answer, PutBack):
                 raise Cancelled(step.answer)
-            untold = [finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)]
-            return step.answer.model_copy(update={"logins_not_read": untold})
+            if isinstance(step.answer, steps.Result):
+                step.answer.logins_not_read = [finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)]
+            return step.answer
         if isinstance(step, Stop):
             raise (Waiting if isinstance(step, steps.Wait) else Stopped)(step.reason)
         if isinstance(step, steps.CannotPutBack):

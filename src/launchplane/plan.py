@@ -497,7 +497,7 @@ def too_late_to_cancel(web_address: str) -> str:
 
 
 # What the generation made is read from the stamp on each part, and goes: its background service, then its instance.
-# One it started before the switch is a repair of the instance that serves: a cancel takes it back, a failure leaves it.
+# A background service started before the switch repairs the instance that serves: a cancel takes it back, a failure leaves it.
 def own_part_step(move: Move, *, repairs: bool) -> Action | Stop | CannotPutBack | None:
     lane = move.lane
     wait = own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])
@@ -509,7 +509,7 @@ def own_part_step(move: Move, *, repairs: bool) -> Action | Stop | CannotPutBack
 
 
 # A move failed with no verdict, and its attempt is fenced. The instance its generation made goes, and each login no
-# container holds, where the server told its logins. The failure stands whether or not it did.
+# container holds, where the server told its logins. The failure stands either way.
 def decide_clean_up(move: Move) -> Step[Result] | CannotPutBack:
     if move.gate.verdict is not Verdict.NONE:
         return Wait(f"The gate answers {move.gate.verdict} for this release, so nothing of it was cleaned up.")
@@ -588,8 +588,8 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     route, web_address = lane.route, lane.web_address
     if (step := loading_step(judged)) is not None:
         return step
-    if route.written is not None:
-        return RemoveRoute(web_address, route.written)
+    if (written := route.written) is not None:
+        return RemoveRoute(web_address, written)
     if lane.background_services:
         return Retire(min(running.container for running in lane.background_services))
     if lane.instances:
