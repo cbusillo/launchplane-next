@@ -16,7 +16,7 @@ Only containers carrying `launchplane.product` are Launchplane's. Any other cont
 | `launchplane.part` | `web`, `background-service` or `database`; a container without it is `web` |
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a background service, the container of its instance's web part |
-| `launchplane.request` | on a web part, a background service and a data set's network, the id of the [request](requests.md) that made it. One that is not a request's id makes that part wrong, and nothing else. |
+| `launchplane.generation` | on a web part, a background service and a data set's network, the generation of the [release](the-move.md#what-it-does) that made it. One that is not a generation makes that part wrong, and nothing else. |
 | `launchplane.secret-variables` | on a web part, background service or database server given a secret, the environment variables that hold one, separated by commas |
 
 Data set networks and volumes carry the product, lane and data set labels too.
@@ -27,14 +27,14 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 | Field | Each entry has |
 | --- | --- |
-| `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `request`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
+| `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `generation`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
 | `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
 | `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`). An empty list is a missing part and two are two. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`, and what the page shows for it: `says` and `standing`. |
 | `lanes` | the judgement on each lane: see [the judgement on a lane](data-sets.md#the-judgement-on-a-lane). |
 | `requests` | every [request](requests.md) that has not ended, as `GET /requests` gives it. |
-| `cancelled` | every request cancelled in the last 10 minutes. |
+| `cancels` | every request a cancel was asked of that ended in the last 10 minutes, however it ended. |
 | `record_error` | why Launchplane's record could not be read or did not answer in time, or `null`. The rest of the answer is still what is on the host. |
 | `cards` | the page, ready to draw: see [the page](#the-page). |
 | `read_at` | the moment the host was asked. |

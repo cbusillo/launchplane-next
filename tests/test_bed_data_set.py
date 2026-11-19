@@ -19,12 +19,13 @@ from tests.bed import (
     ask,
     ask_and_wait,
     kill_launchplane,
-    kill_launchplane_and_end_what_was_asked,
+    kill_launchplane_and_end_the_request_working_on,
     move_lane,
     needs_test_bed,
     on_control,
     on_scratch,
     on_scratch_with_bytes,
+    request_ended,
     request_loop,
     retire,
     wait_for,
@@ -296,7 +297,7 @@ def test_a_good_release_is_shown_as_a_release_under_way_and_never_as_something_w
 
 
 def test_a_release_that_failed_halfway_shows_at_once_as_left_unfinished_not_as_under_way(lane_on_a: LaneView) -> None:
-    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
+    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_and_end_the_move)
     left = json.loads(verdict_now())
     assert (left["moving"], left["release"], left["wrong"]) == (False, [], [])
     assert any("runs beside the active one" in state for state in left["unfinished"])
@@ -357,6 +358,10 @@ def test_retiring_a_lane_keeps_its_data_set_until_it_is_named() -> None:
     assert (status, body["outcome"], body["deleted_data_set"], body["kept_data_sets"]) == (200, "deleted", data_set["data_set"], [])
     assert lane_view().data_sets == []
     assert data_set["data_set"] not in on_scratch("docker network ls --format '{{.Name}}'; docker volume ls --format '{{.Name}}'")
+
+
+def kill_and_end_the_move() -> None:
+    kill_launchplane_and_end_the_request_working_on(PRODUCT, LANE)
 
 
 def kill_once(build: str, seen: Callable[[LaneView], bool], kill: Callable[[], None] = kill_launchplane) -> None:
@@ -467,14 +472,27 @@ def test_after_a_release_the_retired_instances_login_is_gone_and_its_password_op
     assert new["PGPASSWORD"] != old["PGPASSWORD"]
 
 
+# The kill has about 3 s, the length of a check, to land between the new instance starting and the switch. One that
+# lands before the instance runs or after the switch leaves another lane than this, so the lane is looked at, and put
+# back on A to try again, until it is the one wanted.
+def lane_left_with_a_running_instance_of_each_build() -> LaneView:
+    for _ in range(3):
+        kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_and_end_the_move)
+        view = lane_view()
+        running = sorted(instance["build"] for instance in view.instances if instance["state"] == "running")
+        if running == [BUILD_A, BUILD_B] and view.receiving()["build"] == BUILD_A:
+            return view
+        move(BUILD_A)
+    raise AssertionError("three kills in a row landed before the new instance ran or after the switch")
+
+
 def write_many(container: str) -> None:
     # noinspection SqlResolve
     run_sql(container, "INSERT INTO made_by_new (id) SELECT generate_series(1, 200)")
 
 
 def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of_it_belongs_to_app(lane_on_a: LaneView) -> None:
-    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
-    view = lane_view()
+    view = lane_left_with_a_running_instance_of_each_build()
     old = view.receiving()["container"]
     [new] = [instance["container"] for instance in view.instances if instance["container"] != old]
     database = database_of(view.data_sets[0])
@@ -499,7 +517,7 @@ def test_two_instances_write_at_once_each_changes_what_the_other_made_and_all_of
     run_sql(new, "DROP TABLE made_by_old; DROP TABLE made_by_new")
     move(BUILD_B)
     finished = assert_lane_finished_on(BUILD_B)
-    assert logins_on(finished.data_sets[0]) == [environment_of(new)["PGUSER"]]
+    assert logins_on(finished.data_sets[0]) == [environment_of(finished.receiving()["container"])["PGUSER"]]
 
 
 def files_holding(volume: str, text: str) -> list[str]:
@@ -523,15 +541,13 @@ def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) ->
     assert files_holding(volume, "SCRAM-SHA-256") != []
 
 
-def test_starts_that_fail_after_their_login_was_made_never_leave_more_than_the_last_one_and_a_good_move_removes_it(
+def test_a_start_that_fails_after_its_login_was_made_leaves_no_login_behind_once_the_move_has_ended_as_failed(
     lane_on_a: LaneView,
 ) -> None:
     [data_set] = lane_on_a.data_sets
     own = environment_of(lane_on_a.receiving()["container"])["PGUSER"]
     refusals = [move_lane(PRODUCT, LANE, "launchplane-test-ledger:no-such-build")[0] for _ in range(3)]
-    left = logins_on(data_set)
-    move(BUILD_A)
-    assert (refusals, len(left), own in left, logins_on(data_set)) == ([503, 503, 503], 2, True, [own])
+    assert (refusals, logins_on(data_set)) == ([503, 503, 503], [own])
 
 
 SESSION_HOLDER = "test-bed-session-holder"
@@ -669,17 +685,33 @@ def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_
     assert len(logins_on(lane_on_a.data_sets[0])) == 1
 
 
-def test_a_background_service_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
+def retire_leaky_lane_with_its_data() -> None:
+    for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
+        retire(LEAKY_PRODUCT, LANE, found["data_set"])
+    retire(LEAKY_PRODUCT, LANE)
+
+
+def test_a_background_service_that_prints_its_password_and_fails_under_a_switched_release_is_shown_without_the_password() -> None:
+    retire_leaky_lane_with_its_data()
+    status, asked = ask(f"/lanes/{LEAKY_PRODUCT}/{LANE}/move", {"build": BUILD_A})
+    assert status == 202, asked
+
+    def says_why_it_is_not_finished() -> bool:
+        return ask(f"/requests/{asked['id']}")[1]["error"] is not None
+
     try:
-        status, body = move_lane(LEAKY_PRODUCT, LANE, BUILD_A)
+        wait_for(says_why_it_is_not_finished, seconds=120)
+        kept = ask(f"/requests/{asked['id']}")[1]
         [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
         [instance] = [found for found in read_running()["instances"] if found["product"] == LEAKY_PRODUCT]
         password = environment_of(instance["container"])["PGPASSWORD"]
-        assert data_set["data_set"] == instance["data_set"]
-        assert (status, body["outcome"]) == (422, "background service failed"), body
-        assert f"connecting with password {SECRET_REMOVED}" in body["error"]
-        assert password not in json.dumps(body) + shown_by_launchplane()
+        assert (data_set["data_set"], kept["stands"]) == (instance["data_set"], "working"), kept
+        assert f"connecting with password {SECRET_REMOVED}" in kept["error"]
+        assert password not in json.dumps(kept) + shown_by_launchplane()
     finally:
-        for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
-            retire(LEAKY_PRODUCT, LANE, found["data_set"])
-        retire(LEAKY_PRODUCT, LANE)
+        # With a background service that stays up, the release finishes by itself, and its lane can then be retired.
+        place_description(LEAKY_PRODUCT, DESCRIPTION)
+        finished = request_ended(asked["id"])
+        retire_leaky_lane_with_its_data()
+        place_description(LEAKY_PRODUCT, LEAKY_DESCRIPTION)
+    assert finished["stands"] == "done", finished

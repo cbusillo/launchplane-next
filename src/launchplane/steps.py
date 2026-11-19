@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
@@ -78,8 +78,7 @@ class FreshNames:
     data_set: str
 
 
-# The `request` of a step is the stamp put on what it makes. It is not part of which step it is, so a step a call has
-# taken is found among what it has done whoever asked.
+# The `generation` of a step is the stamp put on what it makes.
 @dataclass(frozen=True)
 class StartProxy:
     pass
@@ -89,6 +88,8 @@ class StartProxy:
 class AwaitRoute:
     web_address: str
     container: str | None
+    # Whether the proxy must also have the route enabled, so that visitors are sent there.
+    enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ class CreateDataSetNetwork:
     product: str
     lane: str
     data_set: str
-    request: int | None = field(default=None, compare=False)
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,7 +132,7 @@ class StartInstance:
     target: LaneBuild
     container: str
     use: DataSetUse | None = None
-    request: int | None = field(default=None, compare=False)
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,7 +145,45 @@ class Check:
 class WriteRoute:
     web_address: str
     container: str
-    request: int | None = field(default=None, compare=False)
+
+
+# The rename of a release, asked of the gate for the candidate of one attempt. `Switched` is what it is once taken:
+# whether the gate then said the generation is committed to that candidate.
+@dataclass(frozen=True)
+class Switch:
+    web_address: str
+    container: str
+    generation: str
+    attempt: int
+
+
+@dataclass(frozen=True)
+class Switched:
+    container: str
+    won: bool
+
+
+# An instance taken through the gate and then removed: either the gate says its rename won, and it is kept, or it can
+# never be switched to from there on. `generation` is the release that made it, where one did.
+@dataclass(frozen=True)
+class Discard:
+    web_address: str
+    container: str
+    generation: str | None
+    attempt: int
+
+
+@dataclass(frozen=True)
+class Discarded:
+    container: str
+    kept: bool
+
+
+# A cancel carried to the gate.
+@dataclass(frozen=True)
+class Abandon:
+    web_address: str
+    generation: str
 
 
 @dataclass(frozen=True)
@@ -153,7 +192,7 @@ class StartBackgroundService:
     instance: str
     use: DataSetUse | None
     command: tuple[str, ...]
-    request: int | None = field(default=None, compare=False)
+    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,11 +208,6 @@ class RemoveRoute:
 
 @dataclass(frozen=True)
 class Retire:
-    container: str
-
-
-@dataclass(frozen=True)
-class RemoveInstance:
     container: str
 
 
@@ -219,22 +253,28 @@ class LogRead:
     unreadable: str | None = None
 
 
+# What a part answered when it would not do as asked, with the real error.
 @dataclass(frozen=True)
-class StartRefused:
+class Refused:
     container: str
     report: str
 
 
-@dataclass(frozen=True)
-class CheckRefused:
-    container: str
-    report: str
+class StartRefused(Refused):
+    pass
 
 
-@dataclass(frozen=True)
-class BackgroundServiceRefused:
-    container: str
-    report: str
+class CheckRefused(Refused):
+    pass
+
+
+class BackgroundServiceRefused(Refused):
+    pass
+
+
+# Docker answered that it will not remove the part.
+class RemovalRefused(Refused):
+    pass
 
 
 @dataclass(frozen=True)
@@ -244,6 +284,22 @@ class Done[Answer]:
 
 @dataclass(frozen=True)
 class Stop:
+    reason: str
+
+
+# Neither a failure nor an answer: what was read contradicts the gate, or cannot say what must be known before a part is
+# touched. Nothing is done, and the move is planned again from a later reading.
+class Wait(Stop):
+    pass
+
+
+# How the error of such an ending begins, so a cancel asked again says that it won.
+CANCEL_WON = "The cancel won"
+
+
+# A cancel won at the gate and a part of its release could not be removed: the lane cannot be put back.
+@dataclass(frozen=True)
+class CannotPutBack:
     reason: str
 
 
@@ -263,6 +319,9 @@ type Action = (
     StartProxy
     | AwaitRoute
     | WriteRoute
+    | Switch
+    | Discard
+    | Abandon
     | RemoveRoute
     | CreateDataSetNetwork
     | CreateDataSetVolume
@@ -273,7 +332,6 @@ type Action = (
     | StartInstance
     | StartBackgroundService
     | Retire
-    | RemoveInstance
     | RemoveLogins
     | Check
     | AwaitBackgroundService
@@ -283,4 +341,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead
+type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | RemovalRefused

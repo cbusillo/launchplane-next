@@ -1,10 +1,12 @@
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
 from launchplane.docker_answers import ContainerHostError
+from launchplane.gate import Answer as GateAnswer
+from launchplane.gate import GateError
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
@@ -24,15 +26,20 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
+    Verdict,
     WrittenRoute,
     background_service_container_of,
 )
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
-from launchplane.proxy import CheckFailed
+from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.steps import FreshNames
+from launchplane.telling import Witness
 
 WEB_ADDRESS = "testing.site.test"
+# The generations of a release under test and of one before it.
+GENERATION = "01a1ef36-c51d-74d9-86a1-ff0199cf7a3d"
+EARLIER = "01a1ef36-0000-7000-8000-000000000001"
 SINCE = datetime(2026, 11, 16, 14, 2, tzinfo=UTC)
 QUIET = {LANE_NETWORK: True, "network-d1": True, "network-d2": True, "bridge": False}
 WITH_DATA = Product(
@@ -42,7 +49,8 @@ WITH_DATA = Product(
 )
 
 
-class LaunchplaneKilled(Exception):
+# Not an Exception: nothing in Launchplane may catch its own death and go on.
+class LaunchplaneKilled(BaseException):
     pass
 
 
@@ -77,7 +85,7 @@ class PretendHost:
         container: str,
         state: InstanceState = InstanceState.RUNNING,
         use: DataSetUse | None = None,
-        request: int | None = None,
+        generation: str | None = None,
     ) -> None:
         self.instances[container] = RunningInstance(
             product=target.product,
@@ -87,7 +95,7 @@ class PretendHost:
             state=state,
             networks=(LANE_NETWORK,) if use is None else (LANE_NETWORK, use.network),
             data_set=None if use is None else use.data_set,
-            request=request,
+            generation=generation,
         )
 
     def attach(self, container: str, network: str, *, quiet: bool) -> None:
@@ -110,12 +118,12 @@ class PretendHost:
         self.change_database(database, unheld_logins=())
         self.record(f"remove logins from {database}")
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, request: int | None = None) -> None:
-        self.place(target, container, use=use, request=request)
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+        self.place(target, container, use=use, generation=generation)
         self.record(f"start {container}")
 
     def start_background_service(
-        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], request: int | None = None
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
     ) -> None:
         container = background_service_container_of(instance)
         self.background_services[container] = RunningBackgroundService(
@@ -128,7 +136,7 @@ class PretendHost:
             running_for_seconds=0.0,
             instance=instance,
             data_set=None if use is None else use.data_set,
-            request=request,
+            generation=generation,
         )
         self.most_background_services_running = max(self.most_background_services_running, len(self.background_services))
         self.record(f"start background service {instance} on {None if use is None else use.network} with {' '.join(command)}")
@@ -151,10 +159,10 @@ class PretendHost:
         )
         self.data_sets[data_set] = found.model_copy(update=parts)
 
-    def create_data_set_network(self, product: str, lane: str, data_set: str, request: int | None = None) -> None:
+    def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None:
         self.networks[f"network-{data_set}"] = True
         network = HostNetwork(name=f"network-{data_set}", is_quiet=True)
-        self.change_data_set(product, lane, data_set, networks=(network,), request=request)
+        self.change_data_set(product, lane, data_set, networks=(network,), generation=generation)
         self.record(f"network {data_set}")
 
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
@@ -209,10 +217,6 @@ class PretendHost:
         del self.data_sets[found.data_set]
         self.record(f"delete {found.data_set}")
 
-    def remove_instance(self, container: str) -> None:
-        del self.instances[container]
-        self.record(f"remove {container}")
-
     def retire_instance(self, container: str) -> None:
         if container in self.background_services:
             del self.background_services[container]
@@ -225,6 +229,92 @@ class PretendHost:
         return f"{part.build} listening on :5678"
 
 
+# What the gate keeps for one generation, as tests/test_gate.py shows the real one keeps it.
+@dataclass
+class Kept:
+    armed: tuple[int, str] | None = None
+    committed: str | None = None
+    abandoned: bool = False
+    fenced: int = -1
+    revoked: set[str] = field(default_factory=set[str])
+
+    def answer(self) -> GateAnswer:
+        if self.abandoned:
+            return GateAnswer(Verdict.ABANDONED)
+        return GateAnswer(Verdict.NONE) if self.committed is None else GateAnswer(Verdict.COMMITTED, self.committed)
+
+    def revoke(self, candidate: str) -> None:
+        self.revoked.add(candidate)
+        if self.armed is not None and self.armed[1] == candidate:
+            self.armed = None
+
+
+class PretendGate:
+    def __init__(self, proxy: PretendProxy) -> None:
+        self.proxy = proxy
+        self.kept: dict[str, Kept] = {}
+        self.unreadable: str | None = None
+
+    def of(self, generation: str) -> Kept:
+        if self.unreadable is not None:
+            raise GateError(self.unreadable)
+        if not self.proxy.running:
+            raise GateError("The gate is a command in the proxy's container, which is not running")
+        return self.kept.setdefault(generation, Kept())
+
+    def verdict(self, web_address: str, generation: str) -> GateAnswer:
+        assert web_address
+        return self.of(generation).answer()
+
+    def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        kept = self.of(generation)
+        later = kept.armed is None or kept.armed[1] == candidate or attempt > kept.armed[0]
+        if kept.answer().verdict is Verdict.NONE and later and candidate not in kept.revoked and attempt > kept.fenced:
+            if kept.armed is not None and kept.armed[1] != candidate:
+                kept.revoke(kept.armed[1])
+            kept.armed, kept.committed = (attempt, candidate), candidate
+            self.proxy.written[web_address] = candidate
+            self.proxy.host.record(f"route {candidate}")
+        return kept.answer()
+
+    def abandon(self, web_address: str, generation: str) -> GateAnswer:
+        assert web_address
+        kept = self.of(generation)
+        kept.abandoned = kept.committed is None
+        return kept.answer()
+
+    def discard(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        assert web_address and attempt >= 0
+        kept = self.of(generation)
+        if kept.committed != candidate:
+            kept.revoke(candidate)
+        return kept.answer()
+
+    def fence(self, web_address: str, generation: str, attempt: int) -> GateAnswer:
+        assert web_address
+        kept = self.of(generation)
+        if kept.answer().verdict is Verdict.NONE:
+            kept.fenced = max(kept.fenced, attempt)
+            if kept.armed is not None and kept.armed[0] <= attempt:
+                kept.revoke(kept.armed[1])
+        return kept.answer()
+
+
+# The gate as a test of calls that reach no move being worked is given it: nothing was ever asked of it.
+class GateNeverAsked:
+    answers = GateAnswer(Verdict.NONE)
+
+    def abandon(self, product: str, lane: str, generation: str, /) -> str | None:
+        raise AssertionError(f"the gate was asked to abandon {generation} of {lane} of {product}, where it answers {self.answers}")
+
+    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer:
+        assert product and lane and generation and attempt
+        return self.answers
+
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> None:
+        assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness
+
+
 class PretendProxy:
     def __init__(self, host: PretendHost, running: bool = True, starts: bool = True) -> None:
         self.host = host
@@ -233,12 +323,19 @@ class PretendProxy:
         self.back_soon_runs = True
         self.loaded: dict[str, LoadedRoute] = {}
         self.written: dict[str, str] = {}
-        self.written_by: dict[str, int | None] = {}
+        self.gate = PretendGate(self)
+        self.unread: dict[str, str] = {}
+        self.routed_twice: set[str] = set()
+        # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
+        self.holds_delivery = False
         self.failing: set[str] = set()
         self.not_answering: dict[str, str] = {}
         self.asked: list[str] = []
         self.while_awaiting: Callable[[], None] = lambda: None
         self.while_checking: Callable[[str], None] = lambda _container: None
+
+    def is_running(self) -> bool:
+        return self.running
 
     def start(self) -> None:
         self.running = self.starts
@@ -248,11 +345,10 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={
-                web_address: WrittenRoute(container, SINCE, self.written_by.get(web_address))
-                for web_address, container in self.written.items()
-            },
+            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
             loaded=dict(self.loaded) if self.running else {},
+            unread=dict(self.unread),
+            routed_twice=frozenset(self.routed_twice),
         )
 
     def route(self, web_address: str, container: str) -> None:
@@ -261,19 +357,24 @@ class PretendProxy:
 
     def show_back_soon(self, web_address: str) -> None:
         self.written[web_address] = BACK_SOON
-        self.written_by[web_address] = None
         self.host.record("show back soon")
 
-    def await_route(self, web_address: str, container: str | None) -> None:
+    def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None:
+        assert enabled in (True, False)
         written = self.written.get(web_address)
         assert written == container, f"awaited {web_address} at {container}, written to {written}"
+        if self.holds_delivery:
+            raise ProxyError(f"The proxy did not load the routes file of {web_address} within 10 s.")
         self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()}
         self.while_awaiting()
 
-    def write_route(self, web_address: str, container: str, request: int | None = None) -> None:
+    def write_route(self, web_address: str, container: str) -> None:
         self.written[web_address] = container
-        self.written_by[web_address] = request
         self.host.record(f"route {container}")
+
+    # As on the host, the two that pass the gate exclude each other: one finds what the other did.
+    def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        return self.gate.switch(web_address, generation, attempt, candidate)
 
     def remove_route(self, web_address: str) -> None:
         del self.written[web_address]

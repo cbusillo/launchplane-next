@@ -29,6 +29,7 @@ from launchplane.instance import (
 from launchplane.judge import Kind, judge
 from launchplane.product import Product, ProductError, ProductFolder
 from launchplane.proxy import PROXY
+from tests.pretend_host import GENERATION
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 
 DATA_SET_LABELS = {"launchplane.product": "shop", "launchplane.lane": "testing", "launchplane.data-set": "d1"}
@@ -256,26 +257,26 @@ def test_a_password_made_for_a_lane_is_known_as_a_secret_before_docker_is_given_
     assert known_when_given == [True, True]
 
 
-def test_an_instance_is_stamped_with_the_request_that_made_it_and_read_back_with_it() -> None:
+def test_an_instance_is_stamped_with_the_generation_that_made_it_and_read_back_with_it() -> None:
     docker = RecordingDocker()
     host = ContainerHost(docker.as_client(), "test")
-    host.start_instance(TARGET, WEB, None, 41)
+    host.start_instance(TARGET, WEB, None, GENERATION)
     host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None)
-    assert {each.container: each.request for each in host.read().instances} == {WEB: 41, "shop-testing-bbbbbbbbbbbb": None}
-
-
-def test_a_request_label_that_is_no_request_id_is_read_as_unread_and_makes_only_that_instance_wrong() -> None:
-    longer_than_python_turns_into_a_number = "9" * 4301
-    marked = container("web", "web", []) | {
-        "Labels": DATA_SET_LABELS | {"launchplane.request": longer_than_python_turns_into_a_number}
+    assert {each.container: each.generation for each in host.read().instances} == {
+        WEB: GENERATION,
+        "shop-testing-bbbbbbbbbbbb": None,
     }
+
+
+def test_a_generation_label_that_is_no_generation_is_read_as_unread_and_makes_only_that_instance_wrong() -> None:
+    marked = container("web", "web", []) | {"Labels": DATA_SET_LABELS | {"launchplane.generation": "41"}}
     [instance] = read([marked]).instances
     judged = judge(
         Reading(datetime.now(UTC), ProxySeen(runs=True, back_soon_runs=True), read([marked])).lane("shop", "testing"),
         Product(),
         None,
     )
-    assert instance.request == Unread(why="its label launchplane.request, 4301 characters long, is not the id of a request")
+    assert instance.generation == Unread(why="its label launchplane.generation, 2 characters long, is not a generation")
     assert [(finding.subject, finding.shown) for finding in judged.of_kind(Kind.STAMP_UNREAD)] == [("web", "wrong")]
 
 

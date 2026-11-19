@@ -1,13 +1,15 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
 
 from launchplane.act import Status
-from launchplane.instance import InstanceState, PartOfLane
+from launchplane.gate import Answer as GateAnswer
+from launchplane.instance import InstanceState, PartOfLane, Verdict
 from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
-from launchplane.record import Kept, Request, Stands, how_cancelled
+from launchplane.record import ENDED, Kept, Request, Stands, how_cancelled
+from launchplane.steps import CANCEL_WON
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -24,6 +26,7 @@ STANDS_TONE = {
     Stands.WORKING: Standing.ON_PURPOSE,
     Stands.NEEDS_A_PERSON: Standing.WRONG,
     Stands.CANCELLED: Standing.ON_PURPOSE,
+    Stands.DONE: Standing.GOOD,
 }
 RECORD_UNREAD = "Launchplane's record cannot be read"
 NOT_KNOWN_AT_WORK = (
@@ -93,31 +96,49 @@ def done_so_far(request: Kept) -> str:
     return f"{taken_up}So far: {'; '.join(lines)}." if lines else f"{taken_up}Nothing done so far."
 
 
-def being_cancelled(request: Kept) -> str:
+# A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.
+CANCEL_AT_THE_GATE: dict[Verdict | None, str] = {
+    None: "the gate could not be asked whether that came in time.",
+    Verdict.NONE: "the gate has not been asked yet, and its worker carries the cancel there.",
+    Verdict.ABANDONED: "the cancel won at the gate, and its worker puts the lane back.",
+    Verdict.COMMITTED: "the gate says the routes file was already renamed, so the move is finished as asked.",
+}
+
+
+def being_cancelled(request: Kept, decided: Mapping[int, GateAnswer | None]) -> str:
     if request.cancel_refused is not None:
         return f" {request.cancel_refused}"
     if request.cancel_asked_by is None:
         return ""
-    return f" To be cancelled by {request.cancel_asked_by}: its worker reads that before its next action."
+    if request.id not in decided:
+        return f" To be cancelled by {request.cancel_asked_by}: its worker puts the lane back, unless it is too late."
+    answer = decided[request.id]
+    return f" To be cancelled by {request.cancel_asked_by}: {CANCEL_AT_THE_GATE[None if answer is None else answer.verdict]}"
 
 
-def request_note(request: Request) -> str | None:
+def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> str | None:
     if request.stands is Stands.NEEDS_A_PERSON:
         return request.error
     if request.stands is Stands.CANCELLED:
         return how_cancelled(request)
+    if request.stands is Stands.FAILED and (request.error or "").startswith(CANCEL_WON):
+        return request.error
+    if request.stands in ENDED:
+        why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
+        return f"{why} It ended as {request.stands}."
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
-        return f"{done_so_far(request)}{being_cancelled(request)}"
+        unfinished = "" if request.error is None else f" Not finished yet, and taken up again by itself: {request.error}"
+        return f"{done_so_far(request)}{being_cancelled(request, decided)}{unfinished}"
     return None
 
 
-def request_rows(requests: Sequence[Request]) -> list[Row]:
+def request_rows(requests: Sequence[Request], decided: Mapping[int, GateAnswer | None]) -> list[Row]:
     return [
         Row(
             name=f"Request {request.id}",
             value=[Piece(text=asked_for(request))],
             pills=[Pill(text=request.stands, tone=STANDS_TONE.get(request.stands, Standing.WRONG))],
-            note=request_note(request),
+            note=request_note(request, decided),
         )
         for request in sorted(requests, key=lambda each: each.id)
     ]
@@ -157,7 +178,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests),
+            *request_rows(requests, status.cancels_decided),
             *([] if judged is None else finding_rows(judged)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])
@@ -212,9 +233,9 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
-# Every request that has not ended, then those a cancel ended a short while ago.
+# Every request that has not ended, then those a cancel was asked of that ended a short while ago.
 def shown_requests(status: Status) -> list[Request]:
-    return [*status.requests, *status.cancelled]
+    return [*status.requests, *status.cancels]
 
 
 # A request for a lane with nothing on the host yet has no card of the host's to show on.
@@ -224,7 +245,11 @@ def request_cards(status: Status) -> list[Card]:
     lanes = sorted({(each.product, each.lane) for each in requests} - on_host)
     of = {lane: [each for each in requests if (each.product, each.lane) == lane] for lane in lanes}
     return [
-        Card(title=f"{product} · {lane}", pills=person_pills(of[product, lane]), rows=request_rows(of[product, lane]))
+        Card(
+            title=f"{product} · {lane}",
+            pills=person_pills(of[product, lane]),
+            rows=request_rows(of[product, lane], status.cancels_decided),
+        )
         for product, lane in lanes
     ]
 

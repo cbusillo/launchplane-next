@@ -4,14 +4,16 @@ from launchplane.plan import (
     Step,
     StepBack,
     changes_so_far,
-    check_or_problems,
     failure_report,
+    is_checked,
     is_turned_back,
     left_for_a_move,
     prepared,
+    problems_switching_to,
     put_back_or_what_is_left,
     route_step,
     sentences,
+    unread_route,
 )
 from launchplane.product import Product
 from launchplane.steps import (
@@ -84,7 +86,8 @@ def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None
 def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | None = None) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
     route = lane.route
-    if (step := route_step(judged, done)) is not None:
+    step = unread_route(lane, "put in maintenance", done) or route_step(judged, done)
+    if step is not None:
         return step
     if cancel is not None and is_turned_back(cancel):
         return begin_step_back(judged)
@@ -188,9 +191,9 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
     start = StartStopped(instance.container)
     if instance.state == InstanceState.STOPPED and start not in done:
         return start
-    problems = check_or_problems(judged, instance, product, done)
-    if isinstance(problems, Check):
-        return problems
+    if not is_checked(instance, product, done):
+        return Check(instance.container, product.health_path)
+    problems = problems_switching_to(judged, instance)
     if problems:
         return Stop(
             f"The instance {instance.container} passed its check and the lane is not as it must be to switch back to it, so "
@@ -205,7 +208,8 @@ def decide_end(
     judged: Judgement, product: Product, done: tuple[Event, ...], cancel: Cancel | None = None
 ) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
-    if (step := route_step(judged, done)) is not None:
+    step = unread_route(lane, "brought out of maintenance", done) or route_step(judged, done)
+    if step is not None:
         return step
     if cancel is not None and is_turned_back(cancel):
         return end_step_back(judged)

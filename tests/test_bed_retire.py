@@ -12,7 +12,7 @@ import pytest
 from tests.bed import (
     SCRATCH_ADDRESS,
     ask,
-    kill_launchplane_and_end_what_was_asked,
+    kill_launchplane_and_end_the_request_working_on,
     move_lane,
     needs_test_bed,
     retire,
@@ -149,7 +149,7 @@ def test_a_retire_that_failed_after_the_name_is_gone_is_finished_by_asking_again
     with request_in_flight(seconds=10):
         retirer = in_background(retire_cut_short_by_the_kill)
         wait_for(name_is_gone_and_copy_remains, seconds=30)
-        kill_launchplane_and_end_what_was_asked()
+        kill_launchplane_and_end_the_request_working_on(PRODUCT, LANE)
         retirer.join()
     assert name_is_gone_and_copy_remains()
     status, body = retire(PRODUCT, LANE)

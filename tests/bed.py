@@ -1,3 +1,4 @@
+import http.client
 import json
 import os
 import shlex
@@ -7,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -88,21 +89,21 @@ def kill_launchplane() -> None:
 
 
 # noinspection SqlResolve
-END_WHAT_WAS_ASKED = """
-update attempt set ended_at = now(), ended = 'interrupted' where ended is null;
+END_THE_REQUEST = """
+update attempt set ended_at = now(), ended = 'interrupted' where ended is null and request = :request;
 update request set stands = 'failed', ended_at = now(), error = 'Ended by a test, as a request that failed halfway.'
-where stands in ('waiting', 'working');
+where stands in ('waiting', 'working') and id = :request;
 """
 
 
 # After a kill Launchplane takes its request up again by itself. A test of what a request that failed halfway leaves behind
-# ends the request in the record while Launchplane is down, so the lane stays as the kill left it.
-def kill_launchplane_and_end_what_was_asked() -> None:
+# ends that one request in the record while Launchplane is down, so the lane stays as the kill left it.
+def kill_launchplane_and_end(request: int) -> None:
     on_control(
         "systemctl kill --signal=KILL launchplane; systemctl stop launchplane; "
-        "runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --dbname launchplane; ended=$?; "
+        f"runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --set request={request:d} --dbname launchplane; ended=$?; "
         "systemctl start launchplane; exit $ended",
-        given=END_WHAT_WAS_ASKED,
+        given=END_THE_REQUEST,
     )
     wait_for(launchplane_answers, seconds=30)
 
@@ -111,6 +112,11 @@ def unfinished_requests() -> list[dict[str, Any]]:
     status, body = ask("/requests")
     assert status == 200, body
     return body["unfinished"]
+
+
+def kill_launchplane_and_end_the_request_working_on(product: str, lane: str) -> None:
+    [working] = [each["id"] for each in unfinished_requests() if (each["product"], each["lane"]) == (product, lane)]
+    kill_launchplane_and_end(working)
 
 
 def request_ended(request: int) -> dict[str, Any]:
@@ -158,7 +164,8 @@ class RequestLoop:
         while self.running:
             try:
                 self.answers.append(self.request_once())
-            except (OSError, UnexpectedAnswer) as error:
+            # Every answer that is not whole counts: one cut off mid-body is no OSError.
+            except (OSError, http.client.HTTPException, UnexpectedAnswer) as error:
                 self.failures.append(f"{datetime.now(UTC):%H:%M:%S.%f} {error!r}")
             time.sleep(PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE)
 
@@ -178,3 +185,69 @@ def request_loop(request_once: Callable[[], str]) -> Generator[RequestLoop]:
         time.sleep(1)
         loop.running = False
         thread.join()
+
+
+HOLDS_URL = os.environ.get("LAUNCHPLANE_HOLDS_URL", f"{LAUNCHPLANE_URL.rsplit(':', 1)[0]}:8701")
+HELD_UNIT = "/opt/launchplane/tests/launchplane-held.service"
+
+
+# The holds of tests/held_launchplane.py, which runs Launchplane on the control container with its calls able to be held.
+def holds(method: str = "GET", point: str = "") -> dict[str, list[str]]:
+    request = urllib.request.Request(f"{HOLDS_URL}/holds{'/' if point else ''}{point}", method=method)  # noqa: S310
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return json.loads(response.read())
+
+
+def hold(point: str) -> None:
+    holds("PUT", point)
+
+
+def let_go(point: str = "") -> None:
+    holds("DELETE", point)
+
+
+def wait_until_stopped_at(point: str, seconds: float = 60) -> None:
+    def launchplane_is_stopped_at_the_hold() -> bool:
+        return point.split("?")[0] in holds()["stopped_at"]
+
+    wait_for(launchplane_is_stopped_at_the_hold, seconds)
+
+
+def holds_answer() -> bool:
+    try:
+        return bool(holds()) and launchplane_answers()
+    except OSError:
+        return False
+
+
+# As `kill -9`: no handler runs, and systemd starts Launchplane again.
+def kill_held_launchplane() -> None:
+    with suppress(OSError):
+        urllib.request.urlopen(urllib.request.Request(f"{HOLDS_URL}/kill", method="POST"), timeout=10)  # noqa: S310
+    wait_for(holds_answer, seconds=30)
+
+
+def plain_launchplane_answers() -> bool:
+    try:
+        holds()
+    except OSError:
+        return launchplane_answers()
+    return False
+
+
+# The one port serves either, so each is stopped before the other is started, and the bed is handed back only once the
+# plain service answers and the held one is gone.
+@contextmanager
+def launchplane_held() -> Generator[None]:
+    on_control(
+        f"install -m 644 {HELD_UNIT} /etc/systemd/system/ && systemctl daemon-reload && "
+        "systemctl stop launchplane && systemctl start launchplane-held"
+    )
+    wait_for(holds_answer, seconds=30)
+    let_go()
+    try:
+        yield
+    finally:
+        let_go()
+        on_control("systemctl stop launchplane-held && systemctl start launchplane")
+        wait_for(plain_launchplane_answers, seconds=30)

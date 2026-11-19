@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import requests
-from docker.errors import DockerException
+from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -23,6 +23,7 @@ from launchplane.instance import (
     RunningInstance,
     Stamp,
     Unread,
+    is_generation,
 )
 
 PRODUCT_LABEL = "launchplane.product"
@@ -31,7 +32,7 @@ BUILD_LABEL = "launchplane.build"
 PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
-REQUEST_LABEL = "launchplane.request"
+GENERATION_LABEL = "launchplane.generation"
 GATEWAY_MODE_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
 QUIET_GATEWAY_MODE = "isolated"
 MOST_READS = 3
@@ -58,10 +59,25 @@ class TornRead(Exception):
     pass
 
 
+# The host answered, and the answer is no: Docker will not do it, or what was read of the host forbids it.
+class ContainerHostRefused(ContainerHostError):
+    pass
+
+
+@contextmanager
+def observing() -> Generator[None]:
+    try:
+        yield
+    except ContainerHostRefused as error:
+        raise ContainerHostError(str(error)) from error
+
+
 @contextmanager
 def attempting(action: str, address: str) -> Generator[None]:
     try:
         yield
+    except APIError as error:
+        raise ContainerHostRefused(f"{action} on {address} was refused: {error}") from error
     except (DockerException, requests.RequestException) as error:
         raise ContainerHostError(f"{action} on {address} failed: {error}") from error
 
@@ -222,20 +238,15 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
         mounts=mounts_of(summary),
-        request=request_in(summary.labels),
+        generation=generation_in(summary.labels),
     )
 
 
-MOST_DIGITS_OF_A_REQUEST = 18
-
-
-def request_in(labels: dict[str, str]) -> Stamp:
-    stamped = labels.get(REQUEST_LABEL)
-    if stamped is None:
-        return None
-    if stamped.isascii() and stamped.isdecimal() and len(stamped) <= MOST_DIGITS_OF_A_REQUEST:
-        return int(stamped)
-    return Unread(why=f"its label {REQUEST_LABEL}, {len(stamped)} characters long, is not the id of a request")
+def generation_in(labels: dict[str, str]) -> Stamp:
+    stamped = labels.get(GENERATION_LABEL)
+    if stamped is None or is_generation(stamped):
+        return stamped
+    return Unread(why=f"its label {GENERATION_LABEL}, {len(stamped)} characters long, is not a generation")
 
 
 def running_for(details: DockerContainerDetails, now: datetime) -> float | None:
@@ -258,7 +269,7 @@ def background_service_from(
         instance=summary.labels.get(INSTANCE_LABEL),
         mounts=mounts_of(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
-        request=request_in(summary.labels),
+        generation=generation_in(summary.labels),
     )
 
 
@@ -311,7 +322,7 @@ def data_sets_from(
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
-    made_by = {key: request_in(network.labels or {}) for key, network in marked}
+    made_by = {key: generation_in(network.labels or {}) for key, network in marked}
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
     by_database = grouped(databases)
     return [
@@ -322,7 +333,7 @@ def data_sets_from(
             networks=tuple(sorted(by_network.get(key, []), key=lambda network: network.name)),
             volumes=tuple(sorted(by_volume.get(key, []))),
             databases=tuple(sorted(by_database.get(key, []), key=lambda database: database.container)),
-            request=made_by.get(key),
+            generation=made_by.get(key),
         )
         for key in sorted(by_network.keys() | by_volume.keys() | by_database.keys(), key=str)
     ]

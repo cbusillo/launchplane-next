@@ -12,14 +12,15 @@ A lane's data sets are kept unless one is named in the body as `{"delete_data_se
 
 It reads the host and the proxy again before every step. The next step is the first of these that applies:
 
-1. If the proxy is not running, start it.
-2. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file. A route the proxy reports as disabled still counts as loaded.
-3. If the lane's routes file sends the web address to an instance, delete that file. No other lane's file is touched.
-4. Retire a background service of the lane.
-5. Retire an instance of the lane: Docker sends the stop signal, waits up to 30 s, then removes it.
-6. If the body names one of the lane's data sets, delete it.
-7. If a running database server of the lane has a [login](data-sets.md#logins) no container holds, remove it. If its logins cannot be read, stop with `503`.
-8. Answer.
+1. If the lane's routes file is not a route Launchplane writes, stop with `503`, changing nothing: what it sends visitors to is not known. Remove or repair the file by hand, then ask again.
+2. If the proxy is not running, start it.
+3. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file. A route the proxy reports as disabled still counts as loaded.
+4. If the lane's routes file sends the web address to an instance, delete that file. No other lane's file is touched.
+5. Retire a background service of the lane.
+6. Retire an instance of the lane: Docker sends the stop signal, waits up to 30 s, then removes it.
+7. If the body names one of the lane's data sets, delete it.
+8. If a running database server of the lane has a [login](data-sets.md#logins) no container holds, remove it. If its logins cannot be read, stop with `503`.
+9. Answer.
 
 The web address goes first so that no new request reaches an instance that is stopping. A request the instance already holds gets its answer only if the product finishes it within 30 s of the stop signal.
 

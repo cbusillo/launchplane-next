@@ -109,7 +109,7 @@ def test_a_newer_request_cancels_the_move_being_checked_and_no_visitor_reaches_i
     )
     assert (loop.failures, loop.answers_in_order(), builds_of(LANE)) == ([], [ANSWER_A], [BUILD_A])
     pills, note = request_row_of(older)
-    assert (pills, f"was cancelled by request {newer}. Done to put the lane back: remove" in note) == (["cancelled"], True)
+    assert (pills, f"was cancelled by request {newer}. Done to put the lane back: retire" in note) == (["cancelled"], True)
 
 
 @pytest.mark.usefixtures("lanes_on_a")

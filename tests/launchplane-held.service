@@ -1,0 +1,17 @@
+[Unit]
+Description=Launchplane, run by its test harness so that its calls can be held
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+Conflicts=launchplane.service
+StartLimitIntervalSec=0
+
+[Service]
+User=launchplane
+WorkingDirectory=/var/lib/launchplane
+Environment=LAUNCHPLANE_CONTAINER_HOST=tcp://docker-lp-scratch.shiny:2376
+Environment=LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS=/var/lib/launchplane/tls
+Environment=LAUNCHPLANE_LISTEN_ADDRESS=0.0.0.0
+Environment=LAUNCHPLANE_LISTEN_PORT=8700
+Environment=PYTHONPATH=/opt/launchplane
+ExecStart=/opt/launchplane/.venv/bin/python -m tests.held_launchplane
+Restart=on-failure

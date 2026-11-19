@@ -1,23 +1,28 @@
 import json
+import subprocess
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
-from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, RouteStatus
+from launchplane.gate import Answer
+from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, RouteStatus, Verdict
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
+    ROUTES_FOLDER,
     CheckFailed,
     ProxyError,
     TraefikProxy,
     route_file_of,
     route_text,
 )
+from tests.pretend_host import GENERATION
 
 WEB_ADDRESS = "testing.site.test"
 OTHER = "production.site.test"
@@ -66,6 +71,11 @@ class ProxyHost:
             self.files[PurePosixPath(command[2])] = self.files.pop(PurePosixPath(command[1]))
         elif command[0] == "rm":
             self.files.pop(PurePosixPath(command[-1]), None)
+        elif "sh" in command:
+            result = self.run_in_a_folder(command[command.index("sh") :])
+            if self.loads_on_write:
+                self.load()
+            return result
         elif command[-1] == LOADED_ROUTES_URL:
             return CommandResult(exit_code=0, output=self.loaded) if self.reads_answer else CommandResult(1, "Connection refused")
         else:
@@ -75,9 +85,23 @@ class ProxyHost:
             self.load()
         return CommandResult(exit_code=0, output="")
 
+    # The commands of the gate are run as they are, by a real shell, on a folder that stands for the proxy's.
+    def run_in_a_folder(self, command: list[str]) -> CommandResult:
+        with tempfile.TemporaryDirectory() as folder:
+            for path, text in self.files.items():
+                there = Path(folder) / path.relative_to(ROUTES_FOLDER)
+                there.parent.mkdir(parents=True, exist_ok=True)
+                there.write_text(text)
+            ran = subprocess.run(  # noqa: S603
+                [argument.replace(str(ROUTES_FOLDER), folder) for argument in command], capture_output=True, text=True, check=False
+            )
+            kept = (each for each in Path(folder).rglob("*") if each.is_file())
+            self.files = {ROUTES_FOLDER / each.relative_to(folder): each.read_text() for each in kept}
+        return CommandResult(exit_code=ran.returncode, output=(ran.stdout or ran.stderr).strip())
+
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]:
         assert container == PROXY_NAME
-        return {path.name: FileRead(text, WRITTEN_AT) for path, text in self.files.items() if path.parent == folder}
+        return {path.name: FileRead(text, WRITTEN_AT) for path, text in self.files.items() if folder in path.parents}
 
     def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
         assert container == PROXY_NAME
@@ -100,13 +124,26 @@ def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
     return TraefikProxy(host, sleep=lambda _: host.load(), clock=lambda: next(clock), **seconds)
 
 
-def test_a_route_says_which_request_wrote_it_and_one_written_by_hand_or_before_says_none() -> None:
+def test_a_switch_asks_the_gate_to_rename_the_lanes_routes_file_to_the_route_of_its_candidate() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    proxy.write_route(OTHER, "b", 41)
-    seen = proxy.read()
-    assert (seen.route_of(OTHER).written_by, seen.route_of(WEB_ADDRESS).written_by) == (41, None)
-    assert (seen.route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == ("b", "b")
+    assert proxy.switch(OTHER, GENERATION, 1, "b") == Answer(Verdict.COMMITTED, "b")
+    assert (host.files[route_file_of(OTHER)], proxy.read().route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == (
+        route_text(OTHER, "b"),
+        "b",
+        "b",
+    )
+
+
+def test_removing_a_lanes_route_leaves_what_the_gate_keeps_of_its_releases() -> None:
+    host = ProxyHost({WEB_ADDRESS: "a"})
+    proxy = TraefikProxy(host)
+    proxy.switch(WEB_ADDRESS, GENERATION, 1, "b")
+    proxy.remove_route(WEB_ADDRESS)
+    assert (proxy.gate.verdict(WEB_ADDRESS, GENERATION), proxy.read().route_of(WEB_ADDRESS).written) == (
+        Answer(Verdict.COMMITTED, "b"),
+        None,
+    )
 
 
 def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_place() -> None:
@@ -133,7 +170,7 @@ def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_
     other_lane.start()
     while not touched:
         time.sleep(0.01)
-    read = proxy.read_written()
+    read = proxy.read().written
     other_lane.join(timeout=5)
     assert (touched, sorted(read)) == (["placed", "put in place", "read"], [OTHER, WEB_ADDRESS])
 
@@ -196,11 +233,38 @@ FOREIGN_LANE_FILES = {
 
 
 @pytest.mark.parametrize("text", FOREIGN_LANE_FILES.values(), ids=FOREIGN_LANE_FILES.keys())
-def test_a_lane_file_that_is_not_exactly_the_route_launchplane_writes_is_an_error(text: str) -> None:
-    host = ProxyHost({})
+def test_a_lane_file_that_is_not_the_route_launchplane_writes_is_that_lanes_fault_and_every_other_lane_is_still_read(
+    text: str,
+) -> None:
+    host = ProxyHost({OTHER: "site-p1"})
     host.files[route_file_of(WEB_ADDRESS)] = text
-    with pytest.raises(ProxyError, match="not the route Launchplane writes"):
-        lane_route(host)
+    seen = TraefikProxy(host).read()
+    assert (seen.route_of(OTHER).written, seen.route_of(WEB_ADDRESS).written) == ("site-p1", None)
+    assert "not the route Launchplane writes" in (seen.route_of(WEB_ADDRESS).unread or "")
+
+
+FIRST_LINES = {
+    "a comment the code before the gate wrote": "# launchplane.request=41\n",
+    "none": "",
+    "any other comment": "# launchplane.generation=01a1ef36-c51d-74d9-86a1-ff0199cf7a3d\n",
+}
+
+
+@pytest.mark.parametrize("stamp", FIRST_LINES.values(), ids=FIRST_LINES.keys())
+def test_a_route_with_this_first_line_is_a_route_all_the_same_and_says_nothing_of_any_release(stamp: str) -> None:
+    host = ProxyHost({})
+    host.files[route_file_of(WEB_ADDRESS)] = stamp + route_text(WEB_ADDRESS, "site-t1")
+    host.load()
+    route = lane_route(host)
+    assert (route.written, route.unread, route.sends_visitors_to) == ("site-t1", None, "site-t1")
+
+
+def test_a_web_address_the_proxy_has_two_routes_for_is_read_as_routed_twice_and_never_as_one_target() -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
+    loaded = json.loads(host.loaded)
+    loaded["routers"]["foreign@file"] = loaded["routers"][f"{WEB_ADDRESS}@file"]
+    host.loaded = json.dumps(loaded)
+    assert TraefikProxy(host).read().routed_twice == {WEB_ADDRESS}
 
 
 def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visitors() -> None:
@@ -241,6 +305,17 @@ def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
     assert proxy.read().sends_visitors_to() == {WEB_ADDRESS: "site-t1"}
     proxy.await_route(WEB_ADDRESS, None)
     assert proxy.read().sends_visitors_to() == {}
+
+
+def test_awaiting_an_enabled_route_does_not_return_for_a_route_the_proxy_has_loaded_and_disabled() -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1"})
+    loaded = json.loads(host.loaded)
+    loaded["routers"][f"{WEB_ADDRESS}@file"]["status"] = "disabled"
+    host.loaded = json.dumps(loaded)
+    proxy = TraefikProxy(host, sleep=lambda _: None, clock=iter(range(1000)).__next__, load_deadline_seconds=3)
+    proxy.await_route(WEB_ADDRESS, "site-t1")
+    with pytest.raises(ProxyError, match="still sends it to site-t1, with that route disabled"):
+        proxy.await_route(WEB_ADDRESS, "site-t1", enabled=True)
 
 
 def test_a_route_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> None:
