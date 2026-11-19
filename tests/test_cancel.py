@@ -11,7 +11,7 @@ from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.gate import Answer as GateAnswer
 from launchplane.gate import GateError
-from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Unread, Verdict
+from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
 from launchplane.page import request_note
 from launchplane.record import MOST_ATTEMPTS, Asked, Record, RecordError, Refused, Request, Stands
@@ -1066,16 +1066,3 @@ def test_a_refused_listing_after_a_same_build_repair_leaves_its_background_servi
     [service] = host.background_services.values()
     assert (service.generation, service.state) == (request.generation, InstanceState.RUNNING)
     assert worker.work_next() and kept_of(record, request.id).stands is Stands.DONE
-
-
-def test_failed_cleanup_waits_for_the_login_list_and_removes_the_unused_login(record: Record) -> None:
-    proxy = lane_brought_up_with_a()
-    host, database = proxy.host, "database-data-1"
-    host.start_instance = refusing("Starting the candidate")
-    host.change_database(database, unheld_logins=Unread(why="login list unavailable"))
-    worker = Worker(record, lanes_on(proxy), NO_SECRETS)
-    request = record.write(MOVE_B, CALLER, None)
-    assert worker.work_next() and kept_of(record, request.id).stands is Stands.WORKING
-    host.change_database(database, unheld_logins=("i_unused",))
-    assert worker.work_next() and kept_of(record, request.id).stands is Stands.FAILED
-    assert host.data_sets["data-1"].databases[0].unheld_logins == ()
