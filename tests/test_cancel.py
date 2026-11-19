@@ -893,36 +893,28 @@ def test_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_as_
     assert request_note(kept, {}) == kept.error
 
 
-def test_giving_up_a_request_that_needs_a_person_and_whose_release_is_committed_is_refused_and_it_is_worked_again(
-    record: Record,
+DECIDED_AT_THE_GATE: dict[str, tuple[Callable[[PretendGate, str], object], Stands, list[str]]] = {
+    "committed is finished": (lambda gate, generation: gate.switch(WEB_ADDRESS, generation, 1, NEW), Stands.DONE, [NEW]),
+    "a cancel that won is put back": (lambda gate, generation: gate.abandon(WEB_ADDRESS, generation), Stands.CANCELLED, ["a"]),
+}
+DECIDED = pytest.mark.parametrize(("decide", "stands", "instances"), DECIDED_AT_THE_GATE.values(), ids=DECIDED_AT_THE_GATE.keys())
+
+
+@DECIDED
+def test_giving_up_or_retrying_a_request_that_needs_a_person_and_whose_release_the_gate_has_decided_is_refused_and_it_is_worked(
+    record: Record, decide: Callable[[PretendGate, str], object], stands: Stands, instances: list[str]
 ) -> None:
     worker, lanes, proxy = serving_a(record)
     client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
     asked = client.post(MOVE, json=TO_B).json()["id"]
     taken_up_until_it_needs_a_person(record, asked)
     proxy.host.place(TO_BUILD_B, NEW, generation=kept_of(record, asked).generation)
-    proxy.gate.switch(WEB_ADDRESS, kept_of(record, asked).generation, 0, NEW)
+    decide(proxy.gate, kept_of(record, asked).generation)
     refused = [client.post(f"/requests/{asked}/give-up"), client.post(f"/requests/{asked}/retry")]
     assert ([each.status_code for each in refused], kept_of(record, asked).stands) == ([409, 409], Stands.WORKING)
     while worker.work_next():
         pass
-    kept = kept_of(record, asked)
-    assert kept.answer is not None
-    assert (kept.stands, kept.answer["outcome"], list(proxy.host.instances)) == (Stands.DONE, "switched", [NEW])
-
-
-def test_giving_up_a_request_that_needs_a_person_and_whose_cancel_won_is_refused_and_its_lane_is_put_back(record: Record) -> None:
-    worker, lanes, proxy = serving_a(record)
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
-    asked = client.post(MOVE, json=TO_B).json()["id"]
-    taken_up_until_it_needs_a_person(record, asked)
-    proxy.host.place(TO_BUILD_B, NEW, generation=kept_of(record, asked).generation)
-    proxy.gate.abandon(WEB_ADDRESS, kept_of(record, asked).generation)
-    refused = [client.post(f"/requests/{asked}/give-up"), client.post(f"/requests/{asked}/retry")]
-    assert ([each.status_code for each in refused], kept_of(record, asked).stands) == ([409, 409], Stands.WORKING)
-    while worker.work_next():
-        pass
-    assert (kept_of(record, asked).stands, list(proxy.host.instances)) == (Stands.CANCELLED, ["a"])
+    assert (kept_of(record, asked).stands, list(proxy.host.instances)) == (stands, instances)
 
 
 def interrupted_as_often_as_a_request_may_be(record: Record) -> Request:
@@ -943,13 +935,7 @@ def test_a_move_at_the_limit_needs_a_person_only_once_its_last_attempt_is_fenced
     assert (kept_of(record, request.id).stands, late, proxy.written) == (Stands.NEEDS_A_PERSON, NO_VERDICT, {WEB_ADDRESS: "a"})
 
 
-AT_THE_LIMIT: dict[str, tuple[Callable[[PretendGate, str], object], Stands, list[str]]] = {
-    "committed is finished": (lambda gate, generation: gate.switch(WEB_ADDRESS, generation, 1, NEW), Stands.DONE, [NEW]),
-    "a cancel that won is put back": (lambda gate, generation: gate.abandon(WEB_ADDRESS, generation), Stands.CANCELLED, ["a"]),
-}
-
-
-@pytest.mark.parametrize(("decide", "stands", "instances"), AT_THE_LIMIT.values(), ids=AT_THE_LIMIT.keys())
+@DECIDED
 def test_a_move_at_the_limit_whose_release_the_gate_has_decided_is_taken_up_however_often_it_was_interrupted(
     record: Record, decide: Callable[[PretendGate, str], object], stands: Stands, instances: list[str]
 ) -> None:

@@ -90,9 +90,9 @@ def kill_launchplane() -> None:
 
 # noinspection SqlResolve
 END_THE_REQUEST = """
-update attempt set ended_at = now(), ended = 'interrupted' where ended is null and request = {request:d};
+update attempt set ended_at = now(), ended = 'interrupted' where ended is null and request = :request;
 update request set stands = 'failed', ended_at = now(), error = 'Ended by a test, as a request that failed halfway.'
-where stands in ('waiting', 'working') and id = {request:d};
+where stands in ('waiting', 'working') and id = :request;
 """
 
 
@@ -101,9 +101,9 @@ where stands in ('waiting', 'working') and id = {request:d};
 def kill_launchplane_and_end(request: int) -> None:
     on_control(
         "systemctl kill --signal=KILL launchplane; systemctl stop launchplane; "
-        "runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --dbname launchplane; ended=$?; "
+        f"runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --set request={request:d} --dbname launchplane; ended=$?; "
         "systemctl start launchplane; exit $ended",
-        given=END_THE_REQUEST.format(request=request),
+        given=END_THE_REQUEST,
     )
     wait_for(launchplane_answers, seconds=30)
 

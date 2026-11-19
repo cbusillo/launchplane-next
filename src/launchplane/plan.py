@@ -316,17 +316,17 @@ class Move:
 
 
 def named_by_route(lane: LaneReading) -> set[str]:
-    route = lane.route
-    return {name for name in (route.written, None if route.loaded is None else route.loaded.container) if name is not None}
+    written = set[str]() if lane.route.written is None else {lane.route.written}
+    return written if lane.route.loaded is None else written | {lane.route.loaded.container}
 
 
 # Until the gate says a release is committed, nothing it made receives visitors. A routes file or a proxy that names
 # its instance all the same contradicts the gate, and nothing is touched on a contradiction.
 def own_named_by_route(move: Move) -> Wait | None:
     lane = move.lane
-    own = {each.container for each in lane.instances if each.generation == move.generation}
-    own |= {event.container for event in move.done if isinstance(event, StartInstance)}
-    named = sorted(own & named_by_route(lane))
+    made = {each.container for each in lane.instances if each.generation == move.generation}
+    started = {event.container for event in move.done if isinstance(event, StartInstance)}
+    named = sorted((made | started) & named_by_route(lane))
     if not named:
         return None
     return Wait(
@@ -509,7 +509,8 @@ def too_late_to_cancel(web_address: str) -> str:
 # What the generation made is read from the stamp on each part, and goes: its background service, then its instance.
 def own_part_step(move: Move) -> Action | Stop | CannotPutBack | None:
     lane = move.lane
-    if (wait := own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])) is not None:
+    wait = own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])
+    if wait is not None:
         return wait
     own = [each for each in (*lane.background_services, *lane.instances) if each.generation == move.generation]
     return discard(move, min(own, key=lambda each: (isinstance(each, RunningInstance), each.container))) if own else None

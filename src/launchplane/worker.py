@@ -162,7 +162,7 @@ class Worker:
         finally:
             self.let_go(lane)
 
-    # A move interrupted as often as a request may be needs a person only when the gate, fenced through its last
+    # A move interrupted as often as a request may be is left to a person only when the gate, fenced through its last
     # attempt, has no verdict for it and no cancel is on record. A committed release is finished and a cancel that won
     # is put back, however often they were interrupted, and with no answer from the gate nothing is decided.
     def taken_up(self, request: Request) -> int | None:

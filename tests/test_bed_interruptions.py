@@ -216,6 +216,7 @@ def stop_background_services_of(lane: Lane) -> None:
 # What the gate has kept at the moment before its rename: the candidate's routes file staged, and the mark that arms it.
 def stage_and_arm_as_the_gate_does(lane: Lane, asked: dict[str, Any]) -> None:
     [candidate] = [each["container"] for each in instances_of(lane) if each["build"] == lane.builds[1]]
+    # noinspection SqlResolve
     attempt = on_control(
         f"runuser -u postgres -- psql --dbname launchplane --tuples-only --no-align --set request={asked['id']:d}",
         given="select max(id) from attempt where request = :request",

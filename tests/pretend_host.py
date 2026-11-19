@@ -312,7 +312,7 @@ class GateNeverAsked:
         return self.answers
 
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> None:
-        assert product and lane and generation and attempt and witness
+        assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness
 
 
 class PretendProxy:
