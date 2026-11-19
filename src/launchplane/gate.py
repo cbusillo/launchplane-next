@@ -33,7 +33,8 @@ set -eu
 folder=$1 base=$1/$2.$3 operation=$4
 # Asking changes nothing: where nothing was ever kept, there is no verdict, and nothing is made to say so.
 if [ ! -d "$folder" ]; then
-    ls -a "${{folder%/*}}" > /dev/null || exit {UNREADABLE}
+    beside=$(ls -a "${{folder%/*}}") || exit {UNREADABLE}
+    ! printf '%s\n' "$beside" | grep -qxF "${{folder##*/}}" || exit {UNREADABLE}
     [ "$operation" != verdict ] || {{ echo none; exit 0; }}
     mkdir "$folder"
 fi

@@ -183,6 +183,9 @@ class TraefikProxy:
     # changed, and no longer, so no reading finds a file half put in place by another lane's worker.
     routes_folder: threading.Lock = field(default_factory=threading.Lock, init=False, compare=False, repr=False)
 
+    def is_running(self) -> bool:
+        return self.host.is_running(PROXY_NAME)
+
     def start(self) -> None:
         self.host.ensure_helper(PROXY)
         started = self.clock()
@@ -204,7 +207,7 @@ class TraefikProxy:
     # The route files are read from the proxy's container even while it is stopped; what it has loaded only while it runs.
     # A file that is not a route Launchplane writes is its own lane's fault, and no other lane's reading fails over it.
     def read(self) -> ProxySeen:
-        runs = self.host.is_running(PROXY_NAME)
+        runs = self.is_running()
         files_read = self.read_folder()
         routes = {
             name.removesuffix(ROUTE_FILE_SUFFIX): written_route_from_file(

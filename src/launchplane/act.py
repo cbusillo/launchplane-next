@@ -85,6 +85,7 @@ class AskedGate(Protocol):
 
 
 class Proxy(Protocol):
+    def is_running(self) -> bool: ...
     def start(self) -> None: ...
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None) -> None: ...
@@ -318,7 +319,7 @@ class Lanes:
                     done,
                     generation,
                     attempt,
-                    self.proxy.gate.verdict(web_address, generation),
+                    self.gate().verdict(web_address, generation),
                 ),
                 cancel,
             ),
@@ -326,18 +327,24 @@ class Lanes:
             witness,
         )
 
+    # The gate is a command in the proxy's container, so a proxy that is absent or stopped is started before a move asks.
+    def gate(self) -> AskedGate:
+        if not self.proxy.is_running():
+            self.proxy.start()
+        return self.proxy.gate
+
     def verdict(self, product: str, lane: str, generation: str) -> GateAnswer:
-        return self.proxy.gate.verdict(web_address_of(product, lane), generation)
+        return self.gate().verdict(web_address_of(product, lane), generation)
 
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
     # one can rename after it.
     def fence(self, product: str, lane: str, generation: str, attempt: int) -> GateAnswer:
-        return self.proxy.gate.fence(web_address_of(product, lane), generation, attempt)
+        return self.gate().fence(web_address_of(product, lane), generation, attempt)
 
     # A cancel of a move, carried to the gate by whoever asks. Why it came too late, or None when it won there.
     def abandon(self, product: str, lane: str, generation: str) -> str | None:
         web_address = web_address_of(product, lane)
-        answer = self.proxy.gate.abandon(web_address, generation)
+        answer = self.gate().abandon(web_address, generation)
         return plan.too_late_to_cancel(web_address) if answer.verdict is Verdict.COMMITTED else None
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:

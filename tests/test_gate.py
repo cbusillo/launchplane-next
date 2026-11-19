@@ -189,6 +189,12 @@ def test_asking_for_a_verdict_where_nothing_was_ever_kept_answers_none_and_makes
     assert (lane.gate.verdict(WEB, GENERATION), sorted(each.name for each in lane.host.folder.iterdir())) == (NONE, before)
 
 
+def test_a_gate_path_that_exists_and_is_no_folder_gives_no_answer_and_is_never_taken_as_none(lane: Lane) -> None:
+    (lane.host.folder / GATE_FOLDER_NAME).write_text("not a folder")
+    with pytest.raises(GateError, match="exit code 9"):
+        lane.gate.verdict(WEB, GENERATION)
+
+
 def test_a_route_that_is_a_folder_is_refused_before_anything_is_staged_and_the_generation_keeps_no_verdict(lane: Lane) -> None:
     lane.route.mkdir()
     with pytest.raises(GateError, match="is not a file"):

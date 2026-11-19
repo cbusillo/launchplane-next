@@ -7,6 +7,7 @@ from launchplane.act import EVERY_LANE, MOST_STEPS, Lanes, Stopped
 from launchplane.api import lane_answer
 from launchplane.container_host import Lane
 from launchplane.docker_answers import ContainerHostError
+from launchplane.gate import GateError
 from launchplane.instance import (
     BACK_SOON,
     InstanceState,
@@ -93,9 +94,22 @@ def test_the_first_move_starts_the_proxy_then_moves() -> None:
     assert result.outcome == Outcome.SWITCHED
 
 
+@pytest.mark.parametrize("ask", ["verdict", "fence", "abandon"])
+def test_a_stopped_proxy_is_started_before_the_gate_is_asked_anything_for_a_move(ask: str) -> None:
+    proxy = PretendProxy(PretendHost(), running=False)
+    lanes = Lanes(proxy.host, proxy)
+    asked = {
+        "verdict": lambda: lanes.verdict("site", "testing", GENERATION),
+        "fence": lambda: lanes.fence("site", "testing", GENERATION, 1),
+        "abandon": lambda: lanes.abandon("site", "testing", GENERATION),
+    }
+    asked[ask]()
+    assert (proxy.host.actions, proxy.running) == (["start proxy"], True)
+
+
 def test_a_proxy_that_never_runs_stops_the_move_with_an_error_not_a_loop() -> None:
     proxy = PretendProxy(PretendHost(), running=False, starts=False)
-    with pytest.raises(Stopped, match="StartProxy"):
+    with pytest.raises(GateError, match="not running"):
         Lanes(proxy.host, proxy).move(BUILD_B, GENERATION, 1)
     assert proxy.host.instances == {}
 
@@ -169,7 +183,7 @@ def test_retiring_a_lane_with_data_stops_its_background_service_first_and_keeps_
     assert (deleted.outcome, deleted.deleted_data_set, deleted.kept_data_sets) == (RetireOutcome.DELETED, "data-1", [])
 
 
-NOT_LAUNCHPLANES = {
+NOT_LAUNCHPLANES: dict[str, Callable[[Lanes], object]] = {
     "a retire naming the data set": lambda lanes: lanes.retire("site", "testing", delete_data_set="data-1"),
     "beginning maintenance": lambda lanes: lanes.begin_maintenance("site", "testing"),
     "ending maintenance": lambda lanes: lanes.end_maintenance("site", "testing"),

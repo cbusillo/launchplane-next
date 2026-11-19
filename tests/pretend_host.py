@@ -257,6 +257,8 @@ class PretendGate:
     def of(self, generation: str) -> Kept:
         if self.unreadable is not None:
             raise GateError(self.unreadable)
+        if not self.proxy.running:
+            raise GateError("The gate is a command in the proxy's container, which is not running")
         return self.kept.setdefault(generation, Kept())
 
     def verdict(self, web_address: str, generation: str) -> GateAnswer:
@@ -330,6 +332,9 @@ class PretendProxy:
         self.asked: list[str] = []
         self.while_awaiting: Callable[[], None] = lambda: None
         self.while_checking: Callable[[str], None] = lambda _container: None
+
+    def is_running(self) -> bool:
+        return self.running
 
     def start(self) -> None:
         self.running = self.starts
