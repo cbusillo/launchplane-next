@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from launchplane import maintenance, plan, steps
 from launchplane.container_host import PartStopped
-from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     BACK_SOON,
@@ -261,6 +261,7 @@ class Lanes:
         self.read_cancels = read_cancels
 
     # The containers are read before the proxy, so what is secret on the host is known before anything can be said of it.
+    @observing()
     def read(self, scope: Scope) -> Reading:
         read_at = datetime.now(UTC)
         on_host = self.host.read(scope.lane) if scope.parts else None
@@ -505,6 +506,7 @@ class Lanes:
     def refusal(self, error: CheckFailed | PartStopped, container: str, *, with_log: bool) -> str:
         return plan.failure_report(str(error), self.host.read_log_tail(container)) if with_log else str(error)
 
+    @observing()
     def check(self, container: str, health_path: str, *, with_log: bool = True) -> Event:
         try:
             self.proxy.check_instance(container, health_path)
@@ -512,6 +514,7 @@ class Lanes:
             return steps.CheckRefused(container, self.refusal(error, container, with_log=with_log))
         return steps.Check(container, health_path)
 
+    @observing()
     def await_background_service(self, container: str, *, with_log: bool = True) -> Event:
         try:
             self.host.await_background_service(container, BACKGROUND_SERVICE_STEADY_SECONDS)

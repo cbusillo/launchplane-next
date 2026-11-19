@@ -24,8 +24,10 @@ from launchplane.docker_answers import (
     PRODUCT_LABEL,
     ContainerHostError,
     ContainerHostRefused,
+    attempting,
     checked,
     command_result,
+    observing,
 )
 from launchplane.host_secrets import HostSecrets
 from launchplane.instance import DataSetUse, new_password
@@ -55,7 +57,8 @@ class HostLogins:
         return result.output
 
     def read[Shape](self, database: str, attempt: str, ask: Ask, shape: TypeAdapter[Shape]) -> Shape:
-        answer = self.answer(database, attempt, ask)
+        with observing(), attempting(attempt, self.address):
+            answer = self.answer(database, attempt, ask)
         try:
             return shape.validate_json(answer)
         except ValidationError as error:

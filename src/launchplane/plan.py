@@ -244,7 +244,8 @@ def login_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | No
         unknown = next((finding for finding in about if finding.kind in LOGINS_UNKNOWN), None)
         if unknown is not None:
             why = unknown.sentence if unknown.kind == Kind.LOGINS_UNREAD else f"{unknown.sentence}, so its logins could not be read"
-            return Stop(f"{why}. {changes_so_far(done)} Ask again once the server answers, or delete its data set by name.")
+            stop = Wait if unknown.kind == Kind.LOGINS_UNREAD else Stop
+            return stop(f"{why}. {changes_so_far(done)} Ask again once the server answers, or delete its data set by name.")
     return None
 
 
@@ -521,8 +522,7 @@ def own_part_step(move: Move) -> Action | Stop | CannotPutBack | None:
 def decide_clean_up(move: Move) -> Step[None] | CannotPutBack:
     if move.gate.verdict is not Verdict.NONE:
         return Wait(f"The gate answers {move.gate.verdict} for this release, so nothing of it was cleaned up.")
-    unheld = move.judged.of_kind(Kind.LOGIN_UNHELD)
-    return own_part_step(move) or (RemoveLogins(unheld[0].subject) if unheld else Done(None))
+    return own_part_step(move) or login_step(move.judged, move.done) or Done(None)
 
 
 # A cancel won. What the generation made goes. Data stays.
@@ -533,6 +533,8 @@ def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
     starting = sorted(finding.subject for finding in move.judged.of_kind(Kind.NOT_ACCEPTING))
     if starting:
         return AwaitDatabase(starting[0])
+    if not any(isinstance(event, Abandon) for event in move.done):
+        return Abandon(move.lane.web_address, move.generation)
     return with_logins_settled(put_back_or_what_is_left(move.judged, move.generation), move.judged, move.done)
 
 

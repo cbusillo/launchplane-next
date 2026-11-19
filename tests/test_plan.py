@@ -231,7 +231,7 @@ CANCELS = {
         ABANDONED,
         Case((OLD, MADE_NEW), SERVING_OLD, (), DISCARD_NEW),
     ),
-    "abandoned, nothing of it left: the lane is put back": (ABANDONED, Case((OLD,), SERVING_OLD, (), Done(PutBack(findings=[])))),
+    "abandoned, sweep finished": (ABANDONED, Case((OLD,), SERVING_OLD, (CARRIED_TO_THE_GATE,), Done(PutBack(findings=[])))),
 }
 
 
@@ -247,7 +247,7 @@ FOLLOWS_THE_GATE = {
         Case(
             (OLD, changed(NEW, generation=EARLIER)),
             SERVING_OLD,
-            (),
+            (CARRIED_TO_THE_GATE,),
             Done(PutBack(findings=["The instance new runs beside the active one"])),
         ),
     ),

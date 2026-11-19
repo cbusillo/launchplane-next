@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
 
-from launchplane.docker_answers import CommandResult, ContainerHostError
+from launchplane.docker_answers import CommandResult, ContainerHostError, observing
 from launchplane.instance import Verdict
 
 # The gate: the one place that answers, for a generation, none, committed or abandoned, for good.
@@ -173,6 +173,7 @@ class Gate:
         return answer
 
     # Changes nothing.
+    @observing()
     def verdict(self, web_address: str, generation: str) -> Answer:
         return self.ask(web_address, generation, "verdict")
 

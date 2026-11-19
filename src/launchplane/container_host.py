@@ -50,6 +50,7 @@ from launchplane.docker_answers import (
     container_summaries,
     files_in,
     is_quiet,
+    observing,
     on_host_from,
     read_whole,
     running_for,
@@ -241,6 +242,7 @@ class ContainerHost:
         return Listed(summaries, details)
 
     # Asked before an answer is made that reads nothing else, so that answer too is cleaned of what every container holds.
+    @observing()
     def read_secrets(self) -> frozenset[str]:
         def describe_every_container() -> None:
             with attempting("Reading the secrets Launchplane has given to what is", self.address):
@@ -467,6 +469,7 @@ class ContainerHost:
             elif found.status != "running":
                 found.start()
 
+    @observing()
     def is_running(self, container: str) -> bool:
         with attempting(f"Reading the state of {container}", self.address):
             found = self.find_container(container)

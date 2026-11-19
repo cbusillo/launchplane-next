@@ -23,13 +23,14 @@ from urllib.parse import parse_qs, urlsplit
 from launchplane import api
 from launchplane.act import Lanes
 from launchplane.container_host import ContainerHost
-from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, TraefikProxy
 from launchplane.record import PostgresRecord
 
 HOLDS = Path(os.environ.get("LAUNCHPLANE_HOLDS", "/var/lib/launchplane/holds"))
 PORT = int(os.environ.get("LAUNCHPLANE_HOLDS_PORT", "8701"))
-POINT = re.compile(r"(before|after|lose|fail|refuse)\.(host|proxy|record|lanes)\.[a-z_]+|proxy-delivery")
+POINT = re.compile(r"(before|after|lose|fail|refuse)\.(host|proxy|record|lanes)\.[a-z_]+|proxy-delivery|interrupt-switch")
+M3_BIN = "/tmp/launchplane-m3-bin"  # noqa: S108 inside the test proxy
 PROXY_DELIVERY = "proxy-delivery"
 # Traefik reads every file of its routes folder or none: one it cannot read keeps it on the routes it has loaded.
 UNREADABLE_ROUTES_FILE = ROUTES_FOLDER / "held.toml"
@@ -94,6 +95,11 @@ class Held:
 
 class HeldHost(Held, ContainerHost):
     held_as = "host"
+
+    def run_in(self, container: str, command: list[str]) -> CommandResult:
+        if held_once("interrupt-switch", repr(command)):
+            command = ["env", f"PATH={M3_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", *command]
+        return super().run_in(container, command)
 
 
 class HeldProxy(Held, TraefikProxy):

@@ -11,7 +11,7 @@ import pytest
 
 from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate
 from launchplane.instance import Verdict
-from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of, route_text
+from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -24,7 +24,6 @@ from tests.bed import (
     let_go,
     move_lane,
     needs_test_bed,
-    on_control,
     on_scratch,
     request_ended,
     request_loop,
@@ -32,6 +31,7 @@ from tests.bed import (
     wait_for,
     wait_until_stopped_at,
 )
+from tests.held_launchplane import M3_BIN
 from tests.test_bed_data_set import DESCRIPTION, build_pretend_product, place_description
 from tests.test_bed_gate import ScratchHost
 
@@ -110,7 +110,7 @@ SITE_PAUSES = {
     "M2, its check under way": Pause("before.proxy.request_instance", once=NEWER),
     "M2, check passed": Pause("after.proxy.check_instance"),
     "M3, before the gate": Pause(f"before.{THE_RENAME}"),
-    "M3, staged and armed, not yet renamed": Pause(f"before.{THE_RENAME}", staged=True),
+    "M3, staged and armed, not yet renamed": Pause(f"before.{THE_RENAME}", staged=True, once=KILL),
     "M4, renamed, its reply not yet had, proxy still on A": Pause(f"after.{THE_RENAME}", renamed=True, proxy_held=True),
     "M4, renamed, waiting for a proxy still on A": Pause(
         "before.proxy.await_route", renamed=True, proxy_held=True, once=CANCEL_THEN_KILL
@@ -213,21 +213,23 @@ def stop_background_services_of(lane: Lane) -> None:
     on_scratch(f"docker stop $(docker ps --quiet {labels} --filter name=background-service)")
 
 
-# What the gate has kept at the moment before its rename: the candidate's routes file staged, and the mark that arms it.
-def stage_and_arm_as_the_gate_does(lane: Lane, asked: dict[str, Any]) -> None:
+def interrupt_armed_switch(lane: Lane, asked: dict[str, Any]) -> None:
+    generation = asked["generation"]
     [candidate] = [each["container"] for each in instances_of(lane) if each["build"] == lane.builds[1]]
-    # noinspection SqlResolve
-    attempt = on_control(
-        f"runuser -u postgres -- psql --dbname launchplane --tuples-only --no-align --set request={asked['id']:d}",
-        given="select max(id) from attempt where request = :request",
-    ).strip()
-    base = ROUTES_FOLDER / GATE_FOLDER_NAME / f"{lane.web_address}.{asked['generation']}"
-    for file, text in (
-        (f"{base}.{candidate}.next", route_text(lane.web_address, candidate)),
-        (f"{base}.armed", f"{attempt} {candidate}"),
-    ):
-        on_scratch(f"docker exec -i {PROXY_NAME} sh -c 'cat > {file}'", given=text)
-    assert verdict_of(lane, asked["generation"]) == Answer(Verdict.NONE)
+    base = ROUTES_FOLDER / GATE_FOLDER_NAME / f"{lane.web_address}.{generation}"
+    shim = '#!/bin/sh\ncase "$1" in *.next) kill -KILL "$PPID"; exit 1 ;; esac\nexec /bin/busybox mv "$@"\n'
+    place = f"mkdir -p {M3_BIN} && cat > {M3_BIN}/mv && chmod +x {M3_BIN}/mv"
+    on_scratch(f"docker exec -i {PROXY_NAME} sh -c '{place}'", given=shim)
+    only = "?only=" + quote(f"'{generation}', 'switch'")
+    try:
+        hold("interrupt-switch" + only)
+        hold("after.host.run_in" + only)
+        let_go(f"before.{THE_RENAME}")
+        wait_until_stopped_at("after.host.run_in")
+        assert in_proxy(f"test -f {base}.{candidate}.next && cat {base}.armed").split()[1] == candidate
+        assert verdict_of(lane, generation) == Answer(Verdict.NONE)
+    finally:
+        in_proxy(f"rm -f {M3_BIN}/mv && rmdir {M3_BIN}")
 
 
 @dataclass
@@ -329,7 +331,7 @@ class Held:
                 let_go(self.pause.service_stopped_at)
             wait_until_stopped_at(self.pause.hold, seconds=120)
             if self.pause.staged:
-                stage_and_arm_as_the_gate_does(self.lane, self.asked)
+                interrupt_armed_switch(self.lane, self.asked)
             if self.pause.proxy_held:
                 self.look_while_the_proxy_is_held(loop)
             if self.pause.proxy_on_b:

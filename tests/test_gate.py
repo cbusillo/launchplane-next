@@ -7,7 +7,9 @@ import pytest
 from launchplane.docker_answers import CommandResult
 from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate, GateError
 from launchplane.instance import Verdict
+from launchplane.record import Record, Stands
 from tests.pretend_host import EARLIER, GENERATION
+from tests.test_worker import CALLER, MOVE_B, kept_of, serving_a
 
 WEB = "testing.site.test"
 NONE, ABANDONED = Answer(Verdict.NONE), Answer(Verdict.ABANDONED)
@@ -126,13 +128,21 @@ def test_a_cancel_that_was_cut_short_after_its_mark_was_kept_still_answers_aband
     assert (lane.gate.abandon(WEB, GENERATION), lane.staged()) == (ABANDONED, [])
 
 
-def test_a_cancel_cut_short_after_its_arming_mark_went_still_takes_the_stage_away_when_sent_again(lane: Lane) -> None:
+def test_recovery_sweeps_a_stage_after_its_arming_mark_and_candidate_are_gone_before_saving_cancelled(
+    lane: Lane, record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, _, proxy = serving_a(record)
+    monkeypatch.setattr(proxy, "gate", lane.gate)
+    request = record.write(MOVE_B, CALLER, None)
+    assert record.take_up(request.id) is not None
+    record.cancel(request.id, CALLER)
     gate_folder = lane.host.folder / GATE_FOLDER_NAME
     gate_folder.mkdir()
     for kind, text in ((".b.next", "to b"), (".abandoned", "")):
-        (gate_folder / f"{WEB}.{GENERATION}{kind}").write_text(text)
+        (gate_folder / f"{WEB}.{request.generation}{kind}").write_text(text)
     (gate_folder / f"{WEB}.{EARLIER}.a.next").write_text("to a")
-    assert (lane.gate.abandon(WEB, GENERATION), lane.staged()) == (ABANDONED, [f"{WEB}.{EARLIER}.a.next"])
+    assert worker.work_next() and kept_of(record, request.id).stands is Stands.CANCELLED
+    assert lane.staged() == [f"{WEB}.{EARLIER}.a.next"]
 
 
 def test_a_discard_cut_short_after_its_revocation_was_kept_already_refuses_the_switch_it_was_sent_against(lane: Lane) -> None:

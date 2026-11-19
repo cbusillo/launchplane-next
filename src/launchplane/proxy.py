@@ -13,7 +13,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from launchplane.container_host import FileRead, HelperContainer
-from launchplane.docker_answers import CommandResult
+from launchplane.docker_answers import CommandResult, observing
 from launchplane.gate import Answer, Gate
 from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute
 
@@ -215,6 +215,7 @@ class TraefikProxy:
                 raise ProxyError(f"The proxy did not answer within {self.load_deadline_seconds:g} s of starting: {result.output}")
             self.sleep(POLL_SECONDS)
 
+    @observing()
     def read_routes(self) -> LoadedRoutes:
         result = self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "-", LOADED_ROUTES_URL])
         if not result.succeeded:
@@ -230,6 +231,7 @@ class TraefikProxy:
 
     # The route files are read from the proxy's container even while it is stopped; what it has loaded only while it runs.
     # A file that is not a route Launchplane writes is its own lane's fault, and no other lane's reading fails over it.
+    @observing()
     def read(self) -> ProxySeen:
         runs = self.is_running()
         files_read = self.read_folder()

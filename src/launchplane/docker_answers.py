@@ -65,6 +65,14 @@ class ContainerHostRefused(ContainerHostError):
 
 
 @contextmanager
+def observing() -> Generator[None]:
+    try:
+        yield
+    except ContainerHostRefused as error:
+        raise ContainerHostError(str(error)) from error
+
+
+@contextmanager
 def attempting(action: str, address: str) -> Generator[None]:
     try:
         yield
