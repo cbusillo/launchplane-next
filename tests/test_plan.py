@@ -289,7 +289,7 @@ LEFT_BY_EARLIER = changed(NEW, generation=EARLIER)
 
 
 def test_an_earlier_winner_is_retired_only_once_this_release_is_committed_elsewhere_and_visitors_are_sent_there() -> None:
-    winner = changed(OLD, generation=EARLIER)
+    winner: RunningInstance = changed(OLD, generation=EARLIER)
     kept = (Discarded("old", kept=True),)
     asked = Case((winner, MADE_NEW), SERVING_NEW, (), gone("old", EARLIER), COMMITTED_TO_NEW)
     before_this_release_is_committed = Case((winner,), (None, None), kept, None)
