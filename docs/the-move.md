@@ -8,20 +8,22 @@ For now a build is a container image reference, and the instance must answer HTT
 
 A move is one **release**, and every release is a **generation**: a number given to the request as it is written and to no other request. It is made from the time and from chance, never counted up, so it does not repeat when Launchplane's record is lost and made again. `GET /requests/<id>` shows it as `generation`. The instance, the background service and the network of a data set a release makes carry it as the label `launchplane.generation`.
 
-Whether a release is real is answered in one place, [the gate](#the-gate) on the container host: for a generation it says `none`, `committed` to one instance, or `abandoned`, and that answer is for good. A move takes one step at a time. Before every step it reads the host and the proxy, and then asks the gate, so the gate's answer is never older than the reading beside it. The gate's answer alone picks what the move does next. The routes file and the proxy's loaded route say where visitors go, and never whether the release happened. A move that has taken 50 steps and is not finished stops there.
+Whether a release is real is answered in one place, [the gate](#the-gate) on the container host: for a generation it says `none`, `committed` to one instance, or `abandoned`, and that answer is for good. A move takes one step at a time. Before every step it reads the host and the proxy, and then asks the gate, so the gate's answer is never older than the reading beside it. The gate's answer alone picks what the move does next. The routes file and the proxy's loaded route say where visitors go, and never whether the release happened. A move that has taken 50 steps and is not finished ends nothing: its request stays working and is taken up again.
 
 | The gate answers | The lane as read | The one next action | A cancel |
 | --- | --- | --- | --- |
+| `none` | the routes file or the proxy names an instance of this release | Wait: that contradicts the gate, and nothing is touched on a contradiction. | is carried to the gate |
 | `none` | an instance this attempt started | Check it. One that failed its check goes through the gate and is removed, and the move answers `check failed`. One that passed is switched to, by asking the gate. | is carried to the gate |
 | `none` | no such instance | The lane must not be in [maintenance](maintenance.md), its routes file must be one Launchplane writes, and the proxy must run and have loaded it. If the instance receiving visitors already is this build with nothing wrong, the move finishes around it. Otherwise whatever an earlier request or attempt left goes through the gate and is removed, the data set is made ready, and a new instance is started. | is carried to the gate |
 | `committed` | the instance the gate names is not on the host | Stop, and touch nothing else. The request stays working. | too late |
 | `committed` | the proxy does not send visitors to it yet | Start the proxy if it is not running. Wait for it to send visitors there. | too late |
-| `committed` | the proxy sends visitors to it | Retire the background service of any other instance. Start the new instance's, where the product has one, and watch it. Remove the other instances. Remove the logins no container holds, and answer `switched`. | too late |
-| `abandoned` | anything of this generation is left | Retire its background service, then take its instance through the gate and remove it. Data stays. | won |
+| `committed` | the proxy sends visitors to it | Retire the background service of any other instance. Start the new instance's, where the product has one, and watch it. Only once it has stayed up, remove the other instances. Remove the logins no container holds, and answer `switched`. | too late |
+| `abandoned` | the routes file or the proxy names an instance of this release, or a part's release cannot be read | Wait, and touch nothing. | won |
+| `abandoned` | anything of this generation is left | Remove its background service, then take its instance through the gate and remove it. Data stays. | won |
 | `abandoned` | nothing of it is left | Wait for a database server it had just made, remove the logins no container holds, and end as `cancelled`. | won |
 
 - **A release always makes its own candidate.** An instance left by an earlier request, or by an earlier attempt of this request, is never switched to.
-- **An instance of a release is removed in one way,** through the gate. The gate is asked about the generation that made it. If it answers that the routes file was renamed to that very instance, the instance stays, and where it is of the release being worked that release is finished as the committed one. Otherwise the gate has taken away every permission to switch to it, and it is removed. An instance an earlier release was renamed to, which the lane no longer points at, is retired once the gate has said so.
+- **An instance of a release is removed in one way,** through the gate. The gate is asked about the generation that made it. If it answers that the routes file was renamed to that very instance, the instance stays, and where it is of the release being worked that release is finished as the committed one. Otherwise the gate has taken away every permission to switch to it, and it is removed. An instance an earlier release was renamed to is retired only once this release is committed to another instance and the proxy sends visitors there with the route enabled. An instance whose release cannot be read from its label, or that the routes file or the proxy names, is not removed: the move waits.
 - **The proxy's loaded route is used for three things:** to say where visitors go, to wait until the proxy sends them to the committed instance before the old one is retired, and as the guard at the moment of every stop or removal.
 - **After an interruption nothing is resumed.** The request is taken up again, reads the host, asks the gate, and goes on from the answer.
 
@@ -30,8 +32,8 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | The gate answers | The request may end as |
 | --- | --- |
 | `committed` | `done` and `switched` only, once the instance serves and the rest is finished. Until then it stays `working`, with why in `error`, and is taken up again by itself, ahead of newer work on its lane, however often. Neither a retry nor a give-up ends it. |
-| `abandoned` | `cancelled`, once the lane is put back. It stays `working` while the host cannot be read. It ends as `failed` only when Docker refused to remove a part of the release and the part is still there, and `error` then says that the cancel won and what could not be removed. |
-| `none` | `failed`, `unchanged` or `repaired`, and only after the gate has confirmed `none` and refused every switch of this attempt and earlier ones, also one still on its way. |
+| `abandoned` | `cancelled`, once the lane is put back. It stays `working` while the host cannot be read. It ends as `failed` only when Docker refused to remove a part of the release, its instance or its background service, and the part is still there, and `error` then says that the cancel won and what could not be removed. |
+| `none` | `failed`, `unchanged` or `repaired`, and only after the gate has confirmed `none` and refused every switch of this attempt and earlier ones, also one still on its way. Before `failed` is written, what the release made is removed, through the gate and the guard, and a fresh reading shows none of it left. A call the host did not answer, a wait, a guard that refused, or 50 steps is no failure: nothing is ended, and the request is taken up again after 5 s. |
 | no answer | nothing. No ending is written and the attempt is not counted. The request is taken up again after 5 s. |
 
 | `outcome` | Status | Meaning |
@@ -46,7 +48,7 @@ A move does not answer success while the lane's web address does not answer a re
 
 `did` lists every change the move made, whatever the outcome.
 
-A `503` means the move stopped where it was with nothing switched, and the gate has confirmed that. Its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
+A `503` means the move stopped where it was with nothing switched, the gate has confirmed that, and what the move made is gone. Its request has failed, and it is safe to ask again. A build Docker answers it does not have ends this way; a host that does not answer leaves the request working. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
 
 **The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error.
 
@@ -62,7 +64,7 @@ A routes file that is otherwise not exactly the route Launchplane writes for tha
 
 A move that finds the file and the loaded route disagreeing before it has switched anything waits for the proxy, or stops with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a loaded route Launchplane did not write, stops the call.
 
-No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the call stops with `503` and says so. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
+No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the call stops with `503` and says so. A database server about to be stopped or deleted is checked the same way. While the proxy has two routes for one web address, where those visitors go is not known, and nothing is stopped or removed. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
 
 An instance that exists and does not receive visitors is left over from a move cut short. The next move of the lane, to any build, retires it. The web address points at exactly one instance the whole time.
 
@@ -70,16 +72,8 @@ An instance that exists and does not receive visitors is left over from a move c
 
 The gate is the one place that answers, for a generation, `none`, `committed` or `abandoned`, and the answer is for good. Everything that settles a release is one command, run in the proxy's container while it holds a lock on the routes folder itself. What it decides is kept in the folder `gate` inside the routes folder, as files named for the web address and the generation:
 
-| File | Says |
-| --- | --- |
-| `<candidate>.next` | the candidate's routes file, staged |
-| `armed` | the attempt and the one candidate allowed to be renamed to |
-| `<candidate>.revoked` | this candidate may never be armed |
-| `fenced` | no attempt up to this number may arm |
-| `abandoned` | a cancel won |
-
 - **The switch proves itself.** Under the lock the staged file is finished and made durable, then the `armed` mark, and then the routes file is put in place by renaming the staged file. While a generation is armed, only that rename takes its staged file away. Armed with the staged file there is `none`. Armed with the staged file gone is `committed` to that candidate. Nothing is written after the rename, and no reply has to arrive: a command killed just after the rename, and one whose reply is lost, are answered `committed` when asked again.
-- **A cancel** makes the generation `abandoned` if it has no verdict, and takes its arming and its staged file away.
+- **A cancel** makes the generation `abandoned` if it has no verdict, then takes its arming away, then removes every staged file of the generation and looks that none is left. Sent again it does the same, also where the arming is already gone.
 - **A discard** names the generation, the attempt and the exact candidate. In the one command it either learns that the candidate was renamed to, and the answer is `committed` to it, or it takes away the permission to switch to it, and then the candidate may be removed.
 - **A fence** confirms `none` and refuses every switch of an attempt up to a number, also one still on its way.
 - **Asking** for a generation's verdict changes nothing on the host, also where nothing was ever kept.
@@ -87,7 +81,9 @@ The gate is the one place that answers, for a generation, `none`, `committed` or
 
 Every command answers with the verdict as it then holds. Whatever takes permission away keeps the revocation first, then removes the arming, then the staged file, and a command cut short and sent again goes in the same order. A command sent again returns the first verdict and stages nothing. A generation with a verdict is never renamed for again, a discarded candidate is never armed again, and another candidate is armed only by a later attempt.
 
-A file that cannot be looked for is never taken as absent: the command then fails, and its sender has no answer, which is not `none`.
+A file that cannot be looked for is never taken as absent: the command then fails, and its sender has no answer, which is not `none`. A path named `gate` that is there and is no folder gives no answer either.
+
+The gate is a command in the proxy's container, so a move starts a proxy that is absent or stopped before it asks the gate anything.
 
 Nothing is decided inside Launchplane, so a second Launchplane process, and the call that cancels while a worker is at work, are held off by the same lock as the worker. The lock is held for the one command only. Making and checking a candidate never holds it.
 
@@ -114,7 +110,8 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **A release whose instance never serves keeps its lane.** It stays `working` with the reason, is taken up again every 5 s, a cancel is told too late, and a newer request waits behind it. Nobody is told. Each time it is taken up is an attempt in the record.
 - **What the gate keeps is never cleaned up.** Each release leaves one or two small files in the folder `gate`, also after its lane is retired.
 - **Two gate commands of one Launchplane go one after the other,** by a lock in the process that also keeps a reading of the routes folder from finding a file half put in place. A cancel so waits behind a switch that is waiting for the host's lock.
-- **Only the removal of an instance is ever a confirmed inability to put back.** A background service Docker refuses to remove leaves the request working.
+- **A move the host does not answer for never fails by itself.** It stays `working` and is taken up again every 5 s until the host answers. A cancel ends it.
+- **A routes file or a proxy that names an instance of a release the gate has not committed is waited on for good.** Nothing puts that right by itself.
 - **Untried:** HTTPS, long-lived connections, two Launchplane processes at once.
 
 ## Measured
@@ -147,9 +144,9 @@ Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:
 | M0 | before the lane's turn is taken; before the first action |
 | M1 | the candidate created and not started; started and not checked; and on a lane with data, after the network, the volume and the database server of a new data set are each made |
 | M2 | a request of the check not yet answered; the check passed |
-| M3 | before the gate |
+| M3 | before the gate; and with the candidate's routes file staged and armed as the gate keeps them just before its rename |
 | M4 | the rename done and its reply not yet had, with the proxy held on A; the worker waiting for a proxy held on A |
-| M5 | the rename done and its reply not yet had, with the proxy on B; before the old instance is retired; and with data, before the old background service is retired and after the new one is started |
+| M5 | the rename done and its reply not yet had, with the proxy on B; before the old instance is retired; and with data, before the old background service is retired, after the new one is started, and while the new one is watched |
 | M6 | the old instance gone; and with data, before the logins no container holds are removed |
 | Z | before the result is saved; after it is saved; and a move to the build already active, cancelled before its result is saved |
 
@@ -165,27 +162,27 @@ curl -X POST   http://launchplane.shiny:8701/kill
 ```
 
 - A hold is `before.` or `after.`, then `host`, `proxy`, `record` or `lanes`, then the name of the method. `?only=<text>` holds only a call whose arguments have that text.
-- `fail.` in place of `before.` makes the call fail as a host that cannot be reached, and `refuse.` as a host that answers no, for as long as the hold stands. `lose.` lets the call take effect once and gives its caller the error of a lost reply.
+- `fail.` in place of `before.` makes the call fail as a host that cannot be reached, and `refuse.` as a host that answers no, for as long as the hold stands. `lose.` lets the call take effect once and, where it succeeded, gives its caller the error of a lost reply.
 - `GET /holds` answers `held`, and `stopped_at`: the holds a call is stopped at now.
 - `proxy-delivery` puts a file Traefik cannot read into the routes folder. Traefik then loads no change to any routes file and goes on serving the routes it has, and its API goes on answering. Letting go removes the file, and Traefik loads what is there. Measured on Traefik v3.7.18.
 - `POST /kill` kills Launchplane as `kill -9` does, and systemd starts it again.
 - The tests start the service `launchplane` again when they end, and they pass from a bed on the plain service with nothing done by hand. By hand, on the control container:
 
 ```
-ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
-ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
+lp-control 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
+lp-control 'systemctl stop launchplane-held && systemctl start launchplane'
 ```
 
-  The first puts the bed into holding mode and the second puts it back. A deploy puts it back too. The older test-bed tests need the plain service: some of them stop and start `launchplane` by name.
+  The first puts the bed into holding mode and the second puts it back. From a plain shell, `ssh root@launchplane.shiny` takes the place of `lp-control`. A deploy puts it back too. The older test-bed tests need the plain service: some of them stop and start `launchplane` by name.
 
 A hold on a call inside the lock Launchplane keeps on the routes folder stops every reading of that folder, the status page with it. The switch is held at `proxy.switch`, outside that lock: `before.` it nothing is staged, and `after.` it the rename is done and its reply not yet had.
 
-The same file has the eight held cases of the rule the move is built to. Each probes the lane and its neighbour for the whole of the case and asserts that every probe answered and that the builds came in the order expected.
+The same file has the eight held cases of the rule the move is built to. Each probes the lane and its neighbour for the whole of the case and asserts that every probe answered and that the builds came in the order expected. Renames are counted from the kernel's report of every staged routes file of the generation that left the gate's folder.
 
 | Case | Held, and what must come of it |
 | --- | --- |
-| 1 | B's switch accepted and held before the lock, Launchplane killed, recovery about to discard B, then the rename lands and loads: `done` and `switched`, B alone. |
-| 2 | The rename succeeds and only its reply is lost: `done` and `switched` on the same B, one rename. |
+| 1 | B's switch accepted and held before the lock, Launchplane killed, and recovery held after it has read the routes folder and before it has read the proxy; the rename lands and loads in between: `done` and `switched`, B alone, one rename. |
+| 2 | The switch's own command on the host succeeds and only its reply is lost: `done` and `switched` on the same B, one rename. |
 | 3 | Renamed, the proxy held on A, Launchplane killed four times: a cancel is told too late, the request stays `working`, and it is finished once the proxy loads. |
 | 4 | As case 1, and recovery discards B before the stale switch runs: it renames nothing, and a fresh candidate of the same generation switches once. |
 | 5 | A cancel wins during B's check, then the host cannot be read: `working`, and `cancelled` once it can be. |

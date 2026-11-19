@@ -22,13 +22,14 @@ While the routes file points at the back soon page:
 
 `POST /lanes/{product}/{lane}/maintenance/begin` takes the first of these that applies:
 
-1. If the proxy is not running, start it.
-2. If the lane's routes file and the proxy disagree, wait until the proxy has loaded the file.
-3. If the routes file does not send the web address to the back soon page, start the back soon page if it is not running and write the route to it.
-4. Stop a background service of the lane that is not stopped.
-5. Stop a web part of the lane that is not stopped.
-6. Stop a database server of the lane that is not stopped.
-7. Answer.
+1. If the lane's routes file is not a route Launchplane writes, stop with `503`, changing nothing. Ending maintenance does the same, also on a lane that is not in maintenance.
+2. If the proxy is not running, start it.
+3. If the lane's routes file and the proxy disagree, wait until the proxy has loaded the file.
+4. If the routes file does not send the web address to the back soon page, start the back soon page if it is not running and write the route to it.
+5. Stop a background service of the lane that is not stopped.
+6. Stop a web part of the lane that is not stopped.
+7. Stop a database server of the lane that is not stopped.
+8. Answer.
 
 Containers are stopped and never removed, and no data is touched. A lane with no data set or no background service goes in with the parts it has. A lane with nothing on the host, no route included, is refused with `503`.
 

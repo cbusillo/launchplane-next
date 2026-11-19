@@ -111,7 +111,7 @@ A web part or a background service with anything mounted is replaced. That rule 
 | --- | --- | --- |
 | `background service failed` | 422 | Only where the move switched nothing: the lane already served the build, and its background service did not stay up 3 s. `error` has why and its last log lines. Asking again retires it and starts it again. |
 
-Under a release that has switched, a background service that does not stay up ends nothing: the request stays `working`, its `error` has why and the last log lines, and it is taken up again by itself, ahead of any newer request for the lane ([the move](the-move.md)). Known and not fixed: while the build's background service cannot stay up, nothing ends that request, so no newer move and no retire of the lane gets its turn.
+Under a release that has switched, a background service that does not stay up ends nothing: the request stays `working`, its `error` has why and the last log lines, and it is taken up again by itself, ahead of any newer request for the lane ([the move](the-move.md)). The old instance stays until the new background service has stayed up. Known and not fixed: while the build's background service cannot stay up, nothing ends that request, so no newer move and no retire of the lane gets its turn.
 
 The other outcomes are those of [the move](the-move.md). `data_set` in the answer is the data set of the instance receiving visitors. After an interruption the request is taken up again, reads the host and goes on from what is there.
 
