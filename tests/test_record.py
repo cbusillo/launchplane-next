@@ -283,6 +283,24 @@ def test_the_migration_to_key_digests_refuses_to_be_undone_and_leaves_a_repeated
     assert postgres_record.write(MOVE_B, CALLER, "one-release").id == first.id
 
 
+def test_the_migration_to_generations_stops_while_a_move_begun_before_it_is_working_and_goes_on_once_it_is_settled(
+    postgres_record: PostgresRecord,
+) -> None:
+    begun = postgres_record.write(MOVE_B, CALLER, None)
+    assert postgres_record.take_up(begun.id) is not None
+    command.downgrade(Config(ALEMBIC), "0003")
+    try:
+        with pytest.raises(RuntimeError, match="are working or need a person"):
+            command.upgrade(Config(ALEMBIC), "head")
+        with psycopg.connect(postgres_record.database) as connection:
+            # noinspection SqlResolve
+            connection.execute("update request set stands = 'failed', ended_at = now() where id = %s", [begun.id])
+    finally:
+        command.upgrade(Config(ALEMBIC), "head")
+    settled = postgres_record.read(begun.id)
+    assert settled is not None and (settled.stands, len(settled.generation)) == (Stands.FAILED, 36)
+
+
 HELD = "Zx3-a-secret-a-container-holds-0123456789"
 ASKED_WITH_IT = Asked(product="site", lane="other", work=Work.MOVE, build=f"site:{HELD}", delete_data_set=HELD)
 
