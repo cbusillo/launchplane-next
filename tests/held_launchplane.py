@@ -63,7 +63,7 @@ def held_once(point: str, arguments: str) -> bool:
 
 # `before.` and `after.` stop a call for as long as they stand. `fail.` makes it the host that cannot be reached, and
 # `refuse.` the host that answers no, for as long as they stand and before anything is forwarded. `lose.` lets the call
-# take effect once and gives its caller the error of a lost reply in place of the reply.
+# take effect once and, where it succeeded, gives its caller the error of a lost reply in place of the reply.
 def held_around(point: str, call: Callable[..., Any]) -> Callable[..., Any]:
     def held(*arguments: object, **named: object) -> object:
         given = repr((arguments, named))
@@ -73,7 +73,7 @@ def held_around(point: str, call: Callable[..., Any]) -> Callable[..., Any]:
         if is_held(f"refuse.{point}", given):
             raise ContainerHostRefused(f"{point} was refused: the test harness holds the host as one that answers no")
         reply = call(*arguments, **named)
-        if held_once(f"lose.{point}", given):
+        if getattr(reply, "succeeded", True) and held_once(f"lose.{point}", given):
             raise ContainerHostError(f"{point} failed: the test harness lost the reply after the call took effect")
         pause(f"after.{point}", given)
         return reply

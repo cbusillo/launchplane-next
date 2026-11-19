@@ -5,12 +5,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
 from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate
 from launchplane.instance import Verdict
-from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of
+from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of, route_text
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -23,6 +24,7 @@ from tests.bed import (
     let_go,
     move_lane,
     needs_test_bed,
+    on_control,
     on_scratch,
     request_ended,
     request_loop,
@@ -91,6 +93,10 @@ class Pause:
     saved: bool = False
     # The lane has nothing on the host when the move is asked.
     from_nothing: bool = False
+    # A hold reached first, at which the lane's background service is stopped by hand, so that it is watched after.
+    service_stopped_at: str | None = None
+    # At the hold, the candidate's routes file is staged and armed as the gate does just before it renames.
+    staged: bool = False
     # The one interruption this pause is proven with on the bed. A pause with none stands for its row and has all five.
     # The whole table runs against the pretend host in tests/test_interruptions.py.
     once: str | None = None
@@ -104,6 +110,7 @@ SITE_PAUSES = {
     "M2, its check under way": Pause("before.proxy.request_instance", once=NEWER),
     "M2, check passed": Pause("after.proxy.check_instance"),
     "M3, before the gate": Pause(f"before.{THE_RENAME}"),
+    "M3, staged and armed, not yet renamed": Pause(f"before.{THE_RENAME}", staged=True),
     "M4, renamed, its reply not yet had, proxy still on A": Pause(f"after.{THE_RENAME}", renamed=True, proxy_held=True),
     "M4, renamed, waiting for a proxy still on A": Pause(
         "before.proxy.await_route", renamed=True, proxy_held=True, once=CANCEL_THEN_KILL
@@ -119,7 +126,10 @@ LEDGER_PAUSES = {
     "M1, the volume of a new data set made": Pause("after.host.create_data_set_volume", from_nothing=True, once=KILL),
     "M1, the database server of a new data set made": Pause("after.host.create_database", from_nothing=True, once=NEWER),
     "M5, before the old background service is retired": Pause("before.host.retire_instance", renamed=True, once=KILL_THEN_CANCEL),
-    "M5, the new background service started": Pause("after.host.start_background_service", renamed=True, once=KILL),
+    "M5, the new background service started": Pause("after.host.start_background_service", renamed=True, once=CANCEL_THEN_KILL),
+    "M5, the new background service being watched": Pause(
+        "before.host.await_background_service", renamed=True, service_stopped_at="after.host.start_background_service", once=KILL
+    ),
     "M6, before the logins no container holds are removed": Pause("before.host.remove_unheld_logins", renamed=True, once=CANCEL),
 }
 
@@ -202,6 +212,27 @@ def rows_of(lane: Lane) -> str:
     rows = connection.getresponse().read().decode()
     connection.close()
     return rows
+
+
+def stop_background_services_of(lane: Lane) -> None:
+    labels = f"--filter label=launchplane.product={lane.product} --filter label=launchplane.lane={lane.lane}"
+    on_scratch(f"docker stop $(docker ps --quiet {labels} --filter name=background-service)")
+
+
+# What the gate has kept at the moment before its rename: the candidate's routes file staged, and the mark that arms it.
+def stage_and_arm_as_the_gate_does(lane: Lane, asked: dict[str, Any]) -> None:
+    [candidate] = [each["container"] for each in instances_of(lane) if each["build"] == lane.builds[1]]
+    # noinspection SqlResolve
+    attempt = on_control(
+        f"runuser -u postgres -- psql -d launchplane -Atc 'select max(id) from attempt where request = {asked['id']:d}'"
+    ).strip()
+    base = ROUTES_FOLDER / GATE_FOLDER_NAME / f"{lane.web_address}.{asked['generation']}"
+    for file, text in (
+        (f"{base}.{candidate}.next", route_text(lane.web_address, candidate)),
+        (f"{base}.armed", f"{attempt} {candidate}"),
+    ):
+        on_scratch(f"docker exec -i {PROXY_NAME} sh -c 'cat > {file}'", given=text)
+    assert verdict_of(lane, asked["generation"]) == Answer(Verdict.NONE)
 
 
 @dataclass
@@ -292,10 +323,18 @@ class Held:
         if self.pause.proxy_held:
             hold("proxy-delivery")
         hold(self.pause.hold)
+        if self.pause.service_stopped_at:
+            hold(self.pause.service_stopped_at)
         with request_loop(lambda: answering(self.lane)) as loop, request_loop(lambda: answering(untouched)) as beside:
             status, self.asked = ask(f"/lanes/{self.lane.product}/{self.lane.lane}/move", {"build": self.lane.builds[1]})
             assert status == 202, self.asked
+            if self.pause.service_stopped_at:
+                wait_until_stopped_at(self.pause.service_stopped_at, seconds=120)
+                stop_background_services_of(self.lane)
+                let_go(self.pause.service_stopped_at)
             wait_until_stopped_at(self.pause.hold, seconds=120)
+            if self.pause.staged:
+                stage_and_arm_as_the_gate_does(self.lane, self.asked)
             if self.pause.proxy_held:
                 self.look_while_the_proxy_is_held(loop)
             if self.pause.proxy_on_b:
@@ -517,9 +556,13 @@ def ended_as(request: int) -> tuple[str, str | None]:
 # One of the rule's held cases: the lane on A and the lane beside it, both probed from outside for the whole of the case.
 # Leaving it, every probe answered, the lane's visitors got exactly the builds expected and in that order, and the
 # lane beside kept its instance and its build.
+RENAMES = "/tmp/launchplane-renames"  # noqa: S108 a file inside the proxy's container
+# Every file moved out of the gate's folder, as the kernel reports it: a staged routes file leaves it only by the rename.
+WATCH_RENAMES = f"inotifyd - {ROUTES_FOLDER / GATE_FOLDER_NAME}:m > {RENAMES}"
+
+
 @dataclass
 class Case:
-    renames_before: str
     beside_before: list[dict[str, Any]]
     loop: RequestLoop
     beside: RequestLoop
@@ -528,8 +571,11 @@ class Case:
     def visitors_get(self, *builds: str) -> None:
         self.expected = builds
 
-    def renamed(self) -> bool:
-        return route_inode(SITE) != self.renames_before
+    # How often a staged routes file of the generation was renamed into place since the case began.
+    @staticmethod
+    def renames_of(generation: str) -> int:
+        moved = in_proxy(f"cat {RENAMES}").splitlines()
+        return sum(generation in line and line.endswith(".next") for line in moved)
 
     def now_serves(self, build: str) -> bool:
         return self.loop.answers[-1] == SITE.answer_of(build)
@@ -540,12 +586,13 @@ def case() -> Iterator[Case]:
     let_go()
     untouched = SITE.beside(UNTOUCHED)
     assert (move_lane(SITE.product, SITE.lane, A)[0], move_lane(untouched.product, untouched.lane, A)[0]) == (200, 200)
+    in_proxy(WATCH_RENAMES, flags="--detach")
     try:
         with request_loop(lambda: answering(SITE)) as loop, request_loop(lambda: answering(untouched)) as beside:
-            held_case = Case(route_inode(SITE), instances_of(untouched), loop, beside)
+            held_case = Case(instances_of(untouched), loop, beside)
             yield held_case
     finally:
-        in_proxy(f"rm -f {GATE_HELD}")
+        in_proxy(f"pkill inotifyd; rm -f {GATE_HELD}")
         let_go()
     assert (loop.failures, beside.failures) == ([], [])
     assert loop.answers_in_order() == [SITE.answer_of(build) for build in held_case.expected]
@@ -581,37 +628,41 @@ def switch_in_flight(case: Case) -> Iterator[InFlight]:
         in_proxy(f"kill -STOP {process}; rm -f {GATE_HELD}")
         kill_held_launchplane()
         wait_until_stopped_at(TAKE_UP)
-        assert (verdict_of(SITE, asked["generation"]), case.renamed()) == (Answer(Verdict.NONE), False)
+        assert (verdict_of(SITE, asked["generation"]), case.renames_of(asked["generation"])) == (Answer(Verdict.NONE), 0)
         yield InFlight(asked, process, left)
     finally:
         in_proxy(f"kill -CONT {process} 2>/dev/null || true")
 
 
-def test_case_1_a_rename_that_lands_and_is_loaded_after_recovery_planned_to_discard_its_candidate_ends_done_and_switched(
+def test_case_1_a_rename_that_lands_between_recoverys_reading_of_the_routes_file_and_of_the_proxy_ends_done_and_switched(
     case: Case, switch_in_flight: InFlight
 ) -> None:
-    hold("before.lanes.discard")
+    generation = switch_in_flight.asked["generation"]
+    hold("after.proxy.read_folder")
     let_go(TAKE_UP)
-    wait_until_stopped_at("before.lanes.discard")
+    wait_until_stopped_at("after.proxy.read_folder")
     in_proxy(f"kill -CONT {switch_in_flight.process}")
     wait_for(lambda: case.now_serves(B), seconds=30)
     let_go()
     case.visitors_get(A, B)
     assert ended_as(switch_in_flight.asked["id"]) == ("done", "switched")
-    assert verdict_of(SITE, switch_in_flight.asked["generation"]) == Answer(Verdict.COMMITTED, switch_in_flight.left)
+    assert (verdict_of(SITE, generation), case.renames_of(generation)) == (Answer(Verdict.COMMITTED, switch_in_flight.left), 1)
     assert [each["container"] for each in instances_of(SITE)] == [switch_in_flight.left]
 
 
 def test_case_2_a_rename_whose_reply_alone_is_lost_ends_done_and_switched_on_the_same_candidate_with_one_rename(
     case: Case,
 ) -> None:
-    hold("lose.proxy.switch")
+    hold("before.proxy.switch")
     asked = asked_to_move(B)
+    wait_until_stopped_at("before.proxy.switch", seconds=120)
+    hold("lose.host.run_in?only=" + quote(f"'{asked['generation']}', 'switch'"))
+    let_go("before.proxy.switch")
     case.visitors_get(A, B)
     ended = request_ended(asked["id"])
     assert (ended["stands"], ended["answer"]["outcome"]) == ("done", "switched")
     assert [attempt["ended"] for attempt in ended["attempts"]] == ["unfinished", "done"]
-    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renamed()) == (True, True)
+    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
 
 
 def test_case_3_a_release_renamed_and_held_from_loading_across_four_kills_stays_working_and_is_finished_once_it_loads(
@@ -630,7 +681,7 @@ def test_case_3_a_release_renamed_and_held_from_loading_across_four_kills_stays_
     let_go()
     case.visitors_get(A, B)
     assert ended_as(asked["id"]) == ("done", "switched")
-    assert committed_to_the_one_instance_of(SITE, asked["generation"], B)
+    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
 
 
 def test_case_4_a_stale_rename_resumed_after_recovery_discarded_its_candidate_renames_nothing_and_a_fresh_one_switches_once(
@@ -639,12 +690,12 @@ def test_case_4_a_stale_rename_resumed_after_recovery_discarded_its_candidate_re
     let_go()
     case.visitors_get(A, B)
     assert ended_as(switch_in_flight.asked["id"]) == ("done", "switched")
-    inode_once_switched = route_inode(SITE)
+    generation = switch_in_flight.asked["generation"]
     in_proxy(f"kill -CONT {switch_in_flight.process}")
     wait_for(lambda: not switch_waiting_for_the_lock(switch_in_flight.left), seconds=30)
     [fresh] = instances_of(SITE)
-    assert (fresh["container"] != switch_in_flight.left, route_inode(SITE)) == (True, inode_once_switched)
-    assert verdict_of(SITE, switch_in_flight.asked["generation"]) == Answer(Verdict.COMMITTED, fresh["container"])
+    assert (fresh["container"] != switch_in_flight.left, case.renames_of(generation)) == (True, 1)
+    assert verdict_of(SITE, generation) == Answer(Verdict.COMMITTED, fresh["container"])
 
 
 def test_case_5_a_cancel_that_won_while_the_host_cannot_be_read_stays_working_and_ends_cancelled_once_it_can(case: Case) -> None:
@@ -659,7 +710,7 @@ def test_case_5_a_cancel_that_won_while_the_host_cannot_be_read_stays_working_an
     let_go()
     assert (ended_as(asked["id"])[0], cancel(asked["id"])[0], builds_of(SITE)) == ("cancelled", 200, [A])
     staged = in_proxy(f"ls {ROUTES_FOLDER / GATE_FOLDER_NAME} | grep {asked['generation']} | grep next || true")
-    assert (staged, verdict_of(SITE, asked["generation"]), case.renamed()) == ("", ABANDONED, False)
+    assert (staged, verdict_of(SITE, asked["generation"]), case.renames_of(asked["generation"])) == ("", ABANDONED, 0)
 
 
 def test_case_6_a_cancel_that_wins_while_failed_is_about_to_be_saved_ends_the_move_as_cancelled_with_no_rename(case: Case) -> None:
@@ -670,7 +721,7 @@ def test_case_6_a_cancel_that_wins_while_failed_is_about_to_be_saved_ends_the_mo
     let_go()
     ended = request_ended(asked["id"])
     assert (ended["stands"], ended["cancel_refused"], cancel(asked["id"])[0]) == ("cancelled", None, 200)
-    assert (builds_of(SITE), case.renamed()) == ([A], False)
+    assert (builds_of(SITE), case.renames_of(asked["generation"])) == ([A], 0)
 
 
 def test_case_7_a_cancel_handler_resumed_late_changes_nothing_of_a_later_release_and_both_replayed_switches_rename_nothing(
@@ -699,7 +750,7 @@ def test_case_7_a_cancel_handler_resumed_late_changes_nothing_of_a_later_release
         for each in (first, second)
     ]
     assert ([status for status, _ in answers], replayed) == ([200], [ABANDONED, ABANDONED])
-    assert (builds_of(SITE), case.renamed()) == ([A], False)
+    assert (builds_of(SITE), [case.renames_of(each["generation"]) for each in (first, second)]) == ([A], [0, 0])
 
 
 def test_case_8_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_failed_saying_it_won(case: Case) -> None:
@@ -717,4 +768,4 @@ def test_case_8_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_e
         None,
         True,
     )
-    assert (again[0], ended["error"] in again[1]["error"], case.renamed()) == (409, True, False)
+    assert (again[0], ended["error"] in again[1]["error"], case.renames_of(asked["generation"])) == (409, True, 0)
