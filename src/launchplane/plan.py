@@ -43,6 +43,7 @@ from launchplane.steps import (
     RemovalRefused,
     RemoveLogins,
     RemoveRoute,
+    Result,
     Retire,
     RetireOutcome,
     RetireResult,
@@ -144,9 +145,8 @@ def route_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | No
 # A routes file that is not the route Launchplane writes is never taken for no route: what it sends visitors to is not
 # known, so nothing of its lane is changed and no call on the lane answers success.
 def unread_route(lane: LaneReading, attempted: str, done: tuple[Event, ...]) -> Stop | None:
-    if lane.route.unread is None:
-        return None
-    return Stop(f"{lane.route.unread}, so the lane is not {attempted}. {changes_so_far(done)}")
+    file = lane.route.file
+    return Stop(f"{file}, so the lane is not {attempted}. {changes_so_far(done)}") if isinstance(file, Unread) else None
 
 
 def is_fit(judged: Judgement, instance: RunningInstance, target: LaneBuild) -> bool:
@@ -235,21 +235,18 @@ def left_for_a_move(judged: Judgement, serving: RunningInstance) -> list[Finding
     return [finding for finding in judged.findings if finding.kind not in LOGIN_KINDS and finding.subject not in of_other_data_sets]
 
 
-# A stopped server keeps its logins until it is next started. One that could not tell its logins is never taken to have none.
-def login_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | None:
-    for database in judged.lane.databases:
-        about = judged.about({database.container})
-        if any(finding.kind == Kind.LOGIN_UNHELD for finding in about):
-            return RemoveLogins(database.container)
-        unknown = next((finding for finding in about if finding.kind in LOGINS_UNKNOWN), None)
-        if unknown is not None:
-            why = unknown.sentence if unknown.kind == Kind.LOGINS_UNREAD else f"{unknown.sentence}, so its logins could not be read"
-            return Stop(f"{why}. {changes_so_far(done)} Ask again once the server answers, or delete its data set by name.")
-    return None
+# A login no container holds goes, from every server that told its logins. One that did not is never taken to have none.
+# It holds up only a move that ends well and `needs` its data set. No other call waits or fails for a list: its answer names it.
+def login_step(judged: Judgement, needs: DataSet | None = None) -> RemoveLogins | Wait | None:
+    unheld = judged.of_kind(Kind.LOGIN_UNHELD)
+    if unheld:
+        return RemoveLogins(unheld[0].subject)
+    untold = sentences([finding for finding in judged.about(subjects_of(needs)) if finding.kind in LOGINS_UNKNOWN])
+    return Wait(f"{untold}. Everything else is done and stays as it is. The call ends once they are read.") if untold else None
 
 
-def with_logins_settled[Answer](step: Step[Answer], judged: Judgement, done: tuple[Event, ...]) -> Step[Answer]:
-    return (login_step(judged, done) or step) if isinstance(step, Done) else step
+def with_logins_settled[Answer](step: Step[Answer], judged: Judgement) -> Step[Answer]:
+    return (login_step(judged) or step) if isinstance(step, Done) else step
 
 
 # Whether the call is putting its lane back: a cancel was asked of it and the host has not shown it too late.
@@ -315,18 +312,13 @@ class Move:
         return answer.model_copy(update=update)
 
 
-def named_by_route(lane: LaneReading) -> set[str]:
-    written = set[str]() if lane.route.written is None else {lane.route.written}
-    return written if lane.route.loaded is None else written | {lane.route.loaded.container}
-
-
 # Until the gate says a release is committed, nothing it made receives visitors. A routes file or a proxy that names
 # its instance all the same contradicts the gate, and nothing is touched on a contradiction.
 def own_named_by_route(move: Move) -> Wait | None:
     lane = move.lane
     made = {each.container for each in lane.instances if each.generation == move.generation}
     started = {event.container for event in move.done if isinstance(event, StartInstance)}
-    named = sorted((made | started) & named_by_route(lane))
+    named = sorted((made | started) & lane.route.names)
     if not named:
         return None
     return Wait(
@@ -336,10 +328,8 @@ def own_named_by_route(move: Move) -> Wait | None:
 
 
 def unread_owner(parts: Sequence[RunningInstance | RunningBackgroundService]) -> Wait | None:
-    for part in parts:
-        if isinstance(part.generation, Unread):
-            return Wait(f"Which release made {part.container} could not be read, so it was not touched: {part.generation.why}")
-    return None
+    unread = next((part.generation for part in parts if isinstance(part.generation, Unread)), None)
+    return None if unread is None else Wait(f"{unread}, so it was not touched.")
 
 
 def removal_refused(done: tuple[Event, ...], container: str) -> str | None:
@@ -361,7 +351,7 @@ def discard(move: Move, instance: RunningInstance | RunningBackgroundService) ->
         return Stop(f"{container} could not be removed: {refusal} {changes_so_far(move.done)}")
     if (wait := unread_owner([instance])) is not None:
         return wait
-    if container in named_by_route(move.lane):
+    if container in move.lane.route.names:
         return Wait(f"The routes file or the proxy of {move.lane.web_address} names {container}, so it was not removed.")
     made_by = instance.generation if isinstance(instance, RunningInstance) else None
     return Discard(move.lane.web_address, container, made_by if isinstance(made_by, str) else None, move.attempt)
@@ -439,7 +429,7 @@ def finish(move: Move, serving: RunningInstance) -> Step[MoveResult] | CannotPut
     left = left_for_a_move(judged, serving)
     if left:
         return Stop(f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(done)}")
-    return Done(move.answer())
+    return login_step(judged, move.lane.data_set(serving.data_set)) or Done(move.answer())
 
 
 # The gate says the routes file was renamed to this instance. Visitors are waited for, then the rest is finished.
@@ -507,35 +497,32 @@ def too_late_to_cancel(web_address: str) -> str:
 
 
 # What the generation made is read from the stamp on each part, and goes: its background service, then its instance.
-def own_part_step(move: Move) -> Action | Stop | CannotPutBack | None:
+# One it started before the switch is a repair of the instance that serves: a cancel takes it back, a failure leaves it.
+def own_part_step(move: Move, *, repairs: bool) -> Action | Stop | CannotPutBack | None:
     lane = move.lane
     wait = own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])
     if wait is not None:
         return wait
-    own = [each for each in (*lane.background_services, *lane.instances) if each.generation == move.generation]
+    parts = (*lane.background_services, *lane.instances) if repairs else lane.instances
+    own = [each for each in parts if each.generation == move.generation]
     return discard(move, min(own, key=lambda each: (isinstance(each, RunningInstance), each.container))) if own else None
 
 
-# A move failed with no verdict, and its attempt is fenced. What its generation made goes, and the login of what went.
-# Done is a reading that shows none of it left.
-def decide_clean_up(move: Move) -> Step[None] | CannotPutBack:
+# A move failed with no verdict, and its attempt is fenced. The instance its generation made goes, and each login no
+# container holds, where the server told its logins. The failure stands whether or not it did.
+def decide_clean_up(move: Move) -> Step[Result] | CannotPutBack:
     if move.gate.verdict is not Verdict.NONE:
         return Wait(f"The gate answers {move.gate.verdict} for this release, so nothing of it was cleaned up.")
-    unheld = move.judged.of_kind(Kind.LOGIN_UNHELD)
-    return own_part_step(move) or (RemoveLogins(unheld[0].subject) if unheld else Done(None))
+    return own_part_step(move, repairs=False) or login_step(move.judged) or Done(Result())
 
 
 # A cancel won. What the generation made goes. Data stays.
 def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
-    if (step := own_part_step(move)) is not None:
+    if (step := own_part_step(move, repairs=True)) is not None:
         return step
-    # A server the release had only just made is waited for, so its logins can be read and its data set is kept whole.
-    starting = sorted(finding.subject for finding in move.judged.of_kind(Kind.NOT_ACCEPTING))
-    if starting:
-        return AwaitDatabase(starting[0])
     if not any(isinstance(event, Abandon) for event in move.done):
         return Abandon(move.lane.web_address, move.generation)
-    return with_logins_settled(put_back_or_what_is_left(move.judged, move.generation), move.judged, move.done)
+    return with_logins_settled(put_back_or_what_is_left(move.judged, move.generation), move.judged)
 
 
 # The gate's answer picks what a move does, and nothing else does. A cancel that was asked and that the gate has not
@@ -552,7 +539,7 @@ def decide_move(move: Move, cancel: Cancel | None = None) -> Step[MoveResult] | 
         return Abandon(move.lane.web_address, move.generation) if move.lane.route.proxy_runs else StartProxy()
     else:
         step = prepare(move)
-    return step if isinstance(step, CannotPutBack) else with_logins_settled(step, move.judged, move.done)
+    return step if isinstance(step, CannotPutBack) else with_logins_settled(step, move.judged)
 
 
 def retire_outcome(retired: bool, deleted: str | None) -> RetireOutcome:
@@ -575,7 +562,7 @@ def decide_retire(
         return unread
     if cancel is not None and is_turned_back(cancel):
         return retire_step_back(judged, delete_data_set)
-    return with_logins_settled(retire_step(judged, None if cancel else delete_data_set, done), judged, done)
+    return with_logins_settled(retire_step(judged, None if cancel else delete_data_set, done), judged)
 
 
 # The first thing a retire changes is the route, and nothing it removes after that can be put back.

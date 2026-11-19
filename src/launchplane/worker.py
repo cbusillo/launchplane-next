@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from pydantic import BaseModel
@@ -41,7 +41,7 @@ type Lane = tuple[str, str]
 
 class Carries(Protocol):
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult: ...
-    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> None: ...
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> list[str]: ...
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
@@ -213,7 +213,10 @@ class Worker:
             try:
                 fenced = self.lanes.fence(*lane).verdict
                 if fenced is Verdict.NONE and came_to.stands is Stands.FAILED:
-                    self.lanes.clean_up(*lane, witness)
+                    not_read = "; ".join(self.lanes.clean_up(*lane, witness))
+                    if not_read:
+                        why = f"{came_to.error} Whether it left a login no container holds is not known: {not_read}."
+                        came_to = replace(came_to, error=why)
             except STOPPED as error:
                 return self.left_open(attempt, f"{came_to.error or 'It was done.'} It is not ended yet: {error}")
             if fenced is not Verdict.NONE:

@@ -510,12 +510,12 @@
  "logins that could not be read": {
   "at rest": [
    "could not be read",
-   "could not be read | logins could not be read | The logins of the database database-d1 could not be read, so whether one is left that no container holds is unknown: psql: no such database",
+   "could not be read | logins could not be read | The logins of the database database-d1 could not be read: psql: no such database",
    "parts: new good, new-background-service good, database-d1 could not be read"
   ],
   "at work": [
    "could not be read",
-   "could not be read | logins could not be read | The logins of the database database-d1 could not be read, so whether one is left that no container holds is unknown: psql: no such database",
+   "could not be read | logins could not be read | The logins of the database database-d1 could not be read: psql: no such database",
    "parts: new good, new-background-service good, database-d1 could not be read"
   ]
  },

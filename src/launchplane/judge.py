@@ -9,11 +9,13 @@ from launchplane.data_set import DATA_PATH
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
+    Conflicting,
     DataSet,
     DataSetDatabase,
     InstanceState,
     LaneReading,
     LaneRoute,
+    LoadedRoute,
     Mount,
     Reading,
     RouteStatus,
@@ -49,6 +51,7 @@ class Kind(StrEnum):
     ROUTE_NOT_LOADED = "the proxy has not loaded the routes file"
     ROUTE_DISABLED = "the proxy reports the route not enabled"
     ROUTE_UNREAD = "the routes file is not one Launchplane writes"
+    ROUTES_CONFLICT = "the proxy has more than one route for the web address"
     NOT_ANSWERING = "the web address does not answer"
     BACK_SOON_STOPPED = "the back soon page is not running"
     NO_BUILD = "no build label"
@@ -87,13 +90,16 @@ class Weight(Enum):
     # A state a call passes through: under way while one is at work, left unfinished when none is.
     UNFINISHED = auto()
     UNREAD = auto()
+    CONFLICT = auto()
 
 
+# An unread answer and a conflicting one are each shown in their own word, whatever a call is doing.
 class Shown(StrEnum):
     WRONG = "wrong"
     UNDER_WAY = "under way"
     LEFT_UNFINISHED = "left unfinished"
     UNREAD = "could not be read"
+    CONFLICTING = "conflicting"
 
 
 class Standing(StrEnum):
@@ -101,6 +107,7 @@ class Standing(StrEnum):
     WRONG = "wrong"
     ON_PURPOSE = "on purpose"
     UNREAD = "could not be read"
+    CONFLICTING = "conflicting"
 
 
 class Condition(StrEnum):
@@ -110,6 +117,7 @@ class Condition(StrEnum):
     UNFINISHED = "unfinished"
     WRONG = "wrong"
     UNREAD = "could not be read"
+    CONFLICTING = "conflicting"
 
 
 @dataclass(frozen=True)
@@ -241,10 +249,8 @@ def data_set_label_findings(part: str, instance: RunningInstance, of: Judged) ->
 
 
 # A stamp that is not a generation is a fault of the part that carries it, and of nothing else on the host.
-def stamp_findings(part: str, subject: str, stamp: Stamp) -> list[Found]:
-    if not isinstance(stamp, Unread):
-        return []
-    return [Found(Weight.FAULT, subject, Kind.STAMP_UNREAD, f"{part} does not say which generation made it: {stamp.why}")]
+def stamp_findings(subject: str, stamp: Stamp) -> list[Found]:
+    return [Found(Weight.FAULT, subject, Kind.STAMP_UNREAD, str(stamp))] if isinstance(stamp, Unread | Conflicting) else []
 
 
 def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
@@ -254,7 +260,7 @@ def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
     beside = active is not None and active.container != subject
     return [
         *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
-        *stamp_findings(part, subject, instance.generation),
+        *stamp_findings(subject, instance.generation),
         *state_findings(part, instance, of, Weight.WRONG if serves else Weight.UNFINISHED),
         *data_set_label_findings(part, instance, of),
         *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
@@ -313,7 +319,7 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         if not parts
     ]
     return [
-        *stamp_findings(part, subject, found.generation),
+        *stamp_findings(subject, found.generation),
         *[
             Found(Weight.WRONG, subject, Kind.DOUBLED, f"{part} has {doubled} where it must have one")
             for doubled in doubled_parts(found)
@@ -362,7 +368,8 @@ def belonging_findings(part: str, running: RunningBackgroundService, owner: Runn
         return [Found(Weight.WRONG, subject, Kind.OF_ANOTHER_INSTANCE, sentence)]
     if of.serving is None:
         # In maintenance no instance receiving visitors is meant, and which instance will again is not known of several.
-        if of.lane.route.in_maintenance:
+        # Under two routers which instance receives them is not known, and is not said to be none.
+        if of.lane.route.in_maintenance or isinstance(of.lane.route.loaded, Conflicting):
             return []
         sentence = f"{part} belongs to {owner.container}, which does not receive visitors: no instance does"
         return [Found(Weight.UNFINISHED, subject, Kind.OF_NO_ACTIVE_INSTANCE, sentence)]
@@ -384,7 +391,7 @@ def one_background_service_findings(running: RunningBackgroundService, of: Judge
     belonging = belonging_findings(part, running, owner, of)
     of_the_serving_instance = of.serving is not None and not belonging
     return [
-        *stamp_findings(part, running.container, running.generation),
+        *stamp_findings(running.container, running.generation),
         *belonging,
         *still_up,
         *connected,
@@ -437,17 +444,13 @@ def login_findings(lane: LaneReading) -> list[Found]:
             held_by_none = [f"The database {subject} has the login {login}, which no container holds" for login in unheld]
             findings += [Found(Weight.UNFINISHED, subject, Kind.LOGIN_UNHELD, sentence) for sentence in held_by_none]
         else:
-            why = "they were not read" if unheld is None else unheld.why
-            sentence = (
-                f"The logins of the database {subject} could not be read, so whether one is left that no container holds is "
-                f"unknown: {why}"
-            )
+            sentence = str(unheld or Unread(asked=f"The logins of the database {subject}", why="they were not asked for"))
             findings.append(Found(Weight.UNREAD, subject, Kind.LOGINS_UNREAD, sentence))
     return findings
 
 
 def is_loaded_as_written(route: LaneRoute) -> bool:
-    return (None if route.loaded is None else route.loaded.container) == route.written
+    return (route.loaded.container if isinstance(route.loaded, LoadedRoute) else route.loaded) == route.written
 
 
 def does_not_answer(web_address: str, failure: str) -> str:
@@ -464,6 +467,10 @@ def proxy_findings(lane: LaneReading) -> list[Found]:
         )
         return [Found(Weight.UNFINISHED, web_address, Kind.PROXY_STOPPED, down)]
     loaded = route.loaded
+    if isinstance(loaded, Conflicting):
+        return [Found(Weight.CONFLICT, web_address, Kind.ROUTES_CONFLICT, str(loaded))]
+    if isinstance(loaded, Unread):
+        return [Found(Weight.UNREAD, web_address, Kind.UNREAD, str(loaded))]
     unloaded = (
         f"The proxy has not loaded the routes file of {web_address}: the file sends it to {route.written or 'no instance'} "
         f"and the proxy to {'no instance' if loaded is None else loaded.container}"
@@ -495,9 +502,9 @@ def route_findings(lane: LaneReading) -> list[Found]:
     page = f"The back soon page's container {BACK_SOON} is not running, so the web address answers the proxy's own error"
     page_down = lane.route.in_maintenance and not lane.route.back_soon_runs
     active, failure = lane.active, lane.web_address_failure
-    unread = lane.route.unread
+    file = lane.route.file
     return [
-        *([] if unread is None else [Found(Weight.FAULT, lane.web_address, Kind.ROUTE_UNREAD, unread)]),
+        *([Found(Weight.FAULT, lane.web_address, Kind.ROUTE_UNREAD, str(file))] if isinstance(file, Unread) else []),
         *proxy_findings(lane),
         *([Found(Weight.FAULT, BACK_SOON, Kind.BACK_SOON_STOPPED, page)] if page_down else []),
         *(
@@ -541,6 +548,8 @@ def work_unread(work: WorkUnread) -> str:
 
 # What is wrong only with no request at work is neither wrong nor under way while that is not known.
 def shown_for(weight: Weight, work: Work | WorkUnread | None) -> Shown:
+    if weight == Weight.CONFLICT:
+        return Shown.CONFLICTING
     if weight == Weight.FAULT:
         return Shown.WRONG
     if weight == Weight.UNREAD or isinstance(work, WorkUnread):
@@ -559,6 +568,8 @@ def standing_of(shown_about: set[Shown], unremarked: Standing) -> Standing:
 
 
 def condition_of(lane: LaneReading, work: Work | WorkUnread | None, shown_in_lane: set[Shown]) -> Condition:
+    if Shown.CONFLICTING in shown_in_lane:
+        return Condition.CONFLICTING
     if Shown.WRONG in shown_in_lane:
         return Condition.WRONG
     if Shown.UNREAD in shown_in_lane:
@@ -621,7 +632,10 @@ def why_not_answering(web_address: str, reading: Reading, sends_to: str | None) 
 
 def web_address_judged(web_address: str, owner: tuple[str, str | None] | None, reading: Reading) -> WebAddressJudged:
     sends_to = reading.proxy.sends_visitors_to().get(web_address) if reading.proxy.runs else None
-    if sends_to not in (None, BACK_SOON) and web_address not in reading.web_address_failures:
+    loaded = reading.proxy.loaded.get(web_address)
+    if isinstance(loaded, Conflicting):
+        error, says, standing = str(loaded), Standing.CONFLICTING, Standing.CONFLICTING
+    elif sends_to not in (None, BACK_SOON) and web_address not in reading.web_address_failures:
         error, says, standing = f"{web_address} was not asked, so whether it answers is unknown.", UNASKED, Standing.UNREAD
     else:
         error = why_not_answering(web_address, reading, sends_to)
@@ -646,6 +660,7 @@ def web_addresses_judged(reading: Reading) -> list[WebAddressJudged]:
         web_address: None if (instance := by_container.get(container)) is None else (instance.product, instance.lane)
         for web_address, container in reading.proxy.sends_visitors_to().items()
     }
+    owners |= {web_address: None for web_address, route in reading.proxy.loaded.items() if isinstance(route, Conflicting)}
     for product, lane in reading.lanes():
         owners[web_address_of(product, lane)] = (product, lane)
     return [web_address_judged(web_address, owners[web_address], reading) for web_address in sorted(owners)]

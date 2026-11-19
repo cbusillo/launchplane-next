@@ -93,7 +93,7 @@ class HostLogins:
         labels = self.client.containers.get(database).labels
         product, data_set = labels.get(PRODUCT_LABEL), labels.get(DATA_SET_LABEL)
         if product is None or data_set is None:
-            raise ContainerHostRefused(
+            raise ContainerHostError(
                 f"The database {database} does not say which product and data set it is, so Launchplane cannot tell "
                 "which containers hold its logins. No login was removed."
             )

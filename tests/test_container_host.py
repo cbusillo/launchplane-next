@@ -276,7 +276,9 @@ def test_a_generation_label_that_is_no_generation_is_read_as_unread_and_makes_on
         Product(),
         None,
     )
-    assert instance.generation == Unread(why="its label launchplane.generation, 2 characters long, is not a generation")
+    assert instance.generation == Unread(
+        asked="Which generation made web", why="its label launchplane.generation, 2 characters long, is not a generation"
+    )
     assert [(finding.subject, finding.shown) for finding in judged.of_kind(Kind.STAMP_UNREAD)] == [("web", "wrong")]
 
 

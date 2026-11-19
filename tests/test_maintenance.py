@@ -295,13 +295,6 @@ END_STOPS = {
         (CHECKED,),
         "not one ending maintenance can start: The lane has 0 background services",
     ),
-    "logins that could not be read, said while the back soon page still shows and not after the lane is back": (
-        Given(
-            (web(RUNNING),), IN_MAINTENANCE, (background_service(RUNNING),), (with_database(STARTED_DATABASE, unheld_logins=None),)
-        ),
-        (CHECKED,),
-        "so the web address still shows the back soon page: The logins of the database database-d1 could not be read",
-    ),
 }
 
 
@@ -312,6 +305,14 @@ def test_ending_maintenance_stops_with_why_and_leaves_the_back_soon_page_for(
     step = decide_end(given.judged(Work.END_MAINTENANCE), WITH_DATA, done)
     assert isinstance(step, Stop)
     assert reason in step.reason
+
+
+def test_ending_maintenance_neither_keeps_the_back_soon_page_nor_fails_once_back_over_logins_that_could_not_be_read() -> None:
+    untold = (with_database(STARTED_DATABASE, unheld_logins=None),)
+    behind = Given((web(RUNNING),), IN_MAINTENANCE, (background_service(RUNNING),), untold)
+    back = Given((web(RUNNING),), SERVING, (background_service(RUNNING),), untold)
+    assert decide_end(behind.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)
+    assert isinstance(decide_end(back.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)), Done)
 
 
 BACK_SOON_ROUTES = {

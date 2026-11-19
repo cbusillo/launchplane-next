@@ -15,7 +15,6 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
-    Unread,
     Verdict,
 )
 from launchplane.judge import Judgement, Kind, Work, judge
@@ -64,9 +63,12 @@ from tests.pretend_host import (
     D1,
     EARLIER,
     GENERATION,
+    LOGINS_NOT_TOLD,
     NEW,
     NEW_BACKGROUND_SERVICE,
     NEW_ON_D1,
+    NO_GENERATION,
+    NOT_LAUNCHPLANES_ROUTE,
     OLD,
     OLD_ON_D1,
     SINCE,
@@ -269,11 +271,11 @@ FOLLOWS_THE_GATE = {
     ),
     "abandoned with a part whose release cannot be read is waited on": (
         ABANDONED,
-        Case((OLD, changed(NEW, generation=Unread(why="the label is no generation"))), SERVING_OLD, (), None),
+        Case((OLD, changed(NEW, generation=NO_GENERATION)), SERVING_OLD, (), None),
     ),
     "no verdict with a leftover whose release cannot be read is waited on, and the gate is not skipped": (
         NO_VERDICT,
-        Case((OLD, changed(NEW, generation=Unread(why="the label is no generation"))), SERVING_OLD, (), None),
+        Case((OLD, changed(NEW, generation=NO_GENERATION)), SERVING_OLD, (), None),
     ),
 }
 
@@ -575,24 +577,28 @@ def test_a_retire_answers_with_a_stopped_server_whose_logins_wait_for_its_next_s
 UNKNOWN_LOGINS = {
     "does not accept connections": data_set_named("d1", accepts=False),
     "was not asked whether it accepts connections": with_database(D1, accepts_connections=None, unheld_logins=None),
-    "could not tell its logins": with_database(D1, unheld_logins=Unread(why="psql: no such database")),
+    "could not tell its logins": with_database(D1, unheld_logins=LOGINS_NOT_TOLD),
 }
 
 
 @pytest.mark.parametrize("found", UNKNOWN_LOGINS.values(), ids=UNKNOWN_LOGINS.keys())
-def test_a_retire_does_not_answer_success_over_a_running_server_that(found: DataSet) -> None:
-    step = retire_step_with(found)
-    assert isinstance(step, Stop)
-    assert "could not be read" in step.reason
+def test_a_retire_is_finished_and_neither_waits_nor_fails_over_a_running_server_that(found: DataSet) -> None:
+    assert isinstance(retire_step_with(found), Done)
 
 
-def test_a_move_stops_over_logins_that_could_not_be_read_in_the_words_the_status_call_has_for_them() -> None:
+def test_a_move_that_has_done_everything_else_waits_and_does_not_stop_over_unread_logins_of_the_data_set_it_serves_from() -> None:
     case = DataCase((NEW_ON_D1,), "new", (UNKNOWN_LOGINS["could not tell its logins"],), (), None, (NEW_BACKGROUND_SERVICE,))
     step = next_data_move_step(case)
     [unread] = given_data(case).judged(None).findings
-    assert isinstance(step, Stop)
-    assert "unknown: psql: no such database" in unread.sentence
+    assert isinstance(step, Wait)
+    assert unread.sentence == "The logins of the database database-d1 could not be read: psql: no such database"
     assert unread.sentence in step.reason
+
+
+def test_a_move_neither_waits_nor_stops_over_unread_logins_of_a_data_set_it_does_not_serve_from() -> None:
+    other = with_database(data_set_named("d2"), unheld_logins=LOGINS_NOT_TOLD)
+    case = DataCase((NEW_ON_D1,), "new", (D1, other), (), None, (NEW_BACKGROUND_SERVICE,))
+    assert isinstance(next_data_move_step(case), Done)
 
 
 def test_a_data_set_named_for_deleting_is_deleted_without_its_logins_being_removed_first() -> None:
@@ -711,7 +717,7 @@ def test_a_retire_stops_background_services_first_and_deletes_every_part_of_the_
 
 def test_a_routes_file_launchplane_did_not_write_is_that_lanes_fault_and_stops_its_move() -> None:
     proxy = Given((OLD,), ("old", None)).proxy()
-    proxy.unread[WEB_ADDRESS] = "The routes file is not the route Launchplane writes"
+    proxy.unread[WEB_ADDRESS] = NOT_LAUNCHPLANES_ROUTE
     lane = Reading(SINCE, proxy.read(), proxy.host.read(), {WEB_ADDRESS: None}).lane("site", "testing")
     judged = judge(lane, Product(), Work.MOVE)
     step = decide_move(a_move(judged, (), NO_VERDICT, Product()))

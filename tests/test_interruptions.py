@@ -59,7 +59,7 @@ class Held:
     record: Record
     pause: Pause
     interruption: str
-    forward: Callable[[Action], Event]
+    forward: Callable[..., Event]
     asked: int = 0
     interrupted: bool = False
     visitors_got: list[str] = field(default_factory=list[str])
@@ -68,7 +68,7 @@ class Held:
 
     # What a visitor gets is the instance the proxy has loaded, and that instance is on the host for as long as it is.
     def look(self) -> None:
-        loaded = self.proxy.loaded[WEB_ADDRESS].container
+        loaded = self.proxy.loaded_to(WEB_ADDRESS)
         assert loaded in self.proxy.host.instances, f"the proxy sends visitors to {loaded}, which is gone"
         build = self.proxy.host.instances[loaded].build
         assert build is not None
@@ -92,12 +92,12 @@ class Held:
             raise LaunchplaneKilled
         self.proxy.holds_delivery = False
 
-    def take(self, action: Action) -> Event:
+    def take(self, action: Action, *, behind_back_soon: bool = False) -> Event:
         here = not self.interrupted and self.pause.action is not None and isinstance(action, self.pause.action)
         self.look()
         if here and self.pause.when == "before":
             self.interrupt()
-        event = self.forward(action)
+        event = self.forward(action, behind_back_soon=behind_back_soon)
         self.look()
         if here and self.pause.when == "after":
             self.interrupt()

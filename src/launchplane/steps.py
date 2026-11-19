@@ -15,7 +15,12 @@ class Outcome(StrEnum):
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-class MoveResult(BaseModel):
+# Every answer says which servers did not tell their logins, so that none was looked for there.
+class Result(BaseModel):
+    logins_not_read: list[str] = []
+
+
+class MoveResult(Result):
     product: str
     lane: str
     build: str
@@ -33,7 +38,7 @@ class RetireOutcome(StrEnum):
     UNCHANGED = "unchanged"
 
 
-class RetireResult(BaseModel):
+class RetireResult(Result):
     product: str
     lane: str
     web_address: str
@@ -53,7 +58,7 @@ class MaintenanceOutcome(StrEnum):
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-class MaintenanceResult(BaseModel):
+class MaintenanceResult(Result):
     product: str
     lane: str
     web_address: str
