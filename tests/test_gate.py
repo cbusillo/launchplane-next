@@ -126,6 +126,15 @@ def test_a_cancel_that_was_cut_short_after_its_mark_was_kept_still_answers_aband
     assert (lane.gate.abandon(WEB, GENERATION), lane.staged()) == (ABANDONED, [])
 
 
+def test_a_cancel_cut_short_after_its_arming_mark_went_still_takes_the_stage_away_when_sent_again(lane: Lane) -> None:
+    gate_folder = lane.host.folder / GATE_FOLDER_NAME
+    gate_folder.mkdir()
+    for kind, text in ((".b.next", "to b"), (".abandoned", "")):
+        (gate_folder / f"{WEB}.{GENERATION}{kind}").write_text(text)
+    (gate_folder / f"{WEB}.{EARLIER}.a.next").write_text("to a")
+    assert (lane.gate.abandon(WEB, GENERATION), lane.staged()) == (ABANDONED, [f"{WEB}.{EARLIER}.a.next"])
+
+
 def test_a_discard_cut_short_after_its_revocation_was_kept_already_refuses_the_switch_it_was_sent_against(lane: Lane) -> None:
     gate_folder = lane.host.folder / GATE_FOLDER_NAME
     gate_folder.mkdir()

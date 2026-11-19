@@ -34,7 +34,7 @@ folder=$1 base=$1/$2.$3 operation=$4
 # Asking changes nothing: where nothing was ever kept, there is no verdict, and nothing is made to say so.
 if [ ! -d "$folder" ]; then
     beside=$(ls -a "${{folder%/*}}") || exit {UNREADABLE}
-    ! printf '%s\n' "$beside" | grep -qxF "${{folder##*/}}" || exit {UNREADABLE}
+    ! printf '%s\\n' "$beside" | grep -qxF "${{folder##*/}}" || exit {UNREADABLE}
     [ "$operation" != verdict ] || {{ echo none; exit 0; }}
     mkdir "$folder"
 fi
@@ -100,8 +100,15 @@ switch)
     fi ;;
 abandon)
     [ "$now" != none ] || keep "$base.abandoned" ""
-    armed
-    if has "$base.abandoned" && [ -n "$armed_candidate" ]; then rm "$base.armed"; rm -f "$base.$armed_candidate.next"; fi ;;
+    # Sent again, it sweeps again: a stage is looked for by its name, not by a mark that may already be gone.
+    if has "$base.abandoned"; then
+        rm -f "$base.armed"
+        rm -f "$base".*.next
+        names=$(ls -a "$folder") || exit {UNREADABLE}
+        for name in $names; do
+            case $name in "${{base##*/}}".*.next) exit {UNREADABLE} ;; esac
+        done
+    fi ;;
 discard)
     candidate=$6
     [ "$now" = "committed $candidate" ] || revoke "$candidate" ;;
