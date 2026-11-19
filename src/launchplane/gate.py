@@ -8,8 +8,8 @@ from launchplane.instance import Verdict
 
 # The gate: the one place that answers, for a generation, none, committed or abandoned, for good.
 #
-# Everything that settles a release is one command on the container host, run while it holds a lock on the routes folder. What it
-# decides is kept as files of the generation's own, in a folder a lane's retirement does not touch:
+# Everything that settles a release is one command on the container host, run while it holds a lock on the folder of
+# routes files. Its decisions are kept as files named for the generation, in a folder that retiring a lane leaves alone:
 #
 #   <web address>.<generation>.<candidate>.next     the candidate's routes file, staged
 #   <web address>.<generation>.armed                "<attempt> <candidate>": the one candidate allowed to be renamed

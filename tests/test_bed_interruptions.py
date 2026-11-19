@@ -514,13 +514,13 @@ def ended_as(request: int) -> tuple[str, str | None]:
     return ended["stands"], answer.get("outcome")
 
 
-# One of the rule's held cases: the lane on A, its neighbour beside it, both probed from outside for the whole of the case.
+# One of the rule's held cases: the lane on A and the lane beside it, both probed from outside for the whole of the case.
 # Leaving it, every probe answered, the lane's visitors got exactly the builds expected and in that order, and the
-# neighbour kept its instance and its build.
+# lane beside kept its instance and its build.
 @dataclass
 class Case:
     renames_before: str
-    neighbour: list[dict[str, Any]]
+    beside_before: list[dict[str, Any]]
     loop: RequestLoop
     beside: RequestLoop
     expected: tuple[str, ...] = (A,)
@@ -549,7 +549,7 @@ def case() -> Iterator[Case]:
         let_go()
     assert (loop.failures, beside.failures) == ([], [])
     assert loop.answers_in_order() == [SITE.answer_of(build) for build in held_case.expected]
-    assert (beside.answers_in_order(), instances_of(untouched)) == ([SITE.answers[0]], held_case.neighbour)
+    assert (beside.answers_in_order(), instances_of(untouched)) == ([SITE.answers[0]], held_case.beside_before)
 
 
 @dataclass

@@ -411,7 +411,7 @@ class Lanes:
         return action
 
     # The one removal of an instance of a release. The gate is asked about the generation that made it, and obeyed: one
-    # it says was renamed to stays. Otherwise the gate has taken away every permission to switch to it, and it goes. One
+    # it says was renamed to stays. Otherwise, the gate has taken away every permission to switch to it, and it goes. One
     # no release made has no rename that could be on its way to it.
     def discard(self, action: steps.Discard) -> Event:
         made_by, container = action.generation, action.container

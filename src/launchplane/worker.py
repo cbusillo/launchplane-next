@@ -184,8 +184,8 @@ class Worker:
 
         return Witness(tell, hold, cancel_asked, refuse_cancel)
 
-    # A move the gate says is committed is taken up however often it was interrupted, and so is one the gate cannot be
-    # asked about: neither is a request that never ends.
+    # A move the gate says is committed is taken up however often it was interrupted. So is a move the gate cannot be
+    # asked about. Such a move is not a request that never ends.
     def is_committed_or_unknown(self, request: Request) -> bool:
         if request.work is not Work.MOVE or request.stands is not Stands.WORKING:
             return False

@@ -299,16 +299,18 @@ class PretendGate:
 
 # The gate as a test of calls that reach no move being worked is given it: nothing was ever asked of it.
 class GateNeverAsked:
+    answers = GateAnswer(Verdict.NONE)
+
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None:
-        raise AssertionError(f"the gate was asked to abandon {generation} of {lane} of {product}")
+        raise AssertionError(f"the gate was asked to abandon {generation} of {lane} of {product}, where it answers {self.answers}")
 
     def verdict(self, product: str, lane: str, generation: str, /) -> GateAnswer:
         assert product and lane and generation
-        return GateAnswer(Verdict.NONE)
+        return self.answers
 
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer:
         assert product and lane and generation and attempt
-        return GateAnswer(Verdict.NONE)
+        return self.answers
 
 
 class PretendProxy:

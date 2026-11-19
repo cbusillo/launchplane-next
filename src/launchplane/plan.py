@@ -296,16 +296,23 @@ class Move:
         return answer.model_copy(update=update)
 
 
+def removal_refused(done: tuple[Event, ...], container: str) -> str | None:
+    for event in done:
+        if isinstance(event, RemovalRefused) and event.container == container:
+            return event.report
+    return None
+
+
 # The one way an instance of a release goes: through the gate, which either says its rename won, and then it stays, or
 # takes away the permission to switch to it before it is removed. An instance an earlier release was renamed to, which
 # the lane no longer points at, is that release's past and is retired. A removal Docker refused is said, not tried again.
 def discard(move: Move, instance: RunningInstance) -> Action | Stop | CannotPutBack:
     container = instance.container
-    refused = next((event for event in move.done if isinstance(event, RemovalRefused) and event.container == container), None)
-    if refused is not None and move.gate.verdict is Verdict.ABANDONED:
-        return CannotPutBack(f"{CANCEL_WON}, and {container} could not be removed to put the lane back: {refused.report}")
-    if refused is not None:
-        return Stop(f"{container} could not be removed: {refused.report} {changes_so_far(move.done)}")
+    refusal = removal_refused(move.done, container)
+    if refusal is not None and move.gate.verdict is Verdict.ABANDONED:
+        return CannotPutBack(f"{CANCEL_WON}, and {container} could not be removed to put the lane back: {refusal}")
+    if refusal is not None:
+        return Stop(f"{container} could not be removed: {refusal} {changes_so_far(move.done)}")
     if Discarded(container, kept=True) in move.done:
         return Retire(container)
     made_by = instance.generation

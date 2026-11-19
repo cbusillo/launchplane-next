@@ -109,7 +109,9 @@ A web part or a background service with anything mounted is replaced. That rule 
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
-| `background service failed` | 422 | The web address points at the new instance, and its background service did not stay up 3 s. `error` has why and its last log lines. Asking again retires it and starts it again. |
+| `background service failed` | 422 | Only where the move switched nothing: the lane already served the build, and its background service did not stay up 3 s. `error` has why and its last log lines. Asking again retires it and starts it again. |
+
+Under a release that has switched, a background service that does not stay up ends nothing: the request stays `working`, its `error` has why and the last log lines, and it is taken up again by itself, ahead of any newer request for the lane ([the move](the-move.md)). Known and not fixed: while the build's background service cannot stay up, nothing ends that request, so no newer move and no retire of the lane gets its turn.
 
 The other outcomes are those of [the move](the-move.md). `data_set` in the answer is the data set of the instance receiving visitors. After an interruption the request is taken up again, reads the host and goes on from what is there.
 
@@ -202,4 +204,4 @@ On the test bed, Docker 29.9.3 on the scratch container, November 15:
 - From a container on the data set's network: the instance's login with no password was answered `no password supplied`, with a wrong password `password authentication failed`, and `postgres`, the instance's login on the `postgres` database, and a retired instance's login and password `pg_hba.conf rejects connection`. From a container outside that network the right login and password timed out.
 - Two instances at once each altered a table the other had made and wrote to it together. Every table, sequence and index, and the database, belonged to `app`.
 - Neither the instance's password nor the one the server was first started with was in any file of the data set's volume.
-- A background service that printed its password and exited was answered `background service failed` with that line cleaned, and a build whose health answer carried its password was answered `check failed` with it cleaned. No password appeared in any answer or in `journalctl --unit launchplane`.
+- A background service that printed its password and exited under a switched release left its request `working` with that line cleaned in `error`, and a build whose health answer carried its password was answered `check failed` with it cleaned. No password appeared in any answer or in `journalctl --unit launchplane`.

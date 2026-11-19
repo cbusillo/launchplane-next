@@ -682,17 +682,24 @@ def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_
     assert len(logins_on(lane_on_a.data_sets[0])) == 1
 
 
-def test_a_background_service_that_prints_its_password_and_fails_has_its_log_returned_without_the_password() -> None:
+def test_a_background_service_that_prints_its_password_and_fails_under_a_switched_release_is_shown_without_the_password() -> None:
     try:
-        status, body = move_lane(LEAKY_PRODUCT, LANE, BUILD_A)
+        status, asked = ask(f"/lanes/{LEAKY_PRODUCT}/{LANE}/move", {"build": BUILD_A})
+        assert status == 202, asked
+
+        def says_why_it_is_not_finished() -> bool:
+            return ask(f"/requests/{asked['id']}")[1]["error"] is not None
+
+        wait_for(says_why_it_is_not_finished, seconds=120)
+        kept = ask(f"/requests/{asked['id']}")[1]
         [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
         [instance] = [found for found in read_running()["instances"] if found["product"] == LEAKY_PRODUCT]
         password = environment_of(instance["container"])["PGPASSWORD"]
-        assert data_set["data_set"] == instance["data_set"]
-        assert (status, body["outcome"]) == (422, "background service failed"), body
-        assert f"connecting with password {SECRET_REMOVED}" in body["error"]
-        assert password not in json.dumps(body) + shown_by_launchplane()
+        assert (data_set["data_set"], kept["stands"]) == (instance["data_set"], "working"), kept
+        assert f"connecting with password {SECRET_REMOVED}" in kept["error"]
+        assert password not in json.dumps(kept) + shown_by_launchplane()
     finally:
+        kill_launchplane_and_end_what_was_asked()
         for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
             retire(LEAKY_PRODUCT, LANE, found["data_set"])
         retire(LEAKY_PRODUCT, LANE)
