@@ -182,12 +182,6 @@ def verdict_of(lane: Lane, generation: str) -> Answer:
     return GATE.verdict(lane.web_address, generation)
 
 
-# The routes file is a new file after each rename into place, so a rename on the host shows as a new inode.
-def route_inode(lane: Lane) -> str:
-    route = route_file_of(lane.web_address)
-    return on_scratch(f"docker exec {PROXY_NAME} sh -c 'stat -c %i {route} 2>/dev/null || echo none'").strip()
-
-
 def committed_to_the_one_instance_of(lane: Lane, generation: str, build: str) -> bool:
     [instance] = instances_of(lane)
     return (verdict_of(lane, generation), instance["build"]) == (Answer(Verdict.COMMITTED, instance["container"]), build)
@@ -222,9 +216,9 @@ def stop_background_services_of(lane: Lane) -> None:
 # What the gate has kept at the moment before its rename: the candidate's routes file staged, and the mark that arms it.
 def stage_and_arm_as_the_gate_does(lane: Lane, asked: dict[str, Any]) -> None:
     [candidate] = [each["container"] for each in instances_of(lane) if each["build"] == lane.builds[1]]
-    # noinspection SqlResolve
     attempt = on_control(
-        f"runuser -u postgres -- psql -d launchplane -Atc 'select max(id) from attempt where request = {asked['id']:d}'"
+        f"runuser -u postgres -- psql --dbname launchplane --tuples-only --no-align --set request={asked['id']:d}",
+        given="select max(id) from attempt where request = :request",
     ).strip()
     base = ROUTES_FOLDER / GATE_FOLDER_NAME / f"{lane.web_address}.{asked['generation']}"
     for file, text in (
