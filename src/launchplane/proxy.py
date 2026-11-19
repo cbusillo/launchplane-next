@@ -2,6 +2,7 @@ import json
 import re
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -152,12 +153,20 @@ def lane_routes_by_web_address(routes: LoadedRoutes) -> dict[str, LoadedRoute]:
     return {web_address_in(router): LoadedRoute(container_behind(router, routes.services), router.status) for router in from_files}
 
 
-def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
+def web_addresses_routed_twice(routes: LoadedRoutes) -> frozenset[str]:
+    seen = Counter(web_address_in(router) for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE))
+    return frozenset(web_address for web_address, times in seen.items() if times > 1)
+
+
+def routes_from_answer(answer: str) -> LoadedRoutes:
     try:
-        routes = LoadedRoutes.model_validate_json(answer)
+        return LoadedRoutes.model_validate_json(answer)
     except ValidationError as error:
         raise ProxyError(f"The proxy's loaded routes did not have the expected shape, so nothing was changed: {error}") from error
-    return lane_routes_by_web_address(routes)
+
+
+def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
+    return lane_routes_by_web_address(routes_from_answer(answer))
 
 
 # A first line the proxy reads as a comment is not part of the route. A file that is otherwise not the route Launchplane
@@ -194,11 +203,14 @@ class TraefikProxy:
                 raise ProxyError(f"The proxy did not answer within {self.load_deadline_seconds:g} s of starting: {result.output}")
             self.sleep(POLL_SECONDS)
 
-    def read_loaded(self) -> dict[str, LoadedRoute]:
+    def read_routes(self) -> LoadedRoutes:
         result = self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "-", LOADED_ROUTES_URL])
         if not result.succeeded:
             raise ProxyError(f"Reading the proxy's loaded routes failed: {result.output}")
-        return loaded_routes_from_answer(result.output)
+        return routes_from_answer(result.output)
+
+    def read_loaded(self) -> dict[str, LoadedRoute]:
+        return lane_routes_by_web_address(self.read_routes())
 
     def read_folder(self) -> dict[str, FileRead]:
         with self.routes_folder:
@@ -216,12 +228,14 @@ class TraefikProxy:
             for name, file in files_read.items()
             if name.endswith(ROUTE_FILE_SUFFIX)
         }
+        loaded = self.read_routes() if runs else LoadedRoutes(routers={}, services={})
         return ProxySeen(
             runs=runs,
             back_soon_runs=self.host.is_running(BACK_SOON),
             written={web_address: route for web_address, route in routes.items() if isinstance(route, WrittenRoute)},
-            loaded=self.read_loaded() if runs else {},
+            loaded=lane_routes_by_web_address(loaded),
             unread={web_address: why for web_address, why in routes.items() if isinstance(why, str)},
+            routed_twice=web_addresses_routed_twice(loaded),
         )
 
     def show_back_soon(self, web_address: str) -> None:

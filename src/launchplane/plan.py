@@ -1,9 +1,19 @@
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import overload
 
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import DataSet, DataSetUse, InstanceState, LaneBuild, LaneReading, RunningInstance, Verdict
+from launchplane.instance import (
+    DataSet,
+    DataSetUse,
+    InstanceState,
+    LaneBuild,
+    LaneReading,
+    RunningBackgroundService,
+    RunningInstance,
+    Unread,
+    Verdict,
+)
 from launchplane.judge import LOGIN_KINDS, Finding, Judgement, Kind, subjects_of
 from launchplane.product import Product
 from launchplane.steps import (
@@ -48,6 +58,7 @@ from launchplane.steps import (
     Switch,
     Switched,
     TooLate,
+    Wait,
     WriteRoute,
 )
 
@@ -304,6 +315,33 @@ class Move:
         return answer.model_copy(update=update)
 
 
+def named_by_route(lane: LaneReading) -> set[str]:
+    route = lane.route
+    return {name for name in (route.written, None if route.loaded is None else route.loaded.container) if name is not None}
+
+
+# Until the gate says a release is committed, nothing it made receives visitors. A routes file or a proxy that names
+# its instance all the same contradicts the gate, and nothing is touched on a contradiction.
+def own_named_by_route(move: Move) -> Wait | None:
+    lane = move.lane
+    own = {each.container for each in lane.instances if each.generation == move.generation}
+    own |= {event.container for event in move.done if isinstance(event, StartInstance)}
+    named = sorted(own & named_by_route(lane))
+    if not named:
+        return None
+    return Wait(
+        f"The gate does not say this release is committed, and the routes file or the proxy of {lane.web_address} names "
+        f"its instance {named[0]}. Nothing was touched."
+    )
+
+
+def unread_owner(parts: Sequence[RunningInstance | RunningBackgroundService]) -> Wait | None:
+    for part in parts:
+        if isinstance(part.generation, Unread):
+            return Wait(f"Which release made {part.container} could not be read, so it was not touched: {part.generation.why}")
+    return None
+
+
 def removal_refused(done: tuple[Event, ...], container: str) -> str | None:
     for event in done:
         if isinstance(event, RemovalRefused) and event.container == container:
@@ -312,8 +350,8 @@ def removal_refused(done: tuple[Event, ...], container: str) -> str | None:
 
 
 # The one way an instance of a release goes: through the gate, which either says its rename won, and then it stays, or
-# takes away the permission to switch to it before it is removed. An instance an earlier release was renamed to, which
-# the lane no longer points at, is that release's past and is retired. A removal Docker refused is said, not tried again.
+# takes away the permission to switch to it before it is removed. One whose release cannot be read, or that the routes
+# file or the proxy names, is waited on. A removal Docker refused is said, not tried again.
 def discard(move: Move, instance: RunningInstance) -> Action | Stop | CannotPutBack:
     container = instance.container
     refusal = removal_refused(move.done, container)
@@ -321,20 +359,35 @@ def discard(move: Move, instance: RunningInstance) -> Action | Stop | CannotPutB
         return CannotPutBack(f"{CANCEL_WON}, and {container} could not be removed to put the lane back: {refusal}")
     if refusal is not None:
         return Stop(f"{container} could not be removed: {refusal} {changes_so_far(move.done)}")
-    if Discarded(container, kept=True) in move.done:
-        return Retire(container)
+    if (wait := unread_owner([instance])) is not None:
+        return wait
+    if container in named_by_route(move.lane):
+        return Wait(f"The routes file or the proxy of {move.lane.web_address} names {container}, so it was not removed.")
     made_by = instance.generation
     return Discard(move.lane.web_address, container, made_by if isinstance(made_by, str) else None, move.attempt)
+
+
+# An instance an earlier release was renamed to is that release's winner, and goes only once this release is committed
+# to another instance and the proxy sends visitors there.
+def has_later_target_enabled(move: Move, winner: str) -> bool:
+    target = move.gate.candidate
+    return move.gate.verdict is Verdict.COMMITTED and target != winner and move.lane.route.sends_visitors_to == target
 
 
 # Every part of the lane but the instance kept and its background service, background services first.
 def old_part_step(move: Move, kept: str | None, *, background_services_only: bool = False) -> Action | Stop | CannotPutBack | None:
     lane = move.lane
     background_services = sorted(running.container for running in lane.background_services if running.instance != kept)
-    instances = sorted((each for each in lane.instances if each.container != kept), key=lambda each: each.container)
     if background_services:
         return Retire(background_services[0])
-    return discard(move, instances[0]) if instances and not background_services_only else None
+    if background_services_only:
+        return None
+    for instance in sorted((each for each in lane.instances if each.container != kept), key=lambda each: each.container):
+        if Discarded(instance.container, kept=True) not in move.done:
+            return discard(move, instance)
+        if has_later_target_enabled(move, instance.container):
+            return Retire(instance.container)
+    return None
 
 
 def in_service(move: Move) -> Action | Stop | None:
@@ -411,6 +464,8 @@ def finish_committed(move: Move) -> Step[MoveResult] | CannotPutBack:
 # otherwise what anything earlier left is cleaned up, and a candidate is made.
 def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
     lane, candidate, done = move.lane, move.candidate, move.done
+    if (wait := own_named_by_route(move)) is not None:
+        return wait
     refused = next((event for event in done if isinstance(event, CheckRefused)), None)
     if refused is not None:
         return (
@@ -457,6 +512,8 @@ def too_late_to_cancel(web_address: str) -> str:
 # Data stays.
 def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
     lane = move.lane
+    if (wait := own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])) is not None:
+        return wait
     background_services = sorted(each.container for each in lane.background_services if each.generation == move.generation)
     instances = sorted((each for each in lane.instances if each.generation == move.generation), key=lambda each: each.container)
     if background_services:

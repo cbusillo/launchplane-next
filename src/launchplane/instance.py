@@ -171,6 +171,8 @@ class ProxySeen:
     written: Mapping[str, WrittenRoute] = field(default_factory=dict[str, WrittenRoute])
     loaded: Mapping[str, LoadedRoute] = field(default_factory=dict[str, LoadedRoute])
     unread: Mapping[str, str] = field(default_factory=dict[str, str])
+    # Web addresses the proxy has loaded two routes for, so where their visitors go is not known from `loaded`.
+    routed_twice: frozenset[str] = frozenset()
 
     def route_of(self, web_address: str) -> LaneRoute:
         written = self.written.get(web_address)

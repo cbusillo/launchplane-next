@@ -325,6 +325,7 @@ class PretendProxy:
         self.written: dict[str, str] = {}
         self.gate = PretendGate(self)
         self.unread: dict[str, str] = {}
+        self.routed_twice: set[str] = set()
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
         self.holds_delivery = False
         self.failing: set[str] = set()
@@ -347,6 +348,7 @@ class PretendProxy:
             written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
             loaded=dict(self.loaded) if self.running else {},
             unread=dict(self.unread),
+            routed_twice=frozenset(self.routed_twice),
         )
 
     def route(self, web_address: str, container: str) -> None:

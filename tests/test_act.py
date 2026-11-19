@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 import pytest
 
-from launchplane.act import EVERY_LANE, MOST_STEPS, Lanes, Stopped
+from launchplane.act import EVERY_LANE, MOST_STEPS, Lanes, Stopped, Waiting
 from launchplane.api import lane_answer
 from launchplane.container_host import Lane
 from launchplane.docker_answers import ContainerHostError
@@ -206,6 +206,31 @@ def test_a_routes_file_that_is_not_launchplanes_with_no_loaded_route_stops_the_c
         [instance],
         ("volume-data-1",),
     )
+
+
+TAKES_A_DATABASE_AWAY: dict[str, Callable[[Lanes], object]] = {
+    "a retire naming the data set": lambda lanes: lanes.retire("site", "testing", delete_data_set="data-1"),
+    "beginning maintenance": lambda lanes: lanes.begin_maintenance("site", "testing"),
+}
+
+
+@pytest.mark.parametrize("call", TAKES_A_DATABASE_AWAY.values(), ids=TAKES_A_DATABASE_AWAY.keys())
+def test_no_database_is_stopped_or_removed_while_a_loaded_route_names_it(call: Callable[[Lanes], object]) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.route("elsewhere.site.test", "database-data-1")
+    with pytest.raises(Waiting, match="the proxy sends the visitors of elsewhere"):
+        call(lanes_on(proxy))
+    [database] = proxy.host.data_sets["data-1"].databases
+    assert database.state == InstanceState.RUNNING
+
+
+def test_nothing_is_stopped_or_removed_while_the_proxy_has_two_routes_for_one_web_address() -> None:
+    proxy = lane_brought_up_with_a()
+    instance = proxy.written[WEB_ADDRESS]
+    proxy.routed_twice.add("elsewhere.site.test")
+    with pytest.raises(Waiting, match="two routes for elsewhere"):
+        lanes_on(proxy).retire("site", "testing")
+    assert instance in proxy.host.instances
 
 
 def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_the_next_move_and_the_next_retire() -> None:

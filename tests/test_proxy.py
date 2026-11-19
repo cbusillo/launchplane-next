@@ -259,6 +259,14 @@ def test_a_route_with_this_first_line_is_a_route_all_the_same_and_says_nothing_o
     assert (route.written, route.unread, route.sends_visitors_to) == ("site-t1", None, "site-t1")
 
 
+def test_a_web_address_the_proxy_has_two_routes_for_is_read_as_routed_twice_and_never_as_one_target() -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
+    loaded = json.loads(host.loaded)
+    loaded["routers"]["foreign@file"] = loaded["routers"][f"{WEB_ADDRESS}@file"]
+    host.loaded = json.dumps(loaded)
+    assert TraefikProxy(host).read().routed_twice == {WEB_ADDRESS}
+
+
 def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visitors() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
     loaded = json.loads(host.loaded)

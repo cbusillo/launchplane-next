@@ -58,6 +58,7 @@ from launchplane.steps import (
     Switch,
     Switched,
     TooLate,
+    Wait,
 )
 from tests.pretend_host import (
     D1,
@@ -258,9 +259,21 @@ FOLLOWS_THE_GATE = {
         COMMITTED_TO_NEW,
         Case((OLD,), SERVING_OLD, (), None),
     ),
-    "no verdict with the routes file naming an instance of this generation is not a switch: nothing is finished": (
+    "no verdict with the routes file and the proxy naming an instance of this generation is waited on": (
         NO_VERDICT,
-        Case((MADE_NEW,), SERVING_NEW, (), answer(Outcome.UNCHANGED, "new")),
+        Case((OLD, MADE_NEW), SERVING_NEW, (), None),
+    ),
+    "abandoned with the proxy on an instance of this generation is waited on, and its background service is not touched": (
+        ABANDONED,
+        Case((OLD, MADE_NEW), SERVING_NEW, (), None),
+    ),
+    "abandoned with a part whose release cannot be read is waited on": (
+        ABANDONED,
+        Case((OLD, changed(NEW, generation=Unread(why="the label is no generation"))), SERVING_OLD, (), None),
+    ),
+    "no verdict with a leftover whose release cannot be read is waited on, and the gate is not skipped": (
+        NO_VERDICT,
+        Case((OLD, changed(NEW, generation=Unread(why="the label is no generation"))), SERVING_OLD, (), None),
     ),
 }
 
@@ -269,15 +282,18 @@ FOLLOWS_THE_GATE = {
 def test_a_move_follows_the_gates_answer_and_never_the_routes_file_or_the_loaded_route(gate: GateAnswer, case: Case) -> None:
     step = next_move_step(replace(case, gate=gate))
     assert isinstance(step, Stop) if case.step is None else step == case.step
+    assert isinstance(step, Wait) == (case.step is None and gate is not COMMITTED_TO_NEW)
 
 
 LEFT_BY_EARLIER = changed(NEW, generation=EARLIER)
 
 
-def test_an_instance_the_gate_says_an_earlier_release_was_renamed_to_is_retired_once_the_lane_points_elsewhere() -> None:
-    asked = Case((OLD, LEFT_BY_EARLIER), SERVING_OLD, (), gone("new", EARLIER))
-    answered_kept = replace(asked, done=(Discarded("new", kept=True),), step=Retire("new"))
-    assert [next_move_step(asked), next_move_step(answered_kept)] == [asked.step, answered_kept.step]
+def test_an_earlier_winner_is_retired_only_once_this_release_is_committed_elsewhere_and_visitors_are_sent_there() -> None:
+    winner, kept = changed(OLD, generation=EARLIER), (Discarded("old", kept=True),)
+    asked = Case((winner, MADE_NEW), SERVING_NEW, (), gone("old", EARLIER), COMMITTED_TO_NEW)
+    before_this_release_is_committed = Case((winner,), (None, None), kept, None)
+    assert [next_move_step(asked), next_move_step(replace(asked, done=kept))] == [asked.step, Retire("old")]
+    assert isinstance(next_move_step(before_this_release_is_committed), StartInstance)
 
 
 def test_a_removal_docker_refused_stops_a_move_and_ends_a_cancel_that_won_as_could_not_put_back() -> None:

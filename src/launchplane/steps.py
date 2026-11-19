@@ -285,6 +285,12 @@ class Stop:
     reason: str
 
 
+# Neither a failure nor an answer: what was read contradicts the gate, or cannot say what must be known before a part is
+# touched. Nothing is done, and the move is planned again from a later reading.
+class Wait(Stop):
+    pass
+
+
 # How the error of such an ending begins, so a cancel asked again says that it won.
 CANCEL_WON = "The cancel won"
 

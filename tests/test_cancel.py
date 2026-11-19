@@ -425,7 +425,7 @@ def test_no_cancel_removes_the_instance_the_proxy_sends_visitors_to_though_its_r
     record.cancel(request, BY_HAND)
     assert worker.work_next() is True
     kept = kept_of(record, request)
-    assert kept.error is not None and f"the proxy sends the visitors of {WEB_ADDRESS} to it, so it was left running" in kept.error
+    assert kept.error is not None and f"the proxy of {WEB_ADDRESS} names its instance switched-to" in kept.error
     assert (kept.stands, "switched-to" in proxy.host.instances, proxy.host.actions) == (Stands.WORKING, True, [])
 
 

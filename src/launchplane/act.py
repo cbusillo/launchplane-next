@@ -108,6 +108,11 @@ class Stopped(Exception):
     pass
 
 
+# Nothing was done and nothing failed: the call is to be planned again from a later reading.
+class Waiting(Stopped):
+    pass
+
+
 # A cancel won at the gate, and Docker refused to remove a part of its release, which is still there.
 class CouldNotPutBack(Exception):
     pass
@@ -225,7 +230,7 @@ def settle[Answer](
                 raise Cancelled(step.answer)
             return step.answer
         if isinstance(step, Stop):
-            raise Stopped(step.reason)
+            raise (Waiting if isinstance(step, steps.Wait) else Stopped)(step.reason)
         if isinstance(step, steps.CannotPutBack):
             raise CouldNotPutBack(step.reason)
         if len(done) == MOST_STEPS:
@@ -393,14 +398,23 @@ class Lanes:
     # of the action, and from no stamp or mark. A retire has removed the route by then, and the old instance of a
     # move is retired once the proxy has loaded the switch, so neither is stopped by it.
     def refuse_to_take_from_visitors(self, action: Action) -> None:
-        if not isinstance(action, steps.Retire | steps.StopPart):
+        if isinstance(action, steps.Retire | steps.StopPart | steps.StopDatabase):
+            containers = {action.container}
+        elif isinstance(action, steps.DeleteDataSet):
+            containers = {database.container for database in action.found.databases}
+        else:
             return
-        loaded = self.proxy.read().loaded
-        sent_here = sorted(web_address for web_address, route in loaded.items() if route.container == action.container)
+        seen = self.proxy.read()
+        if seen.routed_twice:
+            raise Waiting(
+                f"Launchplane was about to {named(action)}, and the proxy has two routes for "
+                f"{', '.join(sorted(seen.routed_twice))}, so where those visitors go is not known. Nothing more was done."
+            )
+        sent_here = sorted(web_address for web_address, route in seen.loaded.items() if route.container in containers)
         if sent_here:
-            raise Stopped(
-                f"Launchplane was about to {named(action)}, and the proxy sends the visitors of {', '.join(sent_here)} to it, "
-                "so it was left running. Nothing more was done."
+            raise Waiting(
+                f"Launchplane was about to {named(action)}, and the proxy sends the visitors of {', '.join(sent_here)} to "
+                "what it would take away, so that was left running. Nothing more was done."
             )
 
     def take(self, action: Action) -> Event:
