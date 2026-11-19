@@ -146,6 +146,8 @@ class Status:
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
     cancels: list[Request] = field(default_factory=list[Request])
+    # What the gate answers for each move being worked that a cancel was asked of. None is a gate that gave no answer.
+    cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -308,7 +310,16 @@ class Lanes:
             judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
-        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancels)
+        marked = [each for each in requests if (each.work, each.stands) == (Work.MOVE, Stands.WORKING) and each.cancel_asked_at]
+        decided = {each.id: self.cancel_decided(each) for each in marked}
+        return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancels, decided)
+
+    # Asked as the gate is, and nothing is started to ask it: a status call changes nothing.
+    def cancel_decided(self, request: Kept) -> GateAnswer | None:
+        try:
+            return self.proxy.gate.verdict(web_address_of(request.product, request.lane), request.generation)
+        except ContainerHostError, ProxyError:
+            return None
 
     # The lane is read, and then the gate is asked, so the gate's answer is never older than the reading it is set beside.
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness = NOBODY) -> MoveResult:
@@ -359,9 +370,6 @@ class Lanes:
             self.take,
             witness,
         )
-
-    def verdict(self, product: str, lane: str, generation: str) -> GateAnswer:
-        return self.gate().verdict(web_address_of(product, lane), generation)
 
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
     # one can rename after it.

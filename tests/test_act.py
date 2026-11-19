@@ -94,12 +94,11 @@ def test_the_first_move_starts_the_proxy_then_moves() -> None:
     assert result.outcome == Outcome.SWITCHED
 
 
-@pytest.mark.parametrize("ask", ["verdict", "fence", "abandon"])
+@pytest.mark.parametrize("ask", ["fence", "abandon"])
 def test_a_stopped_proxy_is_started_before_the_gate_is_asked_anything_for_a_move(ask: str) -> None:
     proxy = PretendProxy(PretendHost(), running=False)
     lanes = Lanes(proxy.host, proxy)
     asked = {
-        "verdict": lambda: lanes.verdict("site", "testing", GENERATION),
         "fence": lambda: lanes.fence("site", "testing", GENERATION, 1),
         "abandon": lambda: lanes.abandon("site", "testing", GENERATION),
     }

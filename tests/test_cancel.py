@@ -529,6 +529,34 @@ def row_of(bed: Bed, request: int) -> tuple[list[str], str]:
     return [pill["text"] for pill in row["pills"]], row["note"]
 
 
+CANCEL_ON_RECORD = {
+    "not yet carried to the gate": (None, "the gate has not been asked yet, and its worker carries the cancel there."),
+    "with a gate that gives no answer": (
+        "The routes folder could not be read",
+        "the gate could not be asked whether that came in time.",
+    ),
+}
+
+
+@pytest.mark.parametrize(("unreadable", "said"), CANCEL_ON_RECORD.values(), ids=CANCEL_ON_RECORD.keys())
+def test_a_working_move_with_a_cancel_on_record_shows_what_the_gate_answers_for_it(
+    record: Record, unreadable: str | None, said: str
+) -> None:
+    bed = bed_on(record)
+    asked = bed.client.post(MOVE, json=TO_B).json()["id"]
+    notes: list[str] = []
+
+    def cancel_on_record_alone(_container: str) -> None:
+        bed.record.cancel(asked, BY_HAND)
+        bed.proxy.gate.unreadable = unreadable
+        notes.append(row_of(bed, asked)[1])
+        bed.proxy.gate.unreadable = None
+
+    bed.proxy.while_checking = cancel_on_record_alone
+    assert bed.worker.worked_one() is True
+    assert [note.endswith(f"To be cancelled by {BY_HAND}: {said}") for note in notes] == [True]
+
+
 def test_a_cancelled_request_shows_on_its_lanes_card_and_among_the_ended_with_what_was_put_back_and_by_whom(
     record: Record,
 ) -> None:
@@ -548,7 +576,7 @@ def test_a_cancelled_request_shows_on_its_lanes_card_and_among_the_ended_with_wh
     assert (
         marked,
         pills_meanwhile,
-        note_meanwhile.endswith(f"To be cancelled by {by}: its worker puts the lane back, unless the gate says it is too late."),
+        note_meanwhile.endswith(f"To be cancelled by {by}: the cancel won at the gate, and its worker puts the lane back."),
     ) == (
         202,
         ["working"],
@@ -861,6 +889,8 @@ def test_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_as_
         True,
     )
     assert (proxy.written, sorted(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a", NEW])
+    [card] = client.get("/running").json()["cards"]
+    assert [row["note"] for row in card["rows"] if row["name"] == f"Request {asked}"] == [kept.error]
 
 
 def test_giving_up_a_request_that_needs_a_person_and_whose_release_is_committed_is_refused_and_it_is_worked_again(
