@@ -21,13 +21,15 @@ from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
 from launchplane import api
+from launchplane.act import Lanes
 from launchplane.container_host import ContainerHost
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, TraefikProxy
 from launchplane.record import PostgresRecord
 
 HOLDS = Path(os.environ.get("LAUNCHPLANE_HOLDS", "/var/lib/launchplane/holds"))
 PORT = int(os.environ.get("LAUNCHPLANE_HOLDS_PORT", "8701"))
-POINT = re.compile(r"(before|after)\.(host|proxy|record)\.[a-z_]+|proxy-delivery")
+POINT = re.compile(r"(before|after|lose|fail|refuse)\.(host|proxy|record|lanes)\.[a-z_]+|proxy-delivery")
 PROXY_DELIVERY = "proxy-delivery"
 # Traefik reads every file of its routes folder or none: one it cannot read keeps it on the routes it has loaded.
 UNREADABLE_ROUTES_FILE = ROUTES_FOLDER / "held.toml"
@@ -52,11 +54,27 @@ def pause(point: str, arguments: str) -> None:
     stopped_at.discard(point)
 
 
+def held_once(point: str, arguments: str) -> bool:
+    held = is_held(point, arguments)
+    if held:
+        (HOLDS / point).unlink(missing_ok=True)
+    return held
+
+
+# `before.` and `after.` stop a call for as long as they stand. `fail.` makes it the host that cannot be reached, and
+# `refuse.` the host that answers no, for as long as they stand and before anything is forwarded. `lose.` lets the call
+# take effect once and gives its caller the error of a lost reply in place of the reply.
 def held_around(point: str, call: Callable[..., Any]) -> Callable[..., Any]:
     def held(*arguments: object, **named: object) -> object:
         given = repr((arguments, named))
         pause(f"before.{point}", given)
+        if is_held(f"fail.{point}", given):
+            raise ContainerHostError(f"{point} failed: the test harness holds the host as one that cannot be reached")
+        if is_held(f"refuse.{point}", given):
+            raise ContainerHostRefused(f"{point} was refused: the test harness holds the host as one that answers no")
         reply = call(*arguments, **named)
+        if held_once(f"lose.{point}", given):
+            raise ContainerHostError(f"{point} failed: the test harness lost the reply after the call took effect")
         pause(f"after.{point}", given)
         return reply
 
@@ -84,6 +102,10 @@ class HeldProxy(Held, TraefikProxy):
 
 class HeldRecord(Held, PostgresRecord):
     held_as = "record"
+
+
+class HeldLanes(Held, Lanes):
+    held_as = "lanes"
 
 
 def hold_proxy_delivery(host: ContainerHost, held: bool) -> None:
@@ -160,7 +182,7 @@ def main() -> None:
     HOLDS.mkdir(parents=True, exist_ok=True)
     holds = ThreadingHTTPServer(("", PORT), holds_handler(ContainerHost.from_environment()))
     threading.Thread(target=holds.serve_forever, daemon=True).start()
-    api.ContainerHost, api.TraefikProxy, api.PostgresRecord = HeldHost, HeldProxy, HeldRecord
+    api.ContainerHost, api.TraefikProxy, api.PostgresRecord, api.Lanes = HeldHost, HeldProxy, HeldRecord, HeldLanes
     api.serve()
 
 
