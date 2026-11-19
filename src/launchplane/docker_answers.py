@@ -59,7 +59,7 @@ class TornRead(Exception):
     pass
 
 
-# Docker answered, and its answer was that it will not do it.
+# The host answered, and the answer is no: Docker will not do it, or what was read of the host forbids it.
 class ContainerHostRefused(ContainerHostError):
     pass
 

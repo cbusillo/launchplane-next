@@ -39,6 +39,7 @@ from launchplane.docker_answers import (
     QUIET_GATEWAY_MODE,
     CommandResult,
     ContainerHostError,
+    ContainerHostRefused,
     DockerContainerDetails,
     Listed,
     Part,
@@ -312,7 +313,7 @@ class ContainerHost:
                 self.create_network(name, None, quiet=quiet)
                 return
         if quiet and not is_quiet(checked(DOCKER_NETWORK, found.attrs, f"description of the network {name}")):
-            raise ContainerHostError(
+            raise ContainerHostRefused(
                 f"The network {name} exists and is not quiet: it lets what is attached to it reach out. "
                 "Launchplane attaches nothing to it until it is removed and made again."
             )

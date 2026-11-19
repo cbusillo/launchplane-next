@@ -541,15 +541,13 @@ def test_no_password_is_anywhere_in_the_data_sets_volume(lane_on_a: LaneView) ->
     assert files_holding(volume, "SCRAM-SHA-256") != []
 
 
-def test_starts_that_fail_after_their_login_was_made_never_leave_more_than_the_last_one_and_a_good_move_removes_it(
+def test_a_start_that_fails_after_its_login_was_made_leaves_no_login_behind_once_the_move_has_ended_as_failed(
     lane_on_a: LaneView,
 ) -> None:
     [data_set] = lane_on_a.data_sets
     own = environment_of(lane_on_a.receiving()["container"])["PGUSER"]
     refusals = [move_lane(PRODUCT, LANE, "launchplane-test-ledger:no-such-build")[0] for _ in range(3)]
-    left = logins_on(data_set)
-    move(BUILD_A)
-    assert (refusals, len(left), own in left, logins_on(data_set)) == ([503, 503, 503], 2, True, [own])
+    assert (refusals, logins_on(data_set)) == ([503, 503, 503], [own])
 
 
 SESSION_HOLDER = "test-bed-session-holder"

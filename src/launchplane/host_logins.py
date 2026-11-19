@@ -23,6 +23,7 @@ from launchplane.docker_answers import (
     DOCKER_CONTAINER_DETAILS,
     PRODUCT_LABEL,
     ContainerHostError,
+    ContainerHostRefused,
     checked,
     command_result,
 )
@@ -65,7 +66,7 @@ class HostLogins:
     def require_rules(self, use: DataSetUse) -> None:
         found = self.read(use.database_container, "Reading the access rules", READ_RULES, RULES_READ)
         if found != RULES_AS_READ:
-            raise ContainerHostError(
+            raise ContainerHostRefused(
                 f"The database {use.database_container} of the data set {use.data_set} does not have Launchplane's access rules, "
                 f"so no instance was started on it. Nothing was deleted. It must have exactly:\n{RULES_FILE}\nIt has, as "
                 f"PostgreSQL reads them: {found}. Its set-up did not finish or its rules were changed. "
@@ -89,7 +90,7 @@ class HostLogins:
         labels = self.client.containers.get(database).labels
         product, data_set = labels.get(PRODUCT_LABEL), labels.get(DATA_SET_LABEL)
         if product is None or data_set is None:
-            raise ContainerHostError(
+            raise ContainerHostRefused(
                 f"The database {database} does not say which product and data set it is, so Launchplane cannot tell "
                 "which containers hold its logins. No login was removed."
             )
@@ -114,7 +115,7 @@ class HostLogins:
         login = variable_value(environment, LOGIN_VARIABLE)
         password = variable_value(environment, CLIENT_PASSWORD_VARIABLE)
         if not login or not password:
-            raise ContainerHostError(
+            raise ContainerHostRefused(
                 f"The instance {instance} holds no database login ({LOGIN_VARIABLE} and {CLIENT_PASSWORD_VARIABLE}), "
                 "so its background service cannot be given it. Moving the lane to a build again makes an instance that holds one."
             )
