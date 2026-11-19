@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict
 
-from launchplane.instance import new_generation
+from launchplane.instance import Verdict, new_generation
 from launchplane.judge import Work
 from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
 from launchplane.steps import PutBack
@@ -163,6 +163,12 @@ class Kept(Request):
     events: list[Event]
 
 
+# A request interrupted as often as one may be. `last` is the last attempt it was given.
+@dataclass(frozen=True)
+class AtLimit:
+    last: int
+
+
 class Record(Protocol):
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request: ...
     def read(self, request: int) -> Kept | None: ...
@@ -172,11 +178,13 @@ class Record(Protocol):
     def next_up(self) -> list[Request]: ...
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
     def take_up(self, request: int, *, exempt: bool = False) -> int | None: ...
+    def at_limit(self, request: int) -> AtLimit | None: ...
+    def stop_for_a_person(self, request: int, last: int) -> bool: ...
     def leave_open(self, attempt: int, why: str) -> None: ...
     def resume(self, request: int, why: str) -> None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
     def end(
-        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool: ...
     def give_up(self, request: int) -> Request | None: ...
     def retry(self, request: int, asked_by: str) -> Request | None: ...
@@ -281,7 +289,7 @@ class Sql:
     CANCEL_ASKED: Final = "select cancel_asked_at is not null as asked from request where id = %s"
     REFUSE_CANCEL: Final = "update request set cancel_refused = %s where id = %s and cancel_refused is null"
     # Locks the request, so a cancel is either marked before this is read or finds the request ended. Only a move
-    # answers every cancel from the host, so only a move's ending waits for its call to have seen the cancel.
+    # answers every cancel at the gate, so only a move's ending waits for the gate to have decided the cancel.
     OPEN_ATTEMPT: Final = """
     select request.work = 'moving' and request.cancel_asked_at is not null as move_with_a_cancel
     from request, attempt where attempt.id = %s and attempt.ended is null and request.id = attempt.request
@@ -291,7 +299,9 @@ class Sql:
     TURN_HELD: Final = "select count(*) as held from pg_locks where locktype = 'advisory' and pid = pg_backend_pid() and granted"
     TAKE_TURN: Final = "select pg_try_advisory_lock(hashtextextended(%s, 0)) as ours"
     INTERRUPT: Final = "update attempt set ended_at = now(), ended = 'interrupted' where request = %s and ended is null"
-    COUNT_ATTEMPTS: Final = "select count(*) from attempt where request = %s and ended = 'interrupted'"
+    COUNT_ATTEMPTS: Final = """
+    select count(*) filter (where ended = 'interrupted') as interrupted, max(id) as last from attempt where request = %s
+    """
     LEAVE_OPEN: Final = """
     with open_still as (
         update attempt set ended_at = now(), ended = 'unfinished' where id = %s and ended is null returning request
@@ -544,11 +554,36 @@ class PostgresRecord(Record):
             if found is None or found.stands not in (Stands.WAITING, Stands.WORKING):
                 return None
             session.execute(Sql.INTERRUPT, taken)
-            interrupted = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)["count"]
-            if interrupted >= MOST_ATTEMPTS and not exempt:
+            attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
+            if attempts["interrupted"] >= MOST_ATTEMPTS and not exempt:
                 session.execute(Sql.STOP_FOR_A_PERSON, self.gate.made(needs_a_person(found), request))
                 return None
             return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, self.gate.made(request, request))["id"]
+
+    # Asked of a move before it is taken up, under its lane's turn: whether it needs a person is the gate's to say
+    # first, and the gate is not asked inside a transaction.
+    def at_limit(self, request: int) -> AtLimit | None:
+        with self.session("counting how often a request was interrupted") as session:
+            taken = self.gate.made(request)
+            row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
+            if row is None or Request.model_validate(row).stands is not Stands.WORKING:
+                return None
+            session.execute(Sql.INTERRUPT, taken)
+            attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
+            return AtLimit(attempts["last"]) if attempts["interrupted"] >= MOST_ATTEMPTS else None
+
+    # Whether the move now needs a person: only if, with its row locked, it is still working, was given no attempt
+    # after the one the gate was fenced through, and no cancel is on record for it.
+    def stop_for_a_person(self, request: int, last: int) -> bool:
+        with self.session("leaving a request to a person") as session:
+            taken = self.gate.made(request)
+            row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
+            found = None if row is None else Request.model_validate(row)
+            attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
+            if found is None or (found.stands, found.cancel_asked_at, attempts["last"]) != (Stands.WORKING, None, last):
+                return False
+            session.execute(Sql.STOP_FOR_A_PERSON, self.gate.made(needs_a_person(found), request))
+            return True
 
     # The attempt is over and the request is not: it stays working, with why it is not finished, and is taken up again.
     def leave_open(self, attempt: int, why: str) -> None:
@@ -566,16 +601,16 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
-    # A move does not end over a cancel its call never saw, unless the cancel is what ends it: the call sees the cancel
-    # and ends again.
+    # A move with a cancel on record ends only on what the gate decided of that cancel: abandoned, or committed. With
+    # neither, nothing is written, and the worker carries the cancel to the gate and plans again.
     def end(
-        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool:
         with self.session("writing how a request ended") as session:
             open_attempt = session.execute(Sql.OPEN_ATTEMPT, self.gate.made(attempt)).fetchone()
             if open_attempt is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
-            if open_attempt["move_with_a_cancel"] and not cancel_seen and stands is not Stands.CANCELLED:
+            if open_attempt["move_with_a_cancel"] and decided not in (Verdict.ABANDONED, Verdict.COMMITTED):
                 return False
             session.execute(Sql.END, self.gate.made(stands.value, attempt, stands.value, answer, error))
             return True

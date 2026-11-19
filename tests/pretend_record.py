@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from launchplane.instance import new_generation
+from launchplane.instance import Verdict, new_generation
 from launchplane.judge import Work
 from launchplane.record import (
     ASKED_AGAIN,
@@ -14,6 +14,7 @@ from launchplane.record import (
     MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN,
     MOST_ATTEMPTS,
     Asked,
+    AtLimit,
     Attempt,
     Event,
     Gate,
@@ -49,6 +50,7 @@ class PretendRecord(Record):
     open_attempts: dict[int, int] = field(default_factory=dict[int, int])
     turns: dict[tuple[str, str], object] = field(default_factory=dict[tuple[str, str], object])
     attempts_begun: int = 0
+    last_attempt: dict[int, int] = field(default_factory=dict[int, int])
     reachable: bool = True
     gate: Gate = field(default_factory=lambda: Gate(GivenSecrets()))
     confirms_writes: bool = True
@@ -176,10 +178,7 @@ class PretendRecord(Record):
             found = self.kept.get(request)
             if found is None or found.stands not in UNFINISHED[:2]:
                 return None
-            interrupted = [
-                each if each.ended is not None else each.model_copy(update={"ended": "interrupted", "ended_at": now()})
-                for each in found.attempts
-            ]
+            interrupted = self.interrupted(request)
             self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
             if sum(each.ended == "interrupted" for each in interrupted) >= MOST_ATTEMPTS and not exempt:
                 self.change(request, attempts=interrupted, stands=Stands.NEEDS_A_PERSON, **self.cleaned(error=needs_a_person(found)))
@@ -188,7 +187,36 @@ class PretendRecord(Record):
             self.change(request, attempts=[*interrupted, began], stands=Stands.WORKING)
             self.attempts_begun += 1
             self.open_attempts[self.attempts_begun] = request
+            self.last_attempt[request] = self.attempts_begun
             return self.attempts_begun
+
+    def interrupted(self, request: int) -> list[Attempt]:
+        return [
+            each if each.ended is not None else each.model_copy(update={"ended": "interrupted", "ended_at": now()})
+            for each in self.kept[request].attempts
+        ]
+
+    def at_limit(self, request: int) -> AtLimit | None:
+        self.reach("counting how often a request was interrupted")
+        with self.writing:
+            found = self.kept.get(request)
+            if found is None or found.stands is not Stands.WORKING:
+                return None
+            interrupted = self.interrupted(request)
+            self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
+            self.change(request, attempts=interrupted)
+            at_limit = sum(each.ended == "interrupted" for each in interrupted) >= MOST_ATTEMPTS
+            return AtLimit(self.last_attempt[request]) if at_limit else None
+
+    def stop_for_a_person(self, request: int, last: int) -> bool:
+        self.reach("leaving a request to a person")
+        with self.writing:
+            found = self.kept.get(request)
+            still = found is not None and (found.stands, found.cancel_asked_at) == (Stands.WORKING, None)
+            if found is None or not still or self.last_attempt[request] != last:
+                return False
+            self.change(request, stands=Stands.NEEDS_A_PERSON, **self.cleaned(error=needs_a_person(found)))
+            return True
 
     def leave_open(self, attempt: int, why: str) -> None:
         self.reach("writing why a request is not finished")
@@ -217,7 +245,7 @@ class PretendRecord(Record):
             self.change(request, events=[*found.events, event])
 
     def end(
-        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool:
         self.reach("writing how a request ended")
         with self.writing:
@@ -225,8 +253,8 @@ class PretendRecord(Record):
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
             found = self.kept[request]
-            unseen = found.work is Work.MOVE and found.cancel_asked_at is not None and not cancel_seen
-            if unseen and stands is not Stands.CANCELLED:
+            marked = found.work is Work.MOVE and found.cancel_asked_at is not None
+            if marked and decided not in (Verdict.ABANDONED, Verdict.COMMITTED):
                 return False
             del self.open_attempts[attempt]
             attempts = self.kept[request].attempts

@@ -34,6 +34,7 @@ from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.steps import FreshNames
+from launchplane.telling import Witness
 
 WEB_ADDRESS = "testing.site.test"
 # The generations of a release under test and of one before it.
@@ -313,6 +314,9 @@ class GateNeverAsked:
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer:
         assert product and lane and generation and attempt
         return self.answers
+
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> None:
+        assert product and lane and generation and attempt and witness
 
 
 class PretendProxy:

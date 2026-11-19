@@ -234,7 +234,7 @@ def settle[Answer](
         if isinstance(step, steps.CannotPutBack):
             raise CouldNotPutBack(step.reason)
         if len(done) == MOST_STEPS:
-            raise Stopped(
+            raise Waiting(
                 f"{lane.lane} of {lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
             )
@@ -337,6 +337,28 @@ class Lanes:
         if not self.proxy.is_running():
             self.proxy.start()
         return self.proxy.gate
+
+    # After a move failed with no verdict and its attempt was fenced. It reads nothing of the product's description:
+    # what the generation made is known by its stamp.
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness = NOBODY) -> None:
+        target, web_address = LaneBuild(product=product, lane=lane, build=""), web_address_of(product, lane)
+        settle(
+            *self.judging(product, lane, self.description_of(product), Work.MOVE),
+            lambda judged, done, _cancel: plan.decide_clean_up(
+                plan.Move(
+                    judged,
+                    target,
+                    Product(),
+                    self.name_fresh(target),
+                    done,
+                    generation,
+                    attempt,
+                    self.gate().verdict(web_address, generation),
+                )
+            ),
+            self.take,
+            witness,
+        )
 
     def verdict(self, product: str, lane: str, generation: str) -> GateAnswer:
         return self.gate().verdict(web_address_of(product, lane), generation)

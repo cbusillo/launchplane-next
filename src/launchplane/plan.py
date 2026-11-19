@@ -506,15 +506,28 @@ def too_late_to_cancel(web_address: str) -> str:
     )
 
 
-# A cancel won. What the generation made is read from the stamp on each part: its background service, then its instance.
-# Data stays.
-def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
+# What the generation made is read from the stamp on each part, and goes: its background service, then its instance.
+def own_part_step(move: Move) -> Action | Stop | CannotPutBack | None:
     lane = move.lane
     if (wait := own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])) is not None:
         return wait
     own = [each for each in (*lane.background_services, *lane.instances) if each.generation == move.generation]
-    if own:
-        return discard(move, min(own, key=lambda each: (isinstance(each, RunningInstance), each.container)))
+    return discard(move, min(own, key=lambda each: (isinstance(each, RunningInstance), each.container))) if own else None
+
+
+# A move failed with no verdict, and its attempt is fenced. What its generation made goes, and the login of what went.
+# Done is a reading that shows none of it left.
+def decide_clean_up(move: Move) -> Step[None] | CannotPutBack:
+    if move.gate.verdict is not Verdict.NONE:
+        return Wait(f"The gate answers {move.gate.verdict} for this release, so nothing of it was cleaned up.")
+    unheld = move.judged.of_kind(Kind.LOGIN_UNHELD)
+    return own_part_step(move) or (RemoveLogins(unheld[0].subject) if unheld else Done(None))
+
+
+# A cancel won. What the generation made goes. Data stays.
+def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
+    if (step := own_part_step(move)) is not None:
+        return step
     # A server the release had only just made is waited for, so its logins can be read and its data set is kept whole.
     starting = sorted(finding.subject for finding in move.judged.of_kind(Kind.NOT_ACCEPTING))
     if starting:

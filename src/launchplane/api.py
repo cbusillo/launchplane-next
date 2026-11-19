@@ -294,15 +294,18 @@ class Calls:
             )
         return None
 
-    # A request that needs a person is not ended while the gate says its release is committed: it is worked again. The
-    # gate is asked for good, so a release it has no verdict for can no longer be renamed for once it is given up.
-    def worked_again_since_committed(self, request: int, response: Response) -> NotFinished | None:
+    # A request that needs a person is not ended while the gate has a verdict for its release: committed is finished and
+    # a cancel that won is put back, so it is worked again. The gate is asked for good, so a release it has no verdict
+    # for can no longer be renamed for once it is given up.
+    def worked_again_since_decided(self, request: int, response: Response) -> NotFinished | None:
         kept = self.record.read(request)
         if kept is None or kept.work is not Work.MOVE or kept.stands is not Stands.NEEDS_A_PERSON:
             return None
-        if self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict is not Verdict.COMMITTED:
+        verdict = self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict
+        if verdict is Verdict.NONE:
             return None
-        why = f"The routes file of {kept.lane} of {kept.product} was renamed for request {request}, so it is not given up."
+        decided = "The routes file" if verdict is Verdict.COMMITTED else "A cancel won before the routes file"
+        why = f"{decided} of {kept.lane} of {kept.product} was renamed for request {request}, so it is not given up."
         self.record.resume(request, why)
         self.wake()
         return not_finished(response, HTTPStatus.CONFLICT, f"{why} It is being worked again and will be finished.")
@@ -359,8 +362,8 @@ class Calls:
         self, request: int, response: Response, answer: Callable[[], KeptRequest | None]
     ) -> KeptRequest | NotFinished:
         try:
-            if (committed := self.worked_again_since_committed(request, response)) is not None:
-                return committed
+            if (decided := self.worked_again_since_decided(request, response)) is not None:
+                return decided
             answered = answer()
         except CarriesASecret as error:
             return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))

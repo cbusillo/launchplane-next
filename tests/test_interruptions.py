@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from launchplane import steps
 from launchplane.act import Lanes
 from launchplane.api import create_app
-from launchplane.instance import LaneBuild
+from launchplane.instance import LaneBuild, Verdict
 from launchplane.record import Kept, Record, Stands
 from launchplane.steps import Action, Event
 from launchplane.worker import Worker
@@ -288,11 +288,11 @@ def test_a_cancel_that_wins_just_before_the_result_of_a_move_is_saved_ends_it_as
     end, cancels = record.end, list[int]()
 
     def cancel_just_before_the_result_is_saved(
-        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool:
         if not cancels:
             cancels.append(client.post(f"/requests/{asked}/cancel").status_code)
-        return end(attempt, stands, answer, error, cancel_seen=cancel_seen)
+        return end(attempt, stands, answer, error, decided=decided)
 
     record.end = cancel_just_before_the_result_is_saved
     assert worker.work_next() is True

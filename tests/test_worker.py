@@ -6,7 +6,7 @@ from functools import partial
 import pytest
 
 from launchplane.act import Lanes
-from launchplane.docker_answers import ContainerHostError
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.instance import DataSetUse, LaneBuild, OnHost
 from launchplane.judge import Condition, Work
 from launchplane.page import RECORD_UNREAD, cards
@@ -146,7 +146,7 @@ def test_a_step_the_host_refuses_before_the_switch_fails_the_request_with_the_re
 
     def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
         assert use is None and generation is not None
-        raise ContainerHostError(f"Starting the instance {container} from build {target.build} on test failed: no such image")
+        raise ContainerHostRefused(f"Starting the instance {container} from build {target.build} on test failed: no such image")
 
     proxy.host.start_instance = refuse
     request = record.write(MOVE_B, CALLER, None)

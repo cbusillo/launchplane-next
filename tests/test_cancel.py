@@ -22,6 +22,7 @@ from tests.pretend_host import (
     WITH_DATA,
     GateNeverAsked,
     LaunchplaneKilled,
+    PretendGate,
     PretendHost,
     PretendProxy,
     numbered_names,
@@ -39,6 +40,7 @@ BEGIN = Asked(product="site", lane="testing", work=Work.BEGIN_MAINTENANCE)
 END = Asked(product="site", lane="testing", work=Work.END_MAINTENANCE)
 TO_BUILD_B = LaneBuild(product="site", lane="testing", build="site:b")
 NEW = "site-testing-0"
+NO_VERDICT = GateAnswer(Verdict.NONE)
 
 
 # What a test gives the pretend proxy to call at the moment the cancel is to arrive.
@@ -397,10 +399,10 @@ def test_a_cancel_that_killed_a_database_while_stopping_it_again_still_fails_whe
     end = record.end
 
     def launchplane_is_killed_once(
-        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> NoReturn:
         record.end = end
-        raise LaunchplaneKilled(attempt, stands, answer, error, cancel_seen)
+        raise LaunchplaneKilled(attempt, stands, answer, error, decided)
 
     record.end = launchplane_is_killed_once
     worker = Worker(record, lanes, NO_SECRETS)
@@ -437,12 +439,12 @@ def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_a
     end = record.end
 
     def lose_the_record_once(
-        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> NoReturn:
         record.end = end
         raise RecordError(
             "Launchplane's record could not be reached while writing how a request ended: "
-            f"{attempt} {stands} {answer} {error} {cancel_seen}"
+            f"{attempt} {stands} {answer} {error} {decided}"
         )
 
     record.end = lose_the_record_once
@@ -662,7 +664,7 @@ def test_a_proxy_that_does_not_load_a_renamed_route_leaves_the_release_working_h
     proxy.holds_delivery = True
     assert [worker.work_next() for _ in range(2 * MOST_ATTEMPTS)] == [True] * 2 * MOST_ATTEMPTS
     held = kept_of(record, request.id)
-    assert held.error is not None and "its routes file is renamed" in held.error
+    assert held.error is not None and "did not load the routes file" in held.error
     assert (
         held.stands,
         {each.ended for each in held.attempts},
@@ -748,10 +750,10 @@ def test_ending_maintenance_on_a_lane_already_out_ends_as_it_would_have_over_a_c
     end = record.end
 
     def end_just_after_a_cancel(
-        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
+        attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool:
         record.cancel(request.id, BY_HAND)
-        return end(attempt, stands, answer, error, cancel_seen=cancel_seen)
+        return end(attempt, stands, answer, error, decided=decided)
 
     record.end = end_just_after_a_cancel
     assert worker.work_next() is True
@@ -827,7 +829,7 @@ def test_a_cancel_on_record_with_a_host_that_cannot_be_read_wins_at_the_gate_and
     record.cancel(request, BY_HAND)
     assert [worker.work_next() for _ in range(2 * MOST_ATTEMPTS)] == [True] * 2 * MOST_ATTEMPTS
     during = kept_of(record, request)
-    assert during.error is not None and "its cancel won" in during.error and "connection refused" in during.error
+    assert during.error is not None and "connection refused" in during.error
     assert (during.stands, len(readings) <= 4 * MOST_ATTEMPTS, sorted(proxy.host.instances)) == (Stands.WORKING, True, ["a", NEW])
     proxy.host.read = read
     assert (worker.work_next(), worker.work_next()) == (True, False)
@@ -877,3 +879,153 @@ def test_giving_up_a_request_that_needs_a_person_and_whose_release_is_committed_
     kept = kept_of(record, asked)
     assert kept.answer is not None
     assert (kept.stands, kept.answer["outcome"], list(proxy.host.instances)) == (Stands.DONE, "switched", [NEW])
+
+
+def test_giving_up_a_request_that_needs_a_person_and_whose_cancel_won_is_refused_and_its_lane_is_put_back(record: Record) -> None:
+    worker, lanes, proxy = serving_a(record)
+    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
+    asked = client.post(MOVE, json=TO_B).json()["id"]
+    taken_up_until_it_needs_a_person(record, asked)
+    proxy.host.place(TO_BUILD_B, NEW, generation=kept_of(record, asked).generation)
+    proxy.gate.abandon(WEB_ADDRESS, kept_of(record, asked).generation)
+    refused = [client.post(f"/requests/{asked}/give-up"), client.post(f"/requests/{asked}/retry")]
+    assert ([each.status_code for each in refused], kept_of(record, asked).stands) == ([409, 409], Stands.WORKING)
+    while worker.work_next():
+        pass
+    assert (kept_of(record, asked).stands, list(proxy.host.instances)) == (Stands.CANCELLED, ["a"])
+
+
+def interrupted_as_often_as_a_request_may_be(record: Record) -> Request:
+    request = record.write(MOVE_B, CALLER, None)
+    for _ in range(MOST_ATTEMPTS):
+        assert record.take_up(request.id) is not None
+    return request
+
+
+def test_a_move_at_the_limit_needs_a_person_only_once_its_last_attempt_is_fenced_so_its_switch_can_no_longer_rename(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    request = interrupted_as_often_as_a_request_may_be(record)
+    proxy.host.place(TO_BUILD_B, NEW, generation=request.generation)
+    assert worker.work_next() is True
+    late = proxy.gate.switch(WEB_ADDRESS, request.generation, MOST_ATTEMPTS, NEW)
+    assert (kept_of(record, request.id).stands, late, proxy.written) == (Stands.NEEDS_A_PERSON, NO_VERDICT, {WEB_ADDRESS: "a"})
+
+
+AT_THE_LIMIT: dict[str, tuple[Callable[[PretendGate, str], object], Stands, list[str]]] = {
+    "committed is finished": (lambda gate, generation: gate.switch(WEB_ADDRESS, generation, 1, NEW), Stands.DONE, [NEW]),
+    "a cancel that won is put back": (lambda gate, generation: gate.abandon(WEB_ADDRESS, generation), Stands.CANCELLED, ["a"]),
+}
+
+
+@pytest.mark.parametrize(("decide", "stands", "instances"), AT_THE_LIMIT.values(), ids=AT_THE_LIMIT.keys())
+def test_a_move_at_the_limit_whose_release_the_gate_has_decided_is_taken_up_however_often_it_was_interrupted(
+    record: Record, decide: Callable[[PretendGate, str], object], stands: Stands, instances: list[str]
+) -> None:
+    worker, _, proxy = serving_a(record)
+    request = interrupted_as_often_as_a_request_may_be(record)
+    proxy.host.place(TO_BUILD_B, NEW, generation=request.generation)
+    decide(proxy.gate, request.generation)
+    while worker.work_next():
+        pass
+    assert (kept_of(record, request.id).stands, list(proxy.host.instances)) == (stands, instances)
+
+
+def test_a_move_at_the_limit_with_a_cancel_on_record_is_not_left_to_a_person_and_the_cancel_is_carried_out(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    request = interrupted_as_often_as_a_request_may_be(record)
+    record.cancel(request.id, BY_HAND)
+    while worker.work_next():
+        pass
+    assert (kept_of(record, request.id).stands, list(proxy.host.instances)) == (Stands.CANCELLED, ["a"])
+
+
+def test_a_move_at_the_limit_while_the_gate_cannot_be_asked_is_not_left_to_a_person(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    request = interrupted_as_often_as_a_request_may_be(record)
+    proxy.gate.unreadable = "The routes folder could not be read"
+    assert [worker.work_next() for _ in range(3)] == [True] * 3
+    during = kept_of(record, request.id)
+    assert (during.stands, [each.ended for each in during.attempts][MOST_ATTEMPTS:]) == (Stands.WORKING, ["unfinished"] * 3)
+    proxy.gate.unreadable = None
+    while worker.work_next():
+        pass
+    assert kept_of(record, request.id).stands is Stands.NEEDS_A_PERSON
+
+
+def test_a_call_to_the_host_that_got_no_answer_before_the_switch_leaves_the_move_working_and_it_is_finished_when_it_does(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    switch, lost = proxy.switch, [True]
+
+    def switch_whose_reply_is_lost_once(web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        if lost.pop() if lost else False:
+            raise ContainerHostError("Running flock in the proxy on test failed: timed out")
+        return switch(web_address, generation, attempt, candidate)
+
+    proxy.switch = switch_whose_reply_is_lost_once
+    request = record.write(MOVE_B, CALLER, None)
+    assert worker.work_next() is True
+    during = kept_of(record, request.id)
+    assert (during.stands, [each.ended for each in during.attempts]) == (Stands.WORKING, ["unfinished"])
+    while worker.work_next():
+        pass
+    kept = kept_of(record, request.id)
+    assert (kept.stands, [each.ended for each in kept.attempts], len(proxy.host.instances)) == (
+        Stands.DONE,
+        ["unfinished", "done"],
+        1,
+    )
+
+
+def refusing(what: str) -> Callable[..., NoReturn]:
+    def refuse(*_given: object) -> NoReturn:
+        raise ContainerHostRefused(f"{what} on test was refused: 409 Conflict")
+
+    return refuse
+
+
+def test_a_move_the_host_refuses_before_the_switch_ends_failed_only_once_its_candidate_is_removed(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    proxy.switch = refusing("The switch")
+    request = record.write(MOVE_B, CALLER, None)
+    assert (worker.work_next(), worker.work_next()) == (True, False)
+    kept = kept_of(record, request.id)
+    assert (kept.stands, list(proxy.host.instances), proxy.gate.of(request.generation).fenced) == (Stands.FAILED, ["a"], 1)
+
+
+def test_a_move_that_failed_before_the_switch_and_whose_candidate_cannot_be_removed_stays_working(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    proxy.switch = refusing("The switch")
+    proxy.host.retire_instance = refusing("Stopping and removing the candidate")
+    request = record.write(MOVE_B, CALLER, None)
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.error is not None and "could not be removed" in kept.error
+    assert (kept.stands, sorted(proxy.host.instances)) == (Stands.WORKING, ["a", NEW])
+
+
+def test_a_move_that_failed_with_a_cancel_on_record_the_gate_had_not_decided_ends_cancelled_and_never_failed(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    request = record.write(MOVE_B, CALLER, None)
+    abandon, refused = proxy.gate.abandon, [True]
+
+    def abandon_refused_once(web_address: str, generation: str) -> GateAnswer:
+        if refused.pop() if refused else False:
+            raise ContainerHostRefused("Running flock in the proxy on test was refused: 409 Conflict")
+        return abandon(web_address, generation)
+
+    proxy.gate.abandon = abandon_refused_once
+
+    def cancel_while_checking(_container: str) -> None:
+        record.cancel(request.id, BY_HAND)
+
+    proxy.while_checking = cancel_while_checking
+    while worker.work_next():
+        pass
+    kept = kept_of(record, request.id)
+    assert (kept.stands, kept.cancel_refused, list(proxy.host.instances)) == (Stands.CANCELLED, None, ["a"])

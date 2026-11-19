@@ -7,8 +7,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from launchplane.act import Cancelled, CouldNotPutBack, Stopped
-from launchplane.docker_answers import ContainerHostError
+from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import LaneBuild, Verdict
 from launchplane.judge import Work
@@ -41,7 +41,7 @@ type Lane = tuple[str, str]
 
 class Carries(Protocol):
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult: ...
-    def verdict(self, product: str, lane: str, generation: str, /) -> GateAnswer: ...
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> None: ...
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
@@ -49,20 +49,20 @@ class Carries(Protocol):
     def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
 
 
-# How a call came out, before it is written. `follows_the_gate` is whether the call itself ended on the gate's verdict:
-# a switch finished, a cancel put back, or a cancel that won and could not be put back. Any other ending is no release,
-# and is written only once the gate has confirmed that.
+# How a call came out, before it is written. `verdict` is the gate's verdict the call itself ended on: committed for a
+# switch finished, abandoned for a cancel put back or one that could not be. With none the ending is no release, and is
+# written only once the gate has confirmed that. `left_open` is a call that learned nothing to end on.
 @dataclass(frozen=True)
 class Ending:
     stands: Stands
     answer: dict[str, Any] | None = None
     error: str | None = None
-    follows_the_gate: bool = False
-    answered: bool = True
+    verdict: Verdict = Verdict.NONE
+    left_open: bool = False
 
 
-def ending(stands: Stands, answer: BaseModel | None, error: str | None = None, *, follows_the_gate: bool = False) -> Ending:
-    return Ending(stands, None if answer is None else answer.model_dump(mode="json"), error, follows_the_gate)
+def ending(stands: Stands, answer: BaseModel | None, error: str | None = None, verdict: Verdict = Verdict.NONE) -> Ending:
+    return Ending(stands, None if answer is None else answer.model_dump(mode="json"), error, verdict)
 
 
 def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness) -> Answer:
@@ -155,16 +155,30 @@ class Worker:
             with self.record.turn(*lane) as held:
                 if held is None:
                     return False
-                attempt = self.record.take_up(request.id, exempt=self.is_committed_or_unknown(request))
+                attempt = self.taken_up(request)
                 if attempt is not None:
                     self.carry_through(request, attempt, held)
                 return True
         finally:
             self.let_go(lane)
 
-    # What a call is given to say what it did, to ask before each action, and to ask between actions. `seen` is told when
-    # the call learns a cancel was asked of it.
-    def witness_of(self, request: Request, attempt: int, held: Held, seen: threading.Event) -> Witness:
+    # A move interrupted as often as a request may be needs a person only when the gate, fenced through its last
+    # attempt, has no verdict for it and no cancel is on record. A committed release is finished and a cancel that won
+    # is put back, however often they were interrupted, and with no answer from the gate nothing is decided.
+    def taken_up(self, request: Request) -> int | None:
+        at = self.record.at_limit(request.id) if request.work is Work.MOVE else None
+        if at is None:
+            return self.record.take_up(request.id)
+        try:
+            verdict = self.lanes.fence(request.product, request.lane, request.generation, at.last).verdict
+        except HOST_UNREAD:
+            verdict = None
+        if verdict is Verdict.NONE and self.record.stop_for_a_person(request.id, at.last):
+            return None
+        return self.record.take_up(request.id, exempt=True)
+
+    # What a call is given to say what it did, to ask before each action, and to ask between actions.
+    def witness_of(self, request: Request, attempt: int, held: Held) -> Witness:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
 
@@ -173,65 +187,51 @@ class Worker:
             if not held():
                 raise Interrupted(f"The turn of {request.lane} of {request.product} is no longer held, so nothing more was done.")
 
-        def cancel_asked() -> bool:
-            asked = self.record.cancel_asked(request.id)
-            if asked:
-                seen.set()
-            return asked
-
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
-        return Witness(tell, hold, cancel_asked, refuse_cancel)
-
-    # A move the gate says is committed is taken up however often it was interrupted. So is a move the gate cannot be
-    # asked about. Such a move is not a request that never ends.
-    def is_committed_or_unknown(self, request: Request) -> bool:
-        if request.work is not Work.MOVE or request.stands is not Stands.WORKING:
-            return False
-        try:
-            return self.lanes.verdict(request.product, request.lane, request.generation).verdict is Verdict.COMMITTED
-        except HOST_UNREAD:
-            return True
+        return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel)
 
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
-        seen = threading.Event()
-        witness = self.witness_of(request, attempt, held, seen)
+        witness = self.witness_of(request, attempt, held)
         if request.work is not Work.MOVE:
             came_to = self.ending_of(request, attempt, witness)
             self.record.end(attempt, came_to.stands, came_to.answer, came_to.error)
             return
-        while not self.move_ended_or_left_open(request, attempt, witness, seen):
+        while not self.move_ended_or_left_open(request, attempt, witness):
             pass
 
-    # One round of a move: the call, then the gate's word on its ending, then the record. False is another round: the
-    # gate's verdict is not what the call ended on, or a cancel was recorded that the call never saw.
-    def move_ended_or_left_open(self, request: Request, attempt: int, witness: Witness, seen: threading.Event) -> bool:
+    # One round of a move: the call, then the gate's word on its ending, then the record. An ending that is no release
+    # is written once the attempt is fenced with no verdict and, where it failed, what the release made is cleaned up and
+    # read to be gone. False is another round: the record holds a cancel the gate had not decided, and now has.
+    def move_ended_or_left_open(self, request: Request, attempt: int, witness: Witness) -> bool:
         came_to = self.ending_of(request, attempt, witness)
-        if not came_to.follows_the_gate:
+        if came_to.left_open:
+            return self.left_open(attempt, came_to.error or "")
+        if came_to.verdict is Verdict.NONE:
+            lane = (request.product, request.lane, request.generation, attempt)
             try:
-                verdict = self.lanes.fence(request.product, request.lane, request.generation, attempt).verdict
-            except HOST_UNREAD as error:
-                return self.left_open(attempt, f"The gate could not be asked, so nothing was ended. {came_to.error or ''} {error}")
-            if verdict is not Verdict.NONE and came_to.answered:
-                return False
-            if verdict is not Verdict.NONE:
-                said = "its routes file is renamed" if verdict is Verdict.COMMITTED else "its cancel won"
-                return self.left_open(attempt, f"The gate says {said}, and the release is not finished yet: {came_to.error}")
-        if self.record.end(attempt, came_to.stands, came_to.answer, came_to.error, cancel_seen=seen.is_set()):
+                fenced = self.lanes.fence(*lane).verdict
+                if fenced is Verdict.NONE and came_to.stands is Stands.FAILED:
+                    self.lanes.clean_up(*lane, witness)
+            except STOPPED as error:
+                return self.left_open(attempt, f"{came_to.error or 'It was done.'} It is not ended yet: {error}")
+            if fenced is not Verdict.NONE:
+                why = f"The gate answers {fenced} for this release, so it is not ended on: {came_to.error or 'done'}"
+                return self.left_open(attempt, why)
+        if self.record.end(attempt, came_to.stands, came_to.answer, came_to.error, decided=came_to.verdict):
             return True
-        return self.cancel_carried_to_the_gate(request, attempt, seen)
+        return self.cancel_carried_to_the_gate(request, attempt)
 
-    # The record holds a cancel this call never saw, so nothing was ended. The cancel is carried to the gate, and the
-    # next round follows what the gate then answers.
-    def cancel_carried_to_the_gate(self, request: Request, attempt: int, seen: threading.Event) -> bool:
+    # The record holds a cancel the gate has not decided, so nothing was ended. The cancel is carried to the gate, and
+    # the next round follows what the gate then answers.
+    def cancel_carried_to_the_gate(self, request: Request, attempt: int) -> bool:
         try:
             too_late = self.lanes.abandon(request.product, request.lane, request.generation)
         except HOST_UNREAD as error:
             return self.left_open(attempt, f"A cancel is on record and the gate could not be asked about it: {error}")
         if too_late is not None:
             self.record.refuse_cancel(request.id, too_late)
-        seen.set()
         return False
 
     # No ending is written and the attempt is not counted. The request is taken up again by itself, after a while and
@@ -249,20 +249,25 @@ class Worker:
         except Cancelled as cancelled:
             kept = self.record.read(request.id)
             told = [] if kept is None else put_back_told(kept)
-            return ending(Stands.CANCELLED, cancelled.put_back.model_copy(update={"put_back": told}), follows_the_gate=True)
+            return ending(Stands.CANCELLED, cancelled.put_back.model_copy(update={"put_back": told}), verdict=Verdict.ABANDONED)
         except CouldNotPutBack as error:
-            return ending(Stands.FAILED, None, str(error), follows_the_gate=True)
+            return Ending(Stands.FAILED, error=str(error), verdict=Verdict.ABANDONED)
         except STOPPED as error:
-            why = f"{request.attempted()} stopped, and is safe to ask again: {error}"
-            return Ending(Stands.FAILED, error=why, answered=False)
+            # A move that could not reach the host, was told to wait, or ran out of steps has learned nothing to end on.
+            # A refusal the host answered with is an answer.
+            unanswered = isinstance(error, (Waiting, *HOST_UNREAD)) and not isinstance(error, ContainerHostRefused)
+            unsure = request.work is Work.MOVE and unanswered
+            why = str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error}"
+            return Ending(Stands.FAILED, error=why, left_open=unsure)
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
         except Interrupted, RecordError:
             raise
         except Exception as error:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
-            return Ending(Stands.FAILED, error=why, answered=False)
+            return Ending(Stands.FAILED, error=why)
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED
-        return ending(Stands.FAILED if failed else Stands.DONE, answer, error if failed else None, follows_the_gate=switched)
+        verdict = Verdict.COMMITTED if switched else Verdict.NONE
+        return ending(Stands.FAILED if failed else Stands.DONE, answer, error if failed else None, verdict)

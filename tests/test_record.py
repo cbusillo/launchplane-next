@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 
 from launchplane import record as record_module
+from launchplane.instance import Verdict
 from launchplane.judge import Work
 from launchplane.record import (
     MOST_ATTEMPTS,
@@ -88,7 +89,7 @@ def test_the_oldest_request_of_each_lane_is_next_up_and_a_later_one_of_a_lane_on
     later = record.write(MOVE_C, CALLER, None)
     while_the_first_is_worked = [each.id for each in record.next_up()]
     assert attempt is not None
-    record.end(attempt, Stands.FAILED, None, "stopped")
+    record.end(attempt, Stands.FAILED, None, "stopped", decided=Verdict.ABANDONED)
     assert (while_the_first_is_worked, [each.id for each in record.next_up()]) == ([first.id, other.id], [other.id, later.id])
 
 
@@ -323,6 +324,8 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
         return number
     if hint is bool:
         return True
+    if Verdict in kinds:
+        return Verdict.COMMITTED
     if str in kinds:
         return f"said with {HELD} in it"
     if any(get_origin(kind) is dict for kind in kinds):
