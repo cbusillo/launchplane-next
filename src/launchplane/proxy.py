@@ -180,6 +180,18 @@ def written_route_from_file(text: str, web_address: str, written_at: datetime) -
     return WrittenRoute(found["container"], written_at)
 
 
+def sent_by(route: LoadedRoute | None) -> str:
+    if route is None or route.status == RouteStatus.ENABLED:
+        return str(None if route is None else route.container)
+    return f"{route.container}, with that route {route.status}"
+
+
+def is_loaded(route: LoadedRoute | None, container: str | None, *, enabled: bool) -> bool:
+    if route is None or container is None:
+        return route is None and container is None
+    return route.container == container and (route.status == RouteStatus.ENABLED or not enabled)
+
+
 @dataclass(frozen=True)
 class TraefikProxy:
     host: HelperHost
@@ -242,13 +254,13 @@ class TraefikProxy:
         self.host.ensure_helper(BACK_SOON_PAGE)
         self.write_route(web_address, BACK_SOON)
 
-    def await_route(self, web_address: str, container: str | None) -> None:
+    def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None:
         started = self.clock()
-        while (loaded := self.loaded_container(web_address)) != container:
+        while not is_loaded(loaded := self.read_loaded().get(web_address), container, enabled=enabled):
             if self.clock() - started >= self.load_deadline_seconds:
                 raise ProxyError(
                     f"The proxy did not load the routes file of {web_address} within {self.load_deadline_seconds:g} s: "
-                    f"it is written to send {web_address} to {container} and the proxy still sends it to {loaded}. "
+                    f"it is written to send {web_address} to {container} and the proxy still sends it to {sent_by(loaded)}. "
                     f"The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
                 )
             self.sleep(POLL_SECONDS)
@@ -257,10 +269,6 @@ class TraefikProxy:
     def remove_route(self, web_address: str) -> None:
         with self.routes_folder:
             self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
-
-    def loaded_container(self, web_address: str) -> str | None:
-        route = self.read_loaded().get(web_address)
-        return None if route is None else route.container
 
     def write_route(self, web_address: str, container: str) -> None:
         with self.routes_folder:

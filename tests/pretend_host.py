@@ -359,7 +359,8 @@ class PretendProxy:
         self.written[web_address] = BACK_SOON
         self.host.record("show back soon")
 
-    def await_route(self, web_address: str, container: str | None) -> None:
+    def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None:
+        assert enabled in (True, False)
         written = self.written.get(web_address)
         assert written == container, f"awaited {web_address} at {container}, written to {written}"
         if self.holds_delivery:

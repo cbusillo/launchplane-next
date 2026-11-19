@@ -307,6 +307,17 @@ def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
     assert proxy.read().sends_visitors_to() == {}
 
 
+def test_awaiting_an_enabled_route_does_not_return_for_a_route_the_proxy_has_loaded_and_disabled() -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1"})
+    loaded = json.loads(host.loaded)
+    loaded["routers"][f"{WEB_ADDRESS}@file"]["status"] = "disabled"
+    host.loaded = json.dumps(loaded)
+    proxy = TraefikProxy(host, sleep=lambda _: None, clock=iter(range(1000)).__next__, load_deadline_seconds=3)
+    proxy.await_route(WEB_ADDRESS, "site-t1")
+    with pytest.raises(ProxyError, match="still sends it to site-t1, with that route disabled"):
+        proxy.await_route(WEB_ADDRESS, "site-t1", enabled=True)
+
+
 def test_a_route_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1"})
     host.loads_on_write = False

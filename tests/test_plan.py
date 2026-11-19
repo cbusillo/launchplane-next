@@ -157,7 +157,7 @@ MOVES = {
         (NEW,), ("new", "new"), (), answer(Outcome.SWITCHED, "new"), gate=COMMITTED_TO_NEW
     ),
     "a route renamed for this release and not loaded is waited for as long as it takes": Case(
-        (OLD, NEW), ("old", "new"), (), AwaitRoute(WEB_ADDRESS, "new"), gate=COMMITTED_TO_NEW
+        (OLD, NEW), ("old", "new"), (), AwaitRoute(WEB_ADDRESS, "new", enabled=True), gate=COMMITTED_TO_NEW
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), gone("stray")),
@@ -253,7 +253,7 @@ FOLLOWS_THE_GATE = {
     ),
     "committed while the routes file still names the old instance waits for the candidate the gate names": (
         COMMITTED_TO_NEW,
-        Case((OLD, MADE_NEW), ("old", "old"), (), AwaitRoute(WEB_ADDRESS, "new")),
+        Case((OLD, MADE_NEW), ("old", "old"), (), AwaitRoute(WEB_ADDRESS, "new", enabled=True)),
     ),
     "committed to an instance that is not on the host stops, and the old instance is not touched": (
         COMMITTED_TO_NEW,
@@ -315,6 +315,23 @@ def test_a_background_service_that_does_not_stay_up_under_a_committed_release_st
     assert isinstance(step, Stop) and "did not stay up" in step.reason
 
 
+def test_the_old_web_instance_stays_while_the_new_background_service_has_not_stayed_up() -> None:
+    refused = BackgroundServiceRefused("new-background-service", "The background service new-background-service is not running.")
+    judged = Given((OLD_ON_D1, NEW_ON_D1), SERVING_NEW, (STOPPED_NEW_BACKGROUND_SERVICE,), (D1,)).judged(Work.MOVE)
+    step = decide_move(a_move(judged, (STARTED_NEW_BACKGROUND_SERVICE, refused), COMMITTED_TO_NEW, WITH_DATA))
+    assert isinstance(step, Stop) and "did not stay up" in step.reason
+
+
+def test_a_background_service_of_a_cancelled_release_that_docker_refuses_to_remove_ends_as_could_not_put_back() -> None:
+    made = (changed(NEW_ON_D1, generation=GENERATION),)
+    service = STOPPED_NEW_BACKGROUND_SERVICE.model_copy(update={"generation": GENERATION})
+    judged = Given((OLD_ON_D1, *made), ("old", "old"), (service,), (D1,)).judged(Work.MOVE)
+    asked = decide_move(a_move(judged, (), ABANDONED, WITH_DATA))
+    refused = decide_move(a_move(judged, (RemovalRefused(service.container, "409 Conflict"),), ABANDONED, WITH_DATA))
+    assert asked == Discard(WEB_ADDRESS, service.container, None, ATTEMPT)
+    assert isinstance(refused, CannotPutBack) and f"{service.container} could not be removed" in refused.reason
+
+
 @pytest.mark.parametrize("status", [RouteStatus.DISABLED, RouteStatus.WARNING])
 def test_a_move_stops_and_says_so_when_the_loaded_route_is_not_enabled(status: RouteStatus) -> None:
     step = next_move_step(Case((NEW,), (LoadedRoute("new", status), "new"), (), None))
@@ -324,7 +341,8 @@ def test_a_move_stops_and_says_so_when_the_loaded_route_is_not_enabled(status: R
 
 
 def test_a_committed_release_whose_route_the_proxy_reports_not_enabled_is_waited_for_and_nothing_old_is_retired() -> None:
-    disabled = Case((OLD, NEW), (LoadedRoute("new", RouteStatus.DISABLED), "new"), (), AwaitRoute(WEB_ADDRESS, "new"))
+    waited = AwaitRoute(WEB_ADDRESS, "new", enabled=True)
+    disabled = Case((OLD, NEW), (LoadedRoute("new", RouteStatus.DISABLED), "new"), (), waited)
     assert next_move_step(replace(disabled, gate=COMMITTED_TO_NEW)) == disabled.step
 
 

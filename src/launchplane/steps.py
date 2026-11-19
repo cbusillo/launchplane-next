@@ -88,6 +88,8 @@ class StartProxy:
 class AwaitRoute:
     web_address: str
     container: str | None
+    # Whether the proxy must also have the route enabled, so that visitors are sent there.
+    enabled: bool = False
 
 
 @dataclass(frozen=True)

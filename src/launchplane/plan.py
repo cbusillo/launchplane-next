@@ -349,10 +349,10 @@ def removal_refused(done: tuple[Event, ...], container: str) -> str | None:
     return None
 
 
-# The one way an instance of a release goes: through the gate, which either says its rename won, and then it stays, or
-# takes away the permission to switch to it before it is removed. One whose release cannot be read, or that the routes
-# file or the proxy names, is waited on. A removal Docker refused is said, not tried again.
-def discard(move: Move, instance: RunningInstance) -> Action | Stop | CannotPutBack:
+# The one way a part of a release goes. An instance goes through the gate, which either says its rename won, and then
+# it stays, or takes away the permission to switch to it before it is removed. A part whose release cannot be read, or
+# that the routes file or the proxy names, is waited on. A removal Docker refused is said, not tried again.
+def discard(move: Move, instance: RunningInstance | RunningBackgroundService) -> Action | Stop | CannotPutBack:
     container = instance.container
     refusal = removal_refused(move.done, container)
     if refusal is not None and move.gate.verdict is Verdict.ABANDONED:
@@ -363,7 +363,7 @@ def discard(move: Move, instance: RunningInstance) -> Action | Stop | CannotPutB
         return wait
     if container in named_by_route(move.lane):
         return Wait(f"The routes file or the proxy of {move.lane.web_address} names {container}, so it was not removed.")
-    made_by = instance.generation
+    made_by = instance.generation if isinstance(instance, RunningInstance) else None
     return Discard(move.lane.web_address, container, made_by if isinstance(made_by, str) else None, move.attempt)
 
 
@@ -405,8 +405,6 @@ def in_service(move: Move) -> Action | Stop | None:
 # and replaced when it is anything else that is wrong.
 def background_service_step(move: Move, serving: RunningInstance, use: DataSetUse | None) -> Action | None:
     described = move.product.background_service
-    if any(isinstance(event, BackgroundServiceRefused) for event in move.done):
-        return None
     start = StartBackgroundService(
         move.target, serving.container, use, () if described is None else tuple(described.command), move.generation
     )
@@ -430,14 +428,14 @@ def finish(move: Move, serving: RunningInstance) -> Step[MoveResult] | CannotPut
     use = prepared(judged, serving.data_set, None, move.product, done)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    step = background_service_step(move, serving, use) or old_part_step(move, serving.container)
-    if step is not None:
-        return step
     refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
     if refused is not None and move.gate.verdict is Verdict.COMMITTED:
         return Stop(f"The background service did not stay up: {refused.report}")
     if refused is not None:
         return Done(move.answer(outcome=Outcome.BACKGROUND_SERVICE_FAILED, error=refused.report))
+    step = background_service_step(move, serving, use) or old_part_step(move, serving.container)
+    if step is not None:
+        return step
     left = left_for_a_move(judged, serving)
     if left:
         return Stop(f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(done)}")
@@ -455,7 +453,7 @@ def finish_committed(move: Move) -> Step[MoveResult] | CannotPutBack:
     if not lane.route.proxy_runs:
         return StartProxy()
     if lane.route.sends_visitors_to != serving.container:
-        return AwaitRoute(lane.web_address, serving.container)
+        return AwaitRoute(lane.web_address, serving.container, enabled=True)
     return finish(move, serving)
 
 
@@ -514,12 +512,9 @@ def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
     lane = move.lane
     if (wait := own_named_by_route(move) or unread_owner([*lane.background_services, *lane.instances])) is not None:
         return wait
-    background_services = sorted(each.container for each in lane.background_services if each.generation == move.generation)
-    instances = sorted((each for each in lane.instances if each.generation == move.generation), key=lambda each: each.container)
-    if background_services:
-        return Retire(background_services[0])
-    if instances:
-        return discard(move, instances[0])
+    own = [each for each in (*lane.background_services, *lane.instances) if each.generation == move.generation]
+    if own:
+        return discard(move, min(own, key=lambda each: (isinstance(each, RunningInstance), each.container)))
     # A server the release had only just made is waited for, so its logins can be read and its data set is kept whole.
     starting = sorted(finding.subject for finding in move.judged.of_kind(Kind.NOT_ACCEPTING))
     if starting:
