@@ -89,21 +89,21 @@ def kill_launchplane() -> None:
 
 
 # noinspection SqlResolve
-END_WHAT_WAS_ASKED = """
-update attempt set ended_at = now(), ended = 'interrupted' where ended is null;
+END_THE_REQUEST = """
+update attempt set ended_at = now(), ended = 'interrupted' where ended is null and request = {request:d};
 update request set stands = 'failed', ended_at = now(), error = 'Ended by a test, as a request that failed halfway.'
-where stands in ('waiting', 'working');
+where stands in ('waiting', 'working') and id = {request:d};
 """
 
 
 # After a kill Launchplane takes its request up again by itself. A test of what a request that failed halfway leaves behind
-# ends the request in the record while Launchplane is down, so the lane stays as the kill left it.
-def kill_launchplane_and_end_what_was_asked() -> None:
+# ends that one request in the record while Launchplane is down, so the lane stays as the kill left it.
+def kill_launchplane_and_end(request: int) -> None:
     on_control(
         "systemctl kill --signal=KILL launchplane; systemctl stop launchplane; "
         "runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --dbname launchplane; ended=$?; "
         "systemctl start launchplane; exit $ended",
-        given=END_WHAT_WAS_ASKED,
+        given=END_THE_REQUEST.format(request=request),
     )
     wait_for(launchplane_answers, seconds=30)
 
@@ -112,6 +112,11 @@ def unfinished_requests() -> list[dict[str, Any]]:
     status, body = ask("/requests")
     assert status == 200, body
     return body["unfinished"]
+
+
+def kill_launchplane_and_end_the_request_working_on(product: str, lane: str) -> None:
+    [working] = [each["id"] for each in unfinished_requests() if (each["product"], each["lane"]) == (product, lane)]
+    kill_launchplane_and_end(working)
 
 
 def request_ended(request: int) -> dict[str, Any]:

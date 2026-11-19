@@ -12,7 +12,7 @@ from tests.bed import (
     UnexpectedAnswer,
     ask,
     kill_launchplane,
-    kill_launchplane_and_end_what_was_asked,
+    kill_launchplane_and_end,
     move_lane,
     needs_test_bed,
     on_scratch,
@@ -85,11 +85,11 @@ def copy_of_build_b_answers_the_proxy() -> bool:
     return on_scratch(f"docker exec {PROXY_NAME} wget -q -O /dev/null -T 2 {instance_url(container)}/ && echo yes || true") != ""
 
 
-def kill_launchplane_once_build_b_has_started(kill: Callable[[], None] = kill_launchplane_and_end_what_was_asked) -> int:
+def kill_launchplane_once_build_b_has_started(kill: Callable[[int], None] = kill_launchplane_and_end) -> int:
     status, request = ask(f"/lanes/{PRODUCT}/{LANE}/move", {"build": BUILD_B})
     assert status == 202, request
     wait_for(copy_of_build_b_is_on_scratch, seconds=30)
-    kill()
+    kill(request["id"])
     return request["id"]
 
 
@@ -154,7 +154,7 @@ def test_a_build_that_fails_its_check_switches_nothing_and_leaves_no_copy() -> N
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_move_killed_before_the_switch_is_taken_up_again_and_finished_with_nobody_asking() -> None:
     with request_loop() as loop:
-        request = request_ended(kill_launchplane_once_build_b_has_started(kill_launchplane))
+        request = request_ended(kill_launchplane_once_build_b_has_started(lambda _request: kill_launchplane()))
     assert (request["stands"], request["answer"]["outcome"]) == ("done", "switched"), request
     assert [attempt["ended"] for attempt in request["attempts"]] == ["interrupted", "done"]
     assert loop.failures == []

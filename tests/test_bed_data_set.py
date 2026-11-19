@@ -19,12 +19,13 @@ from tests.bed import (
     ask,
     ask_and_wait,
     kill_launchplane,
-    kill_launchplane_and_end_what_was_asked,
+    kill_launchplane_and_end_the_request_working_on,
     move_lane,
     needs_test_bed,
     on_control,
     on_scratch,
     on_scratch_with_bytes,
+    request_ended,
     request_loop,
     retire,
     wait_for,
@@ -296,7 +297,7 @@ def test_a_good_release_is_shown_as_a_release_under_way_and_never_as_something_w
 
 
 def test_a_release_that_failed_halfway_shows_at_once_as_left_unfinished_not_as_under_way(lane_on_a: LaneView) -> None:
-    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
+    kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_and_end_the_move)
     left = json.loads(verdict_now())
     assert (left["moving"], left["release"], left["wrong"]) == (False, [], [])
     assert any("runs beside the active one" in state for state in left["unfinished"])
@@ -357,6 +358,10 @@ def test_retiring_a_lane_keeps_its_data_set_until_it_is_named() -> None:
     assert (status, body["outcome"], body["deleted_data_set"], body["kept_data_sets"]) == (200, "deleted", data_set["data_set"], [])
     assert lane_view().data_sets == []
     assert data_set["data_set"] not in on_scratch("docker network ls --format '{{.Name}}'; docker volume ls --format '{{.Name}}'")
+
+
+def kill_and_end_the_move() -> None:
+    kill_launchplane_and_end_the_request_working_on(PRODUCT, LANE)
 
 
 def kill_once(build: str, seen: Callable[[LaneView], bool], kill: Callable[[], None] = kill_launchplane) -> None:
@@ -472,7 +477,7 @@ def test_after_a_release_the_retired_instances_login_is_gone_and_its_password_op
 # back on A to try again, until it is the one wanted.
 def lane_left_with_a_running_instance_of_each_build() -> LaneView:
     for _ in range(3):
-        kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_launchplane_and_end_what_was_asked)
+        kill_once(BUILD_B, RELEASE_POINTS["the new instance exists"], kill_and_end_the_move)
         view = lane_view()
         running = sorted(instance["build"] for instance in view.instances if instance["state"] == "running")
         if running == [BUILD_A, BUILD_B] and view.receiving()["build"] == BUILD_A:
@@ -690,13 +695,13 @@ def retire_leaky_lane_with_its_data() -> None:
 
 def test_a_background_service_that_prints_its_password_and_fails_under_a_switched_release_is_shown_without_the_password() -> None:
     retire_leaky_lane_with_its_data()
+    status, asked = ask(f"/lanes/{LEAKY_PRODUCT}/{LANE}/move", {"build": BUILD_A})
+    assert status == 202, asked
+
+    def says_why_it_is_not_finished() -> bool:
+        return ask(f"/requests/{asked['id']}")[1]["error"] is not None
+
     try:
-        status, asked = ask(f"/lanes/{LEAKY_PRODUCT}/{LANE}/move", {"build": BUILD_A})
-        assert status == 202, asked
-
-        def says_why_it_is_not_finished() -> bool:
-            return ask(f"/requests/{asked['id']}")[1]["error"] is not None
-
         wait_for(says_why_it_is_not_finished, seconds=120)
         kept = ask(f"/requests/{asked['id']}")[1]
         [data_set] = [found for found in read_running()["data_sets"] if found["product"] == LEAKY_PRODUCT]
@@ -706,5 +711,9 @@ def test_a_background_service_that_prints_its_password_and_fails_under_a_switche
         assert f"connecting with password {SECRET_REMOVED}" in kept["error"]
         assert password not in json.dumps(kept) + shown_by_launchplane()
     finally:
-        kill_launchplane_and_end_what_was_asked()
+        # With a background service that stays up, the release finishes by itself, and its lane can then be retired.
+        place_description(LEAKY_PRODUCT, DESCRIPTION)
+        finished = request_ended(asked["id"])
         retire_leaky_lane_with_its_data()
+        place_description(LEAKY_PRODUCT, LEAKY_DESCRIPTION)
+    assert finished["stands"] == "done", finished
