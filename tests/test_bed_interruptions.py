@@ -559,24 +559,28 @@ class InFlight:
     left: str
 
 
-def switch_waiting_for_the_lock(generation: str) -> set[str]:
-    return processes_whose("comm", "flock") & processes_whose("cmdline", generation)
+# A switch names its candidate, which no other question to the gate does.
+def switch_waiting_for_the_lock(candidate: str) -> set[str]:
+    return processes_whose("comm", "flock") & processes_whose("cmdline", candidate)
 
 
 # The rule's cases 1 and 4 begin here: B's switch is accepted by Docker and held before it has the gate's lock, and
 # Launchplane is killed. The held command is frozen, the lock let go, and no worker recovers until the test lets it.
 @pytest.fixture
 def switch_in_flight(case: Case) -> Iterator[InFlight]:
-    in_proxy(HOLD_THE_GATE, flags="--detach")
+    hold("before.proxy.switch")
     asked, process = asked_to_move(B), ""
-    hold(TAKE_UP)
     try:
-        wait_for(lambda: bool(switch_waiting_for_the_lock(asked["generation"])), seconds=60)
-        [process] = switch_waiting_for_the_lock(asked["generation"])
+        wait_until_stopped_at("before.proxy.switch", seconds=120)
+        [left] = [each["container"] for each in instances_of(SITE) if each["build"] == B]
+        in_proxy(HOLD_THE_GATE, flags="--detach")
+        hold(TAKE_UP)
+        let_go("before.proxy.switch")
+        wait_for(lambda: bool(switch_waiting_for_the_lock(left)), seconds=60)
+        [process] = switch_waiting_for_the_lock(left)
         in_proxy(f"kill -STOP {process}; rm -f {GATE_HELD}")
         kill_held_launchplane()
         wait_until_stopped_at(TAKE_UP)
-        [left] = [each["container"] for each in instances_of(SITE) if each["build"] == B]
         assert (verdict_of(SITE, asked["generation"]), case.renamed()) == (Answer(Verdict.NONE), False)
         yield InFlight(asked, process, left)
     finally:
@@ -637,7 +641,7 @@ def test_case_4_a_stale_rename_resumed_after_recovery_discarded_its_candidate_re
     assert ended_as(switch_in_flight.asked["id"]) == ("done", "switched")
     inode_once_switched = route_inode(SITE)
     in_proxy(f"kill -CONT {switch_in_flight.process}")
-    wait_for(lambda: not switch_waiting_for_the_lock(switch_in_flight.asked["generation"]), seconds=30)
+    wait_for(lambda: not switch_waiting_for_the_lock(switch_in_flight.left), seconds=30)
     [fresh] = instances_of(SITE)
     assert (fresh["container"] != switch_in_flight.left, route_inode(SITE)) == (True, inode_once_switched)
     assert verdict_of(SITE, switch_in_flight.asked["generation"]) == Answer(Verdict.COMMITTED, fresh["container"])
