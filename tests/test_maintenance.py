@@ -15,7 +15,6 @@ from launchplane.steps import (
     CheckRefused,
     Done,
     Event,
-    FreshNames,
     LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
@@ -34,7 +33,6 @@ from launchplane.steps import (
     WriteRoute,
 )
 from tests.pretend_host import (
-    GENERATION,
     SINCE,
     WEB_ADDRESS,
     WITH_DATA,
@@ -46,7 +44,7 @@ from tests.pretend_host import (
     on_data,
     with_database,
 )
-from tests.test_plan import TARGET
+from tests.test_plan import NO_VERDICT, a_move
 
 RUNNING, STOPPED = InstanceState.RUNNING, InstanceState.STOPPED
 WEB = "web"
@@ -324,14 +322,14 @@ BACK_SOON_ROUTES = {
 
 @pytest.mark.parametrize("route", BACK_SOON_ROUTES.values(), ids=BACK_SOON_ROUTES.keys())
 def test_a_move_refuses_a_lane_whose_route_points_at_the_back_soon_page_and_starts_nothing(route: tuple[str, str]) -> None:
-    step = decide_move(Lane(route).given().judged(Work.MOVE), TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), (), GENERATION)
+    step = decide_move(a_move(Lane(route).given().judged(Work.MOVE), (), NO_VERDICT, WITH_DATA))
     assert isinstance(step, Stop)
     assert "End maintenance first, with POST /lanes/site/testing/maintenance/end. Nothing was changed." in step.reason
 
 
 def test_a_move_refuses_a_lane_in_maintenance_before_it_starts_the_proxy() -> None:
     down = replace(Lane(IN_MAINTENANCE).given(), route=(None, BACK_SOON), proxy_runs=False)
-    step = decide_move(down.judged(Work.MOVE), TARGET, WITH_DATA, FreshNames("fresh", "fresh-data"), (), GENERATION)
+    step = decide_move(a_move(down.judged(Work.MOVE), (), NO_VERDICT, WITH_DATA))
     assert isinstance(step, Stop)
     assert "Nothing was changed." in step.reason
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import requests
-from docker.errors import DockerException
+from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -59,10 +59,17 @@ class TornRead(Exception):
     pass
 
 
+# Docker answered, and its answer was that it will not do it.
+class ContainerHostRefused(ContainerHostError):
+    pass
+
+
 @contextmanager
 def attempting(action: str, address: str) -> Generator[None]:
     try:
         yield
+    except APIError as error:
+        raise ContainerHostRefused(f"{action} on {address} was refused: {error}") from error
     except (DockerException, requests.RequestException) as error:
         raise ContainerHostError(f"{action} on {address} failed: {error}") from error
 

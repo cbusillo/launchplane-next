@@ -170,7 +170,7 @@ class PretendRecord(Record):
             if self.turns.get((product, lane)) is holder:
                 del self.turns[product, lane]
 
-    def take_up(self, request: int) -> int | None:
+    def take_up(self, request: int, *, exempt: bool = False) -> int | None:
         self.reach("taking up a request")
         with self.writing:
             found = self.kept.get(request)
@@ -181,7 +181,7 @@ class PretendRecord(Record):
                 for each in found.attempts
             ]
             self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
-            if len(interrupted) >= MOST_ATTEMPTS:
+            if sum(each.ended == "interrupted" for each in interrupted) >= MOST_ATTEMPTS and not exempt:
                 self.change(request, attempts=interrupted, stands=Stands.NEEDS_A_PERSON, **self.cleaned(error=needs_a_person(found)))
                 return None
             began = Attempt(number=len(interrupted) + 1, began_at=now(), ended_at=None, ended=None)
@@ -189,6 +189,22 @@ class PretendRecord(Record):
             self.attempts_begun += 1
             self.open_attempts[self.attempts_begun] = request
             return self.attempts_begun
+
+    def leave_open(self, attempt: int, why: str) -> None:
+        self.reach("writing why a request is not finished")
+        with self.writing:
+            request = self.open_attempts.pop(attempt, None)
+            if request is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so why it is not finished was not written.")
+            attempts = self.kept[request].attempts
+            left = attempts[-1].model_copy(update={"ended": "unfinished", "ended_at": now()})
+            self.change(request, attempts=[*attempts[:-1], left], **self.cleaned(error=why))
+
+    def resume(self, request: int, why: str) -> None:
+        self.reach("taking a request up again")
+        with self.writing:
+            if request in self.kept and self.kept[request].stands is Stands.NEEDS_A_PERSON:
+                self.change(request, stands=Stands.WORKING, **self.cleaned(error=why))
 
     def note(self, attempt: int, did: str, error: str | None) -> None:
         self.reach("writing what was done")

@@ -139,7 +139,6 @@ class LoadedRoute:
 class WrittenRoute:
     container: str
     written_at: datetime
-    generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,10 +148,6 @@ class LaneRoute:
     back_soon_since: datetime | None = None
     proxy_runs: bool = True
     back_soon_runs: bool = True
-    # The generation whose release renamed the routes file into place, where the file says one did.
-    written_by: str | None = None
-    # The generations a cancel won against at the gate: their releases will never be switched to.
-    abandoned: frozenset[str] = frozenset()
     # Why the lane's routes file is not a route Launchplane writes, where it is not.
     unread: str | None = None
 
@@ -175,7 +170,6 @@ class ProxySeen:
     back_soon_runs: bool
     written: Mapping[str, WrittenRoute] = field(default_factory=dict[str, WrittenRoute])
     loaded: Mapping[str, LoadedRoute] = field(default_factory=dict[str, LoadedRoute])
-    abandoned: Mapping[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
     unread: Mapping[str, str] = field(default_factory=dict[str, str])
 
     def route_of(self, web_address: str) -> LaneRoute:
@@ -186,8 +180,6 @@ class ProxySeen:
             back_soon_since=written.written_at if written is not None and written.container == BACK_SOON else None,
             proxy_runs=self.runs,
             back_soon_runs=self.back_soon_runs,
-            written_by=None if written is None else written.generation,
-            abandoned=self.abandoned.get(web_address, frozenset()),
             unread=self.unread.get(web_address),
         )
 

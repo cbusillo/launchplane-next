@@ -171,7 +171,9 @@ class Record(Protocol):
     def cancels_answered(self) -> list[Request]: ...
     def next_up(self) -> list[Request]: ...
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
-    def take_up(self, request: int) -> int | None: ...
+    def take_up(self, request: int, *, exempt: bool = False) -> int | None: ...
+    def leave_open(self, attempt: int, why: str) -> None: ...
+    def resume(self, request: int, why: str) -> None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, cancel_seen: bool = True
@@ -289,7 +291,14 @@ class Sql:
     TURN_HELD: Final = "select count(*) as held from pg_locks where locktype = 'advisory' and pid = pg_backend_pid() and granted"
     TAKE_TURN: Final = "select pg_try_advisory_lock(hashtextextended(%s, 0)) as ours"
     INTERRUPT: Final = "update attempt set ended_at = now(), ended = 'interrupted' where request = %s and ended is null"
-    COUNT_ATTEMPTS: Final = "select count(*) from attempt where request = %s"
+    COUNT_ATTEMPTS: Final = "select count(*) from attempt where request = %s and ended = 'interrupted'"
+    LEAVE_OPEN: Final = """
+    with open_still as (
+        update attempt set ended_at = now(), ended = 'unfinished' where id = %s and ended is null returning request
+    )
+    update request set error = %s from open_still where request.id = open_still.request returning request.id
+    """
+    RESUME: Final = "update request set stands = 'working', error = %s where id = %s and stands = 'needs a person'"
     STOP_FOR_A_PERSON: Final = "update request set stands = 'needs a person', error = %s where id = %s"
     BEGIN_ATTEMPT: Final = """
     with taken as (update request set stands = 'working' where id = %s)
@@ -526,7 +535,8 @@ class PostgresRecord(Record):
             yield held if ours else None
 
     # A request found working with nobody holding its lane was interrupted. That is counted, never taken for waiting.
-    def take_up(self, request: int) -> int | None:
+    # One that is exempt is taken up however often it was interrupted.
+    def take_up(self, request: int, *, exempt: bool = False) -> int | None:
         with self.session("taking up a request") as session:
             taken = self.gate.made(request)
             row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
@@ -534,10 +544,22 @@ class PostgresRecord(Record):
             if found is None or found.stands not in (Stands.WAITING, Stands.WORKING):
                 return None
             session.execute(Sql.INTERRUPT, taken)
-            if asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)["count"] >= MOST_ATTEMPTS:
+            interrupted = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)["count"]
+            if interrupted >= MOST_ATTEMPTS and not exempt:
                 session.execute(Sql.STOP_FOR_A_PERSON, self.gate.made(needs_a_person(found), request))
                 return None
             return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, self.gate.made(request, request))["id"]
+
+    # The attempt is over and the request is not: it stays working, with why it is not finished, and is taken up again.
+    def leave_open(self, attempt: int, why: str) -> None:
+        with self.session("writing why a request is not finished") as session:
+            if session.execute(Sql.LEAVE_OPEN, self.gate.made(attempt, why)).fetchone() is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so why it is not finished was not written.")
+
+    # A request that waited on a person and whose release the gate says is committed is worked again.
+    def resume(self, request: int, why: str) -> None:
+        with self.session("taking a request up again") as session:
+            session.execute(Sql.RESUME, self.gate.made(why, request))
 
     def note(self, attempt: int, did: str, error: str | None) -> None:
         with self.session("writing what was done") as session:

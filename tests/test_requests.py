@@ -41,7 +41,7 @@ def bed_on(record: Record) -> Bed:
     lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
     worker = Worker(record, lanes, NO_SECRETS)
     lanes.read_cancels = record.cancels_answered
-    app = create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes.abandon)
+    app = create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)
     return Bed(TestClient(app), proxy, record, worker, app)
 
 
@@ -179,7 +179,7 @@ def test_with_the_record_unreachable_a_call_that_changes_something_is_refused_an
 def app_on(record: Record, secrets: GivenSecrets) -> TestClient:
     proxy = PretendProxy(PretendHost())
     lanes = Lanes(proxy.host, proxy, read_unfinished=record.unfinished)
-    return TestClient(create_app(lanes.read_status, record, lambda: None, secrets, lanes.abandon))
+    return TestClient(create_app(lanes.read_status, record, lambda: None, secrets, lanes))
 
 
 def test_a_secret_sent_as_the_key_is_not_shown_once_its_container_is_gone_and_launchplane_has_restarted(

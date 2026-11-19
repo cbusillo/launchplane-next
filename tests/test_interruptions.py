@@ -44,7 +44,7 @@ PAUSES = {
     "M2, check passed": Pause("after", steps.Check),
     "M3, before the rename": Pause("before", steps.Switch),
     "M4, renamed and its reply not yet had, proxy still on A": Pause("after", steps.Switch, renamed=True, proxy_held=True),
-    "M4, renamed, waiting for a proxy still on A": Pause("before", steps.AwaitSwitch, renamed=True, proxy_held=True),
+    "M4, renamed, waiting for a proxy still on A": Pause("before", steps.AwaitRoute, renamed=True, proxy_held=True),
     "M5, proxy on B, old instance still up": Pause("before", steps.Discard, renamed=True),
     "M6, old instance gone": Pause("after", steps.Discard, renamed=True),
     "Z, answered": Pause("ended", renamed=True),
@@ -148,7 +148,7 @@ def launchplane_serving_a(record: Record) -> tuple[PretendProxy, Lanes, Worker, 
     proxy.route(WEB_ADDRESS, "a")
     lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
     worker = Worker(record, lanes, NO_SECRETS)
-    return proxy, lanes, worker, TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes.abandon))
+    return proxy, lanes, worker, TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
 
 
 def held(record: Record, pause: Pause, interruption: str) -> Held:

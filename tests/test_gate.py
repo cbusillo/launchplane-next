@@ -182,3 +182,16 @@ def test_a_folder_that_cannot_be_looked_in_gives_no_answer_and_is_never_taken_as
             lane.gate.verdict(WEB, GENERATION)
     finally:
         gate_folder.chmod(0o755)
+
+
+def test_asking_for_a_verdict_where_nothing_was_ever_kept_answers_none_and_makes_nothing(lane: Lane) -> None:
+    before = sorted(each.name for each in lane.host.folder.iterdir())
+    assert (lane.gate.verdict(WEB, GENERATION), sorted(each.name for each in lane.host.folder.iterdir())) == (NONE, before)
+
+
+def test_a_route_that_is_a_folder_is_refused_before_anything_is_staged_and_the_generation_keeps_no_verdict(lane: Lane) -> None:
+    lane.route.mkdir()
+    with pytest.raises(GateError, match="is not a file"):
+        lane.switch("b")
+    lane.route.rmdir()
+    assert (lane.staged(), lane.gate.verdict(WEB, GENERATION), lane.switch("b")) == ([], NONE, committed("b"))

@@ -3,12 +3,12 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
 
-from launchplane.docker_answers import CommandResult
+from launchplane.docker_answers import CommandResult, ContainerHostError
 from launchplane.instance import Verdict
 
 # The gate: the one place that answers, for a generation, none, committed or abandoned, for good.
 #
-# Everything that settles a release is one command on the container host, run while it holds one lock there. What it
+# Everything that settles a release is one command on the container host, run while it holds a lock on the routes folder. What it
 # decides is kept as files of the generation's own, in a folder a lane's retirement does not touch:
 #
 #   <web address>.<generation>.<candidate>.next     the candidate's routes file, staged
@@ -26,12 +26,17 @@ from launchplane.instance import Verdict
 #
 # A file that cannot be looked for is never taken as absent: the command fails, and its sender has no answer.
 GATE_FOLDER_NAME = "gate"
-LOCK_NAME = ".gate"
 UNREADABLE = 9
+NOT_A_FILE = 8
 SCRIPT = f"""
 set -eu
 folder=$1 base=$1/$2.$3 operation=$4
-mkdir -p "$folder"
+# Asking changes nothing: where nothing was ever kept, there is no verdict, and nothing is made to say so.
+if [ ! -d "$folder" ]; then
+    ls -a "${{folder%/*}}" > /dev/null || exit {UNREADABLE}
+    [ "$operation" != verdict ] || {{ echo none; exit 0; }}
+    mkdir "$folder"
+fi
 
 has() {{
     [ ! -e "$1" ] || return 0
@@ -82,6 +87,8 @@ now=$(verdict)
 case $operation in
 switch)
     attempt=$5 candidate=$6 text=$7 route=$8
+    # A rename onto anything but a file would put the staged file somewhere else and replace no route.
+    [ ! -e "$route" ] || [ -f "$route" ] || {{ echo "$route is not a file" >&2; exit {NOT_A_FILE}; }}
     armed
     if [ "$now" = none ] && may_arm && ! has "$base.$candidate.revoked" && ! fenced "$attempt"; then
         [ -z "$armed_candidate" ] || [ "$armed_candidate" = "$candidate" ] || revoke "$armed_candidate"
@@ -109,7 +116,8 @@ verdict
 """
 
 
-class GateError(Exception):
+# No answer from the gate. It is a failure to read the host, and never a verdict.
+class GateError(ContainerHostError):
     pass
 
 
@@ -147,9 +155,7 @@ class Gate:
     def ask(self, web_address: str, generation: str, operation: str, *arguments: str | int | PurePosixPath) -> Answer:
         passed = [str(self.folder), web_address, generation, operation, *map(str, arguments)]
         with self.reading:
-            result = self.host.run_in(
-                self.container, ["flock", str(self.routes_folder / LOCK_NAME), "sh", "-c", SCRIPT, "sh", *passed]
-            )
+            result = self.host.run_in(self.container, ["flock", str(self.routes_folder), "sh", "-c", SCRIPT, "sh", *passed])
         answer = answer_from(result.output) if result.succeeded else None
         if answer is None:
             raise GateError(

@@ -1,10 +1,12 @@
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
 from launchplane.docker_answers import ContainerHostError
+from launchplane.gate import Answer as GateAnswer
+from launchplane.gate import GateError
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
@@ -214,10 +216,6 @@ class PretendHost:
         del self.data_sets[found.data_set]
         self.record(f"delete {found.data_set}")
 
-    def remove_instance(self, container: str) -> None:
-        del self.instances[container]
-        self.record(f"remove {container}")
-
     def retire_instance(self, container: str) -> None:
         if container in self.background_services:
             del self.background_services[container]
@@ -230,6 +228,89 @@ class PretendHost:
         return f"{part.build} listening on :5678"
 
 
+# What the gate keeps for one generation, as tests/test_gate.py shows the real one keeps it.
+@dataclass
+class Kept:
+    armed: tuple[int, str] | None = None
+    committed: str | None = None
+    abandoned: bool = False
+    fenced: int = -1
+    revoked: set[str] = field(default_factory=set[str])
+
+    def answer(self) -> GateAnswer:
+        if self.abandoned:
+            return GateAnswer(Verdict.ABANDONED)
+        return GateAnswer(Verdict.NONE) if self.committed is None else GateAnswer(Verdict.COMMITTED, self.committed)
+
+    def revoke(self, candidate: str) -> None:
+        self.revoked.add(candidate)
+        if self.armed is not None and self.armed[1] == candidate:
+            self.armed = None
+
+
+class PretendGate:
+    def __init__(self, proxy: PretendProxy) -> None:
+        self.proxy = proxy
+        self.kept: dict[str, Kept] = {}
+        self.unreadable: str | None = None
+
+    def of(self, generation: str) -> Kept:
+        if self.unreadable is not None:
+            raise GateError(self.unreadable)
+        return self.kept.setdefault(generation, Kept())
+
+    def verdict(self, web_address: str, generation: str) -> GateAnswer:
+        assert web_address
+        return self.of(generation).answer()
+
+    def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        kept = self.of(generation)
+        later = kept.armed is None or kept.armed[1] == candidate or attempt > kept.armed[0]
+        if kept.answer().verdict is Verdict.NONE and later and candidate not in kept.revoked and attempt > kept.fenced:
+            if kept.armed is not None and kept.armed[1] != candidate:
+                kept.revoke(kept.armed[1])
+            kept.armed, kept.committed = (attempt, candidate), candidate
+            self.proxy.written[web_address] = candidate
+            self.proxy.host.record(f"route {candidate}")
+        return kept.answer()
+
+    def abandon(self, web_address: str, generation: str) -> GateAnswer:
+        assert web_address
+        kept = self.of(generation)
+        kept.abandoned = kept.committed is None
+        return kept.answer()
+
+    def discard(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        assert web_address and attempt >= 0
+        kept = self.of(generation)
+        if kept.committed != candidate:
+            kept.revoke(candidate)
+        return kept.answer()
+
+    def fence(self, web_address: str, generation: str, attempt: int) -> GateAnswer:
+        assert web_address
+        kept = self.of(generation)
+        if kept.answer().verdict is Verdict.NONE:
+            kept.fenced = max(kept.fenced, attempt)
+            if kept.armed is not None and kept.armed[0] <= attempt:
+                kept.revoke(kept.armed[1])
+        return kept.answer()
+
+
+# The gate as a test of calls that reach no move being worked is given it: nothing was ever asked of it.
+class GateNeverAsked:
+    def abandon(self, product: str, lane: str, generation: str, /) -> str | None:
+        raise AssertionError(f"the gate was asked to abandon {generation} of {lane} of {product}")
+
+    def verdict(self, product: str, lane: str, generation: str, /) -> GateAnswer:
+        assert product and lane and generation
+        return GateAnswer(Verdict.NONE)
+
+    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer:
+        assert product and lane and generation and attempt
+        return GateAnswer(Verdict.NONE)
+
+
 class PretendProxy:
     def __init__(self, host: PretendHost, running: bool = True, starts: bool = True) -> None:
         self.host = host
@@ -238,14 +319,10 @@ class PretendProxy:
         self.back_soon_runs = True
         self.loaded: dict[str, LoadedRoute] = {}
         self.written: dict[str, str] = {}
-        self.written_by: dict[str, str | None] = {}
-        self.abandoned: dict[str, frozenset[str]] = {}
-        self.committed: dict[str, str] = {}
-        self.discarded: set[str] = set()
+        self.gate = PretendGate(self)
         self.unread: dict[str, str] = {}
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
         self.holds_delivery = False
-        self.at_the_gate: Callable[[str], None] = lambda _passing: None
         self.failing: set[str] = set()
         self.not_answering: dict[str, str] = {}
         self.asked: list[str] = []
@@ -260,12 +337,8 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={
-                web_address: WrittenRoute(container, SINCE, self.written_by.get(web_address))
-                for web_address, container in self.written.items()
-            },
+            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
             loaded=dict(self.loaded) if self.running else {},
-            abandoned=dict(self.abandoned),
             unread=dict(self.unread),
         )
 
@@ -275,7 +348,6 @@ class PretendProxy:
 
     def show_back_soon(self, web_address: str) -> None:
         self.written[web_address] = BACK_SOON
-        self.written_by[web_address] = None
         self.host.record("show back soon")
 
     def await_route(self, web_address: str, container: str | None) -> None:
@@ -288,41 +360,14 @@ class PretendProxy:
 
     def write_route(self, web_address: str, container: str) -> None:
         self.written[web_address] = container
-        self.written_by[web_address] = None
         self.host.record(f"route {container}")
 
     # As on the host, the two that pass the gate exclude each other: one finds what the other did.
-    def verdict_of(self, web_address: str, generation: str) -> Verdict:
-        if generation in self.committed:
-            return Verdict.COMMITTED
-        return Verdict.ABANDONED if generation in self.abandoned.get(web_address, ()) else Verdict.NONE
-
-    def switch(self, web_address: str, container: str, generation: str) -> Verdict:
-        self.at_the_gate("before the switch")
-        if self.verdict_of(web_address, generation) is not Verdict.NONE or container in self.discarded:
-            return self.verdict_of(web_address, generation)
-        self.written[web_address] = container
-        self.written_by[web_address] = generation
-        self.committed[generation] = container
-        self.at_the_gate("after the switch")
-        self.host.record(f"route {container}")
-        return Verdict.COMMITTED
-
-    def abandon(self, web_address: str, generation: str) -> Verdict:
-        if generation not in self.committed:
-            self.abandoned[web_address] = self.abandoned.get(web_address, frozenset()) | {generation}
-        return self.verdict_of(web_address, generation)
-
-    def discard(self, web_address: str, container: str, made_by: str) -> Verdict:
-        if self.committed.get(made_by) == container:
-            return Verdict.COMMITTED
-        assert self.written.get(web_address) != container, "the routes file names an instance the gate did not rename to"
-        self.discarded.add(container)
-        return Verdict.NONE
+    def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
+        return self.gate.switch(web_address, generation, attempt, candidate)
 
     def remove_route(self, web_address: str) -> None:
         del self.written[web_address]
-        self.abandoned.pop(web_address, None)
         self.host.record("unroute")
 
     def check_instance(self, container: str, health_path: str) -> None:
@@ -342,7 +387,7 @@ def numbered_names() -> Callable[[LaneBuild], FreshNames]:
 
 
 def lanes_on(proxy: PretendProxy, product: Product = WITH_DATA) -> Lanes:
-    return Lanes(proxy.host, proxy, read_product=lambda _product: product, name_fresh=numbered_names(), sleep=lambda _seconds: None)
+    return Lanes(proxy.host, proxy, read_product=lambda _product: product, name_fresh=numbered_names())
 
 
 def lane_instance(container: str, build: str | None, state: InstanceState = InstanceState.RUNNING) -> RunningInstance:
@@ -430,9 +475,6 @@ class Given:
     proxy_runs: bool = True
     back_soon_runs: bool = True
     web_address_fails: str | None = None
-    # The generation the routes file says it was renamed for, and the one the gate holds a cancel against.
-    written_by: str | None = None
-    abandoned: str | None = None
 
     def proxy(self) -> PretendProxy:
         host = PretendHost()
@@ -447,9 +489,6 @@ class Given:
             proxy.loaded[WEB_ADDRESS] = LoadedRoute(loaded, RouteStatus.ENABLED) if isinstance(loaded, str) else loaded
         if written is not None:
             proxy.written[WEB_ADDRESS] = written
-            proxy.written_by[WEB_ADDRESS] = self.written_by
-        if self.abandoned is not None:
-            proxy.abandoned[WEB_ADDRESS] = frozenset({self.abandoned})
         return proxy
 
     # Read as the status call reads: every lane, and the web address asked where the proxy sends it to a product.

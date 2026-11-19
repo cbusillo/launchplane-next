@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from launchplane import steps
-from launchplane.instance import Verdict
 from launchplane.steps import Action, Event
 
 type Tell = Callable[[str, str | None], None]
@@ -48,8 +47,7 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.Switch: lambda step: f"switch {step.web_address} to {step.container}",
     steps.Discard: lambda step: f"retire {step.container}",
     steps.Abandon: lambda step: f"mark the release of {step.web_address} as cancelled",
-    steps.AwaitSwitch: lambda step: f"wait for the proxy to send {step.web_address} to {step.container}",
-    steps.RemoveRoute: lambda step: f"remove the route of {step.web_address} to {step.container or 'nothing Launchplane wrote'}",
+    steps.RemoveRoute: lambda step: f"remove the route of {step.web_address} to {step.container}",
     steps.CreateDataSetNetwork: lambda step: f"make the network of the data set {step.data_set}",
     steps.CreateDataSetVolume: lambda step: f"make the volume of the data set {step.data_set}",
     steps.CreateDatabase: lambda step: f"make the database server of the data set {step.data_set}",
@@ -59,7 +57,6 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.StartInstance: lambda step: f"start the instance {step.container} of {step.target.build}",
     steps.StartBackgroundService: lambda step: f"start the background service of {step.instance}",
     steps.Retire: lambda step: f"retire {step.container}",
-    steps.RemoveInstance: lambda step: f"remove {step.container}",
     steps.RemoveLogins: lambda step: f"remove the logins no container holds from {step.database}",
     steps.Check: lambda step: f"check {step.container} at {step.health_path}",
     steps.AwaitBackgroundService: lambda step: f"watch the background service {step.container} stay up",
@@ -82,13 +79,11 @@ def told(action: Action, event: Event) -> tuple[str, str | None]:
             return named(action), report
         case steps.LogRead(unreadable=unreadable):
             return named(action), unreadable
-        case steps.NotLoadedYet(report=report):
+        case steps.RemovalRefused(report=report):
             return named(action), report
-        case steps.Discarded(verdict=Verdict.COMMITTED):
-            return named(action), "The routes file sends visitors to it, so it was left running."
-        case steps.Switched(verdict=Verdict.ABANDONED | Verdict.NONE):
-            return named(
-                action
-            ), "A cancel had won against this release, or its instance was discarded, so the routes file was not renamed."
+        case steps.Discarded(kept=True):
+            return named(action), "The gate answered that the routes file was renamed to it, so it was kept."
+        case steps.Switched(won=False):
+            return named(action), "The gate did not rename the routes file to it."
         case _:
             return named(action), None

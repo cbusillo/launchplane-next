@@ -22,7 +22,7 @@ from launchplane.proxy import (
     route_file_of,
     route_text,
 )
-from tests.pretend_host import EARLIER, GENERATION
+from tests.pretend_host import GENERATION
 
 WEB_ADDRESS = "testing.site.test"
 OTHER = "production.site.test"
@@ -124,33 +124,21 @@ def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
     return TraefikProxy(host, sleep=lambda _: host.load(), clock=lambda: next(clock), **seconds)
 
 
-def test_a_route_says_which_generation_it_was_renamed_for_and_one_written_by_hand_or_for_maintenance_says_none() -> None:
+def test_a_switch_asks_the_gate_to_rename_the_lanes_routes_file_to_the_route_of_its_candidate() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    assert proxy.switch(OTHER, "b", GENERATION) is Verdict.COMMITTED
-    seen = proxy.read()
-    assert (seen.route_of(OTHER).written_by, seen.route_of(WEB_ADDRESS).written_by) == (GENERATION, None)
-    assert (seen.route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == ("b", "b")
-
-
-def test_the_calls_the_move_uses_answer_from_the_gate_and_a_reading_shows_the_cancels_that_won() -> None:
-    host = ProxyHost({WEB_ADDRESS: "a"})
-    proxy = TraefikProxy(host)
-    asked = [
-        proxy.abandon(WEB_ADDRESS, EARLIER),
-        proxy.switch(WEB_ADDRESS, "b", EARLIER),
-        proxy.switch(WEB_ADDRESS, "c", GENERATION),
-    ]
-    assert asked == [Verdict.ABANDONED, Verdict.ABANDONED, Verdict.COMMITTED]
-    kept_or_not = [proxy.discard(WEB_ADDRESS, "c", GENERATION), proxy.discard(WEB_ADDRESS, "left", GENERATION)]
-    route = proxy.read().route_of(WEB_ADDRESS)
-    assert (kept_or_not, route.written, route.abandoned) == ([Verdict.COMMITTED, Verdict.NONE], "c", {EARLIER})
+    assert proxy.switch(OTHER, GENERATION, 1, "b") == Answer(Verdict.COMMITTED, "b")
+    assert (host.files[route_file_of(OTHER)], proxy.read().route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == (
+        route_text(OTHER, "b"),
+        "b",
+        "b",
+    )
 
 
 def test_removing_a_lanes_route_leaves_what_the_gate_keeps_of_its_releases() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    proxy.switch(WEB_ADDRESS, "b", GENERATION)
+    proxy.switch(WEB_ADDRESS, GENERATION, 1, "b")
     proxy.remove_route(WEB_ADDRESS)
     assert (proxy.gate.verdict(WEB_ADDRESS, GENERATION), proxy.read().route_of(WEB_ADDRESS).written) == (
         Answer(Verdict.COMMITTED, "b"),
@@ -255,20 +243,20 @@ def test_a_lane_file_that_is_not_the_route_launchplane_writes_is_that_lanes_faul
     assert "not the route Launchplane writes" in (seen.route_of(WEB_ADDRESS).unread or "")
 
 
-STAMPS_OF_NO_RELEASE = {
-    "a stamp of the code before generations": "# launchplane.request=41\n",
-    "no stamp": "",
-    "a stamp whose text is not a generation": "# launchplane.generation=41\n",
+FIRST_LINES = {
+    "a comment the code before the gate wrote": "# launchplane.request=41\n",
+    "none": "",
+    "any other comment": "# launchplane.generation=01a1ef36-c51d-74d9-86a1-ff0199cf7a3d\n",
 }
 
 
-@pytest.mark.parametrize("stamp", STAMPS_OF_NO_RELEASE.values(), ids=STAMPS_OF_NO_RELEASE.keys())
-def test_a_route_with_this_first_line_is_a_route_all_the_same_renamed_for_no_release(stamp: str) -> None:
+@pytest.mark.parametrize("stamp", FIRST_LINES.values(), ids=FIRST_LINES.keys())
+def test_a_route_with_this_first_line_is_a_route_all_the_same_and_says_nothing_of_any_release(stamp: str) -> None:
     host = ProxyHost({})
     host.files[route_file_of(WEB_ADDRESS)] = stamp + route_text(WEB_ADDRESS, "site-t1")
     host.load()
     route = lane_route(host)
-    assert (route.written, route.written_by, route.unread, route.sends_visitors_to) == ("site-t1", None, None, "site-t1")
+    assert (route.written, route.unread, route.sends_visitors_to) == ("site-t1", None, "site-t1")
 
 
 def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visitors() -> None:

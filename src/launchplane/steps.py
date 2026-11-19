@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from launchplane.instance import DataSet, DataSetUse, LaneBuild, Verdict
+from launchplane.instance import DataSet, DataSetUse, LaneBuild
 
 
 class Outcome(StrEnum):
@@ -145,37 +145,36 @@ class WriteRoute:
     container: str
 
 
-# What passes the gate, and what each is once taken: the verdict the gate gave, which the call acts on from then on.
+# The rename of a release, asked of the gate for the candidate of one attempt. `Switched` is what it is once taken:
+# whether the gate then said the generation is committed to that candidate.
 @dataclass(frozen=True)
 class Switch:
     web_address: str
     container: str
     generation: str
+    attempt: int
 
 
 @dataclass(frozen=True)
 class Switched:
     container: str
-    verdict: Verdict
+    won: bool
 
 
-# An instance that receives no visitors, taken through the gate and then retired: a rename on its way to it is refused
-# from there on. Where the rename had already happened, the verdict is committed and the instance stays.
+# An instance taken through the gate and then removed: either the gate says its rename won, and it is kept, or it can
+# never be switched to from there on. `generation` is the release that made it, where one did.
 @dataclass(frozen=True)
 class Discard:
     web_address: str
     container: str
-    # The generation that made the instance, where one did: the gate is asked about that release.
-    generation: str | None = None
-    # Whether the instance is of the release being worked. Only then does a rename the gate says it won keep it: an
-    # instance an earlier release was renamed to is that release's past, and goes once a later one serves.
-    of_this_release: bool = False
+    generation: str | None
+    attempt: int
 
 
 @dataclass(frozen=True)
 class Discarded:
     container: str
-    verdict: Verdict
+    kept: bool
 
 
 # A cancel carried to the gate.
@@ -183,25 +182,6 @@ class Discarded:
 class Abandon:
     web_address: str
     generation: str
-
-
-@dataclass(frozen=True)
-class Abandoned:
-    verdict: Verdict
-
-
-# Waiting for the proxy to load a route that is already renamed: the release is real, so not loading yet is waited
-# for again and is never its failure.
-@dataclass(frozen=True)
-class AwaitSwitch:
-    web_address: str
-    container: str
-
-
-@dataclass(frozen=True)
-class NotLoadedYet:
-    container: str
-    report: str
 
 
 @dataclass(frozen=True)
@@ -221,16 +201,11 @@ class AwaitBackgroundService:
 @dataclass(frozen=True)
 class RemoveRoute:
     web_address: str
-    container: str | None
-
-
-@dataclass(frozen=True)
-class Retire:
     container: str
 
 
 @dataclass(frozen=True)
-class RemoveInstance:
+class Retire:
     container: str
 
 
@@ -295,6 +270,11 @@ class BackgroundServiceRefused(Refused):
     pass
 
 
+# Docker answered that it will not remove the part.
+class RemovalRefused(Refused):
+    pass
+
+
 @dataclass(frozen=True)
 class Done[Answer]:
     answer: Answer
@@ -302,6 +282,16 @@ class Done[Answer]:
 
 @dataclass(frozen=True)
 class Stop:
+    reason: str
+
+
+# How the error of such an ending begins, so a cancel asked again says that it won.
+CANCEL_WON = "The cancel won"
+
+
+# A cancel won at the gate and a part of its release could not be removed: the lane cannot be put back.
+@dataclass(frozen=True)
+class CannotPutBack:
     reason: str
 
 
@@ -324,7 +314,6 @@ type Action = (
     | Switch
     | Discard
     | Abandon
-    | AwaitSwitch
     | RemoveRoute
     | CreateDataSetNetwork
     | CreateDataSetVolume
@@ -335,7 +324,6 @@ type Action = (
     | StartInstance
     | StartBackgroundService
     | Retire
-    | RemoveInstance
     | RemoveLogins
     | Check
     | AwaitBackgroundService
@@ -345,6 +333,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = (
-    Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | Abandoned | NotLoadedYet
-)
+type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | RemovalRefused

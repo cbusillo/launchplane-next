@@ -7,7 +7,7 @@ import pytest
 
 from launchplane.act import Lanes
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import LaneBuild, OnHost
+from launchplane.instance import DataSetUse, LaneBuild, OnHost
 from launchplane.judge import Condition, Work
 from launchplane.page import RECORD_UNREAD, cards
 from launchplane.record import ENDED, MOST_ATTEMPTS, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
@@ -76,7 +76,7 @@ def killed_while_checking(record: Record, lanes: Lanes, proxy: PretendProxy) -> 
     assert attempt is not None
     proxy.while_checking = kill
     with pytest.raises(LaunchplaneKilled):
-        lanes.move(TO_B, request.generation, Witness(tell=partial(record.note, attempt)))
+        lanes.move(TO_B, request.generation, attempt, Witness(tell=partial(record.note, attempt)))
     proxy.while_checking = lambda _container: None
     proxy.host.actions.clear()
     return request.id
@@ -100,7 +100,7 @@ def test_a_request_is_carried_through_and_its_answer_and_each_thing_done_are_kep
         f"start the instance {new} of site:b",
         f"check {new} at /",
         f"switch {WEB_ADDRESS} to {new}",
-        f"wait for the proxy to send {WEB_ADDRESS} to {new}",
+        f"wait for the proxy to load the route of {WEB_ADDRESS}",
         "retire a",
     ]
     assert worker.work_next() is False
@@ -139,23 +139,47 @@ def test_a_request_interrupted_three_times_is_not_taken_up_a_fourth_time_and_its
     assert row.note is not None and f"POST /requests/{request.id}/retry" in row.note
 
 
-def test_a_step_the_host_refuses_fails_the_request_with_the_real_error_and_it_is_not_run_again(record: Record) -> None:
+def test_a_step_the_host_refuses_before_the_switch_fails_the_request_with_the_real_error_and_it_is_not_run_again(
+    record: Record,
+) -> None:
     worker, _, proxy = serving_a(record)
+
+    def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+        assert use is None and generation is not None
+        raise ContainerHostError(f"Starting the instance {container} from build {target.build} on test failed: no such image")
+
+    proxy.host.start_instance = refuse
+    request = record.write(MOVE_B, CALLER, None)
+    assert (worker.work_next(), worker.work_next()) == (True, False)
+    kept = kept_of(record, request.id)
+    assert kept.error is not None
+    assert (kept.stands, kept.answer, "is safe to ask again: Starting the instance" in kept.error) == (Stands.FAILED, None, True)
+
+
+def test_a_step_the_host_refuses_after_the_switch_leaves_the_request_working_with_why_until_it_can_be_finished(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    retire = proxy.host.retire_instance
 
     def refuse(container: str) -> None:
         raise ContainerHostError(f"Retiring {container} on test failed: the daemon is busy")
 
     proxy.host.retire_instance = refuse
     request = record.write(MOVE_B, CALLER, None)
-    assert (worker.work_next(), worker.work_next()) == (True, False)
-    kept = kept_of(record, request.id)
-    assert kept.error is not None
-    assert (kept.stands, kept.answer, "is safe to ask again: Retiring a on test failed: the daemon is busy" in kept.error) == (
-        Stands.FAILED,
-        None,
-        True,
+    assert (worker.work_next(), worker.work_next()) == (True, True)
+    left_open = kept_of(record, request.id)
+    assert left_open.error is not None and "Retiring a on test failed: the daemon is busy" in left_open.error
+    assert (left_open.stands, {each.ended for each in left_open.attempts}, proxy.written) == (
+        Stands.WORKING,
+        {"unfinished"},
+        {WEB_ADDRESS: "site-testing-0"},
     )
-    assert [(each.did, each.error) for each in kept.events][-1] == ("retire a", "Retiring a on test failed: the daemon is busy")
+    proxy.host.retire_instance = retire
+    assert (worker.work_next(), worker.work_next()) == (True, False)
+    finished = kept_of(record, request.id)
+    assert finished.answer is not None
+    assert (finished.stands, finished.answer["outcome"], list(proxy.host.instances)) == (Stands.DONE, "switched", ["site-testing-0"])
 
 
 def test_a_check_that_fails_ends_the_request_as_failed_and_keeps_the_answer(record: Record) -> None:

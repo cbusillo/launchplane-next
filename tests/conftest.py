@@ -47,3 +47,9 @@ def record(request: pytest.FixtureRequest, secrets: GivenSecrets) -> Record:
     if request.param == "pretend":
         return PretendRecord(gate=Gate(secrets))
     return request.getfixturevalue("postgres_record")
+
+
+# A request left open is taken up again after a while. No test waits for that while.
+@pytest.fixture(autouse=True)
+def taken_up_again_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("launchplane.worker.SECONDS_BEFORE_TAKING_UP_AGAIN", 0)

@@ -439,12 +439,6 @@ class ContainerHost:
             found.stop(timeout=RETIRE_GRACE_SECONDS)
             found.remove()
 
-    def remove_instance(self, container: str) -> None:
-        with attempting(f"Removing the instance {container}", self.address):
-            found = self.find_container(container)
-            if found is not None:
-                found.remove(force=True)
-
     def retire_instance(self, container: str) -> None:
         with attempting(f"Stopping and removing {container}", self.address):
             self.retire_container(container)

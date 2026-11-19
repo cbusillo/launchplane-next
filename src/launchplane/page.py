@@ -94,18 +94,15 @@ def done_so_far(request: Kept) -> str:
     return f"{taken_up}So far: {'; '.join(lines)}." if lines else f"{taken_up}Nothing done so far."
 
 
-# Whether a cancel won is read from the gate's mark on the host, as the worker reads it.
-def being_cancelled(request: Kept, abandoned: frozenset[str]) -> str:
+def being_cancelled(request: Kept) -> str:
     if request.cancel_refused is not None:
         return f" {request.cancel_refused}"
     if request.cancel_asked_by is None:
         return ""
-    if request.generation in abandoned:
-        return f" Cancelled by {request.cancel_asked_by} before the switch: its worker is putting the lane back."
-    return f" To be cancelled by {request.cancel_asked_by}: its worker puts the lane back, unless it is found too late."
+    return f" To be cancelled by {request.cancel_asked_by}: its worker puts the lane back, unless the gate says it is too late."
 
 
-def request_note(request: Request, abandoned: frozenset[str]) -> str | None:
+def request_note(request: Request) -> str | None:
     if request.stands is Stands.NEEDS_A_PERSON:
         return request.error
     if request.stands is Stands.CANCELLED:
@@ -114,17 +111,18 @@ def request_note(request: Request, abandoned: frozenset[str]) -> str | None:
         why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return f"{why} It ended as {request.stands}."
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
-        return f"{done_so_far(request)}{being_cancelled(request, abandoned)}"
+        unfinished = "" if request.error is None else f" Not finished yet, and taken up again by itself: {request.error}"
+        return f"{done_so_far(request)}{being_cancelled(request)}{unfinished}"
     return None
 
 
-def request_rows(requests: Sequence[Request], abandoned: frozenset[str] = frozenset()) -> list[Row]:
+def request_rows(requests: Sequence[Request]) -> list[Row]:
     return [
         Row(
             name=f"Request {request.id}",
             value=[Piece(text=asked_for(request))],
             pills=[Pill(text=request.stands, tone=STANDS_TONE.get(request.stands, Standing.WRONG))],
-            note=request_note(request, abandoned),
+            note=request_note(request),
         )
         for request in sorted(requests, key=lambda each: each.id)
     ]
@@ -164,7 +162,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests, frozenset() if judged is None else judged.lane.route.abandoned),
+            *request_rows(requests),
             *([] if judged is None else finding_rows(judged)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])

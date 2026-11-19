@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from launchplane.docker_answers import CommandResult, ContainerHostError
-from launchplane.gate import GATE_FOLDER_NAME, LOCK_NAME, Answer, Gate, GateError
+from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate, GateError
 from launchplane.instance import Verdict, new_generation
 from launchplane.proxy import INSTANCE_URL, PROXY_NAME, ROUTES_FOLDER, route_file_of, route_text
 from tests.bed import SCRATCH_SHELL, needs_test_bed, on_scratch, wait_for
@@ -78,7 +78,7 @@ class Proof:
     def switch(self, candidate: str, attempt: int = 1, generation: str | None = None) -> Answer:
         made_by = generation or self.generation
         try:
-            return self.gate.switch(WEB, made_by, attempt, candidate, route_text(WEB, candidate, made_by), ROUTE)
+            return self.gate.switch(WEB, made_by, attempt, candidate, route_text(WEB, candidate), ROUTE)
         finally:
             self.look()
 
@@ -155,7 +155,7 @@ def test_a_rename_whose_reply_alone_is_lost_is_committed_when_asked_again_and_ha
 def test_a_switch_accepted_and_held_before_the_lock_renames_nothing_once_its_candidate_was_discarded_meanwhile(
     proof: Proof,
 ) -> None:
-    lock = ROUTES_FOLDER / LOCK_NAME
+    lock = ROUTES_FOLDER
     in_proxy(f"touch {LOCK_HELD}; flock {lock} sh -c 'while [ -e {LOCK_HELD} ]; do sleep 0.1; done'", flags="--detach")
     # The held switch is another sender's: one Launchplane sends its gate commands one at a time.
     stale_sender = Proof(proof.host, Gate(proof.host, PROXY_NAME, ROUTES_FOLDER), proof.generation, proof.inodes, proof.answers)

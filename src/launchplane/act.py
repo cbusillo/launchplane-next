@@ -1,13 +1,13 @@
-import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from launchplane import maintenance, plan, steps
 from launchplane.container_host import PartStopped
-from launchplane.docker_answers import ContainerHostError
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     BACK_SOON,
     DataSet,
@@ -49,12 +49,9 @@ from launchplane.steps import (
     Stop,
     TooLate,
 )
-from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, tell_nobody, told
+from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, told
 
 MOST_STEPS = 50
-# A host or proxy that cannot be read is asked again this often, this far apart, before the call stops over it.
-MOST_READS_MISSED = 5
-SECONDS_BETWEEN_READS = 2.0
 type Lane = tuple[str, str]
 
 
@@ -74,10 +71,17 @@ class InstanceHost(Protocol):
     def stop_part(self, container: str) -> None: ...
     def stop_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
-    def remove_instance(self, container: str) -> None: ...
     def retire_instance(self, container: str) -> None: ...
     def remove_unheld_logins(self, database: str) -> None: ...
     def read_log_tail(self, container: str) -> str: ...
+
+
+# What is asked of the gate. Every call answers the verdict that then holds for the generation.
+class AskedGate(Protocol):
+    def verdict(self, web_address: str, generation: str) -> GateAnswer: ...
+    def abandon(self, web_address: str, generation: str) -> GateAnswer: ...
+    def discard(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer: ...
+    def fence(self, web_address: str, generation: str, attempt: int) -> GateAnswer: ...
 
 
 class Proxy(Protocol):
@@ -85,9 +89,9 @@ class Proxy(Protocol):
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None) -> None: ...
     def write_route(self, web_address: str, container: str) -> None: ...
-    def switch(self, web_address: str, container: str, generation: str) -> Verdict: ...
-    def abandon(self, web_address: str, generation: str) -> Verdict: ...
-    def discard(self, web_address: str, container: str, made_by: str) -> Verdict: ...
+    def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer: ...
+    @property
+    def gate(self) -> AskedGate: ...
     def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
     def show_back_soon(self, web_address: str) -> None: ...
@@ -100,6 +104,11 @@ type CancelsReader = Callable[[], list[Request]]
 
 
 class Stopped(Exception):
+    pass
+
+
+# A cancel won at the gate, and Docker refused to remove a part of its release, which is still there.
+class CouldNotPutBack(Exception):
     pass
 
 
@@ -159,7 +168,7 @@ TAKE: dict[type, Take] = {
         step.target, step.instance, step.use, list(step.command), step.generation
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
-    steps.RemoveInstance: lambda host, _proxy, step: host.remove_instance(step.container),
+    steps.Abandon: lambda _host, proxy, step: proxy.gate.abandon(step.web_address, step.generation),
     steps.RemoveLogins: lambda host, _proxy, step: host.remove_unheld_logins(step.database),
     steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
     steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
@@ -184,7 +193,8 @@ def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Wit
     return event
 
 
-type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], Action | Done[Answer] | Done[PutBack] | Stop | TooLate]
+type Decided[Answer] = Action | Done[Answer] | Done[PutBack] | Stop | TooLate | steps.CannotPutBack
+type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], Decided[Answer]]
 
 
 # The host is read first and the cancel after it, so no step is decided from a reading older than the cancel it missed.
@@ -215,18 +225,14 @@ def settle[Answer](
             return step.answer
         if isinstance(step, Stop):
             raise Stopped(step.reason)
+        if isinstance(step, steps.CannotPutBack):
+            raise CouldNotPutBack(step.reason)
         if len(done) == MOST_STEPS:
             raise Stopped(
                 f"{lane.lane} of {lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
             )
-        # A release that is renamed and not yet loaded is waited for as long as it takes: the wait is no step of the
-        # call's count and is told once, however often it is taken.
-        waiting = isinstance(step, steps.AwaitSwitch) and isinstance(done[-1] if done else None, steps.NotLoadedYet)
-        event = taken_and_told(step, take, replace(witness, tell=tell_nobody) if waiting else witness, back=back)
-        if waiting and isinstance(event, steps.NotLoadedYet):
-            continue
-        done.append(event)
+        done.append(taken_and_told(step, take, witness, back=back))
 
 
 class Lanes:
@@ -238,9 +244,7 @@ class Lanes:
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
         read_cancels: CancelsReader = lambda: [],
-        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self.sleep = sleep
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
@@ -300,22 +304,41 @@ class Lanes:
         ]
         return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancels)
 
-    def move(self, target: LaneBuild, generation: str, witness: Witness = NOBODY) -> MoveResult:
-        product = self.read_product(target.product)
+    # The lane is read, and then the gate is asked, so the gate's answer is never older than the reading it is set beside.
+    def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness = NOBODY) -> MoveResult:
+        product, web_address = self.read_product(target.product), web_address_of(target.product, target.lane)
         return settle(
             *self.judging(target.product, target.lane, product, Work.MOVE),
             lambda judged, done, cancel: plan.decide_move(
-                judged, target, product, self.name_fresh(target), done, generation, cancel
+                plan.Move(
+                    judged,
+                    target,
+                    product,
+                    self.name_fresh(target),
+                    done,
+                    generation,
+                    attempt,
+                    self.proxy.gate.verdict(web_address, generation),
+                ),
+                cancel,
             ),
             self.take,
             witness,
         )
 
+    def verdict(self, product: str, lane: str, generation: str) -> GateAnswer:
+        return self.proxy.gate.verdict(web_address_of(product, lane), generation)
+
+    # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
+    # one can rename after it.
+    def fence(self, product: str, lane: str, generation: str, attempt: int) -> GateAnswer:
+        return self.proxy.gate.fence(web_address_of(product, lane), generation, attempt)
+
     # A cancel of a move, carried to the gate by whoever asks. Why it came too late, or None when it won there.
     def abandon(self, product: str, lane: str, generation: str) -> str | None:
         web_address = web_address_of(product, lane)
-        verdict = self.proxy.abandon(web_address, generation)
-        return plan.too_late_to_cancel(web_address) if verdict is Verdict.COMMITTED else None
+        answer = self.proxy.gate.abandon(web_address, generation)
+        return plan.too_late_to_cancel(web_address) if answer.verdict is Verdict.COMMITTED else None
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
         return settle(
@@ -353,28 +376,15 @@ class Lanes:
     ) -> tuple[Callable[[], LaneReading], Callable[[LaneReading, bool], Judgement]]:
         scope = Scope(lane=(product, lane), web_addresses=work is Work.MOVE)
         return (
-            self.patient(lambda: self.read(scope).lane(product, lane)),
+            lambda: self.read(scope).lane(product, lane),
             lambda read, back: judge(read, description, (turned_back or work) if back else work),
         )
-
-    # A reading that fails is waited on and asked again, so no call spins on a host it cannot read, and after a few in a
-    # row the call stops with the last failure.
-    def patient(self, read: Callable[[], LaneReading]) -> Callable[[], LaneReading]:
-        def read_or_wait_and_read_again() -> LaneReading:
-            for _ in range(MOST_READS_MISSED - 1):
-                try:
-                    return read()
-                except ContainerHostError, ProxyError:
-                    self.sleep(SECONDS_BETWEEN_READS)
-            return read()
-
-        return read_or_wait_and_read_again
 
     # A check of its own, whatever the step was decided from: read from the routes the proxy has loaded at the moment
     # of the action, and from no stamp or mark. A retire has removed the route by then, and the old instance of a
     # move is retired once the proxy has loaded the switch, so neither is stopped by it.
     def refuse_to_take_from_visitors(self, action: Action) -> None:
-        if not isinstance(action, steps.Retire | steps.RemoveInstance | steps.StopPart):
+        if not isinstance(action, steps.Retire | steps.StopPart):
             return
         loaded = self.proxy.read().loaded
         sent_here = sorted(web_address for web_address, route in loaded.items() if route.container == action.container)
@@ -393,34 +403,28 @@ class Lanes:
         if isinstance(action, steps.StartStopped):
             return self.start_stopped(action)
         if isinstance(action, steps.Switch):
-            return steps.Switched(action.container, self.proxy.switch(action.web_address, action.container, action.generation))
-        if isinstance(action, steps.AwaitSwitch):
-            return self.await_switch(action)
+            answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
+            return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
             return self.discard(action)
-        if isinstance(action, steps.Abandon):
-            return steps.Abandoned(self.proxy.abandon(action.web_address, action.generation))
         TAKE[type(action)](self.host, self.proxy, action)
         return action
 
-    # The gate is asked first, and its answer is what is acted on: an instance whose release it says is committed stays,
-    # and only one it has refused every rename to is looked at for visitors and retired.
+    # The one removal of an instance of a release. The gate is asked about the generation that made it, and obeyed: one
+    # it says was renamed to stays. Otherwise the gate has taken away every permission to switch to it, and it goes. One
+    # no release made has no rename that could be on its way to it.
     def discard(self, action: steps.Discard) -> Event:
-        # An instance no release made has no rename that could be on its way to it.
-        made_by = action.generation
-        verdict = Verdict.NONE if made_by is None else self.proxy.discard(action.web_address, action.container, made_by)
-        kept = verdict is Verdict.COMMITTED and action.of_this_release
-        if not kept:
-            self.refuse_to_take_from_visitors(steps.Retire(action.container))
-            self.host.retire_instance(action.container)
-        return steps.Discarded(action.container, Verdict.COMMITTED if kept else Verdict.NONE)
-
-    def await_switch(self, action: steps.AwaitSwitch) -> Event:
+        made_by, container = action.generation, action.container
+        if made_by is not None:
+            answer = self.proxy.gate.discard(action.web_address, made_by, action.attempt, container)
+            if answer == GateAnswer(Verdict.COMMITTED, container):
+                return steps.Discarded(container, kept=True)
+        self.refuse_to_take_from_visitors(steps.Retire(container))
         try:
-            self.proxy.await_route(action.web_address, action.container)
-        except ProxyError as error:
-            return steps.NotLoadedYet(action.container, str(error))
-        return action
+            self.host.retire_instance(container)
+        except ContainerHostRefused as error:
+            return steps.RemovalRefused(container, str(error))
+        return steps.Discarded(container, kept=False)
 
     def start_stopped(self, action: steps.StartStopped) -> Event:
         try:

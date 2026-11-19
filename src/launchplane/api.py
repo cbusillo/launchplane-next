@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Any, TextIO
+from typing import Annotated, Any, Protocol, TextIO
 
 import uvicorn
 import uvicorn.config
@@ -20,7 +20,8 @@ from pydantic import BaseModel
 from launchplane.act import Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance
+from launchplane.gate import Answer as GateAnswer
+from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
@@ -41,12 +42,21 @@ from launchplane.record import (
 )
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
-from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
+from launchplane.steps import CANCEL_WON, MaintenanceResult, MoveResult, RetireResult
 from launchplane.worker import Worker
 
 type StatusReader = Callable[[], Status]
-# Carries the cancel of a move to the gate: why it came too late, or None when it won there.
-type Abandon = Callable[[str, str, str], str | None]
+
+
+# What the calls ask of the gate, for a move.
+class AsksGate(Protocol):
+    # Why a cancel came too late, or None when it won.
+    def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
+    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
+
+
+# Past every attempt a request can have: fenced through it, a generation with no verdict can never be renamed for.
+EVERY_ATTEMPT = 2**62
 log = logging.getLogger(__name__)
 
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -257,28 +267,45 @@ NOT_CONFIRMED = (
 
 
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object], abandon: Abandon) -> None:
+    def __init__(self, record: Record, wake: Callable[[], object], gate: AsksGate) -> None:
         self.record = record
         self.wake = wake
-        self.abandon = abandon
+        self.gate = gate
 
     # A cancel of a move being worked is decided at the gate, and the call that asks carries it there itself.
     def carry_to_the_gate(self, request: KeptRequest) -> None:
         marked = request.stands is Stands.WORKING and request.cancel_asked_at is not None and request.cancel_refused is None
         if request.work is Work.MOVE and marked:
-            too_late = self.abandon(request.product, request.lane, request.generation)
+            too_late = self.gate.abandon(request.product, request.lane, request.generation)
             if too_late is not None:
                 self.record.refuse_cancel(request.id, too_late)
 
-    # A newer request takes the path of a cancel. Where the gate cannot be reached, the worker of the older request
-    # carries the cancel there before its next action.
-    def cancel_what_came_before(self, new: KeptRequest) -> None:
+    # A newer request takes the path of a cancel. Where the gate cannot be asked, the cancel stays on record and the
+    # worker of the older request carries it there: the answer says so.
+    def cancel_what_came_before(self, new: KeptRequest) -> str | None:
         try:
             for older in self.record.unfinished():
                 if (older.product, older.lane, older.id < new.id) == (new.product, new.lane, True):
                     self.carry_to_the_gate(older)
         except (RecordError, *UNREADABLE) as error:
-            log.warning("Request %s did not carry the cancel of an older request to the gate: %s", new.id, error)
+            return (
+                f"Request {new.id} is kept and will be worked. The cancel it means for the request before it is on record "
+                f"and could not be carried to the gate, so whether that came in time is not known yet: {error}"
+            )
+        return None
+
+    # A request that needs a person is not ended while the gate says its release is committed: it is worked again. The
+    # gate is asked for good, so a release it has no verdict for can no longer be renamed for once it is given up.
+    def worked_again_since_committed(self, request: int, response: Response) -> NotFinished | None:
+        kept = self.record.read(request)
+        if kept is None or kept.work is not Work.MOVE or kept.stands is not Stands.NEEDS_A_PERSON:
+            return None
+        if self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict is not Verdict.COMMITTED:
+            return None
+        why = f"The routes file of {kept.lane} of {kept.product} was renamed for request {request}, so it is not given up."
+        self.record.resume(request, why)
+        self.wake()
+        return not_finished(response, HTTPStatus.CONFLICT, f"{why} It is being worked again and will be finished.")
 
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
@@ -294,9 +321,11 @@ class Calls:
         except RecordError as error:
             why = f"{error} The request was not written and nothing was changed, and asking again is safe."
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
-        self.cancel_what_came_before(request)
+        not_carried = self.cancel_what_came_before(request)
         self.wake()
         response.headers["Location"] = f"/requests/{request.id}"
+        if not_carried is not None:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, not_carried)
         try:
             kept = read_until(self.record, request.id, wait)
         except RecordError as error:
@@ -326,7 +355,20 @@ class Calls:
         return kept or self.none_such(request, response)
 
     # Only a request that needs a person is asked for again or given up, so any other is refused, saying how it stands.
-    def answered_by_a_person(self, request: int, answered: KeptRequest | None, response: Response) -> KeptRequest | NotFinished:
+    def answered_by_a_person(
+        self, request: int, response: Response, answer: Callable[[], KeptRequest | None]
+    ) -> KeptRequest | NotFinished:
+        try:
+            if (committed := self.worked_again_since_committed(request, response)) is not None:
+                return committed
+            answered = answer()
+        except CarriesASecret as error:
+            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, self.not_known(request, error))
+        except UNREADABLE as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed.")
+        self.wake()
         if answered is not None:
             return answered
         kept = self.read(request, response)
@@ -382,6 +424,8 @@ def why_not_cancelled(kept: Kept) -> str | None:
             f"Request {kept.id} needs a person, so it was not cancelled and nothing was changed. Look at the lane, then ask "
             f"for it again with POST /requests/{kept.id}/retry or give it up with POST /requests/{kept.id}/give-up."
         )
+    if kept.stands is Stands.FAILED and kept.cancel_asked_at is not None and (kept.error or "").startswith(CANCEL_WON):
+        return f"{kept.error} {ended}."
     if kept.stands in (Stands.DONE, Stands.FAILED):
         return f"{ended}, so it was not cancelled. Nothing was changed by this call."
     return None
@@ -450,25 +494,14 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
 
     @app.post("/requests/{request}/retry", status_code=HTTPStatus.ACCEPTED, responses=responses(NOT_FOUND, *NOT_KEPT))
     def retry_request(request: int, http: Request, response: Response) -> KeptRequest | NotFinished:
-        try:
-            again = calls.record.retry(request, asker(http))
-        except CarriesASecret as error:
-            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
-        except RecordError as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, calls.not_known(request, error))
-        if again is not None:
-            calls.wake()
+        again = calls.answered_by_a_person(request, response, lambda: calls.record.retry(request, asker(http)))
+        if isinstance(again, KeptRequest):
             response.headers["Location"] = f"/requests/{again.id}"
-        return calls.answered_by_a_person(request, again, response)
+        return again
 
     @app.post("/requests/{request}/give-up", responses=responses(NOT_FOUND, *NOT_KEPT))
     def give_up_request(request: int, response: Response) -> KeptRequest | NotFinished:
-        try:
-            given_up = calls.record.give_up(request)
-        except RecordError as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, calls.not_known(request, error))
-        calls.wake()
-        return calls.answered_by_a_person(request, given_up, response)
+        return calls.answered_by_a_person(request, response, lambda: calls.record.give_up(request))
 
 
 def add_cancel_call(app: FastAPI, calls: Calls) -> None:
@@ -477,7 +510,7 @@ def add_cancel_call(app: FastAPI, calls: Calls) -> None:
         return calls.cancel(request, f"a call from {asker(http)}", wait, response)
 
 
-def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, abandon: Abandon) -> FastAPI:
+def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: AsksGate) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 
@@ -495,7 +528,7 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    calls = Calls(record, wake, abandon)
+    calls = Calls(record, wake, gate)
     add_lane_calls(app, calls)
     add_request_calls(app, calls)
     add_cancel_call(app, calls)
@@ -519,5 +552,5 @@ def serve() -> None:
     lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_cancels=record.cancels_answered)
     worker = Worker(record, lanes, host)
     worker.start()
-    app = create_app(lanes.read_status, record, worker.wake, host, lanes.abandon)
+    app = create_app(lanes.read_status, record, worker.wake, host, lanes)
     uvicorn.Server(server_config(app, address, port, host)).run()

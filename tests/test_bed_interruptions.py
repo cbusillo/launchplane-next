@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from launchplane.gate import GATE_FOLDER_NAME, LOCK_NAME
+from launchplane.gate import GATE_FOLDER_NAME
 from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of, stamp_line
 from tests.bed import (
     SCRATCH_ADDRESS,
@@ -463,7 +463,7 @@ def test_a_move_to_the_build_already_active_cancelled_before_its_result_is_saved
 
 
 GATE_HELD = "/tmp/launchplane-gate-held"  # noqa: S108 a file inside the proxy's container
-HOLD_THE_GATE = f"touch {GATE_HELD}; flock {ROUTES_FOLDER / LOCK_NAME} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
+HOLD_THE_GATE = f"touch {GATE_HELD}; flock {ROUTES_FOLDER} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
 
 
 def in_proxy(command: str, flags: str = "") -> str:
