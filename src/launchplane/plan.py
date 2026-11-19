@@ -130,6 +130,14 @@ def route_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | No
     return None
 
 
+# A routes file that is not the route Launchplane writes is never taken for no route: what it sends visitors to is not
+# known, so nothing of its lane is changed and no call on the lane answers success.
+def unread_route(lane: LaneReading, attempted: str, done: tuple[Event, ...]) -> Stop | None:
+    if lane.route.unread is None:
+        return None
+    return Stop(f"{lane.route.unread}, so the lane is not {attempted}. {changes_so_far(done)}")
+
+
 def is_fit(judged: Judgement, instance: RunningInstance, target: LaneBuild) -> bool:
     return instance.build == target.build and not judged.about_instance(instance)
 
@@ -337,9 +345,7 @@ def in_service(move: Move) -> Action | Stop | None:
             f"soon page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was "
             "changed."
         )
-    if lane.route.unread is not None:
-        return Stop(f"{lane.route.unread}, so the lane is not moved. Nothing was changed.")
-    return route_step(move.judged, move.done)
+    return unread_route(lane, "moved", move.done) or route_step(move.judged, move.done)
 
 
 # The background service of the instance that serves: started where the product has one, watched while it comes up,
@@ -497,6 +503,8 @@ def decide_retire(
 def decide_retire(
     judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...], cancel: Cancel | None = None
 ) -> Step[RetireResult] | StepBack:
+    if (unread := unread_route(judged.lane, "retired", done)) is not None:
+        return unread
     if cancel is not None and is_turned_back(cancel):
         return retire_step_back(judged, delete_data_set)
     return with_logins_settled(retire_step(judged, None if cancel else delete_data_set, done), judged, done)

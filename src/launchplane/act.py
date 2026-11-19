@@ -356,6 +356,8 @@ class Lanes:
         # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
         web_address = web_address_of(product, lane)
         route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
+        if route.unread is not None:
+            raise Stopped(f"{route.unread}, so the lane is not brought out of maintenance. Nothing was changed.")
         if not route.in_maintenance:
             if route.proxy_runs and not is_loaded_as_written(route):
                 self.proxy.await_route(web_address, route.written)

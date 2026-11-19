@@ -169,6 +169,31 @@ def test_retiring_a_lane_with_data_stops_its_background_service_first_and_keeps_
     assert (deleted.outcome, deleted.deleted_data_set, deleted.kept_data_sets) == (RetireOutcome.DELETED, "data-1", [])
 
 
+NOT_LAUNCHPLANES = {
+    "a retire naming the data set": lambda lanes: lanes.retire("site", "testing", delete_data_set="data-1"),
+    "beginning maintenance": lambda lanes: lanes.begin_maintenance("site", "testing"),
+    "ending maintenance": lambda lanes: lanes.end_maintenance("site", "testing"),
+}
+
+
+@pytest.mark.parametrize("call", NOT_LAUNCHPLANES.values(), ids=NOT_LAUNCHPLANES.keys())
+def test_a_routes_file_that_is_not_launchplanes_with_no_loaded_route_stops_the_call_and_the_instance_and_volume_survive(
+    call: Callable[[Lanes], object],
+) -> None:
+    proxy = lane_brought_up_with_a()
+    instance = proxy.written.pop(WEB_ADDRESS)
+    proxy.loaded.clear()
+    proxy.unread[WEB_ADDRESS] = "The routes file is not the route Launchplane writes"
+    proxy.host.actions.clear()
+    with pytest.raises(Stopped, match="not the route Launchplane writes"):
+        call(lanes_on(proxy))
+    assert (proxy.host.actions, list(proxy.host.instances), proxy.host.data_sets["data-1"].volumes) == (
+        [],
+        [instance],
+        ("volume-data-1",),
+    )
+
+
 def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_the_next_move_and_the_next_retire() -> None:
     proxy = lane_brought_up_with_a()
     proxy.host.actions.clear()

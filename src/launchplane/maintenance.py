@@ -13,6 +13,7 @@ from launchplane.plan import (
     put_back_or_what_is_left,
     route_step,
     sentences,
+    unread_route,
 )
 from launchplane.product import Product
 from launchplane.steps import (
@@ -85,7 +86,7 @@ def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None
 def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | None = None) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
     route = lane.route
-    if (step := route_step(judged, done)) is not None:
+    if (step := unread_route(lane, "put in maintenance", done) or route_step(judged, done)) is not None:
         return step
     if cancel is not None and is_turned_back(cancel):
         return begin_step_back(judged)
@@ -206,7 +207,7 @@ def decide_end(
     judged: Judgement, product: Product, done: tuple[Event, ...], cancel: Cancel | None = None
 ) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
-    if (step := route_step(judged, done)) is not None:
+    if (step := unread_route(lane, "brought out of maintenance", done) or route_step(judged, done)) is not None:
         return step
     if cancel is not None and is_turned_back(cancel):
         return end_step_back(judged)
