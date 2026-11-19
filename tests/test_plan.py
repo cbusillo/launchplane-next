@@ -18,7 +18,7 @@ from launchplane.instance import (
     Verdict,
 )
 from launchplane.judge import Judgement, Kind, Work, judge
-from launchplane.plan import Move, decide_move, decide_retire, too_late_to_cancel
+from launchplane.plan import Move, decide_clean_up, decide_move, decide_retire, too_late_to_cancel
 from launchplane.product import Product
 from launchplane.steps import (
     Abandon,
@@ -553,14 +553,14 @@ def test_a_move_does_not_answer_while_a_running_server_has_a_login_no_container_
     assert next_data_move_step(AT_REST_WITH_A_LOGIN_LEFT) == RemoveLogins("database-d1")
 
 
-def test_a_failed_check_is_not_answered_until_the_login_of_the_instance_it_removed_is_gone() -> None:
+def test_a_failed_check_is_not_ended_until_the_login_of_the_instance_it_removed_is_gone() -> None:
     refused = (
         StartInstance(TARGET, "new", USE_D1),
         CheckRefused("new", "Connection refused"),
         gone("new"),
     )
     case = DataCase((on_data(OLD, "d1"),), "old", (LEFT_ON_D1,), refused, None, (background_service_of(on_data(OLD, "d1")),))
-    assert next_data_move_step(case) == RemoveLogins("database-d1")
+    assert decide_clean_up(a_move(given_data(case).judged(Work.MOVE), refused, NO_VERDICT, WITH_DATA)) == RemoveLogins("database-d1")
 
 
 def retire_step_with(found: DataSet, delete: str | None = None) -> object:
@@ -708,17 +708,19 @@ def test_a_move_with_data_stops_with_why_instead_of_switching_or_answering_succe
     assert reason in step.reason
 
 
-def test_a_retire_stops_background_services_first_and_deletes_every_part_of_the_named_data_set() -> None:
+def test_a_retire_stops_background_services_first_and_deletes_the_named_data_set_only_where_it_has_no_part_twice() -> None:
     doubled = data_set_named("d2", databases=("database-a", "database-b"))
 
     def step(
         instances: tuple[RunningInstance, ...], background_services: tuple[RunningBackgroundService, ...], delete: str | None
     ) -> Action | Done[RetireResult] | Stop:
         judged = Given(instances, background_services=background_services, data_sets=(D1, doubled)).judged(Work.RETIRE)
-        return decide_retire(judged, delete, ())
+        return cast("Action | Done[RetireResult] | Stop", decide_retire(judged, delete, ()))
 
     assert step((OLD_ON_D1,), (background_service_of(OLD_ON_D1),), "d1") == Retire("old-background-service")
-    assert step((), (), "d2") == DeleteDataSet(doubled)
+    assert step((), (), "d1") == DeleteDataSet(D1)
+    refused = step((), (), "d2")
+    assert isinstance(refused, Stop) and "2 database servers (database-a, database-b)" in refused.reason
     kept = step((), (), None)
     assert isinstance(kept, Done)
     assert kept.answer.kept_data_sets == ["d1", "d2"]

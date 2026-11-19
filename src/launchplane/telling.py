@@ -68,6 +68,10 @@ NAMED: dict[type, Callable[[Any], str]] = {
 }
 
 
+# How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.
+LOOKS = ("wait for ", "check ", "watch ", "read the log ", "mark the release ")
+
+
 def named(action: Action) -> str:
     return NAMED[type(action)](action)
 
@@ -75,12 +79,10 @@ def named(action: Action) -> str:
 # One line for a thing done, and the real error where it was refused.
 def told(action: Action, event: Event) -> tuple[str, str | None]:
     match event:
-        case steps.CheckRefused(report=report) | steps.BackgroundServiceRefused(report=report) | steps.StartRefused(report=report):
+        case steps.Refused(report=report):
             return named(action), report
         case steps.LogRead(unreadable=unreadable):
             return named(action), unreadable
-        case steps.RemovalRefused(report=report):
-            return named(action), report
         case steps.Discarded(kept=True):
             return named(action), "The gate answered that the routes file was renamed to it, so it was kept."
         case steps.Switched(won=False):

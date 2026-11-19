@@ -163,7 +163,7 @@ def background_service_step(judged: Judgement, done: tuple[Event, ...]) -> Actio
 # A login nobody holds goes, and what else is found is said, while the back soon page still shows, so the lane never comes
 # back with it unsaid. Like a move, ending maintenance answers for the instance and its data set, not for another data set.
 def rest_step(judged: Judgement, instance: RunningInstance, done: tuple[Event, ...]) -> Action | Stop | None:
-    if (step := login_step(judged)) is not None:
+    if (step := login_step(judged, done)) is not None:
         return step
     # Switching back is what takes visitors off a back soon page that is not running.
     left = [finding for finding in left_for_a_move(judged, instance) if finding.kind != Kind.BACK_SOON_STOPPED]

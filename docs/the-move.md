@@ -40,7 +40,7 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | --- | --- | --- |
 | `switched` | 200 | The gate says the routes file was renamed for this request's generation, and the web address points at a running instance of this build. A request taken up again after a kill answers this too, though another attempt did the rename. |
 | `unchanged` | 200 | It already did, and nothing was done. |
-| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. |
+| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
@@ -111,6 +111,9 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **Asking for the old build while its instance is still stopping answers `check failed` for a good build.** Confirmed once, after a kill during retirement. Asking again works, and the web address never moves.
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
+- **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
+- **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
+- **A retire or a maintenance call refused for two routers is not taken up again when there is one.** It has ended as `failed`. Ask again.
 - **Only the move passes the gate.** A retire and beginning or ending maintenance are cancelled as before, by a mark in the record their worker reads between actions.
 - **The gate does not know whose turn a lane is.** It refuses a switch after a cancel of its generation, after its candidate was discarded, and after its attempt was fenced. A worker that lost its lane's turn, and whose attempt nobody has fenced, can still switch.
 - **A gate command waits for the lock for as long as something holds it.** Docker's client gives up after 5 s, and the caller then has no answer: the request stays working and is taken up again. Only a test holds the lock for long.

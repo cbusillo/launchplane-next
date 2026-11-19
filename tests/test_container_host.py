@@ -4,9 +4,10 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import pytest
+from docker.errors import APIError
 
 from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.data_set import RULES_AS_READ, RULES_FILE, login_of
@@ -359,6 +360,23 @@ def test_a_login_is_held_by_the_container_the_one_listing_found_it_in_and_any_ot
     holding_a_login(docker, WEB)
     server = database_read(docker, ExecResult(0), ExecResult(0, b'["i_aaaaaaaaaaaa", "i_left_by_a_crash"]'))
     assert (server.accepts_connections, server.unheld_logins) == (True, ("i_left_by_a_crash",))
+
+
+def test_a_failed_lookup_of_who_holds_the_logins_removes_no_login_and_is_an_error_not_a_server_nothing_holds() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    holding_a_login(docker, WEB)
+    database = docker.containers.by_name[DATABASE]
+    database.answers = [ExecResult(0, b'["i_aaaaaaaaaaaa"]')]
+    asked_before = len(database.calls)
+
+    def refuse(**_options: object) -> NoReturn:
+        raise APIError("500 Server Error: the daemon did not list its containers")
+
+    docker.containers.list = refuse
+    with pytest.raises(ContainerHostError, match="did not list its containers"):
+        host.remove_unheld_logins(DATABASE)
+    assert len(database.calls) == asked_before + 1
 
 
 def test_a_server_whose_logins_cannot_be_read_is_read_with_why_and_never_as_having_none() -> None:

@@ -115,6 +115,8 @@ def test_a_repair_whose_login_read_is_refused_keeps_its_background_service_writi
     let_go(LOGIN_READ)
     ended = request_ended(asked["id"])
     assert (ended["stands"], container_id(repaired["container"]), judged()["condition"]) == ("done", started, "good"), ended
+    did = [f"start the background service of {repaired['instance']}"]
+    assert (ended["answer"]["outcome"], ended["answer"]["did"]) == ("repaired", did), ended
 
 
 @pytest.mark.usefixtures("lane_on_a")

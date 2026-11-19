@@ -14,10 +14,10 @@ from launchplane.instance import LaneBuild, Verdict
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands, put_back_told
+from launchplane.record import Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
-from launchplane.telling import Witness
+from launchplane.telling import LOOKS, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -78,6 +78,15 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
             return lanes.begin_maintenance(product, lane, witness)
         case Work.END_MAINTENANCE:
             return lanes.end_maintenance(product, lane, witness)
+
+
+# A request's answer says what every attempt of it did, as each told it. It is history: nothing is decided from it.
+def of_every_attempt(answer: Answer, kept: Kept | None) -> Answer:
+    if not isinstance(answer, MoveResult) or kept is None or len(kept.attempts) < 2:
+        return answer
+    did = [event.did for event in kept.events if event.error is None and not event.did.startswith(LOOKS)]
+    repaired = Outcome.REPAIRED if did and answer.outcome is Outcome.UNCHANGED else answer.outcome
+    return answer.model_copy(update={"did": did, "outcome": repaired})
 
 
 # Several threads each take the oldest request of a lane none of them is on, so a lane has one worker and its requests
@@ -248,7 +257,7 @@ class Worker:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
-            answer = carried_out(self.lanes, request, attempt, witness)
+            answer = of_every_attempt(carried_out(self.lanes, request, attempt, witness), self.record.read(request.id))
         except Cancelled as cancelled:
             kept = self.record.read(request.id)
             told = [] if kept is None else put_back_told(kept)

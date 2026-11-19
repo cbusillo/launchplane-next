@@ -3,15 +3,18 @@ from collections.abc import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane.act import Lanes, Waiting
+from launchplane import plan, steps
+from launchplane.act import Lanes, Stopped, Waiting
 from launchplane.api import create_app
+from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import Mount, Unread
 from launchplane.judge import Work
 from launchplane.record import Asked, Record, Stands
+from launchplane.telling import LOOKS, NAMED, named
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
-from tests.test_act import lane_brought_up_with_a, lanes_on
+from tests.pretend_host import D1, EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
+from tests.test_act import BUILD_A, lane_brought_up_with_a, lanes_on
 from tests.test_worker import CALLER, MOVE_B, kept_of
 
 DATABASE = "database-data-1"
@@ -53,7 +56,9 @@ def test_a_repair_whose_last_login_read_fails_stays_working_with_the_background_
     assert left.error is not None and str(NOT_TOLD) in left.error
     host.change_database(DATABASE, unheld_logins=())
     assert worker.work_next() is True
-    assert kept_of(record, request.id).stands is Stands.DONE
+    done = kept_of(record, request.id)
+    assert done.stands is Stands.DONE and done.answer is not None
+    assert (done.answer["outcome"], done.answer["did"]) == ("repaired", [f"start the background service of {service.instance}"])
     assert [action.split()[0] for action in host.actions] == ["start", "await"]
 
 
@@ -69,24 +74,52 @@ def test_a_repair_that_fails_for_another_reason_leaves_the_background_service_it
     assert [each.generation for each in proxy.host.background_services.values()] == [request.generation]
 
 
-def test_a_start_on_a_wrongly_set_up_data_set_ends_failed_with_its_data_kept_and_says_the_logins_were_not_read_and_a_retire_ends(
-    record: Record,
-) -> None:
-    proxy = lane_brought_up_with_a()
-    host = proxy.host
+# A lane retired with its data kept, whose database server then has another volume: a start on it, and then a retire.
+def a_start_and_then_a_retire_on_another_volume(record: Record, proxy: PretendProxy, unheld: object) -> tuple[str, list[str]]:
     lanes_on(proxy).retire("site", "testing")
-    host.change_database(DATABASE, mounts=(Mount(source="another-volume", path="/var/lib/postgresql"),), unheld_logins=NOT_TOLD)
+    proxy.host.change_database(DATABASE, mounts=(Mount(source="another-volume", path="/var/lib/postgresql"),), unheld_logins=unheld)
     worker = worker_on(proxy, record)
     move = record.write(MOVE_A, CALLER, None)
     assert worker.work_next() is True
     retire = record.write(RETIRE, CALLER, None)
     assert worker.work_next() is True
     failed, retired = kept_of(record, move.id), kept_of(record, retire.id)
-    assert failed.stands is Stands.FAILED and failed.error is not None
-    assert "another-volume mounted" in failed.error
-    assert f"Whether it left a login no container holds is not known: {NOT_TOLD}." in failed.error
-    assert (retired.stands, retired.answer and retired.answer["logins_not_read"]) == (Stands.DONE, [str(NOT_TOLD)])
-    assert (list(host.data_sets), host.instances) == (["data-1"], {})
+    assert (failed.stands, retired.stands) == (Stands.FAILED, Stands.DONE), (failed, retired)
+    assert failed.error is not None and "another-volume mounted" in failed.error and retired.answer is not None
+    assert (list(proxy.host.data_sets), proxy.host.instances) == (["data-1"], {})
+    return failed.error, retired.answer["logins_not_read"]
+
+
+def test_a_start_on_a_wrongly_set_up_data_set_ends_failed_with_its_data_kept_and_says_the_logins_were_not_read_and_a_retire_ends(
+    record: Record,
+) -> None:
+    error, not_read = a_start_and_then_a_retire_on_another_volume(record, lane_brought_up_with_a(), NOT_TOLD)
+    assert f"Whether it left a login no container holds is not known: {NOT_TOLD}." in error
+    assert not_read == [str(NOT_TOLD)]
+
+
+def test_a_refused_lookup_of_who_holds_a_login_decides_neither_a_proved_failure_nor_a_retire_and_both_say_it_was_not_had(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+
+    def holders_not_told(database: str) -> None:
+        raise ContainerHostError(f"Listing the containers that hold the logins of {database} on test failed: timed out")
+
+    proxy.host.remove_unheld_logins = holders_not_told
+    error, not_read = a_start_and_then_a_retire_on_another_volume(record, proxy, ("i_left",))
+    assert "Whether it left a login no container holds is not known: Listing the containers that hold the logins" in error
+    assert ["Listing the containers" in each for each in not_read] == [True]
+
+
+def test_a_retire_naming_a_data_set_that_has_two_volumes_deletes_nothing_of_it_names_both_and_retires_the_rest() -> None:
+    proxy = lane_brought_up_with_a()
+    host = proxy.host
+    host.change_data_set("site", "testing", "data-1", volumes=("volume-data-1", "volume-put-beside-it"))
+    with pytest.raises(Stopped, match=r"2 volumes \(volume-data-1, volume-put-beside-it\).*nothing of the data set was deleted"):
+        lanes_on(proxy).retire("site", "testing", delete_data_set="data-1")
+    assert (list(host.data_sets), host.instances, host.background_services) == (["data-1"], {}, {})
+    assert not any(action.startswith("delete") for action in host.actions)
 
 
 TWO_ROUTERS = {
@@ -138,3 +171,40 @@ def test_under_two_routers_for_its_web_address_this_call_changes_nothing_and_doe
     with pytest.raises(Waiting, match="has 2 answers where it must have one"):
         call(lanes_on(proxy))
     assert proxy.host.actions == []
+
+
+LOOKING = (
+    steps.AwaitRoute(WEB_ADDRESS, "a"),
+    steps.AwaitDatabase("database"),
+    steps.Check("a"),
+    steps.AwaitBackgroundService("a"),
+    steps.ReadLog("a"),
+    steps.Abandon(WEB_ADDRESS, GENERATION),
+)
+CHANGING = (
+    steps.StartProxy(),
+    steps.WriteRoute(WEB_ADDRESS, "a"),
+    steps.RemoveRoute(WEB_ADDRESS, "a"),
+    steps.CreateDataSetNetwork("site", "testing", "d1"),
+    steps.CreateDataSetVolume("site", "testing", "d1"),
+    steps.CreateDatabase("site", "testing", "d1", "network", "volume", "image"),
+    steps.StartDatabase("database"),
+    steps.DeleteDataSet(D1),
+    steps.StartInstance(BUILD_A, "a"),
+    steps.StartBackgroundService(BUILD_A, "a", None, ()),
+    steps.Retire("a"),
+    steps.RemoveLogins("database"),
+    steps.ShowBackSoon(WEB_ADDRESS),
+    steps.StopPart("a"),
+    steps.StopDatabase("database"),
+    steps.StartStopped("a"),
+    steps.Switch(WEB_ADDRESS, "a", GENERATION, 1),
+    steps.Discard(WEB_ADDRESS, "a", GENERATION, 1),
+)
+
+
+def test_every_step_is_told_as_a_change_or_as_a_look_and_a_request_s_account_of_what_it_did_takes_only_the_changes() -> None:
+    assert {type(each) for each in (*LOOKING, *CHANGING)} == set(NAMED)
+    assert [named(each).startswith(LOOKS) for each in LOOKING] == [True] * len(LOOKING)
+    assert [named(each).startswith(LOOKS) for each in CHANGING] == [False] * len(CHANGING)
+    assert [plan.change_made_by(each) is None for each in LOOKING] == [True] * len(LOOKING)

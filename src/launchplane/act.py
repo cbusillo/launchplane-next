@@ -184,6 +184,7 @@ TAKE: dict[type, Take] = {
     steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
     steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
     steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
+    steps.StartStopped: lambda host, _proxy, step: host.start_part(step.container),
 }
 
 
@@ -237,7 +238,8 @@ def settle[Answer](
             if isinstance(step.answer, PutBack):
                 raise Cancelled(step.answer)
             if isinstance(step.answer, steps.Result):
-                step.answer.logins_not_read = [finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)]
+                untold = [finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)]
+                step.answer.logins_not_read = [*untold, *(each.report for each in done if isinstance(each, steps.LoginsUnread))]
             return step.answer
         if isinstance(step, Stop):
             raise (Waiting if isinstance(step, steps.Wait) else Stopped)(step.reason)
@@ -444,8 +446,8 @@ class Lanes:
             return self.await_background_service(action.container, with_log=not behind_back_soon)
         if isinstance(action, steps.ReadLog):
             return self.read_log(action.container)
-        if isinstance(action, steps.StartStopped):
-            return self.start_stopped(action)
+        if isinstance(action, steps.StartStopped | steps.RemoveLogins):
+            return self.taken_or_refused(action)
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
@@ -470,11 +472,14 @@ class Lanes:
             return steps.RemovalRefused(container, str(error))
         return steps.Discarded(container, kept=False)
 
-    def start_stopped(self, action: steps.StartStopped) -> Event:
+    # A part that will not start, and a server whose logins or their holders cannot be read, are answers to plan from.
+    def taken_or_refused(self, action: steps.StartStopped | steps.RemoveLogins) -> Event:
         try:
-            self.host.start_part(action.container)
+            TAKE[type(action)](self.host, self.proxy, action)
         except ContainerHostError as error:
-            return steps.StartRefused(action.container, str(error))
+            if isinstance(action, steps.StartStopped):
+                return steps.StartRefused(action.container, str(error))
+            return steps.LoginsUnread(action.database, str(error))
         return action
 
     def read_log(self, container: str) -> Event:

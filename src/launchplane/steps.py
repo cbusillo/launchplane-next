@@ -282,6 +282,11 @@ class RemovalRefused(Refused):
     pass
 
 
+# The logins of a database server, or who holds them, could not be read when they were to be removed. None was removed.
+class LoginsUnread(Refused):
+    pass
+
+
 @dataclass(frozen=True)
 class Done[Answer]:
     answer: Answer
@@ -346,4 +351,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | RemovalRefused
+type Event = Action | Refused | LogRead | Switched | Discarded
