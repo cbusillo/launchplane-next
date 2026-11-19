@@ -13,6 +13,7 @@ from launchplane.gate import Answer as GateAnswer
 from launchplane.gate import GateError
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
+from launchplane.page import request_note
 from launchplane.record import MOST_ATTEMPTS, Asked, Record, RecordError, Refused, Request, Stands
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
@@ -889,8 +890,7 @@ def test_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_as_
         True,
     )
     assert (proxy.written, sorted(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a", NEW])
-    [card] = client.get("/running").json()["cards"]
-    assert [row["note"] for row in card["rows"] if row["name"] == f"Request {asked}"] == [kept.error]
+    assert request_note(kept, {}) == kept.error
 
 
 def test_giving_up_a_request_that_needs_a_person_and_whose_release_is_committed_is_refused_and_it_is_worked_again(
