@@ -682,7 +682,14 @@ def test_a_check_whose_failure_carries_the_password_is_answered_without_it(lane_
     assert len(logins_on(lane_on_a.data_sets[0])) == 1
 
 
+def retire_leaky_lane_with_its_data() -> None:
+    for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
+        retire(LEAKY_PRODUCT, LANE, found["data_set"])
+    retire(LEAKY_PRODUCT, LANE)
+
+
 def test_a_background_service_that_prints_its_password_and_fails_under_a_switched_release_is_shown_without_the_password() -> None:
+    retire_leaky_lane_with_its_data()
     try:
         status, asked = ask(f"/lanes/{LEAKY_PRODUCT}/{LANE}/move", {"build": BUILD_A})
         assert status == 202, asked
@@ -700,6 +707,4 @@ def test_a_background_service_that_prints_its_password_and_fails_under_a_switche
         assert password not in json.dumps(kept) + shown_by_launchplane()
     finally:
         kill_launchplane_and_end_what_was_asked()
-        for found in [each for each in read_running()["data_sets"] if each["product"] == LEAKY_PRODUCT]:
-            retire(LEAKY_PRODUCT, LANE, found["data_set"])
-        retire(LEAKY_PRODUCT, LANE)
+        retire_leaky_lane_with_its_data()
