@@ -430,10 +430,10 @@ class Lanes:
             if isinstance(route, Conflicting):
                 why = f"{route}, so where those visitors go is not known"
             elif route.container in containers:
-                why = f"the proxy sends the visitors of {web_address} to what it would take away, so that was left running"
+                why = f"The proxy sends the visitors of {web_address} to what it would take away, so that was left running"
             else:
                 continue
-            raise Waiting(f"Launchplane was about to {named(action)}, and {why}. Nothing more was done.")
+            raise Waiting(f"Launchplane was about to {named(action)}. {why}. Nothing more was done.")
 
     # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
     def take(self, action: Action, *, behind_back_soon: bool = False) -> Event:

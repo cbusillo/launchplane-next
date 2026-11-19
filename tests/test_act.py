@@ -218,7 +218,7 @@ TAKES_A_DATABASE_AWAY: dict[str, Callable[[Lanes], object]] = {
 def test_no_database_is_stopped_or_removed_while_a_loaded_route_names_it(call: Callable[[Lanes], object]) -> None:
     proxy = lane_brought_up_with_a()
     proxy.route("elsewhere.site.test", "database-data-1")
-    with pytest.raises(Waiting, match="the proxy sends the visitors of elsewhere"):
+    with pytest.raises(Waiting, match="The proxy sends the visitors of elsewhere"):
         call(lanes_on(proxy))
     [database] = proxy.host.data_sets["data-1"].databases
     assert database.state == InstanceState.RUNNING
