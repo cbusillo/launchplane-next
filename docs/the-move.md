@@ -64,14 +64,14 @@ A routes file that is otherwise not exactly the route Launchplane writes for tha
 
 A move that finds the file and the loaded route disagreeing before it has switched anything waits for the proxy, or stops with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a loaded route Launchplane did not write, stops the call.
 
-No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the call stops with `503` and says so. A database server about to be stopped or deleted is checked the same way. While the proxy has two routers for one web address, of any lane, where those visitors go is not known, and nothing is stopped or removed. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
+No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the request stays `working` and says so. A database server about to be stopped or deleted is checked the same way. While the proxy has two routers for one web address, of any lane, where those visitors go is not known, and nothing is stopped or removed. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
 
 ### Two routers for one web address
 
 The proxy must have one router for a web address. When it has loaded two, from a second file in the routes folder, that is a conflict, also when both send the web address to the same instance, and in whatever order the proxy lists them. Neither is taken for where visitors go.
 
 - The lane's `condition` is `conflicting`, with one finding that names each router, the container it sends to and its status. The web address says `conflicting` with the same sentence, and has no `sends_to_container`.
-- No call changes anything on that lane. A move stays `working` with the same sentence in `error`, starts, switches and removes nothing, and is taken up again every 5 s. Once the proxy has one router it goes on by itself. A retire and the maintenance calls answer `503` with the sentence, having changed nothing.
+- No call changes anything on that lane. A move stays `working` with the same sentence in `error`, starts, switches and removes nothing, and is taken up again every 5 s. Once the proxy has one router it goes on by itself. A retire and the maintenance calls do the same.
 - Nothing puts it right by itself: remove the file Launchplane did not write.
 
 An instance that exists and does not receive visitors is left over from a move cut short. The next move of the lane, to any build, retires it. The web address points at exactly one instance the whole time.
@@ -115,10 +115,9 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
 - **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A removal of logins that found none left to remove is listed as one.
-- **Two routers on another lane's web address can stop a retire after its route is removed.** The retire removes its lane's route first, and the guard then refuses to remove any container while any web address has two routers. That lane has lost its visitors, and its retire has ended as `failed`. Ask again once the other lane has one router.
+- **Two routers on another lane's web address can stop a retire after its route is removed.** The retire removes its lane's route first, and the guard then refuses to remove any container while any web address has two routers. That lane has lost its visitors, and its retire stays `working` until the other lane has one router.
 - **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
 - **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
-- **A retire or a maintenance call refused for two routers is not taken up again when there is one.** It has ended as `failed`. Ask again.
 - **Only a move's cancel is decided at the gate.** A retire and beginning or ending maintenance change the route through the gate, and are cancelled as before, by a mark in the record their worker reads between actions.
 - **The gate does not know whose turn a lane is.** It refuses a switch after a cancel of its generation, after its candidate was discarded, and after its attempt was fenced. A worker that lost its lane's turn, and whose attempt nobody has fenced, can still switch, or edit a route that is still exactly as it read it.
 - **A routes file changed by hand between a move's planning and its switch is overwritten.** The switch does not compare the route the move read, as an edit does.

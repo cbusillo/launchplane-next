@@ -134,7 +134,7 @@ class Asked(GateNeverAsked):
 # Each request is worked within the call that asked for it, so the call answers with how it ended.
 def app_working_at_once(read: Callable[[], Status], lanes: Carries, secrets: Secrets) -> FastAPI:
     record = PretendRecord()
-    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets, GateNeverAsked())
+    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets, lanes)
 
 
 STOPPED = Asked("POST", "/", 503)

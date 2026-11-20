@@ -21,7 +21,7 @@ from tests.pretend_host import (
     EARLIER,
     WEB_ADDRESS,
     WITH_DATA,
-    GateNeverAsked,
+    LanesNeverAsked,
     LaunchplaneKilled,
     PretendGate,
     PretendHost,
@@ -662,7 +662,7 @@ def test_a_proxy_that_does_not_load_a_renamed_route_leaves_the_release_working_h
     assert (kept.stands, kept.answer["outcome"], list(proxy.host.instances)) == (Stands.DONE, "switched", [NEW])
 
 
-class GateThatCannotBeReached(GateNeverAsked):
+class GateThatCannotBeReached(LanesNeverAsked):
     def abandon(self, product: str, lane: str, generation: str, /) -> NoReturn:
         raise GateError(f"The gate gave no verdict for the release {generation} of {lane} of {product}: connection refused")
 

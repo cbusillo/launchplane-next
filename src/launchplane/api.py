@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Any, Protocol, TextIO
+from typing import Annotated, Any, TextIO
 
 import uvicorn
 import uvicorn.config
@@ -17,10 +17,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from launchplane.act import Lanes, Status, Stopped
+from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
@@ -44,17 +43,14 @@ from launchplane.record import (
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
 from launchplane.steps import CANCEL_WON, MaintenanceResult, MoveResult, RetireResult
-from launchplane.worker import Worker
+from launchplane.telling import Witness
+from launchplane.worker import Carries, Worker, carried_out
 
 type StatusReader = Callable[[], Status]
 
 
-# What the calls ask of the gate, for a move.
-class AsksGate(Protocol):
-    # Why a cancel came too late, or None when it won.
-    def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
-    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
-    def why_part_way(self, product: str, lane: str, /) -> str | None: ...
+class WouldAct(Exception):
+    pass
 
 
 # Past every attempt a request can have: fenced through it, a generation with no verdict can never be renamed for.
@@ -271,7 +267,7 @@ NOT_CONFIRMED = (
 
 
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object], gate: AsksGate) -> None:
+    def __init__(self, record: Record, wake: Callable[[], object], gate: Carries) -> None:
         self.record = record
         self.wake = wake
         self.gate = gate
@@ -293,14 +289,26 @@ class Calls:
             return None
         verdict = self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict
         if verdict is Verdict.NONE:
-            part_way = self.gate.why_part_way(kept.product, kept.lane) if giving_up else None
-            why = f"Request {request} was not given up: {part_way}. POST /requests/{request}/retry finishes it. Nothing was changed."
-            return None if part_way is None else not_finished(response, HTTPStatus.CONFLICT, why)
+            whole = not giving_up or kept.work is Work.MOVE or any(self.has_nothing_to_do(kept, back) for back in (False, True))
+            why = f"Request {request} was not given up: {kept.lane} of {kept.product} is neither finished nor as it was before."
+            return None if whole else not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{why} A retry finishes it.")
         decided = "The routes file" if verdict is Verdict.COMMITTED else "A cancel won before the routes file"
         why = f"{decided} of {kept.lane} of {kept.product} was renamed for request {request}, so it is not given up."
         self.record.resume(request, why)
         self.wake()
         return not_finished(response, HTTPStatus.CONFLICT, f"{why} It is being worked again and will be finished.")
+
+    # The request's own call, on what the host shows now and stopped before it acts: whether it would answer with nothing
+    # done or, cancelled, with nothing put back. So the one check of a finished maintenance or retire is its planner's.
+    def has_nothing_to_do(self, kept: Kept, cancelled: bool) -> bool:
+        def stop_before_acting() -> None:
+            raise WouldAct
+
+        try:
+            carried_out(self.gate, kept, 0, Witness(hold=stop_before_acting, cancel_asked=lambda: cancelled))
+        except (WouldAct, Cancelled) as stopped:
+            return isinstance(stopped, Cancelled)
+        return True
 
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
@@ -502,7 +510,7 @@ def add_cancel_call(app: FastAPI, calls: Calls) -> None:
         return calls.cancel(request, f"a call from {asker(http)}", wait, response)
 
 
-def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: AsksGate) -> FastAPI:
+def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: Carries) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 

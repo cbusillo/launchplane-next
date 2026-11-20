@@ -35,7 +35,7 @@ from launchplane.instance import (
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.steps import FreshNames
+from launchplane.steps import FreshNames, MaintenanceResult, MoveResult, RetireResult
 from launchplane.telling import Witness
 
 WEB_ADDRESS = "testing.site.test"
@@ -324,13 +324,24 @@ class GateNeverAsked:
         assert product and lane and generation and attempt
         return self.answers
 
-    def why_part_way(self, product: str, lane: str, /) -> str | None:
-        assert self.answers and product and lane
-        return None
-
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
         assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness and logins
         return []
+
+
+# What the calls are given where no request is worked: no lane is ever asked to do anything.
+class LanesNeverAsked(GateNeverAsked):
+    def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult:
+        raise AssertionError(f"a move to {target} was asked for as {generation}, attempt {attempt}, by {witness}")
+
+    def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult:
+        raise AssertionError(f"a retire of {lane} of {product} was asked for, deleting {delete_data_set}, by {witness}")
+
+    def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult:
+        raise AssertionError(f"maintenance of {lane} of {product} was begun by {witness}")
+
+    def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult:
+        raise AssertionError(f"maintenance of {lane} of {product} was ended by {witness}")
 
 
 class PretendProxy:

@@ -15,7 +15,6 @@ from launchplane.instance import (
     Conflicting,
     DataSet,
     DataSetUse,
-    InstanceState,
     LaneBuild,
     LaneReading,
     OnHost,
@@ -50,6 +49,7 @@ from launchplane.steps import (
     MaintenanceResult,
     MoveResult,
     PutBack,
+    RetireOutcome,
     RetireResult,
     Stop,
     TooLate,
@@ -368,22 +368,17 @@ class Lanes:
         answer = self.gate().abandon(web_address, generation)
         return plan.too_late_to_cancel(web_address) if answer.verdict is Verdict.COMMITTED else None
 
-    # Where a maintenance or a retire cut short leaves a lane: its route names no instance and a part of it is still up.
-    def why_part_way(self, product: str, lane: str) -> str | None:
-        read = self.read(Scope(lane=(product, lane))).lane(product, lane)
-        if isinstance(read.route.file, Unread):
-            raise Waiting(f"{read.route.file}, so whether {lane} of {product} was left part way is not known.")
-        up = sorted(part.container for part in (*read.instances, *read.background_services) if part.state != InstanceState.STOPPED)
-        whole = not up or read.route.written not in (None, BACK_SOON)
-        return None if whole else f"{read.web_address} sends visitors to no instance and {', '.join(up)} is still up"
-
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
-        return settle(
+        answer = settle(
             *self.judging(product, lane, self.description_of(product), Work.RETIRE),
             lambda judged, done, cancel: plan.decide_retire(judged, delete_data_set, done, cancel),
             self.take,
             witness,
         )
+        # A data set named for deleting that no lane on the host has is deleted, whichever attempt's removal it was.
+        on_host = {each.data_set for each in self.read(Scope()).parts.data_sets} if delete_data_set else set[str]()
+        gone = delete_data_set not in {None, answer.deleted_data_set, *on_host}
+        return answer.model_copy(update={"outcome": RetireOutcome.DELETED, "deleted_data_set": delete_data_set}) if gone else answer
 
     def begin_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)

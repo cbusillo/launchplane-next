@@ -99,20 +99,16 @@ def unread_after_the_first_change(proxy: PretendProxy, changes: int = 1) -> Call
 def lose_the_first_reply_to(host: object, change: str) -> None:
     made = getattr(host, change)
 
-    def made_and_not_answered(container: str) -> None:
+    def made_and_not_answered(changed: object) -> None:
         setattr(host, change, made)
-        made(container)
-        raise ContainerHostError(f"{change} of {container} on test failed: the connection was lost before the reply")
+        made(changed)
+        raise ContainerHostError(f"{change} on test failed: the connection was lost before the reply")
 
     setattr(host, change, made_and_not_answered)
 
 
 def refuse(*_sent: object) -> NoReturn:
     raise ContainerHostRefused("The change on test was refused: pull access denied")
-
-
-def fence_refused(web_address: str, generation: str, attempt: int) -> NoReturn:
-    refuse(web_address, generation, attempt)
 
 
 def left_working(record: Record, request: int) -> Kept:
@@ -195,7 +191,7 @@ def test_a_request_found_working_whose_fence_the_host_refuses_to_run_does_nothin
     worker, fence = worker_on(proxy, record), proxy.gate.fence
     request = record.write(asked, CALLER, None)
     assert record.take_up(request.id) is not None
-    proxy.gate.fence = fence_refused
+    proxy.gate.fence = refuse
     assert worker.work_next() is True
     assert (left_working_after_an_interruption(record, request.id), proxy.host.actions) == ("pull access denied", [])
     proxy.gate.fence = fence
@@ -210,17 +206,13 @@ def test_a_request_whose_work_the_host_shows_done_ends_as_done_and_changes_nothi
     assert (kept_of(record, request.id).stands, proxy.host.actions, is_as_asked(proxy)) == (Stands.DONE, [], True)
 
 
-# Ending maintenance starts the database server, waits for it, and only then starts a part.
-CHANGES_UNTIL_A_PART_IS_UP = {"a maintenance end": 3}
-
-
-# The lane as a request of this kind cut short leaves it, with a part up and that request needing a person.
-def cut_short_and_left_to_a_person(record: Record, kind: str) -> tuple[TestClient, PretendProxy, Worker, int]:
-    asked, lane, _, _, _, _, _ = KINDS[kind]
+# The lane as this request leaves it when it is cut short after so many changes, with the request needing a person.
+def cut_short_and_left_to_a_person(
+    record: Record, asked: Asked, lane: Lane, changes: int = 1
+) -> tuple[TestClient, PretendProxy, Worker, int]:
     proxy = lane()
     lanes = lanes_on(proxy)
-    worker = Worker(record, lanes, NO_SECRETS)
-    read_again = unread_after_the_first_change(proxy, CHANGES_UNTIL_A_PART_IS_UP.get(kind, 1))
+    worker, read_again = Worker(record, lanes, NO_SECRETS), unread_after_the_first_change(proxy, changes)
     request = record.write(asked, CALLER, None)
     assert worker.work_next() is True
     read_again()
@@ -233,7 +225,7 @@ def cut_short_and_left_to_a_person(record: Record, kind: str) -> tuple[TestClien
 def test_giving_up_a_request_whose_lane_cannot_be_read_answers_503_and_the_request_still_needs_a_person(
     record: Record, kind: str
 ) -> None:
-    client, proxy, _, request = cut_short_and_left_to_a_person(record, kind)
+    client, proxy, _, request = cut_short_and_left_to_a_person(record, *KINDS[kind][:2])
     unread_after_the_first_change(proxy)
     given_up = client.post(f"/requests/{request}/give-up")
     assert (given_up.status_code, UNREAD in given_up.json()["error"], kept_of(record, request).stands) == (
@@ -243,17 +235,54 @@ def test_giving_up_a_request_whose_lane_cannot_be_read_answers_503_and_the_reque
     )
 
 
-def test_giving_up_a_request_whose_lane_is_part_way_is_refused_saying_what_is_still_up_and_asking_again_finishes_the_lane(
-    record: Record, kind: str
+# What was asked, of which lane, how many changes it made before it was cut short, and the lane once it is finished.
+PART_WAY: dict[str, tuple[Asked, Lane, int, Callable[[PretendProxy], bool]]] = {
+    "beginning maintenance, with only the back soon page up": (
+        BEGIN,
+        lane_brought_up_with_a,
+        1,
+        is_in_maintenance_with_everything_stopped,
+    ),
+    "beginning maintenance, with the database server still up": (
+        BEGIN,
+        lane_brought_up_with_a,
+        3,
+        is_in_maintenance_with_everything_stopped,
+    ),
+    "ending maintenance, with only the database server started": (END, lane_in_maintenance, 1, is_back_with_everything_up),
+    "ending maintenance, with the web part started": (END, lane_in_maintenance, 3, is_back_with_everything_up),
+    "a retire, with the route removed": (RETIRE, lane_brought_up_with_a, 1, is_retired),
+    "a retire from maintenance, with stopped containers still there": (RETIRE, lane_in_maintenance, 1, is_retired),
+}
+
+
+@pytest.mark.parametrize("cut_short", PART_WAY.values(), ids=PART_WAY.keys())
+def test_giving_up_a_request_whose_lane_is_neither_finished_nor_as_it_was_answers_503_changes_nothing_and_a_retry_finishes_it(
+    record: Record, cut_short: tuple[Asked, Lane, int, Callable[[PretendProxy], bool]]
 ) -> None:
-    client, proxy, worker, request = cut_short_and_left_to_a_person(record, kind)
-    is_as_asked = KINDS[kind][5]
-    up = parts_up(proxy)
+    asked, lane, changes, is_as_asked = cut_short
+    client, proxy, worker, request = cut_short_and_left_to_a_person(record, asked, lane, changes)
+    left = (dict(proxy.written), parts_up(proxy), databases_up(proxy), list(proxy.host.actions))
     given_up = client.post(f"/requests/{request}/give-up")
-    assert (given_up.status_code, kept_of(record, request).stands, bool(up)) == (409, Stands.NEEDS_A_PERSON, True)
-    assert f"{WEB_ADDRESS} sends visitors to no instance and {', '.join(up)} is still up" in given_up.json()["error"]
+    assert (given_up.status_code, kept_of(record, request).stands, is_as_asked(proxy)) == (503, Stands.NEEDS_A_PERSON, False)
+    assert "is neither finished nor as it was before" in given_up.json()["error"]
+    assert (dict(proxy.written), parts_up(proxy), databases_up(proxy), list(proxy.host.actions)) == left
     again = client.post(f"/requests/{request}/retry").json()["id"]
     assert (worker.work_next(), kept_of(record, again).stands, is_as_asked(proxy)) == (True, Stands.DONE, True)
+
+
+def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered_ends_saying_that_data_set_was_deleted(
+    record: Record,
+) -> None:
+    proxy = lane_retired()
+    worker = worker_on(proxy, record)
+    lose_the_first_reply_to(proxy.host, "delete_data_set")
+    request = record.write(RETIRE.model_copy(update={"delete_data_set": "data-1"}), CALLER, None)
+    assert (worker.work_next(), left_working(record, request.id).answer, list(proxy.host.data_sets)) == (True, None, [])
+    assert worker.work_next() is True
+    ended = kept_of(record, request.id)
+    assert ended.stands is Stands.DONE and ended.answer is not None
+    assert (ended.answer["outcome"], ended.answer["deleted_data_set"]) == ("deleted", "data-1")
 
 
 def test_giving_up_a_request_whose_lane_was_read_and_is_not_part_way_ends_it_and_changes_nothing(record: Record, kind: str) -> None:
