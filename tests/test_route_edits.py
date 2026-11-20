@@ -112,7 +112,7 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
     record: Record,
 ) -> None:
     proxy = lane_in_maintenance()
-    worker, edit, read = worker_on(proxy, record), proxy.edit, proxy.host.read
+    worker, edit, read_host = worker_on(proxy, record), proxy.edit, proxy.host.read
     sent: list[Sent] = []
     arrived: list[str] = []
 
@@ -122,7 +122,7 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
 
     def read_once_the_old_change_has_arrived(lane: tuple[str, str] | None = None) -> OnHost:
         arrived.append(edit(*sent[0]))
-        return read(lane)
+        return read_host(lane)
 
     proxy.edit = killed_once_sent
     request = record.write(END, CALLER, None)

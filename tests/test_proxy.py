@@ -83,9 +83,6 @@ class ProxyHost:
         else:
             answered = next(self.answers)
             return CommandResult(exit_code=0 if answered else 1, output="" if answered else "Connection refused")
-        if self.loads_on_write:
-            self.load()
-        return CommandResult(exit_code=0, output="")
 
     # The commands of the gate are run as they are, by a real shell, on a folder that stands for the proxy's.
     def run_in_a_folder(self, command: list[str]) -> CommandResult:

@@ -205,10 +205,10 @@ class Worker:
 
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         witness = self.witness_of(request, attempt, held)
-        if request.work is not Work.MOVE:
-            return self.carry_fenced(request, witness)
-        while not self.move_ended_or_left_open(request, attempt, witness):
+        while request.work is Work.MOVE and not self.move_ended_or_left_open(request, attempt, witness):
             pass
+        if request.work is not Work.MOVE:
+            self.carry_fenced(request, witness)
 
     # An earlier attempt's change of the route is made or fenced before this one reads the lane, and this one's before it ends.
     def carry_fenced(self, request: Request, witness: Witness) -> None:
