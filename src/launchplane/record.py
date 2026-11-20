@@ -100,9 +100,10 @@ class Stands(StrEnum):
     FAILED = "failed"
     NEEDS_A_PERSON = "needs a person"
     CANCELLED = "cancelled"
+    REPLACED = "replaced"
 
 
-ENDED = (Stands.DONE, Stands.FAILED, Stands.CANCELLED)
+ENDED = (Stands.DONE, Stands.FAILED, Stands.CANCELLED, Stands.REPLACED)
 
 ATTEMPTED = {
     Work.MOVE: "The move of {lane} of {product} to {build}",
@@ -139,6 +140,8 @@ class Request(Asked):
     cancel_asked_by: str | None = None
     # Why a cancel that was asked was not carried out, once the worker has read the host and said so.
     cancel_refused: str | None = None
+    # The newer request for the lane that took the waiting place from this one, which then ended with nothing done.
+    replaced_by: int | None = None
 
     def asked(self) -> Asked:
         return Asked.model_validate(self.model_dump(include=set(Asked.model_fields)))
@@ -220,6 +223,13 @@ def how_cancelled(request: Request) -> str:
     return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}{kept}"
 
 
+def how_replaced(request: Request) -> str:
+    return (
+        f"{request.attempted()} was replaced by request {request.replaced_by} while it waited. It was never taken up, "
+        "so nothing was done."
+    )
+
+
 # What every attempt said it was about to do to put the lane back. It is history: nothing is decided from it.
 def put_back_told(kept: Kept) -> list[str]:
     told = [event.did.removesuffix(TO_PUT_BACK) for event in kept.events if event.did.endswith(TO_PUT_BACK)]
@@ -233,7 +243,8 @@ ASKED_AGAIN = " A person asked for it again, as request {again}."
 # PyCharm has no schema to resolve these against. The tests run every statement against PostgreSQL.
 # noinspection SqlResolve
 class Sql:
-    SAME_KEY: Final = "select * from request where key_digest = %s"
+    SAME_KEY: Final = "select request.* from request, request_key answered where (digest, request) = (%s, request.id)"
+    KEEP_KEY: Final = "insert into request_key (digest, request) values (%s, %s)"
     WAITS_ON_A_PERSON: Final = """
     select id from request where (product, lane) = (%s, %s) and stands = 'needs a person' order by id limit 1
     """
@@ -244,16 +255,16 @@ class Sql:
     order by id limit 1
     """
     WRITE: Final = """
-    insert into request (product, lane, work, build, delete_data_set, asked_by, key_digest, generation)
-    values (%s, %s, %s, %s, %s, %s, %s, %s) returning *
+    insert into request (product, lane, work, build, delete_data_set, asked_by, generation)
+    values (%s, %s, %s, %s, %s, %s, %s) returning *
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
     RECENTLY_ENDED: Final = """
-    select * from request where stands in ('done', 'failed', 'cancelled') order by ended_at desc, id desc limit 20
+    select * from request where stands in ('done', 'failed', 'cancelled', 'replaced') order by ended_at desc, id desc limit 20
     """
     CANCELS_ANSWERED: Final = """
     select * from request
-    where cancel_asked_at is not null and stands in ('done', 'failed', 'cancelled')
+    where (cancel_asked_at is not null and stands in ('done', 'failed', 'cancelled') or stands = 'replaced')
         and ended_at > now() - make_interval(mins => %s)
     order by id
     """
@@ -269,13 +280,12 @@ class Sql:
         order by product, lane, id
     ) oldest_of_each_lane order by id
     """
-    # One that asks exactly what the new request asks is left: asking for the same again cancels nothing.
-    UNFINISHED_BEFORE: Final = """
-    select older.id from request older, request new
-    where new.id = %s and (older.product, older.lane) = (new.product, new.lane) and older.id < new.id
-        and older.stands in ('waiting', 'working')
-        and (older.work, older.build, older.delete_data_set) is distinct from (new.work, new.build, new.delete_data_set)
+    # One statement, so a request taken up at that moment is left to be worked: only one that still waits is replaced.
+    # It leaves the waiting place before the new request is written, since the record refuses a lane two that wait.
+    END_WAITING: Final = """
+    update request set stands = 'replaced', ended_at = now() where (product, lane) = (%s, %s) and stands = 'waiting' returning id
     """
+    REPLACED_BY: Final = "update request set replaced_by = %s where id = any(%s)"
     # One statement, so a request taken up during its cancel is either ended or marked, never neither.
     CANCEL: Final = """
     update request set
@@ -284,7 +294,7 @@ class Sql:
         answer = case stands when 'waiting' then %s end,
         cancel_asked_at = now(),
         cancel_asked_by = %s
-    where id = any(%s) and stands in ('waiting', 'working') and cancel_asked_at is null
+    where id = %s and stands in ('waiting', 'working') and cancel_asked_at is null
     """
     CANCEL_ASKED: Final = "select cancel_asked_at is not null as asked from request where id = %s"
     REFUSE_CANCEL: Final = "update request set cancel_refused = %s where id = %s and cancel_refused is null"
@@ -352,17 +362,23 @@ def said(asked: Asked) -> list[JsonValue]:
     return [asked.product, asked.lane, asked.work.value, asked.build, asked.delete_data_set]
 
 
+# The request a key is answered with is the one it is always answered with, however that request has ended since.
+def keep_key(session: Session, gate: Gate, idempotency_key: str | None, request: Request) -> Request:
+    if idempotency_key is not None:
+        session.execute(Sql.KEEP_KEY, gate.made(key_digest(idempotency_key), request.id))
+    return request
+
+
+# A key says only that a call is one sent before. With a key not seen, a call is held to its lane's rule like any other.
 def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
-    if idempotency_key is None:
-        row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
-        return None if row is None else Request.model_validate(row)
     row = session.execute(Sql.SAME_KEY, gate.made(key_digest(idempotency_key))).fetchone()
-    if row is None:
-        return None
-    same_key = Request.model_validate(row)
-    if same_key.asked() != asked:
-        raise key_reused(same_key)
-    return same_key
+    if row is not None:
+        same_key = Request.model_validate(row)
+        if same_key.asked() != asked:
+            raise key_reused(same_key)
+        return same_key
+    row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
+    return None if row is None else keep_key(session, gate, idempotency_key, Request.model_validate(row))
 
 
 def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked) -> None:
@@ -371,20 +387,12 @@ def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked)
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
-# The one path of a cancel, for the call and for a newer request of its lane: a request that waits ends
-# with nothing done, and one that is worked is marked for its worker to read between actions.
-def cancel_each(session: Session, gate: Gate, requests: list[int], by: str) -> None:
-    session.execute(Sql.CANCEL, gate.sent(PutBack().model_dump(), by, list[JsonValue](requests)))
-
-
-# A newer request for a lane cancels every unfinished one that came before it and asks something else. One that needs a
-# person is never among them: its lane takes no request at all.
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-    passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key), new_generation())
+    passed = gate.sent(*said(asked), asked_by, new_generation())
+    waited = [row["id"] for row in session.execute(Sql.END_WAITING, gate.sent(asked.product, asked.lane)).fetchall()]
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
-    before = session.execute(Sql.UNFINISHED_BEFORE, gate.made(new.id)).fetchall()
-    cancel_each(session, gate, [row["id"] for row in before], f"request {new.id}")
-    return new
+    session.execute(Sql.REPLACED_BY, gate.made(new.id, list[JsonValue](waited)))
+    return keep_key(session, gate, idempotency_key, new)
 
 
 def unreachable(doing: str, error: psycopg.Error) -> RecordError:
@@ -508,11 +516,11 @@ class PostgresRecord(Record):
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()],
         )
 
-    # Every request a cancel was asked of that ended a short while ago, however it ended.
+    # Every request that ended a short while ago and was replaced or had a cancel asked of it, however it ended.
     def cancels_answered(self) -> list[Request]:
         shown = self.gate.made(MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
         return self.reading(
-            "reading the requests a cancel was asked of",
+            "reading the requests that were replaced or asked to cancel",
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.CANCELS_ANSWERED, shown).fetchall()],
         )
 
@@ -631,7 +639,8 @@ class PostgresRecord(Record):
 
     def cancel(self, request: int, by: str) -> Request | None:
         with self.session("cancelling a request") as session:
-            cancel_each(session, self.gate, [request], by)
+            # A request that waits ends with nothing done, and one being worked is marked for its worker to read.
+            session.execute(Sql.CANCEL, self.gate.sent(PutBack().model_dump(), by, request))
             row = session.execute(Sql.READ, self.gate.made(request)).fetchone()
             return None if row is None else Request.model_validate(row)
 

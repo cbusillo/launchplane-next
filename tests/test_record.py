@@ -31,6 +31,7 @@ from tests.pretend_record import PretendRecord, lose_every_turn
 
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
 MOVE_C = Asked(product="site", lane="testing", work=Work.MOVE, build="site:c")
+RETIRE = Asked(product="site", lane="testing", work=Work.RETIRE)
 RETIRE_OTHER = Asked(product="site", lane="other", work=Work.RETIRE)
 CALLER = "the address 192.0.2.1"
 
@@ -46,6 +47,119 @@ def test_asking_the_same_of_a_lane_while_one_is_unfinished_writes_no_second_requ
     again = record.write(MOVE_B, "the address 192.0.2.2", None)
     other = record.write(MOVE_C, CALLER, None)
     assert (again.id, again.asked_by, other.id != first.id) == (first.id, CALLER, True)
+
+
+def at_work_on_b(record: Record) -> int:
+    request = record.write(MOVE_B, CALLER, None)
+    assert record.take_up(request.id) is not None
+    return request.id
+
+
+def test_a_request_for_a_lane_with_nothing_unfinished_waits_and_is_next_up_at_once(record: Record) -> None:
+    request = record.write(MOVE_B, CALLER, None)
+    assert (request.stands, [each.id for each in record.next_up()]) == (Stands.WAITING, [request.id])
+
+
+def test_a_request_arriving_while_one_is_at_work_waits_and_the_one_at_work_is_untouched(record: Record) -> None:
+    at_work = at_work_on_b(record)
+    before = record.read(at_work)
+    arrived = record.write(MOVE_C, CALLER, None)
+    assert (arrived.stands, record.read(at_work), [each.id for each in record.next_up()]) == (Stands.WAITING, before, [at_work])
+
+
+def test_a_request_arriving_while_one_is_at_work_and_one_waits_replaces_the_one_waiting_which_says_by_which(
+    record: Record,
+) -> None:
+    at_work = at_work_on_b(record)
+    before = record.read(at_work)
+    waited, newest = record.write(MOVE_C, CALLER, None), record.write(RETIRE, CALLER, None)
+    replaced = record.read(waited.id)
+    assert replaced is not None
+    assert (replaced.stands, replaced.replaced_by, replaced.attempts, replaced.cancel_asked_by, replaced.ended_at is None) == (
+        Stands.REPLACED,
+        newest.id,
+        [],
+        None,
+        False,
+    )
+    assert (record.read(at_work), [each.id for each in record.unfinished()]) == (before, [at_work, newest.id])
+    assert record.take_up(waited.id) is None
+
+
+def test_asking_exactly_what_an_unfinished_request_asks_is_answered_with_that_request_and_replaces_nothing(
+    record: Record,
+) -> None:
+    at_work = at_work_on_b(record)
+    waiting = record.write(MOVE_C, CALLER, None)
+    again = [record.write(MOVE_B, CALLER, None).id, record.write(MOVE_C, CALLER, None).id]
+    assert (again, [(each.id, each.stands) for each in record.unfinished()]) == (
+        [at_work, waiting.id],
+        [(at_work, Stands.WORKING), (waiting.id, Stands.WAITING)],
+    )
+
+
+def test_a_key_not_seen_before_exempts_no_request_from_its_lanes_rule_and_a_lane_never_has_two_waiting(record: Record) -> None:
+    at_work = at_work_on_b(record)
+    waiting = record.write(MOVE_C, CALLER, "first")
+    same = [record.write(MOVE_C, CALLER, "second").id, record.write(MOVE_B, CALLER, "third").id]
+    newest = record.write(RETIRE, CALLER, "fourth")
+    assert (same, [(each.id, each.stands) for each in record.unfinished()], record.write(MOVE_C, CALLER, "first").stands) == (
+        [waiting.id, at_work],
+        [(at_work, Stands.WORKING), (newest.id, Stands.WAITING)],
+        Stands.REPLACED,
+    )
+
+
+def test_the_record_itself_refuses_a_lane_a_second_request_that_waits(
+    postgres_record: PostgresRecord, migrated_database: str
+) -> None:
+    waiting = postgres_record.write(MOVE_B, CALLER, None)
+    # noinspection SqlResolve
+    second = "insert into request (product, lane, work, asked_by, generation) values ('site', 'testing', 'retiring', 'a test', 'g')"
+    with psycopg.connect(migrated_database) as by_hand, pytest.raises(psycopg.errors.UniqueViolation):
+        by_hand.execute(second)
+    assert [each.id for each in postgres_record.unfinished()] == [waiting.id]
+
+
+def test_a_lane_with_a_request_that_needs_a_person_refuses_a_new_request_and_writes_nothing(record: Record) -> None:
+    stuck = record.write(MOVE_B, CALLER, None)
+    taken_up_until_it_needs_a_person(record, stuck.id)
+    with pytest.raises(Refused, match=f"POST /requests/{stuck.id}/retry"):
+        record.write(MOVE_C, CALLER, None)
+    assert [(each.id, each.stands) for each in record.unfinished()] == [(stuck.id, Stands.NEEDS_A_PERSON)]
+
+
+def test_asking_again_for_a_request_that_needs_a_person_replaces_the_one_that_waited_behind_it(record: Record) -> None:
+    stuck = at_work_on_b(record)
+    waited = record.write(MOVE_C, CALLER, None)
+    for _ in range(MOST_ATTEMPTS):
+        record.take_up(stuck)
+    again = record.retry(stuck, CALLER)
+    replaced = record.read(waited.id)
+    assert again is not None and replaced is not None
+    assert (replaced.stands, replaced.replaced_by, [each.id for each in record.next_up()]) == (Stands.REPLACED, again.id, [again.id])
+
+
+# Held at the moment its row is locked to be taken up, as a worker holds it, while a newer request arrives. PostgreSQL
+# ends one of the two, and whichever it is, a request is never both replaced and worked.
+# noinspection SqlResolve
+def test_a_request_being_taken_up_as_a_newer_one_arrives_is_worked_or_replaced_and_never_both(
+    postgres_record: PostgresRecord, migrated_database: str
+) -> None:
+    waited = postgres_record.write(MOVE_B, CALLER, None)
+    with psycopg.connect(migrated_database) as taking_up, ThreadPoolExecutor(max_workers=1) as pool:
+        taking_up.execute("select * from request where id = %s for update", [waited.id])
+        arriving = pool.submit(postgres_record.write, MOVE_C, CALLER, None)
+        time.sleep(0.3)
+        try:
+            taking_up.execute("update request set stands = 'working' where id = %s and stands = 'waiting'", [waited.id])
+            taking_up.commit()
+        except psycopg.errors.DeadlockDetected:
+            taking_up.rollback()
+        arrived = arriving.exception() is None
+    kept = postgres_record.read(waited.id)
+    assert kept is not None
+    assert (kept.stands, kept.replaced_by is None, arrived) in ((Stands.WORKING, True, False), (Stands.REPLACED, False, True))
 
 
 def test_asking_the_same_again_once_the_first_has_ended_writes_a_new_request(record: Record) -> None:
@@ -283,6 +397,40 @@ def test_the_migration_to_key_digests_refuses_to_be_undone_and_leaves_a_repeated
     assert postgres_record.write(MOVE_B, CALLER, "one-release").id == first.id
 
 
+def test_a_key_answered_with_another_calls_request_answers_with_it_ever_after_and_writes_nothing(record: Record) -> None:
+    asked = record.write(MOVE_B, CALLER, None)
+    answered = record.write(MOVE_B, CALLER, "lost-reply")
+    attempt = record.take_up(asked.id)
+    assert attempt is not None
+    record.end(attempt, Stands.DONE, {"outcome": "switched"}, None)
+    later = record.write(MOVE_C, CALLER, None)
+    again = record.write(MOVE_B, CALLER, "lost-reply")
+    with pytest.raises(Refused, match=f"request {asked.id}"):
+        record.write(MOVE_C, CALLER, "lost-reply")
+    assert (answered.id, again.id, again.stands, [each.id for each in record.unfinished()]) == (
+        asked.id,
+        asked.id,
+        Stands.DONE,
+        [later.id],
+    )
+
+
+def test_the_migration_to_one_waiting_request_a_lane_leaves_the_newest_waiting_and_ends_the_others_as_replaced_by_it(
+    postgres_record: PostgresRecord,
+) -> None:
+    command.downgrade(Config(ALEMBIC), "0005")
+    try:
+        with psycopg.connect(postgres_record.database) as connection:
+            # noinspection SqlResolve
+            waiting = "insert into request (product, lane, work, asked_by, generation) values ('site', %s, 'retiring', 'a test', %s)"
+            for lane, generation in (("testing", "g1"), ("testing", "g2"), ("other", "g3"), ("testing", "g4")):
+                connection.execute(waiting, [lane, generation])
+    finally:
+        command.upgrade(Config(ALEMBIC), "head")
+    stand = {each.id: (each.stands, each.replaced_by) for each in (*postgres_record.unfinished(), *postgres_record.recently_ended())}
+    assert stand == {1: ("replaced", 4), 2: ("replaced", 4), 3: ("waiting", None), 4: ("waiting", None)}
+
+
 def test_the_migration_to_generations_stops_while_a_move_begun_before_it_is_working_and_goes_on_once_it_is_settled(
     postgres_record: PostgresRecord,
 ) -> None:
@@ -328,7 +476,7 @@ def emptied(record: Record) -> None:
     if isinstance(record, PostgresRecord):
         with psycopg.connect(record.database, autocommit=True) as connection:
             # noinspection SqlResolve
-            connection.execute("truncate request, attempt, event restart identity")
+            connection.execute("truncate request, attempt, event, request_key restart identity")
 
 
 # Every kind of value a call of the record takes. One the test cannot fill fails it, so a new kind is given the secret too.

@@ -34,7 +34,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`, and what the page shows for it: `says` and `standing`. |
 | `lanes` | the judgement on each lane: see [the judgement on a lane](data-sets.md#the-judgement-on-a-lane). |
 | `requests` | every [request](requests.md) that has not ended, as `GET /requests` gives it. |
-| `cancels` | every request a cancel was asked of that ended in the last 10 minutes, however it ended. |
+| `cancels` | every request that ended in the last 10 minutes and had a cancel asked of it, however it ended, or was replaced by a newer request. |
 | `record_error` | why Launchplane's record could not be read or did not answer in time, or `null`. The rest of the answer is still what is on the host. |
 | `cards` | the page, ready to draw: see [the page](#the-page). |
 | `read_at` | the moment the host was asked. |

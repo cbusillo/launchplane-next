@@ -37,9 +37,9 @@ from tests.test_bed_gate import ScratchHost
 
 pytestmark = needs_test_bed
 
-CANCEL, NEWER, KILL = "a cancel", "a newer request", "a kill"
+CANCEL, KILL = "a cancel", "a kill"
 KILL_THEN_CANCEL, CANCEL_THEN_KILL = "a kill, then a cancel", "a cancel, then a kill"
-INTERRUPTIONS = (CANCEL, NEWER, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
+INTERRUPTIONS = (CANCEL, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 CANCELS = (CANCEL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 TOO_LATE = "already renamed for this release"
 THE_RENAME = "proxy.switch"
@@ -97,7 +97,7 @@ class Pause:
     service_stopped_at: str | None = None
     # At the hold, the candidate's routes file is staged and armed as the gate does just before it renames.
     staged: bool = False
-    # The one interruption this pause is proven with on the bed. A pause with none stands for its row and has all five.
+    # The one interruption this pause is proven with on the bed. A pause with none stands for its row and has all four.
     # The whole table runs against the pretend host in tests/test_interruptions.py.
     once: str | None = None
 
@@ -107,7 +107,7 @@ SITE_PAUSES = {
     "M0, taken up, before its first action": Pause("before.host.start_instance", once=CANCEL),
     "M1, candidate created and not started": Pause("after.host.create", once=KILL),
     "M1, candidate started and not yet checked": Pause("after.host.start_instance"),
-    "M2, its check under way": Pause("before.proxy.request_instance", once=NEWER),
+    "M2, its check under way": Pause("before.proxy.request_instance", once=KILL_THEN_CANCEL),
     "M2, check passed": Pause("after.proxy.check_instance"),
     "M3, before the gate": Pause(f"before.{THE_RENAME}"),
     "M3, staged and armed, not yet renamed": Pause(f"before.{THE_RENAME}", staged=True, once=KILL),
@@ -124,7 +124,7 @@ SITE_PAUSES = {
 LEDGER_PAUSES = {
     "M1, the network of a new data set made": Pause("after.host.create_data_set_network", from_nothing=True, once=CANCEL),
     "M1, the volume of a new data set made": Pause("after.host.create_data_set_volume", from_nothing=True, once=KILL),
-    "M1, the database server of a new data set made": Pause("after.host.create_database", from_nothing=True, once=NEWER),
+    "M1, the database server of a new data set made": Pause("after.host.create_database", from_nothing=True, once=CANCEL_THEN_KILL),
     "M5, before the old background service is retired": Pause("before.host.retire_instance", renamed=True, once=KILL_THEN_CANCEL),
     "M5, the new background service started": Pause("after.host.start_background_service", renamed=True, once=CANCEL_THEN_KILL),
     "M5, the new background service being watched": Pause(
@@ -238,11 +238,9 @@ class Held:
     pause: Pause
     interruption: str
     asked: dict[str, Any] = field(default_factory=dict[str, Any])
-    newer: int | None = None
     cancel_answers: list[tuple[int, dict[str, Any]]] = field(default_factory=list[tuple[int, dict[str, Any]]])
     cancel_cut_short: list[OSError] = field(default_factory=list[OSError])
     ended: dict[str, Any] = field(default_factory=dict[str, Any])
-    newer_ended: dict[str, Any] = field(default_factory=dict[str, Any])
     visitors_got: list[str] = field(default_factory=list[str])
     visitor_failures: list[str] = field(default_factory=list[str])
     untouched_got: list[str] = field(default_factory=list[str])
@@ -302,11 +300,6 @@ class Held:
     def interrupt(self) -> None:
         if self.interruption == CANCEL:
             self.a_cancel_waiting_for_the_lane_to_be_put_back()
-        elif self.interruption == NEWER:
-            status, newer = ask(f"/lanes/{self.lane.product}/{self.lane.lane}/move", {"build": self.lane.builds[2]})
-            assert status == 202, newer
-            self.newer = newer["id"]
-            let_go()
         elif self.interruption == KILL:
             kill_held_launchplane()
             let_go()
@@ -338,8 +331,6 @@ class Held:
                 wait_for(lambda: loop.answers[-1] == self.lane.answers[1], seconds=30)
             self.interrupt()
             self.ended = request_ended(self.asked["id"])
-            if self.newer is not None:
-                self.newer_ended = request_ended(self.newer)
         self.visitors_got, self.visitor_failures = loop.answers_in_order(), loop.failures
         self.untouched_got, self.untouched_failures = beside.answers_in_order(), beside.failures
 
@@ -431,17 +422,6 @@ def test_a_cancel_before_the_rename_wins_visitors_get_the_old_build_throughout_a
         assert sorted(run.ended["answer"]["data_sets_kept"]) == sorted(data_sets_of(lane)), "the data set it made is kept and named"
 
 
-@pytest.mark.parametrize(("lane", "pause", "interruption"), every((NEWER,), renamed=False))
-def test_a_newer_request_before_the_rename_takes_the_lane_to_the_newest_build_and_never_to_the_older(
-    lane: Lane, pause: Pause, interruption: str
-) -> None:
-    run = held(lane, pause, interruption)
-    began = [] if pause.from_nothing else [lane.builds[0]]
-    assert (run.outcome(), run.ended["cancel_asked_by"]) == (("cancelled", None), f"request {run.newer}")
-    assert (run.newer_ended["stands"], run.newer_ended["answer"]["outcome"]) == ("done", "switched")
-    assert (builds_of(lane), run.visitors_got) == ([lane.builds[2]], [*as_it_began(run)[1], *run.got(lane.builds[2])]), began
-
-
 @pytest.mark.parametrize(("lane", "pause", "interruption"), every((KILL,), renamed=False) + every((KILL,), renamed=True))
 def test_a_kill_with_no_cancel_finishes_the_release_and_the_gate_says_it_is_committed_to_the_one_instance_left(
     lane: Lane, pause: Pause, interruption: str
@@ -473,20 +453,6 @@ def test_a_cancel_from_the_rename_on_is_told_too_late_names_the_rename_and_the_r
         assert "written before the release" in rows_of(lane)
 
 
-@pytest.mark.parametrize(("lane", "pause", "interruption"), every((NEWER,), renamed=True))
-def test_a_newer_request_from_the_rename_on_runs_after_the_older_has_finished_and_the_older_says_why_it_was_not_cancelled(
-    lane: Lane, pause: Pause, interruption: str
-) -> None:
-    run = held(lane, pause, interruption)
-    assert (run.outcome(), run.ended["cancel_asked_by"], TOO_LATE in (run.ended["cancel_refused"] or "")) == (
-        ("done", "switched"),
-        f"request {run.newer}",
-        True,
-    )
-    assert (run.newer_ended["stands"], run.newer_ended["answer"]["outcome"]) == ("done", "switched")
-    assert (builds_of(lane), run.visitors_got) == ([lane.builds[2]], run.got(*lane.builds))
-
-
 @pytest.mark.parametrize(("lane", "pause", "interruption"), every(INTERRUPTIONS, renamed=True, saved=True))
 def test_a_result_already_saved_stands_whatever_comes_after_it(lane: Lane, pause: Pause, interruption: str) -> None:
     run = held(lane, pause, interruption)
@@ -494,7 +460,51 @@ def test_a_result_already_saved_stands_whatever_comes_after_it(lane: Lane, pause
     assert (run.outcome(), run.ended["cancel_refused"]) == (("done", "switched"), None)
     assert [status for status, _ in run.cancel_answers] == [409] * len(run.cancel_answers)
     assert (again_status, "ended as done" in again["error"]) == (409, True)
-    assert run.visitors_got == run.got(*lane.builds[: 3 if interruption == NEWER else 2])
+    assert run.visitors_got == run.got(*lane.builds[:2])
+
+
+# Answers as Gunicorn would, so a visitor it ever reached would show among the answers.
+NEVER_STARTED = "kennethreitz/httpbin@sha256:599fe5e5073102dbb0ee3dbb65f049dab44fa9fc251f6835c9990f8fb196a72b"
+
+
+def request_row_of(lane: Lane, request: int) -> tuple[list[str], str]:
+    card = next(card for card in running()["cards"] if card["title"] == f"{lane.product} · {lane.lane}")
+    row = next(row for row in card["rows"] if row["name"] == f"Request {request}")
+    return [pill["text"] for pill in row["pills"]], row["note"]
+
+
+def test_a_move_held_before_its_switch_finishes_as_asked_then_the_newest_waiting_runs_and_one_that_waited_between_never_starts() -> (
+    None
+):
+    let_go()
+    assert move_lane(SITE.product, SITE.lane, SITE.builds[0])[0] == 200
+    hold(f"before.{THE_RENAME}")
+    try:
+        with request_loop(lambda: answering(SITE)) as loop:
+            first = asked_to_move(SITE.builds[1])
+            wait_until_stopped_at(f"before.{THE_RENAME}")
+            second, third = asked_to_move(NEVER_STARTED), asked_to_move(SITE.builds[2])
+            replaced, at_work = request_ended(second["id"]), ask(f"/requests/{first['id']}")[1]
+            let_go()
+            finished, ran_next = request_ended(first["id"]), request_ended(third["id"])
+    finally:
+        let_go()
+    assert (at_work["stands"], at_work["cancel_asked_by"], finished["stands"], finished["answer"]["outcome"]) == (
+        "working",
+        None,
+        "done",
+        "switched",
+    ), finished
+    assert (replaced["stands"], replaced["replaced_by"], replaced["attempts"], replaced["events"]) == (
+        "replaced",
+        third["id"],
+        [],
+        [],
+    ), replaced
+    assert (ran_next["stands"], ran_next["answer"]["outcome"], builds_of(SITE)) == ("done", "switched", [SITE.builds[2]]), ran_next
+    assert (loop.failures, loop.answers_in_order()) == ([], list(SITE.answers))
+    pills, note = request_row_of(SITE, second["id"])
+    assert (pills, f"was replaced by request {third['id']} while it waited" in note) == (["replaced"], True)
 
 
 def test_a_move_to_the_build_already_active_cancelled_before_its_result_is_saved_ends_as_cancelled() -> None:

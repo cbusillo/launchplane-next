@@ -35,7 +35,7 @@ def secrets() -> GivenSecrets:
 @pytest.fixture
 def postgres_record(migrated_database: str, secrets: GivenSecrets) -> Iterator[PostgresRecord]:
     with psycopg.connect(migrated_database, autocommit=True) as connection:
-        connection.execute("truncate request, attempt, event restart identity")
+        connection.execute("truncate request, attempt, event, request_key restart identity")
     record = PostgresRecord(migrated_database, secrets)
     yield record
     record.close()

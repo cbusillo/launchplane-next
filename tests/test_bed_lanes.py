@@ -79,12 +79,6 @@ def asked_to_move(lane: str, build: str) -> int:
     return request["id"]
 
 
-def request_row_of(request: int) -> tuple[list[str], str]:
-    card = next(card for card in running()["cards"] if card["title"] == f"{PRODUCT} · {LANE}")
-    row = next(row for row in card["rows"] if row["name"] == f"Request {request}")
-    return [pill["text"] for pill in row["pills"]], row["note"]
-
-
 @pytest.mark.usefixtures("lanes_on_a")
 def test_two_lanes_asked_at_once_are_at_work_at_the_same_time_and_both_switch() -> None:
     began = time.monotonic()
@@ -95,21 +89,6 @@ def test_two_lanes_asked_at_once_are_at_work_at_the_same_time_and_both_switch() 
     assert [(each["stands"], each["answer"]["outcome"]) for each in ended] == [("done", "switched")] * 2, ended
     assert [builds_of(lane) for lane in LANES] == [[BUILD_B], [BUILD_B]]
     sys.stdout.write(f"Two lanes moved at once took {took:.1f} s.\n")
-
-
-@pytest.mark.usefixtures("lanes_on_a")
-def test_a_newer_request_cancels_the_move_being_checked_and_no_visitor_reaches_its_build() -> None:
-    with request_loop(server_answering) as loop:
-        older = asked_to_move(LANE, BUILD_B)
-        wait_for(build_b_is_being_checked, seconds=30)
-        newer = asked_to_move(LANE, BUILD_A)
-        cancelled, done = request_ended(older), request_ended(newer)
-    assert (cancelled["stands"], cancelled["cancel_asked_by"], done["stands"]) == ("cancelled", f"request {newer}", "done"), (
-        cancelled
-    )
-    assert (loop.failures, loop.answers_in_order(), builds_of(LANE)) == ([], [ANSWER_A], [BUILD_A])
-    pills, note = request_row_of(older)
-    assert (pills, f"was cancelled by request {newer}. Done to put the lane back: retire" in note) == (["cancelled"], True)
 
 
 @pytest.mark.usefixtures("lanes_on_a")
