@@ -51,8 +51,8 @@ def kind(request: pytest.FixtureRequest) -> str:
     return request.param
 
 
-# What is asked, the lane it is asked of, a change it sends that is no change of the route, its first change of all,
-# the lane on which nothing is left for it to do, and what the host shows once it is done.
+# What is asked and the lane it is asked of. Then a change it sends that is no change of the route, and its first change.
+# Then the lane on which nothing is left for it to do, what the host shows once it is done, and the outcome it answers.
 type Lane = Callable[[], PretendProxy]
 KINDS: dict[str, tuple[Asked, Lane, str, str, Lane, Callable[[PretendProxy], bool], str]] = {
     "a maintenance begin": (
