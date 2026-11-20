@@ -206,17 +206,20 @@ class Worker:
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         witness = self.witness_of(request, attempt, held)
         if request.work is not Work.MOVE:
-            return self.end_closed(request, witness, self.ending_of(request, attempt, witness))
+            return self.carry_fenced(request, witness)
         while not self.move_ended_or_left_open(request, attempt, witness):
             pass
 
-    # A change of the route this attempt sent, or an earlier one of a request found working, is made once fenced or never.
-    def end_closed(self, request: Request, witness: Witness, came_to: Ending) -> None:
+    # An earlier attempt's change of the route is made or fenced before this one reads the lane, and this one's before it ends.
+    def carry_fenced(self, request: Request, witness: Witness) -> None:
         try:
-            if witness.sent or request.stands is Stands.WORKING:
+            if request.stands is Stands.WORKING:
+                self.lanes.fence(request.product, request.lane, request.generation, witness.attempt - 1)
+            came_to = self.ending_of(request, witness.attempt, witness)
+            if witness.edit_sent:
                 self.lanes.fence(request.product, request.lane, request.generation, witness.attempt)
         except HOST_UNREAD as error:
-            self.left_open(witness.attempt, f"{came_to.error or 'It was done.'} It is not ended yet: {error}")
+            self.left_open(witness.attempt, f"{request.attempted()} is not ended yet, and its lane stays with it: {error}")
         else:
             self.record.end(witness.attempt, came_to.stands, came_to.answer, came_to.error)
 

@@ -5,12 +5,12 @@ from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError
 from launchplane.gate import LOST
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import BACK_SOON
+from launchplane.instance import BACK_SOON, OnHost
 from launchplane.record import MOST_ATTEMPTS, Record, Stands
 from launchplane.steps import MaintenanceOutcome
 from launchplane.telling import Witness
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy
+from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_host_answers import BEGIN, END, RETIRE, worker_on
 from tests.test_worker import CALLER, kept_of, serving_a
@@ -99,19 +99,39 @@ def test_a_retire_whose_fence_gets_no_answer_keeps_its_lane_from_the_next_reques
     assert worker.work_next() is True
     left = kept_of(record, retire.id)
     assert (left.stands, [each.ended for each in left.attempts]) == (Stands.WORKING, ["unfinished", "unfinished"])
-    assert left.error is not None and "It is not ended yet: The proxy's container did not answer" in left.error
+    assert (
+        left.error == "Retiring testing of site is not ended yet, and its lane stays with it: The proxy's container did not answer"
+    )
     assert (kept_of(record, begin.id).stands, WEB_ADDRESS in proxy.written) == (Stands.WAITING, False)
     proxy.gate.unreadable = None
     assert worker.work_next() is True
     assert (kept_of(record, retire.id).stands, proxy.gate.kept[retire.generation].fenced >= 0) == (Stands.DONE, True)
 
 
-def test_a_request_found_working_is_fenced_when_it_ends_though_this_attempt_asked_for_no_change(record: Record) -> None:
-    proxy = PretendProxy(PretendHost())
-    request = record.write(RETIRE, CALLER, None)
-    assert record.take_up(request.id) is not None
-    assert worker_on(proxy, record).work_next() is True
-    assert (kept_of(record, request.id).stands, proxy.gate.kept[request.generation].fenced >= 0) == (Stands.DONE, True)
+def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its_lane_so_no_change_of_theirs_lands_under_it(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    worker, edit, read = worker_on(proxy, record), proxy.edit, proxy.host.read
+    sent: list[Sent] = []
+    arrived: list[str] = []
+
+    def killed_once_sent(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        sent.append((web_address, generation, attempt, read, container))
+        raise LaunchplaneKilled
+
+    def read_once_the_old_change_has_arrived(lane: tuple[str, str] | None = None) -> OnHost:
+        arrived.append(edit(*sent[0]))
+        return read(lane)
+
+    proxy.edit = killed_once_sent
+    request = record.write(END, CALLER, None)
+    with pytest.raises(LaunchplaneKilled):
+        worker.work_next()
+    proxy.edit, proxy.host.read = edit, read_once_the_old_change_has_arrived
+    record.cancel(request.id, CALLER)
+    assert worker.work_next() is True
+    assert (set(arrived), kept_of(record, request.id).stands, proxy.written[WEB_ADDRESS]) == ({LOST}, Stands.CANCELLED, BACK_SOON)
 
 
 def test_giving_up_a_retire_that_needs_a_person_fences_every_attempt_of_it_before_its_lane_takes_another_request(

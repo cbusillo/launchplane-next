@@ -430,8 +430,7 @@ class Lanes:
     def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.EditRoute):
-            # Marked before it is sent: a change asked for and not answered may still be made.
-            witness.sent = True
+            witness.edit_sent = True  # before it is: a change asked for and not answered may still be made
             edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
             return action if edit != LOST else steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
         if isinstance(action, steps.Check):

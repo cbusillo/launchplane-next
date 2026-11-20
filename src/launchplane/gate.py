@@ -32,7 +32,7 @@ UNREADABLE = 9
 NOT_A_FILE = 8
 SCRIPT = f"""
 set -eu
-folder=$1 base=$1/$2.$3 operation=$4
+folder=$1 base=$1/$2.$3 operation=$4 route=${{8-}}
 # Asking changes nothing: where nothing was ever kept, there is no verdict, and nothing is made to say so.
 if [ ! -d "$folder" ]; then
     beside=$(ls -a "${{folder%/*}}") || exit {UNREADABLE}
@@ -87,7 +87,6 @@ may_arm() {{
 }}
 
 now=$(verdict)
-route=${{8-}}
 # A rename onto anything but a file would put the staged file somewhere else and replace no route.
 [ ! -e "$route" ] || [ -f "$route" ] || {{ echo "$route is not a file" >&2; exit {NOT_A_FILE}; }}
 case $operation in

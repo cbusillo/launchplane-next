@@ -10,7 +10,6 @@ type Tell = Callable[[str, str | None], None]
 
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
-# The gate lets a call change its lane's route by its `generation` and `attempt`, and `sent` is whether it asked to.
 @dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
@@ -19,7 +18,7 @@ class Witness:
     refuse_cancel: Callable[[str], None] = lambda _why: None
     generation: str = ""
     attempt: int = 0
-    sent: bool = False
+    edit_sent: bool = False
 
 
 NOBODY = Witness()
