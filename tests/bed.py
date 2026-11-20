@@ -12,6 +12,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -19,6 +20,8 @@ LAUNCHPLANE_URL = os.environ.get("LAUNCHPLANE_URL", "")
 SCRATCH_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_SCRATCH_SHELL", "lp-scratch"))
 SCRATCH_ADDRESS = os.environ.get("LAUNCHPLANE_SCRATCH_ADDRESS", "docker-lp-scratch.shiny")
 CONTROL_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_CONTROL_SHELL", "lp-control"))
+CONTROL = urlsplit(LAUNCHPLANE_URL)
+CONTROL_ADDRESS, CONTROL_PORT = CONTROL.hostname or "", CONTROL.port or 80
 
 PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
 
@@ -187,7 +190,15 @@ def request_loop(request_once: Callable[[], str]) -> Generator[RequestLoop]:
         thread.join()
 
 
-HOLDS_URL = os.environ.get("LAUNCHPLANE_HOLDS_URL", f"{LAUNCHPLANE_URL.rsplit(':', 1)[0]}:8701")
+HOLDS_PORT = 8701
+
+
+def holds_url_beside(launchplane_url: str) -> str:
+    control = urlsplit(launchplane_url)
+    return f"{control.scheme}://{control.hostname}:{HOLDS_PORT}"
+
+
+HOLDS_URL = os.environ.get("LAUNCHPLANE_HOLDS_URL", holds_url_beside(LAUNCHPLANE_URL))
 HELD_UNIT = "/opt/launchplane/tests/launchplane-held.service"
 
 

@@ -98,9 +98,9 @@ Anything asked of the host has one of four answers: what is there, nothing there
 
 ## How Launchplane reaches the host
 
-The Docker SDK for Python over TCP with mutual TLS. Settings: `LAUNCHPLANE_CONTAINER_HOST` (`tcp://docker-lp-scratch.shiny:2376`) and `LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS`, the folder holding `ca.pem`, `cert.pem` and `key.pem`.
+The Docker SDK for Python over TCP with mutual TLS. Settings: `LAUNCHPLANE_CONTAINER_HOST` (`tcp://docker-lp-scratch.shiny:2376`) and `LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS`, the folder holding `ca.pem`, `cert.pem` and `key.pem`. The service reads the first from `/etc/launchplane/bed.env` on the control container, which a deploy does not replace.
 
-`./scripts/issue-certificates`, run from a machine with `lp-control` and `lp-scratch`, issues what is missing for this test bed and keeps what exists.
+`./scripts/issue-certificates`, run from a machine with `lp-control` and `lp-scratch`, issues what is missing for the [chosen test bed](#choosing-the-test-bed) and keeps what exists.
 
 - The certificate authority is in `/root/launchplane-ca` on the control container, readable only by root.
 - Every key is made on the host that uses it. Only certificate requests and certificates travel.
@@ -118,3 +118,18 @@ On the control container as the systemd service `launchplane`, user `launchplane
 ```
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_what_is_running.py
 ```
+
+### Choosing the test bed
+
+A test bed is one control container and one scratch container. Nothing in the repository says which pair: these settings do, and what each is when not set is the first bed.
+
+| Setting | Read by | Not set |
+| --- | --- | --- |
+| `LAUNCHPLANE_URL` | the tests, which also take the control container's address and port from it | the test-bed tests are skipped |
+| `LAUNCHPLANE_CONTROL_SHELL` | the tests, `./scripts/deploy-control`, `./scripts/issue-certificates` | `lp-control` |
+| `LAUNCHPLANE_SCRATCH_SHELL` | the tests, `./scripts/issue-certificates` | `lp-scratch` |
+| `LAUNCHPLANE_SCRATCH_ADDRESS` | the tests, `./scripts/issue-certificates` | `docker-lp-scratch.shiny` |
+| `LAUNCHPLANE_HOLDS_URL` | the tests that hold Launchplane | port 8701 at the address of `LAUNCHPLANE_URL` |
+| `/etc/launchplane/bed.env` on the control container | the services `launchplane` and `launchplane-held` | a deploy stops and says what to write |
+
+`/etc/launchplane/bed.env` is written once by hand and holds one line, `LAUNCHPLANE_CONTAINER_HOST=tcp://<scratch address>:2376`. A second bed has not been made. `tests/test_bed_interruptions.py` builds every image it uses, so it runs by itself on a bed where no other test has run.

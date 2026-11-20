@@ -11,7 +11,7 @@ import pytest
 
 from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate
 from launchplane.instance import Verdict
-from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, route_file_of
+from launchplane.proxy import PROXY_NAME, VOLUME_FOLDER, route_file_of
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -174,7 +174,7 @@ def data_sets_of(lane: Lane) -> list[str]:
 
 
 # The gate itself, asked from the test as Launchplane asks it. Asking changes nothing.
-GATE = Gate(ScratchHost(), PROXY_NAME, ROUTES_FOLDER)
+GATE = Gate(ScratchHost(), PROXY_NAME, VOLUME_FOLDER)
 ABANDONED = Answer(Verdict.ABANDONED)
 
 
@@ -216,7 +216,7 @@ def stop_background_services_of(lane: Lane) -> None:
 def interrupt_armed_switch(lane: Lane, asked: dict[str, Any]) -> None:
     generation = asked["generation"]
     [candidate] = [each["container"] for each in instances_of(lane) if each["build"] == lane.builds[1]]
-    base = ROUTES_FOLDER / GATE_FOLDER_NAME / f"{lane.web_address}.{generation}"
+    base = VOLUME_FOLDER / GATE_FOLDER_NAME / f"{lane.web_address}.{generation}"
     shim = '#!/bin/sh\ncase "$1" in *.next) kill -KILL "$PPID"; exit 1 ;; esac\nexec /bin/busybox mv "$@"\n'
     place = f"mkdir -p {M3_BIN} && cat > {M3_BIN}/mv && chmod +x {M3_BIN}/mv"
     on_scratch(f"docker exec -i {PROXY_NAME} sh -c '{place}'", given=shim)
@@ -360,7 +360,8 @@ def held_bed() -> Iterator[None]:
         for lane in (SITE, LEDGER):
             retire_with_its_data(lane)
             retire_with_its_data(lane.beside(UNTOUCHED))
-        build_pretend_product(LEDGER.builds[2], "c")
+        for build, version in zip(LEDGER.builds, LEDGER.answers, strict=True):
+            build_pretend_product(build, version)
         place_description(LEDGER.product, DESCRIPTION)
         yield
         let_go()
@@ -516,7 +517,7 @@ def test_a_move_to_the_build_already_active_cancelled_before_its_result_is_saved
 
 
 GATE_HELD = "/tmp/launchplane-gate-held"  # noqa: S108 a file inside the proxy's container
-HOLD_THE_GATE = f"touch {GATE_HELD}; flock {ROUTES_FOLDER} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
+HOLD_THE_GATE = f"touch {GATE_HELD}; flock {VOLUME_FOLDER} sh -c 'while [ -e {GATE_HELD} ]; do sleep 0.1; done'"
 A, B, C = SITE.builds
 FAILS_ITS_CHECK = "hashicorp/http-echo:1.0"
 
@@ -555,7 +556,7 @@ def ended_as(request: int) -> tuple[str, str | None]:
 # lane beside kept its instance and its build.
 RENAMES = "/tmp/launchplane-renames"  # noqa: S108 a file inside the proxy's container
 # Every file moved out of the gate's folder, as the kernel reports it: a staged routes file leaves it only by the rename.
-WATCH_RENAMES = f"inotifyd - {ROUTES_FOLDER / GATE_FOLDER_NAME}:m > {RENAMES}"
+WATCH_RENAMES = f"inotifyd - {VOLUME_FOLDER / GATE_FOLDER_NAME}:m > {RENAMES}"
 
 
 @dataclass
@@ -706,7 +707,7 @@ def test_case_5_a_cancel_that_won_while_the_host_cannot_be_read_stays_working_an
     assert how_it_stands(asked["id"]) == "working"
     let_go()
     assert (ended_as(asked["id"])[0], cancel(asked["id"])[0], builds_of(SITE)) == ("cancelled", 200, [A])
-    staged = in_proxy(f"ls {ROUTES_FOLDER / GATE_FOLDER_NAME} | grep {asked['generation']} | grep next || true")
+    staged = in_proxy(f"ls {VOLUME_FOLDER / GATE_FOLDER_NAME} | grep {asked['generation']} | grep next || true")
     assert (staged, verdict_of(SITE, asked["generation"]), case.renames_of(asked["generation"])) == ("", ABANDONED, 0)
 
 

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from launchplane.proxy import PROXY_NAME, instance_url, route_file_of, route_text, staged_route_file_of
+from launchplane.proxy import PROXY_NAME, instance_url, route_file_of, route_text
 from tests.bed import (
     SCRATCH_ADDRESS,
     RequestLoop,
@@ -54,7 +54,7 @@ def request_loop() -> Generator[RequestLoop]:
 
 
 def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:
-    staged, written = staged_route_file_of(NAME), route_file_of(NAME)
+    staged, written = route_file_of(NAME, ".next"), route_file_of(NAME)
     on_scratch(f"docker exec -i {PROXY_NAME} sh -c 'cat > {staged} && mv {staged} {written}'", given=route_text(NAME, copy_name))
 
 

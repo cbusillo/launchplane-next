@@ -26,6 +26,10 @@ DEFAULT_INTERPRETER_NAME = "launchplane inspection"
 PROJECT_SETTINGS = REPOSITORY / ".idea" / "misc.xml"
 INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
+APP_VM_OPTIONS = INSPECTOR.parent / "pycharm.vmoptions"
+# PyCharm takes every processor of the machine unless told a number, and the machine runs everything else too.
+PROCESSORS = 6
+BEHIND_OTHER_WORK = ("nice", "-n", "10")
 CANARY_FOLDER = REPOSITORY / ".inspection-canary"
 CANARY_SOURCE = "from pathlib import Path\n\n\ndef canary() -> None:\n    Path().no_such_method()\n"
 
@@ -113,14 +117,14 @@ def exclusive_inspector_home() -> Generator[None]:
         yield
 
 
-def prepare_inspection() -> Path:
+def prepare_inspection() -> dict[str, str]:
     forget_earlier_inspections()
     try:
         trust_repository()
         register_interpreter(project_interpreter_name())
         CANARY_FOLDER.mkdir(exist_ok=True)
         (CANARY_FOLDER / "canary.py").write_text(CANARY_SOURCE)
-        return write_inspector_properties()
+        return {"PYCHARM_PROPERTIES": str(write_inspector_properties()), "PYCHARM_VM_OPTIONS": str(write_vm_options())}
     except (OSError, ElementTree.ParseError) as error:
         raise InspectionUnknownError(f"Could not prepare PyCharm to inspect this repository: {error}") from error
 
@@ -129,6 +133,12 @@ def write_inspector_properties() -> Path:
     properties = INSPECTOR_HOME / "idea.properties"
     properties.write_text("".join(f"idea.{kind}.path={INSPECTOR_HOME / kind}\n" for kind in ("config", "system", "plugins", "log")))
     return properties
+
+
+def write_vm_options() -> Path:
+    options = INSPECTOR_HOME / "inspection.vmoptions"
+    options.write_text(f"{APP_VM_OPTIONS.read_text().rstrip()}\n-XX:ActiveProcessorCount={PROCESSORS}\n")
+    return options
 
 
 def forget_earlier_inspections() -> None:
@@ -188,13 +198,13 @@ def read_project_settings() -> ElementTree.Element:
     return ElementTree.parse(PROJECT_SETTINGS).getroot()  # noqa: S314 PyCharm's own settings file in this checkout
 
 
-def run_inspector(folder: Path, properties: Path) -> list[Finding]:
+def run_inspector(folder: Path, settings: dict[str, str]) -> list[Finding]:
     with tempfile.TemporaryDirectory() as output:
-        command = [INSPECTOR, REPOSITORY, PROFILE, output, "-d", folder, "-v2", "-format", "json"]
+        command = [*BEHIND_OTHER_WORK, INSPECTOR, REPOSITORY, PROFILE, output, "-d", folder, "-v2", "-format", "json"]
         result = subprocess.run(  # noqa: S603 the command is built only from this file's fixed paths
             command,
             cwd=INSPECTOR_HOME,
-            env=os.environ | {"PYCHARM_PROPERTIES": str(properties)},
+            env=os.environ | settings,
             capture_output=True,
             text=True,
             check=False,
@@ -221,9 +231,9 @@ def inspect_repository() -> list[Finding]:
     require_inspector_installed()
     require_inspector_home_reachable()
     with exclusive_inspector_home():
-        properties = prepare_inspection()
-        require_canary_caught(run_inspector(CANARY_FOLDER, properties))
-        return [finding for name in INSPECTED_FOLDERS for finding in run_inspector(REPOSITORY / name, properties)]
+        settings = prepare_inspection()
+        require_canary_caught(run_inspector(CANARY_FOLDER, settings))
+        return [finding for name in INSPECTED_FOLDERS for finding in run_inspector(REPOSITORY / name, settings)]
 
 
 def main() -> int:

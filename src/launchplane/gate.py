@@ -8,8 +8,8 @@ from launchplane.instance import Verdict
 
 # The gate: the one place that answers, for a generation, none, committed or abandoned, for good.
 #
-# Everything that settles a release is one command on the container host, run while it holds a lock on the folder of
-# routes files. Its decisions are kept as files named for the generation, in a folder that retiring a lane leaves alone:
+# Everything that settles a release is one command on the container host, run while it holds a lock on the folder the
+# routes folder is in. Its decisions are files named for the generation, in a folder beside it that retiring a lane keeps:
 #
 #   <web address>.<generation>.<candidate>.next     the candidate's routes file, staged
 #   <web address>.<generation>.armed                "<attempt> <candidate>": the one candidate allowed to be renamed
@@ -151,19 +151,19 @@ def answer_from(output: str) -> Answer | None:
 class Gate:
     host: GateHost
     container: str
-    routes_folder: PurePosixPath
-    # Held with the folder's readers, so no reading of the routes folder finds a file half put in place.
+    root: PurePosixPath
+    # Held with the routes folder's readers, so no reading of the routes folder finds a file half put in place.
     reading: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
     @property
     def folder(self) -> PurePosixPath:
-        return self.routes_folder / GATE_FOLDER_NAME
+        return self.root / GATE_FOLDER_NAME
 
     # A command that does not come back with a verdict has given no answer: it is never taken as none.
     def ask(self, web_address: str, generation: str, operation: str, *arguments: str | int | PurePosixPath) -> Answer:
         passed = [str(self.folder), web_address, generation, operation, *map(str, arguments)]
         with self.reading:
-            result = self.host.run_in(self.container, ["flock", str(self.routes_folder), "sh", "-c", SCRIPT, "sh", *passed])
+            result = self.host.run_in(self.container, ["flock", str(self.root), "sh", "-c", SCRIPT, "sh", *passed])
         answer = answer_from(result.output) if result.succeeded else None
         if answer is None:
             raise GateError(
