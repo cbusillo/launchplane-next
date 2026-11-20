@@ -80,7 +80,10 @@ class PretendRecord(Record):
         if same_key is not None and same_key.asked() != asked:
             raise key_reused(same_key)
         unfinished = (each for each in self.every() if each.stands in UNFINISHED[:2] and each.cancel_asked_at is None)
-        return same_key or next((each for each in unfinished if each.asked() == asked), None)
+        same = same_key or next((each for each in unfinished if each.asked() == asked), None)
+        if same is not None and idempotency_key is not None:
+            self.keys[key_digest(idempotency_key) or ""] = same.id
+        return same
 
     def write_new(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         self.gate.refuse(*said(asked), asked_by)

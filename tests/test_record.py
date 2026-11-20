@@ -397,6 +397,40 @@ def test_the_migration_to_key_digests_refuses_to_be_undone_and_leaves_a_repeated
     assert postgres_record.write(MOVE_B, CALLER, "one-release").id == first.id
 
 
+def test_a_key_answered_with_another_calls_request_answers_with_it_ever_after_and_writes_nothing(record: Record) -> None:
+    asked = record.write(MOVE_B, CALLER, None)
+    answered = record.write(MOVE_B, CALLER, "lost-reply")
+    attempt = record.take_up(asked.id)
+    assert attempt is not None
+    record.end(attempt, Stands.DONE, {"outcome": "switched"}, None)
+    later = record.write(MOVE_C, CALLER, None)
+    again = record.write(MOVE_B, CALLER, "lost-reply")
+    with pytest.raises(Refused, match=f"request {asked.id}"):
+        record.write(MOVE_C, CALLER, "lost-reply")
+    assert (answered.id, again.id, again.stands, [each.id for each in record.unfinished()]) == (
+        asked.id,
+        asked.id,
+        Stands.DONE,
+        [later.id],
+    )
+
+
+def test_the_migration_to_one_waiting_request_a_lane_leaves_the_newest_waiting_and_ends_the_others_as_replaced_by_it(
+    postgres_record: PostgresRecord,
+) -> None:
+    command.downgrade(Config(ALEMBIC), "0005")
+    try:
+        with psycopg.connect(postgres_record.database) as connection:
+            # noinspection SqlResolve
+            waiting = "insert into request (product, lane, work, asked_by, generation) values ('site', %s, 'retiring', 'a test', %s)"
+            for lane, generation in (("testing", "g1"), ("testing", "g2"), ("other", "g3"), ("testing", "g4")):
+                connection.execute(waiting, [lane, generation])
+    finally:
+        command.upgrade(Config(ALEMBIC), "head")
+    stand = {each.id: (each.stands, each.replaced_by) for each in (*postgres_record.unfinished(), *postgres_record.recently_ended())}
+    assert stand == {1: ("replaced", 4), 2: ("replaced", 4), 3: ("waiting", None), 4: ("waiting", None)}
+
+
 def test_the_migration_to_generations_stops_while_a_move_begun_before_it_is_working_and_goes_on_once_it_is_settled(
     postgres_record: PostgresRecord,
 ) -> None:
@@ -442,7 +476,7 @@ def emptied(record: Record) -> None:
     if isinstance(record, PostgresRecord):
         with psycopg.connect(record.database, autocommit=True) as connection:
             # noinspection SqlResolve
-            connection.execute("truncate request, attempt, event restart identity")
+            connection.execute("truncate request, attempt, event, request_key restart identity")
 
 
 # Every kind of value a call of the record takes. One the test cannot fill fails it, so a new kind is given the secret too.

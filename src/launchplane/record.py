@@ -243,7 +243,8 @@ ASKED_AGAIN = " A person asked for it again, as request {again}."
 # PyCharm has no schema to resolve these against. The tests run every statement against PostgreSQL.
 # noinspection SqlResolve
 class Sql:
-    SAME_KEY: Final = "select * from request where key_digest = %s"
+    SAME_KEY: Final = "select request.* from request, request_key answered where (digest, request) = (%s, request.id)"
+    KEEP_KEY: Final = "insert into request_key (digest, request) values (%s, %s)"
     WAITS_ON_A_PERSON: Final = """
     select id from request where (product, lane) = (%s, %s) and stands = 'needs a person' order by id limit 1
     """
@@ -254,8 +255,8 @@ class Sql:
     order by id limit 1
     """
     WRITE: Final = """
-    insert into request (product, lane, work, build, delete_data_set, asked_by, key_digest, generation)
-    values (%s, %s, %s, %s, %s, %s, %s, %s) returning *
+    insert into request (product, lane, work, build, delete_data_set, asked_by, generation)
+    values (%s, %s, %s, %s, %s, %s, %s) returning *
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
     RECENTLY_ENDED: Final = """
@@ -361,6 +362,13 @@ def said(asked: Asked) -> list[JsonValue]:
     return [asked.product, asked.lane, asked.work.value, asked.build, asked.delete_data_set]
 
 
+# The request a key is answered with is the one it is always answered with, however that request has ended since.
+def keep_key(session: Session, gate: Gate, idempotency_key: str | None, request: Request) -> Request:
+    if idempotency_key is not None:
+        session.execute(Sql.KEEP_KEY, gate.made(key_digest(idempotency_key), request.id))
+    return request
+
+
 # A key says only that a call is one sent before. With a key not seen, a call is held to its lane's rule like any other.
 def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
     row = session.execute(Sql.SAME_KEY, gate.made(key_digest(idempotency_key))).fetchone()
@@ -370,7 +378,7 @@ def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key:
             raise key_reused(same_key)
         return same_key
     row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
-    return None if row is None else Request.model_validate(row)
+    return None if row is None else keep_key(session, gate, idempotency_key, Request.model_validate(row))
 
 
 def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked) -> None:
@@ -380,11 +388,11 @@ def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked)
 
 
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-    passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key), new_generation())
+    passed = gate.sent(*said(asked), asked_by, new_generation())
     waited = [row["id"] for row in session.execute(Sql.END_WAITING, gate.sent(asked.product, asked.lane)).fetchall()]
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
     session.execute(Sql.REPLACED_BY, gate.made(new.id, list[JsonValue](waited)))
-    return new
+    return keep_key(session, gate, idempotency_key, new)
 
 
 def unreachable(doing: str, error: psycopg.Error) -> RecordError:
