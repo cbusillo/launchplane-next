@@ -15,7 +15,7 @@ It reads the host and the proxy again before every step. The next step is the fi
 1. If the lane's routes file is not a route Launchplane writes, stop with `503`, changing nothing: what it sends visitors to is not known. Remove or repair the file by hand, then ask again.
 2. If the proxy is not running, start it.
 3. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file. A route the proxy reports as disabled still counts as loaded.
-4. If the lane's routes file sends the web address to an instance, delete that file. No other lane's file is touched.
+4. If the lane has a routes file, ask [the gate](the-move.md#the-gate) to remove it, as the file exactly as it was just read. If the gate answers that the file is no longer that one, nothing was removed and the retire starts again from step 1. No other lane's file is touched, and what the gate keeps of the lane's releases stays.
 5. Retire a background service of the lane.
 6. Retire an instance of the lane: Docker sends the stop signal, waits up to 30 s, then removes it.
 7. If the body names one of the lane's data sets, delete it, unless it has a part twice: then stop with `503`, deleting nothing of it ([retiring a lane with data](data-sets.md#retiring-a-lane-with-data)).
@@ -32,7 +32,7 @@ The web address goes first so that no new request reaches an instance that is st
 
 The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
 
-A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
+A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A removal of the route that was sent and not answered is [fenced](requests.md#the-workers) before the request ends: it has removed the route by then, or it never will. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
 
 ## Known and not fixed
 

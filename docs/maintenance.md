@@ -25,7 +25,7 @@ While the routes file points at the back soon page:
 1. If the lane's routes file is not a route Launchplane writes, stop with `503`, changing nothing. Ending maintenance does the same, also on a lane that is not in maintenance.
 2. If the proxy is not running, start it.
 3. If the lane's routes file and the proxy disagree, wait until the proxy has loaded the file.
-4. If the routes file does not send the web address to the back soon page, start the back soon page if it is not running and write the route to it.
+4. If the routes file does not send the web address to the back soon page, start the back soon page if it is not running and ask [the gate](the-move.md#the-gate) to put the route to it in place of the routes file exactly as it was just read. If the gate answers that the file is no longer that one, nothing was changed and the call starts again from step 1.
 5. Stop a background service of the lane that is not stopped.
 6. Stop a web part of the lane that is not stopped.
 7. Stop a database server of the lane that is not stopped.
@@ -52,7 +52,7 @@ Docker sends each container its image's stop signal and kills it after 30 s, or 
 4. Check the web part as a move checks a new instance, while the web address still shows the back soon page.
 5. Start the background service and watch it stay up 3 s. One read as running for less is watched too, whoever started it.
 6. Remove every [login](data-sets.md#logins) no container holds.
-7. Write the route back to the web part, and wait until the proxy has loaded it.
+7. Ask the gate to put the route to the web part in place of the route to the back soon page exactly as it was just read, and wait until the proxy has loaded it.
 8. Answer.
 
 The web address changes first going in and last coming out, so a call killed anywhere before step 7 leaves the lane in maintenance. Whatever the judgement still finds before step 7 stops the call there, with the back soon page still showing, so a lane never comes back with something left unsaid, and asking again says the same.
@@ -108,6 +108,7 @@ Every web part, background service and database server is made with Docker's res
 - **If the container host refuses to run the web part's check while maintenance is ending**, a host error and not a failed check, the call answers `503` and the web part and the database server are left running behind the back soon page. The page shows them as wrong. Beginning or ending maintenance again puts it right.
 - **A back soon page container that is gone while a lane is in maintenance is not started by beginning that lane's maintenance again.** That call answers `503` and says the container is not running, the web address answers the proxy's own error, and the page shows it as wrong. Docker brings the container back after a crash or a restart. Comes back if anything ever removes it.
 - **A lane with a second data set that no instance uses, put in maintenance and ended,** comes back, and the call then answers `503` naming that data set's stopped database server. Asked again it answers `not in maintenance`. Ending maintenance starts only the server its instance uses. What a lane with two data sets may be is settled by the release that copies data.
+- **A change of the route that the container host accepted and did not answer fails the call with `503`.** Its request is fenced before it ends, so the change is either made by then or never. Asking again reads which.
 - **A call ending maintenance that is killed after it wrote the route back** has finished its work. Asked again it waits for the proxy to load the file and answers `not in maintenance`, not `ended`.
 - **A proxy container removed by hand takes the routes files out of reach** until a call starts the proxy again on the same volume. Until then no lane reads as in maintenance.
 - **The test-bed kill tests cannot say at which action the kill landed.** They show that the same call asked again reaches the same end. The unit tests cover each action.

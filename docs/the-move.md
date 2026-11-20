@@ -58,7 +58,7 @@ A `503` means the move stopped where it was with nothing switched, the gate has 
 
 The proxy's loaded routes are the only mark. A route sends one web address to one instance by its container name. `GET /running` gives each instance `receives_visitors_for`, and a move answers `container_receiving_visitors`.
 
-A route is written by renaming a new routes file for the lane into place, and Traefik loads it up to 2 s later. The file holds the route and nothing about any release. A first line the proxy reads as a comment, such as the code before the gate wrote, is not part of the route.
+A route is written by renaming a new routes file for the lane into place, and Traefik loads it up to 2 s later. Every change of a routes file is made by [the gate](#the-gate): no other command writes or removes one. The first line of the file, which the proxy reads as a comment, says which installation the route is: the generation and attempt that put it in place. So a route put back to the same instance is not the file that was there before. A file with no such line, or with another comment there, is a route all the same.
 
 A routes file that is otherwise not exactly the route Launchplane writes for that web address is that lane's fault and no other lane's: the lane shows it as wrong, and a move of the lane stops and says so. Every other lane is read as before.
 
@@ -83,11 +83,12 @@ The gate is the one place that answers, for a generation, `none`, `committed` or
 - **The switch proves itself.** Under the lock the staged file is finished and made durable, then the `armed` mark, and then the routes file is put in place by renaming the staged file. While a generation is armed, only that rename takes its staged file away. Armed with the staged file there is `none`. Armed with the staged file gone is `committed` to that candidate. Nothing is written after the rename, and no reply has to arrive: a command killed just after the rename, and one whose reply is lost, are answered `committed` when asked again.
 - **A cancel** makes the generation `abandoned` if it has no verdict, then takes its arming away, then removes every staged file of the generation and looks that none is left. Sent again it does the same, also where the arming is already gone.
 - **A discard** names the generation, the attempt and the exact candidate. In the one command it either learns that the candidate was renamed to, and the answer is `committed` to it, or it takes away the permission to switch to it, and then the candidate may be removed.
-- **A fence** confirms `none` and refuses every switch of an attempt up to a number, also one still on its way.
+- **A fence** confirms `none` and refuses every switch and every edit of an attempt up to a number, also one still on its way.
+- **An edit** is every change of a route that is no release: into [maintenance](maintenance.md), out of it, and the removal by a [retire](retiring-a-lane.md). It names the generation and attempt of its request and the routes file exactly as that request read it. Under the lock it is made only if no fence has reached that attempt and the file is still exactly that one. The new file is staged in the gate's folder, apart from every candidate of a release, and renamed into place; a removal removes the file. It answers `done`, `already` when the file is the one wanted, or `lost` when it changed nothing. On `lost` the request reads its lane again and decides again. An edit gives its generation no verdict and takes nothing from a release.
 - **Asking** for a generation's verdict changes nothing on the host, also where nothing was ever kept.
 - **A route that is not a file,** such as a folder of that name, is refused before anything is staged: the command fails, and the generation keeps no verdict.
 
-Every command answers with the verdict as it then holds. Whatever takes permission away keeps the revocation first, then removes the arming, then the staged file, and a command cut short and sent again goes in the same order. A command sent again returns the first verdict and stages nothing. A generation with a verdict is never renamed for again, a discarded candidate is never armed again, and another candidate is armed only by a later attempt.
+Every command but an edit answers with the verdict as it then holds. Whatever takes permission away keeps the revocation first, then removes the arming, then the staged file, and a command cut short and sent again goes in the same order. A command sent again returns the first verdict and stages nothing. A generation with a verdict is never renamed for again, a discarded candidate is never armed again, and another candidate is armed only by a later attempt.
 
 A file that cannot be looked for is never taken as absent: the command then fails, and its sender has no answer, which is not `none`. A path named `gate` that is there and is no folder gives no answer either.
 
@@ -118,8 +119,8 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
 - **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
 - **A retire or a maintenance call refused for two routers is not taken up again when there is one.** It has ended as `failed`. Ask again.
-- **Only the move passes the gate.** A retire and beginning or ending maintenance are cancelled as before, by a mark in the record their worker reads between actions.
-- **The gate does not know whose turn a lane is.** It refuses a switch after a cancel of its generation, after its candidate was discarded, and after its attempt was fenced. A worker that lost its lane's turn, and whose attempt nobody has fenced, can still switch.
+- **Only a move's cancel is decided at the gate.** A retire and beginning or ending maintenance change the route through the gate, and are cancelled as before, by a mark in the record their worker reads between actions.
+- **The gate does not know whose turn a lane is.** It refuses a switch after a cancel of its generation, after its candidate was discarded, and after its attempt was fenced. A worker that lost its lane's turn, and whose attempt nobody has fenced, can still switch, or edit a route that is still exactly as it read it.
 - **A gate command waits for the lock for as long as something holds it.** Docker's client gives up after 5 s, and the caller then has no answer: the request stays working and is taken up again. Only a test holds the lock for long.
 - **A release whose instance never serves keeps its lane.** It stays `working` with the reason, is taken up again every 5 s, a cancel is told too late, and a newer request waits behind it. Nobody is told. Each time it is taken up is an attempt in the record.
 - **What the gate keeps is never cleaned up.** Each release leaves one or two small files in the folder `gate`, also after its lane is retired. A gate command looks through the whole folder: with 3,188 files a verdict took 0.15 s on the host, 0.1 s more than a command that does nothing.
@@ -212,6 +213,8 @@ The same file has the eight held cases of the rule the move is built to. Each pr
 | 8 | A cancel wins and Docker refuses to remove B: `failed`, saying the cancel won and what is left, and a repeated cancel says the same. |
 
 Case 3 holds the release after the rename and kills Launchplane. It does not kill the host command itself: `tests/test_bed_gate.py` does that, at the gate.
+
+One more case is a retire's. Its removal of the route is accepted by Docker and frozen before it has the gate's lock, and Launchplane is killed. A cancel is asked, recovery ends the retire as `cancelled` and fences it, and the lane is put in maintenance. The frozen command is then let go: the routes file keeps its bytes and its inode, the instance stays, and every probe from outside is answered by the back soon page.
 
 `tests/test_bed_gate.py` proves the gate alone on the real host, with no worker: it sends the gate's own commands to the proxy's container and counts the renames by the inode of the routes file. Its five cases are a command killed just after the rename, a reply lost after the rename, a switch held before the lock whose candidate is discarded meanwhile, a cancel and a switch each sent again after the cancel won, and two generations on one lane. They take 13 s. `tests/test_gate.py` runs the gate's command against a folder on the machine that tests.
 
