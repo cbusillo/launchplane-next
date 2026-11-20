@@ -78,7 +78,7 @@ An instance that exists and does not receive visitors is left over from a move c
 
 ## The gate
 
-The gate is the one place that answers, for a generation, `none`, `committed` or `abandoned`, and the answer is for good. Everything that settles a release is one command, run in the proxy's container while it holds a lock on the routes folder itself. What it decides is kept in the folder `gate` inside the routes folder, as files named for the web address and the generation:
+The gate is the one place that answers, for a generation, `none`, `committed` or `abandoned`, and the answer is for good. Everything that settles a release is one command, run in the proxy's container while it holds a lock on the folder the routes folder is in. What it decides is kept in the folder `gate` beside the routes folder, as files named for the web address and the generation:
 
 - **The switch proves itself.** Under the lock the staged file is finished and made durable, then the `armed` mark, and then the routes file is put in place by renaming the staged file. While a generation is armed, only that rename takes its staged file away. Armed with the staged file there is `none`. Armed with the staged file gone is `committed` to that candidate. Nothing is written after the rename, and no reply has to arrive: a command killed just after the rename, and one whose reply is lost, are answered `committed` when asked again.
 - **A cancel** makes the generation `abandoned` if it has no verdict, then takes its arming away, then removes every staged file of the generation and looks that none is left. Sent again it does the same, also where the arming is already gone.
@@ -95,15 +95,40 @@ The gate is a command in the proxy's container, so a move starts a proxy that is
 
 Nothing is decided inside Launchplane, so a second Launchplane process, and the call that cancels while a worker is at work, are held off by the same lock as the worker. The lock is held for the one command only. Making and checking a candidate never holds it.
 
-**Where the evidence is kept, and for how long.** The folder `gate` is not removed when a lane is retired, and a later release of the lane changes nothing in an earlier generation's files. Nothing removes them yet. A generation's files are safe to remove once its request has ended in the record and no command for it can still arrive: no Launchplane process is working it, and no command for it is left running in the proxy's container, which a restart of that container ends.
+**Where the evidence is kept, and for how long.** The folder `gate` is not removed when a lane is retired, and a later release of the lane changes nothing in an earlier generation's files. Nothing removes them yet, and a reading of the routes takes none of them off the host. A generation's files are safe to remove once its request has ended in the record and no command for it can still arrive: no Launchplane process is working it, and no command for it is left running in the proxy's container, which a restart of that container ends.
 
 ## The proxy
 
 Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, attached to `launchplane-lanes` with the instances and to `launchplane-proxy-outside`, through which port 80 is published. Launchplane refuses to start an instance while a `launchplane-lanes` that is not quiet exists; it must be removed and made again, which means retiring every lane and removing the proxy first.
 
-- Routes are one file per lane, such as `testing.test-bed-site.test.yml`, in the volume `launchplane-proxy-routes`. Retiring a lane deletes its file.
+- Routes are one file per lane, such as `testing.test-bed-site.test.yml`, in the folder `routes` of the volume `launchplane-proxy-routes`. Retiring a lane deletes its file.
+- The gate's folder `gate` is beside `routes` in the same volume, so the gate's rename stays inside one file system. Reading where visitors go fetches the folder `routes` and nothing else, also while the proxy is stopped.
+- The proxy's container makes the folder `routes` before it starts Traefik, which watches no folder that is missing when it starts. Its log then begins with `'sh' is not a Traefik command: assuming shell execution`.
 - Traefik's API listens on `127.0.0.1:8080` inside its container only. Launchplane asks it by running `wget` inside the proxy container. No new port is opened.
 - Its restart policy is `always`.
+
+### A host whose routes are still beside the folder `gate`
+
+Before November 20 the routes files lay in the volume itself, with the folder `gate` among them. Such a host is moved once, with Launchplane stopped. Visitors get no answer from the moment the proxy is stopped until it runs again.
+
+```
+lp-control 'systemctl stop launchplane launchplane-held'
+lp-scratch 'set -eu
+volume=$(docker volume inspect launchplane-proxy-routes --format "{{.Mountpoint}}")
+docker stop launchplane-proxy
+mkdir "$volume/routes"
+find "$volume" -mindepth 1 -maxdepth 1 ! -name routes ! -name gate -exec mv {} "$volume/routes/" \;
+docker rm launchplane-proxy'
+./scripts/deploy-control
+curl -X POST -H 'Content-Type: application/json' -d '{"build": "<the build it runs>"}' 'http://launchplane.shiny:8700/lanes/<product>/<lane>/move?wait=60'
+```
+
+- The deploy stops unless `/etc/launchplane/bed.env` [names the container host](what-is-running.md#choosing-the-test-bed).
+- Every file that is not the gate's goes into `routes` with its content and time kept, also one Launchplane did not write. Nothing in `gate` is touched.
+- The proxy is removed because a restarted container keeps the command it was made with, and that names the old folder.
+- The last line asks any one lane for the build it already runs. The move finds no proxy, makes it with the new folder and answers `repaired`. Every lane then reads `good` again.
+
+Done on the test bed on November 20: 6 routes files and a stray empty file moved, 3,174 gate files kept, and all 6 lanes answered and read `good` after.
 
 ## Known and not fixed
 
@@ -120,7 +145,7 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **The gate does not know whose turn a lane is.** It refuses a switch after a cancel of its generation, after its candidate was discarded, and after its attempt was fenced. A worker that lost its lane's turn, and whose attempt nobody has fenced, can still switch.
 - **A gate command waits for the lock for as long as something holds it.** Docker's client gives up after 5 s, and the caller then has no answer: the request stays working and is taken up again. Only a test holds the lock for long.
 - **A release whose instance never serves keeps its lane.** It stays `working` with the reason, is taken up again every 5 s, a cancel is told too late, and a newer request waits behind it. Nobody is told. Each time it is taken up is an attempt in the record.
-- **What the gate keeps is never cleaned up.** Each release leaves one or two small files in the folder `gate`, also after its lane is retired.
+- **What the gate keeps is never cleaned up.** Each release leaves one or two small files in the folder `gate`, also after its lane is retired. A gate command looks through the whole folder: with 3,188 files a verdict took 0.15 s on the host, 0.1 s more than a command that does nothing.
 - **Two gate commands of one Launchplane go one after the other,** by a lock in the process that also keeps a reading of the routes folder from finding a file half put in place. A cancel so waits behind a switch that is waiting for the host's lock.
 - **A move the host does not answer for never fails by itself.** It stays `working` and is taken up again every 5 s until the host answers. A cancel ends it.
 - **A routes file or a proxy that names an instance of a release the gate has not committed is waited on for good.** Nothing puts that right by itself.
@@ -138,6 +163,7 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - On November 19, all 139 test-bed tests passed in 50 min 7 s, the four of `tests/test_bed_host_answers.py` in 2 min 47 s.
 - A repaired background service whose move waited on a refused login read kept one container and wrote 41 beats in 8 s. The request was taken up again every 5 s and ended `done` within 8 s of the read answering.
 - A second routes file made the lane `conflicting` within 5 s. A move asked then stayed `working`, and ended `switched` within 25 s of the file being removed.
+- On November 20, with 3,174 files in the folder `gate` and none removed: a reading of the routes transferred 8 KiB where it had transferred 3.1 MB, and `/running` answered in 0.37 to 0.49 s where it had taken 0.78 s. Ten releases of one lane took the folder from 3,175 to 3,186 files. A switch and a cancel sent twice more for the first of those releases, and for a release cancelled after them, each got the first answer again, `committed` to the same instance and `abandoned`, and changed no file.
 - The Docker SDK over the certificate connection gave everything the move needed. Nothing was missing that a container manager such as Dokploy would have given.
 
 ## On the test bed
@@ -149,7 +175,7 @@ uv run pytest tests/test_interruptions.py -v
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_host_answers.py -v
 ```
 
-Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
+Which bed the tests run against is [chosen by settings](what-is-running.md#choosing-the-test-bed), and these lines name the first one. Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
 
 `tests/test_bed_host_answers.py` runs under the same harness as the interruptions below, with the product `test-bed-answers`. It refuses the reading of a database server's logins after a repaired background service has passed its watch, and reads that service's container and the rows it writes from the scratch container while the request stays `working`. It puts a database server on another volume in a data set's place, asks for a start and then a retire. And it puts a second routes file into the proxy's folder, once with a router listed before the lane's own and once after.
 

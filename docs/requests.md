@@ -175,6 +175,7 @@ On the test bed on November 17, PostgreSQL 17, one nginx lane.
 With each lane its own turn, on November 17, nginx lanes:
 
 - One lane moved from one build to another in 6.3 s. Two at once took 6.3 s, four at once 6.8 s, and six asked at once 12.2 s: four, then two.
+- On November 20, with the gate and 3,188 files in its folder: one lane moved in 5.9 to 7.0 s over ten moves, and two at once in 9.6, 10.8 and 9.3 s. Before the routes were read without the gate's files, two at once took 10.5 s. `tests/test_bed_lanes.py` reports that time and does not judge by it.
 - A call answered `202` in 50 ms from another machine.
 - A move cancelled by the call while its new instance was being checked ended as `cancelled` 2.4 s later, with the instance removed. The web address answered from the old build throughout, and no request failed.
 - A newer request asked 2 s into a move: the first ended `cancelled`, and the lane ended on the newer build.
