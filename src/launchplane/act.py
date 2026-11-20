@@ -357,7 +357,8 @@ class Lanes:
         ).logins_not_read
 
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
-    # one can rename after it.
+    # one can rename after it. A host that refuses to run it has given no answer.
+    @observing()
     def fence(self, product: str, lane: str, generation: str, attempt: int) -> GateAnswer:
         return self.gate().fence(web_address_of(product, lane), generation, attempt)
 

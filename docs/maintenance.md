@@ -9,6 +9,8 @@ curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/maintenance/en
 
 Neither takes a body. Each is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when it ends. Each reads the host and the proxy again before every step, so one interrupted at any point is finished when its request is taken up again, or by making the same call again.
 
+Neither call ends over a host it could not read. When a read fails, or a change is sent and its reply is lost, the request stays `working`, keeps its lane, says why in `error`, and is [taken up again](requests.md#the-workers) from what the host shows. So a lane is not left showing the back soon page with a part still running by a host that stopped answering. A call with `?wait=` answers `202` with the request when that time runs out.
+
 ## The mark
 
 A lane is in maintenance when its own routes file sends its web address to the back soon page. Nothing else is stored. The file is read from the proxy's container whether or not the proxy runs, so a lane in maintenance reads as in maintenance while the proxy is down. `since` in an answer and on the page is the time that file was written, by the control container's clock.
@@ -60,7 +62,7 @@ The web address changes first going in and last coming out, so a call killed any
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `ended` | 200 | This call switched the web address back to the web part, and the judgement the status page draws then found nothing in the lane. |
-| `not in maintenance` | 200 | The lane's routes file did not point at the back soon page. The call changed nothing, started nothing and read no part of the lane, whatever state the lane is in. If the proxy runs and has not yet loaded that file, the call waits until it has, as a move does, and answers `503` if it does not within 10 s. With the proxy down it answers at once. |
+| `not in maintenance` | 200 | The lane's routes file did not point at the back soon page. The call changed nothing, started nothing and read no part of the lane, whatever state the lane is in. If the proxy runs and has not yet loaded that file, the call waits until it has, as a move does, and its request stays working if it does not within 10 s. With the proxy down it answers at once. |
 | `web part failed` | 422 | Docker refused to start the web part, or it failed its check. |
 | `background service failed` | 422 | Docker refused to start the background service, or it did not stay up 3 s. |
 
@@ -104,11 +106,10 @@ Every web part, background service and database server is made with Docker's res
 
 - **A request the web part already holds when it is stopped** gets its answer only if the product finishes it within 30 s of the stop signal.
 - **A container made before restart policies changed has the policy `always`**, and Docker starts it again after a restart even in maintenance. Nothing is converted. A move makes a web part and a background service again; a database server keeps its policy until it is removed and made again.
-- **A database server that does not accept connections within 60 s while maintenance ends** stops the call with `503` and is left running behind the back soon page. Beginning maintenance again stops it.
-- **If the container host refuses to run the web part's check while maintenance is ending**, a host error and not a failed check, the call answers `503` and the web part and the database server are left running behind the back soon page. The page shows them as wrong. Beginning or ending maintenance again puts it right.
+- **A database server that does not accept connections within 60 s while maintenance ends** leaves the request working: it is asked again every 5 s, with the server running behind the back soon page, for as long as it takes. Cancelling the request stops the server again.
+- **If the container host cannot run the web part's check while maintenance is ending**, a host error and not a failed check, the request stays working the same way, with the web part and the database server running behind the back soon page.
 - **A back soon page container that is gone while a lane is in maintenance is not started by beginning that lane's maintenance again.** That call answers `503` and says the container is not running, the web address answers the proxy's own error, and the page shows it as wrong. Docker brings the container back after a crash or a restart. Comes back if anything ever removes it.
 - **A lane with a second data set that no instance uses, put in maintenance and ended,** comes back, and the call then answers `503` naming that data set's stopped database server. Asked again it answers `not in maintenance`. Ending maintenance starts only the server its instance uses. What a lane with two data sets may be is settled by the release that copies data.
-- **A change of the route that the container host accepted and did not answer does not end the call.** Its request stays working, and its next attempt fences the change, reads the route and finishes: a lane is not left showing the back soon page with a part still running.
 - **A call ending maintenance that is killed after it wrote the route back** has finished its work. Asked again it waits for the proxy to load the file and answers `not in maintenance`, not `ended`.
 - **A proxy container removed by hand takes the routes files out of reach** until a call starts the proxy again on the same volume. Until then no lane reads as in maintenance.
 - **The test-bed kill tests cannot say at which action the kill landed.** They show that the same call asked again reaches the same end. The unit tests cover each action.

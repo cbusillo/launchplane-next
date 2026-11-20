@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import NoReturn
 
 import pytest
 from fastapi.testclient import TestClient
@@ -106,14 +107,24 @@ def lose_the_first_reply_to(host: object, change: str) -> None:
     setattr(host, change, made_and_not_answered)
 
 
-def refuse(*_sent: object) -> None:
+def refuse(*_sent: object) -> NoReturn:
     raise ContainerHostRefused("The change on test was refused: pull access denied")
+
+
+def fence_refused(web_address: str, generation: str, attempt: int) -> NoReturn:
+    refuse(web_address, generation, attempt)
 
 
 def left_working(record: Record, request: int) -> Kept:
     kept = kept_of(record, request)
     assert (kept.stands, {each.ended for each in kept.attempts}) == (Stands.WORKING, {"unfinished"}), kept
     return kept
+
+
+def left_working_after_an_interruption(record: Record, request: int) -> str:
+    kept = kept_of(record, request)
+    assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.WORKING, ["interrupted", "unfinished"]), kept
+    return (kept.error or "").rpartition(": ")[2]
 
 
 def test_a_read_that_fails_after_the_first_change_leaves_the_request_working_with_its_lane_and_it_ends_done_once_the_host_is_read(
@@ -174,6 +185,21 @@ def test_a_first_change_the_host_refuses_ends_the_request_failed_with_the_hosts_
         True,
     )
     assert (again.id != request.id, kept_of(record, again.id).stands) == (True, Stands.DONE)
+
+
+def test_a_request_found_working_whose_fence_the_host_refuses_to_run_does_nothing_and_stays_working_until_the_gate_answers(
+    record: Record, kind: str
+) -> None:
+    asked, lane, _, _, _, is_as_asked, _ = KINDS[kind]
+    proxy = lane()
+    worker, fence = worker_on(proxy, record), proxy.gate.fence
+    request = record.write(asked, CALLER, None)
+    assert record.take_up(request.id) is not None
+    proxy.gate.fence = fence_refused
+    assert worker.work_next() is True
+    assert (left_working_after_an_interruption(record, request.id), proxy.host.actions) == ("pull access denied", [])
+    proxy.gate.fence = fence
+    assert (worker.work_next(), kept_of(record, request.id).stands, is_as_asked(proxy)) == (True, Stands.DONE, True)
 
 
 def test_a_request_whose_work_the_host_shows_done_ends_as_done_and_changes_nothing(record: Record, kind: str) -> None:

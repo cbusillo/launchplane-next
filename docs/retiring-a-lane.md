@@ -32,7 +32,7 @@ The web address goes first so that no new request reaches an instance that is st
 
 The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
 
-A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A removal of the route that was sent and not answered does not fail the request: it stays working, and its [next attempt](requests.md#the-workers) fences the removal, reads the route and finishes the retire. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
+A `503` means the host answered no, or the lane is not as it must be. Retiring stopped where it was, its request has failed, and it is safe to ask again. A host or proxy that could not be read, and a change that was sent and not answered, do not fail the request: it stays working, and its [next attempt](requests.md#the-workers) reads the host and finishes the retire. A removal of the route not answered is fenced first. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
 
 ## Known and not fixed
 
