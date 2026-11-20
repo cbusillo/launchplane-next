@@ -76,13 +76,11 @@ class PretendRecord(Record):
         return self.kept[request]
 
     def same_as_written(self, asked: Asked, idempotency_key: str | None) -> Request | None:
-        if idempotency_key is None:
-            unfinished = (each for each in self.every() if each.stands in UNFINISHED[:2] and each.cancel_asked_at is None)
-            return next((each for each in unfinished if each.asked() == asked), None)
         same_key = self.kept.get(self.keys.get(key_digest(idempotency_key) or "", 0))
         if same_key is not None and same_key.asked() != asked:
             raise key_reused(same_key)
-        return same_key
+        unfinished = (each for each in self.every() if each.stands in UNFINISHED[:2] and each.cancel_asked_at is None)
+        return same_key or next((each for each in unfinished if each.asked() == asked), None)
 
     def write_new(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         self.gate.refuse(*said(asked), asked_by)
@@ -103,8 +101,7 @@ class PretendRecord(Record):
         if idempotency_key is not None:
             self.keys[key_digest(idempotency_key) or ""] = new.id
         for each in self.every():
-            older = (each.product, each.lane) == (new.product, new.lane) and each.id < new.id and each.asked() != asked
-            if older and each.stands is Stands.WAITING:
+            if (each.product, each.lane, each.stands, each.id < new.id) == (new.product, new.lane, Stands.WAITING, True):
                 self.change(each.id, stands=Stands.REPLACED, ended_at=now(), replaced_by=new.id)
         if not self.confirms_writes:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")

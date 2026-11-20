@@ -98,6 +98,29 @@ def test_asking_exactly_what_an_unfinished_request_asks_is_answered_with_that_re
     )
 
 
+def test_a_key_not_seen_before_exempts_no_request_from_its_lanes_rule_and_a_lane_never_has_two_waiting(record: Record) -> None:
+    at_work = at_work_on_b(record)
+    waiting = record.write(MOVE_C, CALLER, "first")
+    same = [record.write(MOVE_C, CALLER, "second").id, record.write(MOVE_B, CALLER, "third").id]
+    newest = record.write(RETIRE, CALLER, "fourth")
+    assert (same, [(each.id, each.stands) for each in record.unfinished()], record.write(MOVE_C, CALLER, "first").stands) == (
+        [waiting.id, at_work],
+        [(at_work, Stands.WORKING), (newest.id, Stands.WAITING)],
+        Stands.REPLACED,
+    )
+
+
+def test_the_record_itself_refuses_a_lane_a_second_request_that_waits(
+    postgres_record: PostgresRecord, migrated_database: str
+) -> None:
+    waiting = postgres_record.write(MOVE_B, CALLER, None)
+    # noinspection SqlResolve
+    second = "insert into request (product, lane, work, asked_by, generation) values ('site', 'testing', 'retiring', 'a test', 'g')"
+    with psycopg.connect(migrated_database) as by_hand, pytest.raises(psycopg.errors.UniqueViolation):
+        by_hand.execute(second)
+    assert [each.id for each in postgres_record.unfinished()] == [waiting.id]
+
+
 def test_a_lane_with_a_request_that_needs_a_person_refuses_a_new_request_and_writes_nothing(record: Record) -> None:
     stuck = record.write(MOVE_B, CALLER, None)
     taken_up_until_it_needs_a_person(record, stuck.id)

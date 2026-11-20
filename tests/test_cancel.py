@@ -454,15 +454,6 @@ def test_a_retire_cancelled_before_it_deleted_the_named_data_set_keeps_it_and_fi
     assert (list(proxy.host.data_sets), proxy.host.instances) == (["data-1"], {})
 
 
-def test_asking_with_a_key_for_exactly_what_an_unfinished_request_asks_replaces_nothing_and_writes_a_request_of_its_own(
-    record: Record,
-) -> None:
-    waiting, other = record.write(MOVE_B, CALLER, None), record.write(RETIRE, CALLER, None)
-    with_a_key = record.write(RETIRE, CALLER, "one-release")
-    assert (with_a_key.id != other.id, kept_of(record, other.id).stands) == (True, Stands.WAITING)
-    assert kept_of(record, waiting.id).replaced_by == other.id
-
-
 def test_a_cancel_that_waits_is_answered_at_once_for_a_request_that_needs_a_person(record: Record) -> None:
     bed = bed_on(record)
     stuck = bed.client.post(MOVE, json=TO_B).json()["id"]

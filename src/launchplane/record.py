@@ -280,13 +280,11 @@ class Sql:
     ) oldest_of_each_lane order by id
     """
     # One statement, so a request taken up at that moment is left to be worked: only one that still waits is replaced.
-    # One that asks exactly what the new request asks is left too.
-    REPLACE_WAITING: Final = """
-    update request older set stands = 'replaced', ended_at = now(), replaced_by = new.id from request new
-    where new.id = %s and (older.product, older.lane) = (new.product, new.lane) and older.id < new.id
-        and older.stands = 'waiting'
-        and (older.work, older.build, older.delete_data_set) is distinct from (new.work, new.build, new.delete_data_set)
+    # It leaves the waiting place before the new request is written, since the record refuses a lane two that wait.
+    END_WAITING: Final = """
+    update request set stands = 'replaced', ended_at = now() where (product, lane) = (%s, %s) and stands = 'waiting' returning id
     """
+    REPLACED_BY: Final = "update request set replaced_by = %s where id = any(%s)"
     # One statement, so a request taken up during its cancel is either ended or marked, never neither.
     CANCEL: Final = """
     update request set
@@ -363,17 +361,16 @@ def said(asked: Asked) -> list[JsonValue]:
     return [asked.product, asked.lane, asked.work.value, asked.build, asked.delete_data_set]
 
 
+# A key says only that a call is one sent before. With a key not seen, a call is held to its lane's rule like any other.
 def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
-    if idempotency_key is None:
-        row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
-        return None if row is None else Request.model_validate(row)
     row = session.execute(Sql.SAME_KEY, gate.made(key_digest(idempotency_key))).fetchone()
-    if row is None:
-        return None
-    same_key = Request.model_validate(row)
-    if same_key.asked() != asked:
-        raise key_reused(same_key)
-    return same_key
+    if row is not None:
+        same_key = Request.model_validate(row)
+        if same_key.asked() != asked:
+            raise key_reused(same_key)
+        return same_key
+    row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
+    return None if row is None else Request.model_validate(row)
 
 
 def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked) -> None:
@@ -382,11 +379,11 @@ def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked)
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
-# A lane has one waiting place, and a new request takes it. The request at work is not touched.
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
     passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key), new_generation())
+    waited = [row["id"] for row in session.execute(Sql.END_WAITING, gate.sent(asked.product, asked.lane)).fetchall()]
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
-    session.execute(Sql.REPLACE_WAITING, gate.made(new.id))
+    session.execute(Sql.REPLACED_BY, gate.made(new.id, list[JsonValue](waited)))
     return new
 
 
