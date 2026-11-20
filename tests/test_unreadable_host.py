@@ -191,7 +191,7 @@ def test_a_request_found_working_whose_fence_the_host_refuses_to_run_does_nothin
     worker, fence = worker_on(proxy, record), proxy.gate.fence
     request = record.write(asked, CALLER, None)
     assert record.take_up(request.id) is not None
-    proxy.gate.fence = refuse
+    setattr(proxy.gate, "fence", refuse)
     assert worker.work_next() is True
     assert (left_working_after_an_interruption(record, request.id), proxy.host.actions) == ("pull access denied", [])
     proxy.gate.fence = fence
