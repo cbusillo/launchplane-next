@@ -192,3 +192,21 @@ def test_a_retire_whose_removal_the_gate_never_makes_retires_no_container_and_do
     request = record.write(RETIRE, CALLER, None)
     assert worker_on(proxy, record).work_next() is True
     assert (kept_of(record, request.id).stands, WEB_ADDRESS in proxy.written, len(proxy.host.instances)) == (Stands.FAILED, True, 1)
+
+
+def test_beginning_maintenance_refused_before_any_change_of_the_route_was_sent_fails_with_why_and_its_lane_takes_the_next_request(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.refuses_helpers = True
+    worker = worker_on(proxy, record)
+    begin = record.write(BEGIN, CALLER, None)
+    assert worker.work_next() is True
+    retire = record.write(RETIRE, CALLER, None)
+    assert worker.work_next() is True
+    refused = kept_of(record, begin.id)
+    assert (refused.stands, "pull access denied" in (refused.error or ""), kept_of(record, retire.id).stands) == (
+        Stands.FAILED,
+        True,
+        Stands.DONE,
+    )

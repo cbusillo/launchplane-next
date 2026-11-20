@@ -569,8 +569,7 @@ class PostgresRecord(Record):
                 return None
             return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, self.gate.made(request, request))["id"]
 
-    # Asked of a move before it is taken up, under its lane's turn: whether it needs a person is the gate's to say
-    # first, and the gate is not asked inside a transaction.
+    # Asked before a request is taken up, under its lane's turn. The gate is asked after, and never inside a transaction.
     def at_limit(self, request: int) -> AtLimit | None:
         with self.session("counting how often a request was interrupted") as session:
             taken = self.gate.made(request)

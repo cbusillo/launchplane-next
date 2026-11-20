@@ -178,8 +178,8 @@ class Gate:
         answer = told(result.output) if result.succeeded else None
         if answer is None:
             raise GateError(
-                f"The gate gave no verdict for the release {generation} of {web_address} when asked to {asked[0]}, so "
-                f"what holds for it is not known: exit code {result.exit_code}, {result.output or 'no output'}"
+                f"The gate gave no answer when asked to {asked[0]} for {web_address}, generation {generation}, so whether the route "
+                f"was changed and what holds there is not known: exit code {result.exit_code}, {result.output or 'no output'}"
             )
         return answer
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
-from launchplane.docker_answers import ContainerHostError, LoginRemovalRefused
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -61,6 +61,7 @@ class LaunchplaneKilled(BaseException):
 
 class PretendHost:
     def __init__(self) -> None:
+        self.refuses_helpers = False
         self.instances: dict[str, RunningInstance] = {}
         self.background_services: dict[str, RunningBackgroundService] = {}
         self.data_sets: dict[str, DataSet] = {}
@@ -395,6 +396,8 @@ class PretendProxy:
 
     # As the gate does it.
     def edit(self, web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        if container == BACK_SOON and self.host.refuses_helpers:
+            raise ContainerHostRefused(f"Starting Launchplane's own container {BACK_SOON} was refused: pull access denied")
         text = "" if container is None else f"{container} {generation} {attempt}"
         installed = self.installed(web_address)
         if installed == text:

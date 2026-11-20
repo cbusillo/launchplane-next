@@ -186,6 +186,7 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
     try:
         event = take(action, witness)
     except (ContainerHostError, ProxyError) as error:
+        witness.edit_unanswered &= not isinstance(error, ContainerHostRefused)  # what Docker refused never ran
         witness.tell(named(action), str(error))
         raise
     did, refusal = told(action, event)
