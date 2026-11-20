@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
-from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
+from launchplane.docker_answers import ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -214,7 +214,7 @@ class PretendHost:
 
     def start_part(self, container: str) -> None:
         if container in self.parts_that_will_not_start:
-            raise ContainerHostError(f"Starting {container} on test failed: no such image")
+            raise ContainerHostRefused(f"Starting {container} on test was refused: no such image")
         self.change_part(container, InstanceState.RUNNING)
         self.record(f"start {container}")
 
@@ -323,6 +323,10 @@ class GateNeverAsked:
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer:
         assert product and lane and generation and attempt
         return self.answers
+
+    def why_part_way(self, product: str, lane: str, /) -> str | None:
+        assert self.answers and product and lane
+        return None
 
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
         assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness and logins

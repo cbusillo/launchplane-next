@@ -16,11 +16,13 @@ from tests.bed import (
     needs_test_bed,
     on_scratch,
     request_ended,
+    request_loop,
     retire,
     wait_for,
     wait_until_stopped_at,
 )
 from tests.test_bed_data_set import DESCRIPTION, build_pretend_product, place_description
+from tests.test_bed_maintenance import BACK_SOON, shows_back_soon, visit
 
 pytestmark = needs_test_bed
 
@@ -29,6 +31,7 @@ LANE = "testing"
 WEB_ADDRESS = f"{LANE}.{PRODUCT}.test"
 BUILD_A, BUILD_B = "launchplane-test-ledger:a", "launchplane-test-ledger:b"
 LOGIN_READ, WATCHED = "fail.logins.read_logins", "after.host.await_background_service"
+BACK_SOON_UP, LANE_READ = "after.proxy.edit", f"fail.host.read?only={PRODUCT}"
 IMPOSTOR, ANOTHER_VOLUME = "test-bed-answers-impostor", "test-bed-answers-another-volume"
 LONGER_THAN_A_REQUEST_IS_LEFT_BEFORE_IT_IS_TAKEN_UP_AGAIN = 12
 
@@ -147,6 +150,45 @@ def test_a_start_on_a_database_with_another_volume_ends_failed_with_its_data_kep
         )
     finally:
         on_scratch(f"docker rm --force {IMPOSTOR}; docker volume rm {ANOTHER_VOLUME}")
+
+
+def states_of_the_lane() -> set[str]:
+    shown = running()
+    databases = [database for data_set in of_lane(shown["data_sets"]) for database in data_set["databases"]]
+    return {part["state"] for part in (*of_lane(shown["instances"]), *of_lane(shown["background_services"]), *databases)}
+
+
+@pytest.mark.usefixtures("lane_on_a")
+def test_beginning_maintenance_whose_first_read_behind_back_soon_fails_stays_working_and_ends_with_every_part_stopped() -> None:
+    hold(BACK_SOON_UP)
+    asked = ask(f"/lanes/{PRODUCT}/{LANE}/maintenance/begin", {})[1]
+    wait_until_stopped_at(BACK_SOON_UP)
+    wait_for(lambda: shows_back_soon(WEB_ADDRESS), seconds=30)
+    with request_loop(lambda: str(visit(WEB_ADDRESS, "GET", "/"))) as visitors:
+        hold(LANE_READ)
+        let_go(BACK_SOON_UP)
+
+        def left_working_over_the_read() -> bool:
+            now = ask(f"/requests/{asked['id']}")[1]
+            assert now["stands"] == "working", now
+            return "host.read failed" in (now["error"] or "")
+
+        wait_for(left_working_over_the_read, seconds=30)
+        time.sleep(LONGER_THAN_A_REQUEST_IS_LEFT_BEFORE_IT_IS_TAKEN_UP_AGAIN)
+        kept = ask(f"/requests/{asked['id']}")[1]
+        assert (kept["stands"], {each["ended"] for each in kept["attempts"]}) == ("working", {"unfinished"}), kept
+        assert (len(kept["attempts"]) > 1, "running" in states_of_the_lane(), judged()["work"]) == (
+            True,
+            True,
+            "beginning maintenance",
+        )
+        let_go(LANE_READ)
+        ended = request_ended(asked["id"])
+    assert (ended["stands"], ended["answer"]["outcome"]) == ("done", "in maintenance"), ended
+    assert (states_of_the_lane(), judged()["condition"]) == ({"stopped"}, "in maintenance")
+    assert (visitors.answers_in_order(), visitors.failures) == ([str(BACK_SOON)], [])
+    status, back = ask_and_wait(f"/lanes/{PRODUCT}/{LANE}/maintenance/end", {})
+    assert (status, back["outcome"]) == (200, "ended"), back
 
 
 def second_router(name: str, container: str) -> str:

@@ -15,6 +15,7 @@ from launchplane.instance import (
     Conflicting,
     DataSet,
     DataSetUse,
+    InstanceState,
     LaneBuild,
     LaneReading,
     OnHost,
@@ -186,7 +187,6 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
     try:
         event = take(action, witness)
     except (ContainerHostError, ProxyError) as error:
-        witness.edit_unanswered &= not isinstance(error, ContainerHostRefused)  # what Docker refused never ran
         witness.tell(named(action), str(error))
         raise
     did, refusal = told(action, event)
@@ -367,6 +367,15 @@ class Lanes:
         answer = self.gate().abandon(web_address, generation)
         return plan.too_late_to_cancel(web_address) if answer.verdict is Verdict.COMMITTED else None
 
+    # Where a maintenance or a retire cut short leaves a lane: its route names no instance and a part of it is still up.
+    def why_part_way(self, product: str, lane: str) -> str | None:
+        read = self.read(Scope(lane=(product, lane))).lane(product, lane)
+        if isinstance(read.route.file, Unread):
+            raise Waiting(f"{read.route.file}, so whether {lane} of {product} was left part way is not known.")
+        up = sorted(part.container for part in (*read.instances, *read.background_services) if part.state != InstanceState.STOPPED)
+        whole = not up or read.route.written not in (None, BACK_SOON)
+        return None if whole else f"{read.web_address} sends visitors to no instance and {', '.join(up)} is still up"
+
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
         return settle(
             *self.judging(product, lane, self.description_of(product), Work.RETIRE),
@@ -431,9 +440,7 @@ class Lanes:
     def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.EditRoute):
-            witness.edit_unanswered = True  # from before it is sent: a change not answered may still be made
             edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
-            witness.edit_unanswered = False
             return action if edit != LOST else steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path, with_log=not behind_back_soon)
@@ -447,7 +454,7 @@ class Lanes:
         if isinstance(action, steps.StartStopped):
             try:
                 self.host.start_part(action.container)
-            except ContainerHostError as error:
+            except ContainerHostRefused as error:
                 return steps.StartRefused(action.container, str(error))
             return action
         if isinstance(action, steps.Switch):

@@ -91,7 +91,7 @@ def test_a_request_found_working_whose_fence_gets_no_answer_does_nothing_on_the_
         ["interrupted", "unfinished"],
         [],
     )
-    assert left.error == "Retiring testing of site was not begun: The proxy's container did not answer"
+    assert left.error == "The proxy's container did not answer"
     proxy.gate.unreadable = None
     assert worker.work_next() is True
     assert (kept_of(record, retire.id).stands, WEB_ADDRESS in proxy.written) == (Stands.DONE, False)
@@ -181,7 +181,7 @@ def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_
     )
 
 
-def test_a_retire_whose_removal_the_gate_never_makes_retires_no_container_and_does_not_end_as_done(record: Record) -> None:
+def test_a_retire_whose_removal_the_gate_never_makes_retires_no_container_and_stays_working_saying_so(record: Record) -> None:
     proxy = lane_brought_up_with_a()
 
     def never_made(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
@@ -191,7 +191,9 @@ def test_a_retire_whose_removal_the_gate_never_makes_retires_no_container_and_do
     proxy.edit = never_made
     request = record.write(RETIRE, CALLER, None)
     assert worker_on(proxy, record).work_next() is True
-    assert (kept_of(record, request.id).stands, WEB_ADDRESS in proxy.written, len(proxy.host.instances)) == (Stands.FAILED, True, 1)
+    kept = kept_of(record, request.id)
+    assert (kept.stands, WEB_ADDRESS in proxy.written, len(proxy.host.instances)) == (Stands.WORKING, True, 1)
+    assert "was not finished after 50 steps" in (kept.error or "")
 
 
 def test_beginning_maintenance_refused_before_any_change_of_the_route_was_sent_fails_with_why_and_its_lane_takes_the_next_request(

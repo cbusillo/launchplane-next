@@ -54,6 +54,7 @@ class AsksGate(Protocol):
     # Why a cancel came too late, or None when it won.
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
+    def why_part_way(self, product: str, lane: str, /) -> str | None: ...
 
 
 # Past every attempt a request can have: fenced through it, a generation with no verdict can never be renamed for.
@@ -283,16 +284,18 @@ class Calls:
             if too_late is not None:
                 self.record.refuse_cancel(request.id, too_late)
 
-    # A request that needs a person is not ended while the gate has a verdict for its release: committed is finished and
-    # a cancel that won is put back, so it is worked again. The gate is asked for good, so a release it has no verdict
-    # for can no longer be renamed for once it is given up.
-    def worked_again_since_decided(self, request: int, response: Response) -> NotFinished | None:
+    # Why a request that needs a person is not ended by this call. While the gate has a verdict for its release it is
+    # worked again: committed is finished and a cancel that won is put back. The gate is asked for good, so a release it
+    # has no verdict for can no longer be renamed for once it is ended. A lane read as left part way is not given up.
+    def not_to_be_ended(self, request: int, response: Response, *, giving_up: bool) -> NotFinished | None:
         kept = self.record.read(request)
         if kept is None or kept.stands is not Stands.NEEDS_A_PERSON:
             return None
         verdict = self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict
         if verdict is Verdict.NONE:
-            return None
+            part_way = self.gate.why_part_way(kept.product, kept.lane) if giving_up else None
+            why = f"Request {request} was not given up: {part_way}. POST /requests/{request}/retry finishes it. Nothing was changed."
+            return None if part_way is None else not_finished(response, HTTPStatus.CONFLICT, why)
         decided = "The routes file" if verdict is Verdict.COMMITTED else "A cancel won before the routes file"
         why = f"{decided} of {kept.lane} of {kept.product} was renamed for request {request}, so it is not given up."
         self.record.resume(request, why)
@@ -345,11 +348,11 @@ class Calls:
 
     # Only a request that needs a person is asked for again or given up, so any other is refused, saying how it stands.
     def answered_by_a_person(
-        self, request: int, response: Response, answer: Callable[[], KeptRequest | None]
+        self, request: int, response: Response, answer: Callable[[], KeptRequest | None], *, giving_up: bool = False
     ) -> KeptRequest | NotFinished:
         try:
-            if (decided := self.worked_again_since_decided(request, response)) is not None:
-                return decided
+            if (not_ended := self.not_to_be_ended(request, response, giving_up=giving_up)) is not None:
+                return not_ended
             answered = answer()
         except CarriesASecret as error:
             return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
@@ -490,7 +493,7 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
 
     @app.post("/requests/{request}/give-up", responses=responses(NOT_FOUND, *NOT_KEPT))
     def give_up_request(request: int, response: Response) -> KeptRequest | NotFinished:
-        return calls.answered_by_a_person(request, response, lambda: calls.record.give_up(request))
+        return calls.answered_by_a_person(request, response, lambda: calls.record.give_up(request), giving_up=True)
 
 
 def add_cancel_call(app: FastAPI, calls: Calls) -> None:
