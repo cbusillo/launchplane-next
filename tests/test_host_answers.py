@@ -239,23 +239,20 @@ def test_this_request_ends_without_reading_its_history(asked: Asked) -> None:
     assert kept is not None and kept.stands is Stands.DONE
 
 
-DOUBLED: dict[str, tuple[dict[str, object], str]] = {
-    "volumes": ({"volumes": ("volume-data-1", "volume-put-beside-it")}, r"2 volumes \(volume-data-1, volume-put-beside-it\)"),
-    "networks": (
-        {"networks": (HostNetwork(name="network-data-1", is_quiet=True), HostNetwork(name="network-beside-it", is_quiet=True))},
-        r"2 networks \(network-data-1, network-beside-it\)",
-    ),
+NETWORKS = (HostNetwork(name="network-data-1", is_quiet=True), HostNetwork(name="network-beside-it", is_quiet=True))
+DOUBLED: dict[str, tuple[tuple[object, ...], str]] = {
+    "volumes": (("volume-data-1", "volume-put-beside-it"), r"2 volumes \(volume-data-1, volume-put-beside-it\)"),
+    "networks": (NETWORKS, r"2 networks \(network-data-1, network-beside-it\)"),
 }
 
 
-@pytest.mark.parametrize(("parts", "named"), DOUBLED.values(), ids=DOUBLED.keys())
-def test_a_retire_naming_a_data_set_that_has_two_of_these_deletes_nothing_of_it_names_both_and_retires_the_rest(
-    parts: dict[str, object], named: str
-) -> None:
+@pytest.mark.parametrize("part", DOUBLED)
+def test_a_retire_naming_a_data_set_that_has_two_of_these_deletes_nothing_of_it_names_both_and_retires_the_rest(part: str) -> None:
+    twice, both = DOUBLED[part]
     proxy = lane_brought_up_with_a()
     host = proxy.host
-    host.change_data_set("site", "testing", "data-1", **parts)
-    with pytest.raises(Stopped, match=f"{named}.*nothing of the data set was deleted"):
+    host.change_data_set("site", "testing", "data-1", **{part: twice})
+    with pytest.raises(Stopped, match=f"{both}.*nothing of the data set was deleted"):
         lanes_on(proxy).retire("site", "testing", delete_data_set="data-1")
     assert (list(host.data_sets), host.instances, host.background_services) == (["data-1"], {}, {})
     assert not any(action.startswith("delete") for action in host.actions)
