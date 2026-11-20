@@ -64,6 +64,11 @@ class ContainerHostRefused(ContainerHostError):
     pass
 
 
+# A database server answered no to the removal of a login. The removal failed: nothing about it is unread.
+class LoginRemovalRefused(ContainerHostRefused):
+    pass
+
+
 @contextmanager
 def observing() -> Generator[None]:
     try:

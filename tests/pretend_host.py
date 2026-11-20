@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
-from launchplane.docker_answers import ContainerHostError
+from launchplane.docker_answers import ContainerHostError, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
 from launchplane.gate import GateError
 from launchplane.instance import (
@@ -73,6 +73,8 @@ class PretendHost:
         self.databases_that_must_be_killed: set[str] = set()
         self.parts_that_will_not_start: set[str] = set()
         self.logins_left_in: dict[str, tuple[str, ...]] = {}
+        self.holders_unread: set[str] = set()
+        self.removals_refused: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -118,10 +120,15 @@ class PretendHost:
             of_lane(self.instances.values()), of_lane(self.background_services.values()), of_lane(self.data_sets.values()), networks
         )
 
-    def remove_unheld_logins(self, database: str) -> None:
+    def remove_unheld_logins(self, database: str) -> Unread | None:
+        self.record(f"remove logins from {database}")
+        if database in self.holders_unread:
+            return Unread(asked=f"Which logins of the database {database} no container holds", why="timed out")
+        if database in self.removals_refused:
+            raise LoginRemovalRefused(f"The database {database} did not remove the login i_left: it owns objects")
         self.logins_left_in.pop(database, None)
         self.change_database(database, unheld_logins=())
-        self.record(f"remove logins from {database}")
+        return None
 
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
         self.place(target, container, use=use, generation=generation)
@@ -316,8 +323,8 @@ class GateNeverAsked:
         assert product and lane and generation and attempt
         return self.answers
 
-    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> list[str]:
-        assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
+        assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness and logins
         return []
 
 

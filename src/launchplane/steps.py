@@ -69,7 +69,7 @@ class MaintenanceResult(Result):
 
 
 # The answer of a request that a cancel ended: what was done to put its lane back as it was.
-class PutBack(BaseModel):
+class PutBack(Result):
     put_back: list[str] = []
     # Data sets the request made. Putting a lane back never deletes data, so they stay.
     data_sets_kept: list[str] = []
@@ -282,7 +282,7 @@ class RemovalRefused(Refused):
     pass
 
 
-# The logins of a database server, or who holds them, could not be read when they were to be removed. None was removed.
+# A read a removal of logins stands on failed, so none was sent. A removal the server refuses is an error, never this.
 class LoginsUnread(Refused):
     pass
 

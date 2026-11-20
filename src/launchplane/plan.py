@@ -1,5 +1,6 @@
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -76,38 +77,30 @@ def failure_report(why: str, log_tail: str) -> str:
     return f"{why}\nIts last log lines:\n{log_tail}"
 
 
-def maintenance_change_made_by(event: Event) -> str | None:
-    match event:
-        case ShowBackSoon(web_address=web_address):
-            return f"switched {web_address} to the back soon page"
-        case StopPart(container=container) | StopDatabase(container=container):
-            return f"stopped {container}"
-        case StartStopped(container=container):
-            return f"started {container}"
-        case _:
-            return None
+CHANGES: dict[type, Callable[[Any], str]] = {
+    StartProxy: lambda _step: "started the proxy",
+    CreateDataSetNetwork: lambda step: f"made part of the data set {step.data_set}",
+    CreateDataSetVolume: lambda step: f"made part of the data set {step.data_set}",
+    CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
+    StartDatabase: lambda step: f"started the database {step.container}",
+    StartInstance: lambda step: f"started the instance {step.container}",
+    WriteRoute: lambda step: f"wrote the route to {step.container}",
+    StartBackgroundService: lambda step: f"started the background service of {step.instance}",
+    Retire: lambda step: f"retired {step.container}",
+    RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
+    ShowBackSoon: lambda step: f"switched {step.web_address} to the back soon page",
+    StopPart: lambda step: f"stopped {step.container}",
+    StopDatabase: lambda step: f"stopped {step.container}",
+    StartStopped: lambda step: f"started {step.container}",
+}
 
 
+# What a step that was taken changed. A switch the gate did not rename for, and an instance it kept, changed nothing.
 def change_made_by(event: Event) -> str | None:
-    match event:
-        case StartProxy():
-            return "started the proxy"
-        case CreateDataSetNetwork(data_set=data_set) | CreateDataSetVolume(data_set=data_set) | CreateDatabase(data_set=data_set):
-            return f"made part of the data set {data_set}"
-        case StartDatabase(container=container):
-            return f"started the database {container}"
-        case StartInstance(container=container):
-            return f"started the instance {container}"
-        case WriteRoute(container=container) | Switched(container=container, won=True):
-            return f"wrote the route to {container}"
-        case StartBackgroundService(instance=instance):
-            return f"started the background service of {instance}"
-        case Retire(container=container) | Discard(container=container) | Discarded(container=container, kept=False):
-            return f"retired {container}"
-        case RemoveLogins(database=database):
-            return f"removed the logins no container holds from {database}"
-        case _:
-            return maintenance_change_made_by(event)
+    if isinstance(event, Switched | Discarded):
+        changed = event.won if isinstance(event, Switched) else not event.kept
+        return f"{'wrote the route to' if isinstance(event, Switched) else 'retired'} {event.container}" if changed else None
+    return CHANGES[type(event)](event) if type(event) in CHANGES else None
 
 
 def changes_made(done: tuple[Event, ...]) -> list[str]:
@@ -507,10 +500,10 @@ def own_part_step(move: Move, *, repairs: bool) -> Action | Stop | CannotPutBack
 
 
 # After a move failed with no verdict and its attempt is fenced: the instance it made goes, and each login read as unheld.
-def decide_clean_up(move: Move) -> Step[Result] | CannotPutBack:
+def decide_clean_up(move: Move, *, logins: bool) -> Step[Result] | CannotPutBack:
     if move.gate.verdict is not Verdict.NONE:
         return Wait(f"The gate answers {move.gate.verdict} for this release, so nothing of it was cleaned up.")
-    return own_part_step(move, repairs=False) or login_step(move.judged, move.done) or Done(Result())
+    return own_part_step(move, repairs=False) or (login_step(move.judged, move.done) if logins else None) or Done(Result())
 
 
 # A cancel won. What the generation made goes. Data stays.

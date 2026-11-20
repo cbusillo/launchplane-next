@@ -8,30 +8,14 @@ from launchplane.steps import Action, Event
 type Tell = Callable[[str, str | None], None]
 
 
-def tell_nobody(_did: str, _error: str | None) -> None:
-    pass
-
-
-def hold_nothing() -> None:
-    pass
-
-
-def never_cancelled() -> bool:
-    return False
-
-
-def refuse_to_nobody(_why: str) -> None:
-    pass
-
-
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
 @dataclass(frozen=True)
 class Witness:
-    tell: Tell = tell_nobody
-    hold: Callable[[], None] = hold_nothing
-    cancel_asked: Callable[[], bool] = never_cancelled
-    refuse_cancel: Callable[[str], None] = refuse_to_nobody
+    tell: Tell = lambda _did, _error: None
+    hold: Callable[[], None] = lambda: None
+    cancel_asked: Callable[[], bool] = lambda: False
+    refuse_cancel: Callable[[str], None] = lambda _why: None
 
 
 NOBODY = Witness()

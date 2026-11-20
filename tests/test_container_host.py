@@ -11,7 +11,14 @@ from docker.errors import APIError
 
 from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.data_set import RULES_AS_READ, RULES_FILE, login_of
-from launchplane.docker_answers import ContainerHostError, HostAnswers, Listed, container_summaries, on_host_from_answers
+from launchplane.docker_answers import (
+    ContainerHostError,
+    HostAnswers,
+    Listed,
+    LoginRemovalRefused,
+    container_summaries,
+    on_host_from_answers,
+)
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, logins_held
 from launchplane.instance import (
     LANE_NETWORK,
@@ -362,21 +369,52 @@ def test_a_login_is_held_by_the_container_the_one_listing_found_it_in_and_any_ot
     assert (server.accepts_connections, server.unheld_logins) == (True, ("i_left_by_a_crash",))
 
 
-def test_a_failed_lookup_of_who_holds_the_logins_removes_no_login_and_is_an_error_not_a_server_nothing_holds() -> None:
-    docker = RecordingDocker()
+ROLES = ExecResult(0, b'["i_aaaaaaaaaaaa", "i_left", "i_left_too"]')
+DROP_REFUSED = ExecResult(3, b'ERROR:  role "i_left_too" cannot be dropped because some objects depend on it')
+
+
+def removals_sent(docker: RecordingDocker, *answers: ExecResult, holders_listed: bool = True) -> tuple[object, list[str]]:
     host = database_made(docker)
     holding_a_login(docker, WEB)
     database = docker.containers.by_name[DATABASE]
-    database.answers = [ExecResult(0, b'["i_aaaaaaaaaaaa"]')]
-    asked_before = len(database.calls)
+    database.answers, asked_before = list(answers), len(database.calls)
 
     def refuse(**_options: object) -> NoReturn:
         raise APIError("500 Server Error: the daemon did not list its containers")
 
-    docker.containers.list = refuse
-    with pytest.raises(ContainerHostError, match="did not list its containers"):
-        host.remove_unheld_logins(DATABASE)
-    assert len(database.calls) == asked_before + 1
+    if not holders_listed:
+        docker.containers.list = refuse
+    try:
+        answered: object = host.remove_unheld_logins(DATABASE)
+    except ContainerHostError as error:
+        answered = error
+    return answered, [call.rsplit("=", 1)[1] for call in database.calls[asked_before + 1 :]]
+
+
+def test_logins_whose_list_could_not_be_read_are_unread_and_no_removal_is_sent() -> None:
+    answered, sent = removals_sent(RecordingDocker(), ExecResult(2, b"psql: could not connect"))
+    assert isinstance(answered, Unread) and "could not connect" in answered.why and sent == []
+
+
+def test_logins_whose_holders_could_not_be_listed_are_unread_and_never_a_server_nothing_holds() -> None:
+    answered, sent = removals_sent(RecordingDocker(), ROLES, holders_listed=False)
+    assert isinstance(answered, Unread) and "did not list its containers" in answered.why and sent == []
+
+
+def test_only_the_logins_no_container_holds_on_the_fresh_reading_are_removed() -> None:
+    assert removals_sent(RecordingDocker(), ROLES, ExecResult(0), ExecResult(0)) == (None, ["i_left", "i_left_too"])
+
+
+def test_a_removal_the_server_refuses_is_a_refused_write_with_its_error_and_says_which_login_went_before_it() -> None:
+    answered, sent = removals_sent(RecordingDocker(), ROLES, ExecResult(0), DROP_REFUSED)
+    assert isinstance(answered, LoginRemovalRefused) and sent == ["i_left", "i_left_too"]
+    assert "did not remove the login i_left_too" in str(answered) and "some objects depend on it" in str(answered)
+    assert "Removed before it: ['i_left']." in str(answered)
+
+
+def test_a_removal_that_got_no_answer_from_the_server_is_neither_unread_nor_refused() -> None:
+    answered, _ = removals_sent(RecordingDocker(), ROLES, ExecResult(2, b"psql: connection lost"))
+    assert type(answered) is ContainerHostError
 
 
 def test_a_server_whose_logins_cannot_be_read_is_read_with_why_and_never_as_having_none() -> None:

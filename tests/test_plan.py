@@ -560,7 +560,8 @@ def test_a_failed_check_is_not_ended_until_the_login_of_the_instance_it_removed_
         gone("new"),
     )
     case = DataCase((on_data(OLD, "d1"),), "old", (LEFT_ON_D1,), refused, None, (background_service_of(on_data(OLD, "d1")),))
-    assert decide_clean_up(a_move(given_data(case).judged(Work.MOVE), refused, NO_VERDICT, WITH_DATA)) == RemoveLogins("database-d1")
+    move = a_move(given_data(case).judged(Work.MOVE), refused, NO_VERDICT, WITH_DATA)
+    assert decide_clean_up(move, logins=True) == RemoveLogins("database-d1")
 
 
 def retire_step_with(found: DataSet, delete: str | None = None) -> object:

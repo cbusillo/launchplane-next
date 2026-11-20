@@ -26,6 +26,7 @@ from launchplane.steps import (
     CheckRefused,
     Done,
     Event,
+    LoginsUnread,
     LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
@@ -74,7 +75,9 @@ def answer_for(product: str, lane: str, route: LaneRoute, outcome: MaintenanceOu
 
 
 def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None:
-    found = [finding for finding in judged.findings if finding.kind != Kind.LOGINS_UNREAD]
+    holders_unread = {event.container for event in done if isinstance(event, LoginsUnread)}
+    left = (finding for finding in judged.findings if finding.kind != Kind.LOGINS_UNREAD)
+    found = [finding for finding in left if not (finding.kind == Kind.LOGIN_UNHELD and finding.subject in holders_unread)]
     if not found:
         return None
     state = "is in maintenance" if judged.lane.route.in_maintenance else "is out of maintenance"

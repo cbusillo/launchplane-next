@@ -48,10 +48,9 @@ class Conflicting[Seen]:
         return f"{self.asked} has {len(self.seen)} answers where it must have one: {'; '.join(map(str, self.seen))}"
 
 
-# What one question asked of the host was answered: the value, None for nothing there in a reading that succeeded, or
-# one of the two that are no answer. It stays one of the four from the reading to whatever is decided from it.
+# What a question asked of the host was answered: the value, None for nothing there, or one of the two that are no
+# answer. It stays one of the four from the reading to whatever is decided from it.
 type Answered[Value] = Value | Unread | Conflicting[Value] | None
-
 # The generation that made a part, where one did. A stamp that is not a generation is unread.
 type Stamp = Answered[str]
 
@@ -169,7 +168,7 @@ class WrittenRoute:
 # What the proxy has loaded and what the routes file says are two observations. A file ahead of the proxy is a wait.
 @dataclass(frozen=True)
 class LaneRoute:
-    loaded: Answered[LoadedRoute]
+    loaded: LoadedRoute | Conflicting[LoadedRoute] | None
     file: Answered[WrittenRoute]
     proxy_runs: bool = True
     back_soon_runs: bool = True

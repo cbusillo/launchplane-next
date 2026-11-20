@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel
 
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
-from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import LaneBuild, Verdict
 from launchplane.judge import Work
@@ -41,7 +41,7 @@ type Lane = tuple[str, str]
 
 class Carries(Protocol):
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult: ...
-    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> list[str]: ...
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, by: Witness, /, *, logins: bool) -> list[str]: ...
     def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
@@ -59,6 +59,8 @@ class Ending:
     error: str | None = None
     verdict: Verdict = Verdict.NONE
     left_open: bool = False
+    # A database server refused to remove a login. The request ends on that, and the removal is not sent again.
+    write_refused: bool = False
 
 
 def ending(stands: Stands, answer: BaseModel | None, error: str | None = None, verdict: Verdict = Verdict.NONE) -> Ending:
@@ -81,8 +83,8 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
 
 
 # A request's answer says what every attempt of it did, as each told it. It is history: nothing is decided from it.
-def of_every_attempt(answer: Answer, kept: Kept | None) -> Answer:
-    if not isinstance(answer, MoveResult) or kept is None or len(kept.attempts) < 2:
+def of_every_attempt(answer: MoveResult, kept: Kept | None) -> MoveResult:
+    if kept is None or len(kept.attempts) < 2:
         return answer
     did = [event.did for event in kept.events if event.error is None and not event.did.startswith(LOOKS)]
     repaired = Outcome.REPAIRED if did and answer.outcome is Outcome.UNCHANGED else answer.outcome
@@ -222,18 +224,24 @@ class Worker:
             try:
                 fenced = self.lanes.fence(*lane).verdict
                 if fenced is Verdict.NONE and came_to.stands is Stands.FAILED:
-                    not_read = "; ".join(self.lanes.clean_up(*lane, witness))
-                    if not_read:
-                        why = f"{came_to.error} Whether it left a login no container holds is not known: {not_read}."
-                        came_to = replace(came_to, error=why)
+                    came_to = self.cleaned_up(came_to, lane, witness)
             except STOPPED as error:
                 return self.left_open(attempt, f"{came_to.error or 'It was done.'} It is not ended yet: {error}")
-            if fenced is not Verdict.NONE:
+            came_to = replace(came_to, verdict=fenced)
+            if fenced is not Verdict.NONE and not came_to.write_refused:
                 why = f"The gate answers {fenced} for this release, so it is not ended on: {came_to.error or 'done'}"
                 return self.left_open(attempt, why)
         if self.record.end(attempt, came_to.stands, came_to.answer, came_to.error, decided=came_to.verdict):
             return True
         return self.cancel_carried_to_the_gate(request, attempt)
+
+    # The failure stands whatever cleaning up after it could not read or was refused, and its error says which.
+    def cleaned_up(self, came_to: Ending, lane: tuple[str, str, str, int], witness: Witness) -> Ending:
+        try:
+            left = "; ".join(self.lanes.clean_up(*lane, witness, logins=not came_to.write_refused))
+        except LoginRemovalRefused as error:
+            left = str(error)
+        return replace(came_to, error=f"{came_to.error} The clean-up after it is not known to be whole: {left}") if left else came_to
 
     # The record holds a cancel the gate has not decided, so nothing was ended. The cancel is carried to the gate, and
     # the next round follows what the gate then answers.
@@ -257,7 +265,7 @@ class Worker:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
-            answer = of_every_attempt(carried_out(self.lanes, request, attempt, witness), self.record.read(request.id))
+            answer = carried_out(self.lanes, request, attempt, witness)
         except Cancelled as cancelled:
             kept = self.record.read(request.id)
             told = [] if kept is None else put_back_told(kept)
@@ -270,7 +278,7 @@ class Worker:
             unanswered = isinstance(error, (Waiting, *HOST_UNREAD)) and not isinstance(error, ContainerHostRefused)
             unsure = request.work is Work.MOVE and unanswered
             why = str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error}"
-            return Ending(Stands.FAILED, error=why, left_open=unsure)
+            return Ending(Stands.FAILED, error=why, left_open=unsure, write_refused=isinstance(error, LoginRemovalRefused))
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
         except Interrupted, RecordError:
             raise
@@ -278,6 +286,8 @@ class Worker:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
             return Ending(Stands.FAILED, error=why)
+        if isinstance(answer, MoveResult):
+            answer = of_every_attempt(answer, self.record.read(request.id))
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED

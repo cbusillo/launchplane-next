@@ -139,7 +139,7 @@ def test_a_start_on_a_database_with_another_volume_ends_failed_with_its_data_kep
         moved, failed = move_lane(PRODUCT, LANE, BUILD_A)
         retired, answer = retire(PRODUCT, LANE)
         assert moved == 503 and f"has {ANOTHER_VOLUME} mounted" in failed["error"], failed
-        assert f"Whether it left a login no container holds is not known: {not_read}" in failed["error"], failed
+        assert f"The clean-up after it is not known to be whole: {not_read}" in failed["error"], failed
         assert (retired, answer["outcome"], [not_read in each for each in answer["logins_not_read"]]) == (200, "unchanged", [True])
         assert (of_lane(running()["instances"]), on_scratch(f"docker volume ls --quiet --filter name={volume}").split()) == (
             [],

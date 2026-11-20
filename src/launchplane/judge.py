@@ -469,8 +469,6 @@ def proxy_findings(lane: LaneReading) -> list[Found]:
     loaded = route.loaded
     if isinstance(loaded, Conflicting):
         return [Found(Weight.CONFLICT, web_address, Kind.ROUTES_CONFLICT, str(loaded))]
-    if isinstance(loaded, Unread):
-        return [Found(Weight.UNREAD, web_address, Kind.UNREAD, str(loaded))]
     unloaded = (
         f"The proxy has not loaded the routes file of {web_address}: the file sends it to {route.written or 'no instance'} "
         f"and the proxy to {'no instance' if loaded is None else loaded.container}"

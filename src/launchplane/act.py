@@ -75,7 +75,7 @@ class InstanceHost(Protocol):
     def stop_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
     def retire_instance(self, container: str) -> None: ...
-    def remove_unheld_logins(self, database: str) -> None: ...
+    def remove_unheld_logins(self, database: str) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
 
 
@@ -180,28 +180,22 @@ TAKE: dict[type, Take] = {
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.Abandon: lambda _host, proxy, step: proxy.gate.abandon(step.web_address, step.generation),
-    steps.RemoveLogins: lambda host, _proxy, step: host.remove_unheld_logins(step.database),
     steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
     steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
     steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
-    steps.StartStopped: lambda host, _proxy, step: host.start_part(step.container),
 }
 
 
-# A change that puts a lane back is told before it is made, so it is in the record even if the record is lost just after.
+# Nothing is told as done before it is done: a change that put a lane back is marked so once the host has made it.
 def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness, *, back: bool) -> Event:
     witness.hold()
-    tell = witness.tell
-    told_before = back and plan.change_made_by(action) is not None
-    if told_before:
-        tell(f"{named(action)}{TO_PUT_BACK}", None)
     try:
         event = take(action)
     except (ContainerHostError, ProxyError) as error:
-        tell(named(action), str(error))
+        witness.tell(named(action), str(error))
         raise
-    if not told_before:
-        tell(*told(action, event))
+    did, refusal = told(action, event)
+    witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
     return event
 
 
@@ -234,15 +228,15 @@ def settle[Answer](
             witness.refuse_cancel(step.reason)
             cancel = Cancel(refused=True)
             continue
+        unread = [each.report for each in done if isinstance(each, steps.LoginsUnread)]
         if isinstance(step, Done):
+            if isinstance(step.answer, steps.Result):
+                step.answer.logins_not_read = [*(finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)), *unread]
             if isinstance(step.answer, PutBack):
                 raise Cancelled(step.answer)
-            if isinstance(step.answer, steps.Result):
-                untold = [finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)]
-                step.answer.logins_not_read = [*untold, *(each.report for each in done if isinstance(each, steps.LoginsUnread))]
             return step.answer
         if isinstance(step, Stop):
-            raise (Waiting if isinstance(step, steps.Wait) else Stopped)(step.reason)
+            raise (Waiting if isinstance(step, steps.Wait) else Stopped)(" ".join([step.reason, *unread]))
         if isinstance(step, steps.CannotPutBack):
             raise CouldNotPutBack(step.reason)
         if len(done) == MOST_STEPS:
@@ -357,13 +351,13 @@ class Lanes:
 
     # After a move failed with no verdict and its attempt was fenced. It reads nothing of the product's description:
     # what the generation made is known by its stamp.
-    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness = NOBODY) -> list[str]:
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY, *, logins: bool) -> list[str]:
         of = (LaneBuild(product=product, lane=lane, build=""), Product(), generation, attempt)
         return settle(
             *self.judging(product, lane, self.description_of(product), Work.MOVE),
-            lambda judged, done, _cancel: plan.decide_clean_up(self.release(judged, done, *of)),
+            lambda judged, done, _cancel: plan.decide_clean_up(self.release(judged, done, *of), logins=logins),
             self.take,
-            witness,
+            by,
         ).logins_not_read
 
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
@@ -446,8 +440,15 @@ class Lanes:
             return self.await_background_service(action.container, with_log=not behind_back_soon)
         if isinstance(action, steps.ReadLog):
             return self.read_log(action.container)
-        if isinstance(action, steps.StartStopped | steps.RemoveLogins):
-            return self.taken_or_refused(action)
+        if isinstance(action, steps.RemoveLogins):
+            unread = self.host.remove_unheld_logins(action.database)
+            return action if unread is None else steps.LoginsUnread(action.database, str(unread))
+        if isinstance(action, steps.StartStopped):
+            try:
+                self.host.start_part(action.container)
+            except ContainerHostError as error:
+                return steps.StartRefused(action.container, str(error))
+            return action
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
@@ -471,16 +472,6 @@ class Lanes:
         except ContainerHostRefused as error:
             return steps.RemovalRefused(container, str(error))
         return steps.Discarded(container, kept=False)
-
-    # A part that will not start, and a server whose logins or their holders cannot be read, are answers to plan from.
-    def taken_or_refused(self, action: steps.StartStopped | steps.RemoveLogins) -> Event:
-        try:
-            TAKE[type(action)](self.host, self.proxy, action)
-        except ContainerHostError as error:
-            if isinstance(action, steps.StartStopped):
-                return steps.StartRefused(action.container, str(error))
-            return steps.LoginsUnread(action.database, str(error))
-        return action
 
     def read_log(self, container: str) -> Event:
         try:

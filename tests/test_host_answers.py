@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import NoReturn
 
 import pytest
 from fastapi.testclient import TestClient
@@ -6,20 +7,22 @@ from fastapi.testclient import TestClient
 from launchplane import plan, steps
 from launchplane.act import Lanes, Stopped, Waiting
 from launchplane.api import create_app
-from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import Mount, Unread
+from launchplane.instance import BACK_SOON, HostNetwork, Mount, Unread
 from launchplane.judge import Work
-from launchplane.record import Asked, Record, Stands
+from launchplane.record import Asked, Kept, Record, Stands
 from launchplane.telling import LOOKS, NAMED, named
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import D1, EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
-from tests.test_act import BUILD_A, lane_brought_up_with_a, lanes_on
+from tests.pretend_record import PretendRecord
+from tests.test_act import BUILD_A, lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_worker import CALLER, MOVE_B, kept_of
 
 DATABASE = "database-data-1"
 MOVE_A = MOVE_B.model_copy(update={"build": "site:a"})
 RETIRE = Asked(product="site", lane="testing", work=Work.RETIRE)
+BEGIN = Asked(product="site", lane="testing", work=Work.BEGIN_MAINTENANCE)
+END = Asked(product="site", lane="testing", work=Work.END_MAINTENANCE)
 NOT_TOLD = Unread(asked=f"The logins of the database {DATABASE}", why="psql: connection refused")
 
 
@@ -75,7 +78,9 @@ def test_a_repair_that_fails_for_another_reason_leaves_the_background_service_it
 
 
 # A lane retired with its data kept, whose database server then has another volume: a start on it, and then a retire.
-def a_start_and_then_a_retire_on_another_volume(record: Record, proxy: PretendProxy, unheld: object) -> tuple[str, list[str]]:
+def a_start_and_then_a_retire_on_another_volume(
+    record: Record, proxy: PretendProxy, unheld: object, retire_ends: Stands = Stands.DONE
+) -> tuple[str, list[str]]:
     lanes_on(proxy).retire("site", "testing")
     proxy.host.change_database(DATABASE, mounts=(Mount(source="another-volume", path="/var/lib/postgresql"),), unheld_logins=unheld)
     worker = worker_on(proxy, record)
@@ -84,17 +89,17 @@ def a_start_and_then_a_retire_on_another_volume(record: Record, proxy: PretendPr
     retire = record.write(RETIRE, CALLER, None)
     assert worker.work_next() is True
     failed, retired = kept_of(record, move.id), kept_of(record, retire.id)
-    assert (failed.stands, retired.stands) == (Stands.FAILED, Stands.DONE), (failed, retired)
-    assert failed.error is not None and "another-volume mounted" in failed.error and retired.answer is not None
+    assert (failed.stands, retired.stands) == (Stands.FAILED, retire_ends), (failed, retired)
+    assert failed.error is not None and "another-volume mounted" in failed.error
     assert (list(proxy.host.data_sets), proxy.host.instances) == (["data-1"], {})
-    return failed.error, retired.answer["logins_not_read"]
+    return failed.error, [] if retired.answer is None else retired.answer["logins_not_read"]
 
 
 def test_a_start_on_a_wrongly_set_up_data_set_ends_failed_with_its_data_kept_and_says_the_logins_were_not_read_and_a_retire_ends(
     record: Record,
 ) -> None:
     error, not_read = a_start_and_then_a_retire_on_another_volume(record, lane_brought_up_with_a(), NOT_TOLD)
-    assert f"Whether it left a login no container holds is not known: {NOT_TOLD}." in error
+    assert f"The clean-up after it is not known to be whole: {NOT_TOLD}" in error
     assert not_read == [str(NOT_TOLD)]
 
 
@@ -102,21 +107,155 @@ def test_a_refused_lookup_of_who_holds_a_login_decides_neither_a_proved_failure_
     record: Record,
 ) -> None:
     proxy = lane_brought_up_with_a()
-
-    def holders_not_told(database: str) -> None:
-        raise ContainerHostError(f"Listing the containers that hold the logins of {database} on test failed: timed out")
-
-    proxy.host.remove_unheld_logins = holders_not_told
+    proxy.host.holders_unread.add(DATABASE)
     error, not_read = a_start_and_then_a_retire_on_another_volume(record, proxy, ("i_left",))
-    assert "Whether it left a login no container holds is not known: Listing the containers that hold the logins" in error
-    assert ["Listing the containers" in each for each in not_read] == [True]
+    assert f"is not known to be whole: Which logins of the database {DATABASE} no container holds could not be read" in error
+    assert ["no container holds could not be read: timed out" in each for each in not_read] == [True]
 
 
-def test_a_retire_naming_a_data_set_that_has_two_volumes_deletes_nothing_of_it_names_both_and_retires_the_rest() -> None:
+REFUSED = f"The database {DATABASE} did not remove the login i_left: it owns objects"
+
+
+def lane_with_a_login_the_server_will_not_remove() -> PretendProxy:
+    proxy = lane_brought_up_with_a()
+    proxy.host.change_database(DATABASE, unheld_logins=("i_left",))
+    proxy.host.removals_refused.add(DATABASE)
+    return proxy
+
+
+def removals_sent(proxy: PretendProxy) -> int:
+    return proxy.host.actions.count(f"remove logins from {DATABASE}")
+
+
+# The request ends failed on the server's own error, and the refused removal was sent once.
+def failed_on_the_refusal(record: Record, proxy: PretendProxy, asked: Asked) -> Kept:
+    request = record.write(asked, CALLER, None)
+    worker = worker_on(proxy, record)
+    assert (worker.work_next(), worker.work_next()) == (True, False)
+    kept = kept_of(record, request.id)
+    assert (kept.stands, REFUSED in (kept.error or ""), removals_sent(proxy)) == (Stands.FAILED, True, 1), kept
+    return kept
+
+
+@pytest.mark.parametrize("asked", [MOVE_A, RETIRE], ids=["a move to the serving build", "a retire"])
+def test_a_login_removal_the_server_refuses_ends_this_request_failed_with_the_servers_error_and_is_sent_once(
+    record: Record, asked: Asked
+) -> None:
+    proxy = lane_with_a_login_the_server_will_not_remove()
+    kept = failed_on_the_refusal(record, proxy, asked)
+    assert "could not be read" not in (kept.error or "") and list(proxy.host.data_sets) == ["data-1"]
+    assert asked is RETIRE or len(proxy.host.background_services) == 1
+
+
+def test_a_removal_refused_while_cleaning_up_after_a_proved_failure_ends_failed_with_both_errors(record: Record) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.removals_refused.add(DATABASE)
+    error, not_read = a_start_and_then_a_retire_on_another_volume(record, proxy, ("i_left",), retire_ends=Stands.FAILED)
+    assert f"is not known to be whole: {REFUSED}" in error and not_read == []
+
+
+def test_a_removal_refused_after_the_switch_ends_failed_and_the_release_stays_switched(record: Record) -> None:
+    proxy = lane_with_a_login_the_server_will_not_remove()
+    kept = failed_on_the_refusal(record, proxy, MOVE_B)
+    assert proxy.gate.of(kept.generation).committed == proxy.written[WEB_ADDRESS] == proxy.loaded_to(WEB_ADDRESS)
+    assert [each.build for each in proxy.host.instances.values()] == ["site:b"]
+
+
+def cancelled_while_checking(record: Record, proxy: PretendProxy) -> Kept:
+    request = record.write(MOVE_B, CALLER, None)
+
+    def cancel(_container: str) -> None:
+        record.cancel(request.id, "a test")
+
+    proxy.while_checking = cancel
+    worker = worker_on(proxy, record)
+    assert (worker.work_next(), worker.work_next()) == (True, False)
+    return kept_of(record, request.id)
+
+
+def test_a_cancel_that_won_and_whose_login_removal_the_server_refuses_ends_failed_and_the_cancel_stays_won(record: Record) -> None:
+    proxy = lane_with_a_login_the_server_will_not_remove()
+    kept = cancelled_while_checking(record, proxy)
+    assert (kept.stands, REFUSED in (kept.error or ""), removals_sent(proxy)) == (Stands.FAILED, True, 1), kept
+    assert proxy.gate.of(kept.generation).abandoned and [each.build for each in proxy.host.instances.values()] == ["site:a"]
+
+
+@pytest.mark.parametrize("holders_read", [False, True], ids=["holders not read", "holders read"])
+def test_a_cancel_that_won_says_a_login_was_removed_only_where_it_was_and_names_a_lookup_that_failed(
+    record: Record, holders_read: bool
+) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.change_database(DATABASE, unheld_logins=("i_left",))
+    if not holders_read:
+        proxy.host.holders_unread.add(DATABASE)
+    kept = cancelled_while_checking(record, proxy)
+    assert kept.stands is Stands.CANCELLED and kept.answer is not None
+    removed = [each for each in kept.answer["put_back"] if "logins" in each]
+    assert (len(removed), len(kept.answer["logins_not_read"])) == ((1, 0) if holders_read else (0, 1)), kept.answer
+    assert proxy.host.data_sets["data-1"].databases[0].unheld_logins == (() if holders_read else ("i_left",))
+
+
+def test_ending_maintenance_over_a_lookup_of_holders_that_failed_brings_the_lane_back_and_ends_saying_so(record: Record) -> None:
+    proxy = lane_in_maintenance()
+    proxy.host.logins_left_in[DATABASE] = ("i_left",)
+    proxy.host.holders_unread.add(DATABASE)
+    request = record.write(END, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.stands is Stands.DONE and kept.answer is not None, kept
+    assert (kept.answer["outcome"], len(kept.answer["logins_not_read"]), removals_sent(proxy)) == ("ended", 1, 1)
+    assert proxy.written[WEB_ADDRESS] != BACK_SOON and proxy.host.data_sets["data-1"].databases[0].unheld_logins == ("i_left",)
+
+
+def test_ending_maintenance_still_fails_over_another_finding_and_says_the_lookup_that_failed_too(record: Record) -> None:
+    proxy = lane_in_maintenance()
+    proxy.host.logins_left_in[DATABASE] = ("i_left",)
+    proxy.host.holders_unread.add(DATABASE)
+    write_route = proxy.write_route
+
+    def back_with_a_way_out(web_address: str, container: str) -> None:
+        write_route(web_address, container)
+        proxy.host.attach(container, "bridge", quiet=False)
+
+    proxy.write_route = back_with_a_way_out
+    request = record.write(END, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.stands is Stands.FAILED and kept.error is not None
+    assert "can reach out through bridge" in kept.error and "no container holds could not be read" in kept.error
+
+
+class RecordNotRead(PretendRecord):
+    def read(self, request: int) -> NoReturn:
+        raise AssertionError(f"the history of request {request} was read for an answer that does not use it")
+
+
+@pytest.mark.parametrize("asked", [RETIRE, BEGIN], ids=["a retire", "beginning maintenance"])
+def test_this_request_ends_without_reading_its_history(asked: Asked) -> None:
+    record = RecordNotRead()
+    request = record.write(asked, CALLER, None)
+    assert worker_on(lane_brought_up_with_a(), record).work_next() is True
+    kept = PretendRecord.read(record, request.id)
+    assert kept is not None and kept.stands is Stands.DONE
+
+
+DOUBLED: dict[str, tuple[dict[str, object], str]] = {
+    "volumes": ({"volumes": ("volume-data-1", "volume-put-beside-it")}, r"2 volumes \(volume-data-1, volume-put-beside-it\)"),
+    "networks": (
+        {"networks": (HostNetwork(name="network-data-1", is_quiet=True), HostNetwork(name="network-beside-it", is_quiet=True))},
+        r"2 networks \(network-data-1, network-beside-it\)",
+    ),
+}
+
+
+@pytest.mark.parametrize(("parts", "named"), DOUBLED.values(), ids=DOUBLED.keys())
+def test_a_retire_naming_a_data_set_that_has_two_of_these_deletes_nothing_of_it_names_both_and_retires_the_rest(
+    parts: dict[str, object], named: str
+) -> None:
     proxy = lane_brought_up_with_a()
     host = proxy.host
-    host.change_data_set("site", "testing", "data-1", volumes=("volume-data-1", "volume-put-beside-it"))
-    with pytest.raises(Stopped, match=r"2 volumes \(volume-data-1, volume-put-beside-it\).*nothing of the data set was deleted"):
+    host.change_data_set("site", "testing", "data-1", **parts)
+    with pytest.raises(Stopped, match=f"{named}.*nothing of the data set was deleted"):
         lanes_on(proxy).retire("site", "testing", delete_data_set="data-1")
     assert (list(host.data_sets), host.instances, host.background_services) == (["data-1"], {}, {})
     assert not any(action.startswith("delete") for action in host.actions)
@@ -157,8 +296,8 @@ NO_MOVE: dict[str, Callable[[Lanes], object]] = {
     "a retire": lambda lanes: lanes.retire("site", "testing"),
     "beginning maintenance": lambda lanes: lanes.begin_maintenance("site", "testing"),
     "ending maintenance": lambda lanes: lanes.end_maintenance("site", "testing"),
-    "cleaning up after a failed move": lambda lanes: lanes.clean_up("site", "testing", GENERATION, 1),
-    "cleaning up after the move that made the serving instance": lambda lanes: lanes.clean_up("site", "testing", EARLIER, 1),
+    "cleaning up after a failed move": lambda lanes: lanes.clean_up("site", "testing", GENERATION, 1, logins=True),
+    "cleaning up after the move that made what serves": lambda lanes: lanes.clean_up("site", "testing", EARLIER, 1, logins=True),
 }
 
 
