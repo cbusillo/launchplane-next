@@ -190,7 +190,15 @@ def request_loop(request_once: Callable[[], str]) -> Generator[RequestLoop]:
         thread.join()
 
 
-HOLDS_URL = os.environ.get("LAUNCHPLANE_HOLDS_URL", f"{LAUNCHPLANE_URL.rsplit(':', 1)[0]}:8701")
+HOLDS_PORT = 8701
+
+
+def holds_url_beside(launchplane_url: str) -> str:
+    control = urlsplit(launchplane_url)
+    return f"{control.scheme}://{control.hostname}:{HOLDS_PORT}"
+
+
+HOLDS_URL = os.environ.get("LAUNCHPLANE_HOLDS_URL", holds_url_beside(LAUNCHPLANE_URL))
 HELD_UNIT = "/opt/launchplane/tests/launchplane-held.service"
 
 

@@ -107,29 +107,6 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - Traefik's API listens on `127.0.0.1:8080` inside its container only. Launchplane asks it by running `wget` inside the proxy container. No new port is opened.
 - Its restart policy is `always`.
 
-### A host whose routes are still beside the folder `gate`
-
-Before November 20 the routes files lay in the volume itself, with the folder `gate` among them. Such a host is moved once, with Launchplane stopped. Visitors get no answer from the moment the proxy is stopped until it runs again.
-
-```
-lp-control 'systemctl stop launchplane launchplane-held'
-lp-scratch 'set -eu
-volume=$(docker volume inspect launchplane-proxy-routes --format "{{.Mountpoint}}")
-docker stop launchplane-proxy
-mkdir "$volume/routes"
-find "$volume" -mindepth 1 -maxdepth 1 ! -name routes ! -name gate -exec mv {} "$volume/routes/" \;
-docker rm launchplane-proxy'
-./scripts/deploy-control
-curl -X POST -H 'Content-Type: application/json' -d '{"build": "<the build it runs>"}' 'http://launchplane.shiny:8700/lanes/<product>/<lane>/move?wait=60'
-```
-
-- The deploy stops unless `/etc/launchplane/bed.env` [names the container host](what-is-running.md#choosing-the-test-bed).
-- Every file that is not the gate's goes into `routes` with its content and time kept, also one Launchplane did not write. Nothing in `gate` is touched.
-- The proxy is removed because a restarted container keeps the command it was made with, and that names the old folder.
-- The last line asks any one lane for the build it already runs. The move finds no proxy, makes it with the new folder and answers `repaired`. Every lane then reads `good` again.
-
-Done on the test bed on November 20: 6 routes files and a stray empty file moved, 3,174 gate files kept, and all 6 lanes answered and read `good` after.
-
 ## Known and not fixed
 
 - **A slow reader can lose the end of a large download when the old instance stops.** Measured: a 24 MiB download read at 1.8 MB/s across a move lost its last 2.4 to 2.9 MB in 4 of 4 runs. Comes back if a real product kind shows it.
@@ -163,7 +140,7 @@ Done on the test bed on November 20: 6 routes files and a stray empty file moved
 - On November 19, all 139 test-bed tests passed in 50 min 7 s, the four of `tests/test_bed_host_answers.py` in 2 min 47 s.
 - A repaired background service whose move waited on a refused login read kept one container and wrote 41 beats in 8 s. The request was taken up again every 5 s and ended `done` within 8 s of the read answering.
 - A second routes file made the lane `conflicting` within 5 s. A move asked then stayed `working`, and ended `switched` within 25 s of the file being removed.
-- On November 20, with 3,174 files in the folder `gate` and none removed: a reading of the routes transferred 8 KiB where it had transferred 3.1 MB, and `/running` answered in 0.37 to 0.49 s where it had taken 0.78 s. Ten releases of one lane took the folder from 3,175 to 3,186 files. A switch and a cancel sent twice more for the first of those releases, and for a release cancelled after them, each got the first answer again, `committed` to the same instance and `abandoned`, and changed no file.
+- On November 20, with 3,174 files in the folder `gate` and none removed: a reading of the routes transferred 8 KiB where it had transferred 3.1 MB, and `/running` answered in 0.37 to 0.49 s where it had taken 0.78 s. Every lane answered after the routes files were moved into `routes`. Ten releases of one lane took the folder from 3,175 to 3,186 files. A switch and a cancel sent twice more for the first of those releases, and for a release cancelled after them, each got the first answer again, `committed` to the same instance and `abandoned`, and changed no file.
 - The Docker SDK over the certificate connection gave everything the move needed. Nothing was missing that a container manager such as Dokploy would have given.
 
 ## On the test bed

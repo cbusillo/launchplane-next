@@ -28,7 +28,7 @@ INSPECTOR_OPTIONS = INSPECTOR_HOME / "config" / "options"
 INSPECTOR_CACHES = INSPECTOR_HOME / "system"
 APP_VM_OPTIONS = INSPECTOR.parent / "pycharm.vmoptions"
 # PyCharm takes every processor of the machine unless told a number, and the machine runs everything else too.
-PROCESSORS = 2
+PROCESSORS = 6
 BEHIND_OTHER_WORK = ("nice", "-n", "10")
 CANARY_FOLDER = REPOSITORY / ".inspection-canary"
 CANARY_SOURCE = "from pathlib import Path\n\n\ndef canary() -> None:\n    Path().no_such_method()\n"
