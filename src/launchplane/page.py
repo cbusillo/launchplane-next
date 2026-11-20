@@ -8,7 +8,7 @@ from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import InstanceState, PartOfLane, Verdict
 from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
-from launchplane.record import ENDED, Kept, Request, Stands, how_cancelled
+from launchplane.record import ENDED, Kept, Request, Stands, how_cancelled, how_replaced
 from launchplane.steps import CANCEL_WON
 
 TONE = {
@@ -27,6 +27,7 @@ STANDS_TONE = {
     Stands.WORKING: Standing.ON_PURPOSE,
     Stands.NEEDS_A_PERSON: Standing.WRONG,
     Stands.CANCELLED: Standing.ON_PURPOSE,
+    Stands.REPLACED: Standing.ON_PURPOSE,
     Stands.DONE: Standing.GOOD,
 }
 RECORD_UNREAD = "Launchplane's record cannot be read"
@@ -122,6 +123,8 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
         return request.error
     if request.stands is Stands.CANCELLED:
         return how_cancelled(request)
+    if request.stands is Stands.REPLACED:
+        return how_replaced(request)
     if request.stands is Stands.FAILED and (request.error or "").startswith(CANCEL_WON):
         return request.error
     if request.stands in ENDED:
@@ -234,7 +237,7 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
-# Every request that has not ended, then those a cancel was asked of that ended a short while ago.
+# Every request that has not ended, then those replaced or asked to cancel that ended a short while ago.
 def shown_requests(status: Status) -> list[Request]:
     return [*status.requests, *status.cancels]
 

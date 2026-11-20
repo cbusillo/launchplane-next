@@ -299,21 +299,28 @@ def test_losing_the_record_for_one_write_stops_the_work_and_it_is_taken_up_again
     assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.DONE, ["interrupted", "done"])
 
 
-def test_a_request_too_late_to_cancel_finishes_first_and_the_newer_one_is_then_worked_in_its_turn(record: Record) -> None:
+def test_the_request_at_work_finishes_as_asked_then_the_newest_waiting_runs_and_one_that_waited_between_never_starts(
+    record: Record,
+) -> None:
     worker, _, proxy = serving_a(record)
-    newer: list[int] = []
+    at_work = record.write(MOVE_B, CALLER, None)
+    arrived: list[int] = []
 
-    def ask_for_a_retire_once_switched() -> None:
-        if not newer:
-            newer.append(record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None).id)
+    def ask_for_c_and_then_d_while_b_is_checked(_container: str) -> None:
+        if not arrived:
+            arrived.extend(
+                record.write(MOVE_B.model_copy(update={"build": build}), CALLER, None).id for build in ("site:c", "site:d")
+            )
 
-    proxy.while_awaiting = ask_for_a_retire_once_switched
-    moved = record.write(MOVE_B, CALLER, None)
+    proxy.while_checking = ask_for_c_and_then_d_while_b_is_checked
     assert (worker.work_next(), worker.work_next(), worker.work_next()) == (True, True, False)
-    move, retire = kept_of(record, moved.id), kept_of(record, newer[0])
-    assert move.cancel_refused is not None and "already renamed for this release" in move.cancel_refused
-    assert (move.stands, move.cancel_asked_by, retire.stands) == (Stands.DONE, f"request {retire.id}", Stands.DONE)
-    assert proxy.host.actions[2:] == ["route site-testing-0", "retire a", "unroute", "retire site-testing-0"]
+    first, between, newest = (kept_of(record, each) for each in (at_work.id, *arrived))
+    assert (first.stands, first.answer and first.answer["outcome"], first.cancel_asked_by) == (Stands.DONE, "switched", None)
+    assert (between.stands, between.replaced_by, between.attempts, between.events) == (Stands.REPLACED, newest.id, [], [])
+    assert (newest.stands, [each.build for each in proxy.host.instances.values()]) == (Stands.DONE, ["site:d"])
+    started = [action.removeprefix("start ") for action in proxy.host.actions if action.startswith("start ")]
+    assert [action for action in proxy.host.actions if action.startswith("route ")] == [f"route {each}" for each in started]
+    assert (len(started), proxy.written) == (2, {WEB_ADDRESS: started[1]})
 
 
 def test_a_worker_whose_turn_was_lost_and_taken_by_another_does_nothing_more_on_the_host(record: Record) -> None:

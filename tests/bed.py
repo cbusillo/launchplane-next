@@ -124,7 +124,7 @@ def kill_launchplane_and_end_the_request_working_on(product: str, lane: str) -> 
 
 def request_ended(request: int) -> dict[str, Any]:
     def has_ended() -> bool:
-        return ask(f"/requests/{request}")[1]["stands"] in ("done", "failed", "cancelled")
+        return ask(f"/requests/{request}")[1]["stands"] in ("done", "failed", "cancelled", "replaced")
 
     wait_for(has_ended, seconds=120)
     return ask(f"/requests/{request}")[1]

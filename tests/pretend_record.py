@@ -102,12 +102,10 @@ class PretendRecord(Record):
         self.kept[new.id] = new
         if idempotency_key is not None:
             self.keys[key_digest(idempotency_key) or ""] = new.id
-        before = [
-            each.id
-            for each in self.every()
-            if (each.product, each.lane) == (new.product, new.lane) and each.id < new.id and each.asked() != asked
-        ]
-        self.cancel_each(before, f"request {new.id}")
+        for each in self.every():
+            older = (each.product, each.lane) == (new.product, new.lane) and each.id < new.id and each.asked() != asked
+            if older and each.stands is Stands.WAITING:
+                self.change(each.id, stands=Stands.REPLACED, ended_at=now(), replaced_by=new.id)
         if not self.confirms_writes:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")
         return new
@@ -143,7 +141,7 @@ class PretendRecord(Record):
         self.reach("reading the requests a cancel was asked of")
         since = now() - timedelta(minutes=MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
         ended = (each for each in self.every() if each.stands in ENDED and each.ended_at and each.ended_at > since)
-        return list[Request](each for each in ended if each.cancel_asked_at is not None)
+        return list[Request](each for each in ended if each.cancel_asked_at is not None or each.stands is Stands.REPLACED)
 
     def next_up(self) -> list[Request]:
         self.reach("looking for the next requests")
@@ -284,23 +282,17 @@ class PretendRecord(Record):
             self.answered_by_a_person(request, ASKED_AGAIN.format(again=again.id))
             return again
 
-    def cancel_each(self, requests: list[int], by: str) -> None:
-        self.gate.refuse(by)
-        for request in requests:
-            found = self.kept.get(request)
-            if found is None or found.stands not in UNFINISHED[:2] or found.cancel_asked_at is not None:
-                continue
-            mark = {"cancel_asked_at": now(), "cancel_asked_by": by}
-            if found.stands is Stands.WAITING:
-                self.change(request, **mark, stands=Stands.CANCELLED, ended_at=now(), answer=PutBack().model_dump())
-            else:
-                self.change(request, **mark)
-
     def cancel(self, request: int, by: str) -> Request | None:
         self.reach("cancelling a request")
+        self.gate.refuse(by)
         with self.writing:
-            self.cancel_each([request], by)
-            return self.kept.get(request)
+            found = self.kept.get(request)
+            if found is None or found.stands not in UNFINISHED[:2] or found.cancel_asked_at is not None:
+                return found
+            mark = {"cancel_asked_at": now(), "cancel_asked_by": by}
+            if found.stands is Stands.WAITING:
+                return self.change(request, **mark, stands=Stands.CANCELLED, ended_at=now(), answer=PutBack().model_dump())
+            return self.change(request, **mark)
 
     def cancel_asked(self, request: int) -> bool:
         self.reach("reading whether a cancel was asked of a request")

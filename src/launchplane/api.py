@@ -39,6 +39,7 @@ from launchplane.record import (
     Unconfirmed,
     database,
     how_cancelled,
+    how_replaced,
 )
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
@@ -253,6 +254,8 @@ def read_until(record: Record, request: int, seconds: float, settled: Callable[[
 def final_answer[Answer: BaseModel](kept: Kept, answer: type[Answer], response: Response) -> Answer | NotFinished:
     if kept.stands is Stands.CANCELLED:
         return not_finished(response, HTTPStatus.CONFLICT, how_cancelled(kept))
+    if kept.stands is Stands.REPLACED:
+        return not_finished(response, HTTPStatus.CONFLICT, how_replaced(kept))
     if kept.answer is None:
         return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, kept.error or f"Request {kept.id} failed and kept no error.")
     if kept.stands is Stands.FAILED:
@@ -279,20 +282,6 @@ class Calls:
             too_late = self.gate.abandon(request.product, request.lane, request.generation)
             if too_late is not None:
                 self.record.refuse_cancel(request.id, too_late)
-
-    # A newer request takes the path of a cancel. Where the gate cannot be asked, the cancel stays on record and the
-    # worker of the older request carries it there: the answer says so.
-    def cancel_what_came_before(self, new: KeptRequest) -> str | None:
-        try:
-            for older in self.record.unfinished():
-                if (older.product, older.lane, older.id < new.id) == (new.product, new.lane, True):
-                    self.carry_to_the_gate(older)
-        except (RecordError, *UNREADABLE) as error:
-            return (
-                f"Request {new.id} is kept and will be worked. The cancel it means for the request before it is on record "
-                f"and could not be carried to the gate, so whether that came in time is not known yet: {error}"
-            )
-        return None
 
     # A request that needs a person is not ended while the gate has a verdict for its release: committed is finished and
     # a cancel that won is put back, so it is worked again. The gate is asked for good, so a release it has no verdict
@@ -324,11 +313,8 @@ class Calls:
         except RecordError as error:
             why = f"{error} The request was not written and nothing was changed, and asking again is safe."
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
-        not_carried = self.cancel_what_came_before(request)
         self.wake()
         response.headers["Location"] = f"/requests/{request.id}"
-        if not_carried is not None:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, not_carried)
         try:
             kept = read_until(self.record, request.id, wait)
         except RecordError as error:
@@ -429,7 +415,7 @@ def why_not_cancelled(kept: Kept) -> str | None:
         )
     if kept.stands is Stands.FAILED and kept.cancel_asked_at is not None and (kept.error or "").startswith(CANCEL_WON):
         return f"{kept.error} {ended}."
-    if kept.stands in (Stands.DONE, Stands.FAILED):
+    if kept.stands in (Stands.DONE, Stands.FAILED, Stands.REPLACED):
         return f"{ended}, so it was not cancelled. Nothing was changed by this call."
     return None
 

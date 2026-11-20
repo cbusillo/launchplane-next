@@ -100,9 +100,10 @@ class Stands(StrEnum):
     FAILED = "failed"
     NEEDS_A_PERSON = "needs a person"
     CANCELLED = "cancelled"
+    REPLACED = "replaced"
 
 
-ENDED = (Stands.DONE, Stands.FAILED, Stands.CANCELLED)
+ENDED = (Stands.DONE, Stands.FAILED, Stands.CANCELLED, Stands.REPLACED)
 
 ATTEMPTED = {
     Work.MOVE: "The move of {lane} of {product} to {build}",
@@ -139,6 +140,8 @@ class Request(Asked):
     cancel_asked_by: str | None = None
     # Why a cancel that was asked was not carried out, once the worker has read the host and said so.
     cancel_refused: str | None = None
+    # The newer request for the lane that took the waiting place from this one, which then ended with nothing done.
+    replaced_by: int | None = None
 
     def asked(self) -> Asked:
         return Asked.model_validate(self.model_dump(include=set(Asked.model_fields)))
@@ -220,6 +223,13 @@ def how_cancelled(request: Request) -> str:
     return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}{kept}"
 
 
+def how_replaced(request: Request) -> str:
+    return (
+        f"{request.attempted()} was replaced by request {request.replaced_by} while it waited. It was never taken up, "
+        "so nothing was done."
+    )
+
+
 # What every attempt said it was about to do to put the lane back. It is history: nothing is decided from it.
 def put_back_told(kept: Kept) -> list[str]:
     told = [event.did.removesuffix(TO_PUT_BACK) for event in kept.events if event.did.endswith(TO_PUT_BACK)]
@@ -249,11 +259,11 @@ class Sql:
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
     RECENTLY_ENDED: Final = """
-    select * from request where stands in ('done', 'failed', 'cancelled') order by ended_at desc, id desc limit 20
+    select * from request where stands in ('done', 'failed', 'cancelled', 'replaced') order by ended_at desc, id desc limit 20
     """
     CANCELS_ANSWERED: Final = """
     select * from request
-    where cancel_asked_at is not null and stands in ('done', 'failed', 'cancelled')
+    where (cancel_asked_at is not null and stands in ('done', 'failed', 'cancelled') or stands = 'replaced')
         and ended_at > now() - make_interval(mins => %s)
     order by id
     """
@@ -269,11 +279,12 @@ class Sql:
         order by product, lane, id
     ) oldest_of_each_lane order by id
     """
-    # One that asks exactly what the new request asks is left: asking for the same again cancels nothing.
-    UNFINISHED_BEFORE: Final = """
-    select older.id from request older, request new
+    # One statement, so a request taken up in that moment is left to be worked: only one that still waits is replaced.
+    # One that asks exactly what the new request asks is left too.
+    REPLACE_WAITING: Final = """
+    update request older set stands = 'replaced', ended_at = now(), replaced_by = new.id from request new
     where new.id = %s and (older.product, older.lane) = (new.product, new.lane) and older.id < new.id
-        and older.stands in ('waiting', 'working')
+        and older.stands = 'waiting'
         and (older.work, older.build, older.delete_data_set) is distinct from (new.work, new.build, new.delete_data_set)
     """
     # One statement, so a request taken up during its cancel is either ended or marked, never neither.
@@ -284,7 +295,7 @@ class Sql:
         answer = case stands when 'waiting' then %s end,
         cancel_asked_at = now(),
         cancel_asked_by = %s
-    where id = any(%s) and stands in ('waiting', 'working') and cancel_asked_at is null
+    where id = %s and stands in ('waiting', 'working') and cancel_asked_at is null
     """
     CANCEL_ASKED: Final = "select cancel_asked_at is not null as asked from request where id = %s"
     REFUSE_CANCEL: Final = "update request set cancel_refused = %s where id = %s and cancel_refused is null"
@@ -371,19 +382,11 @@ def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked)
         raise lane_waits_on_a_person(asked, stuck["id"])
 
 
-# The one path of a cancel, for the call and for a newer request of its lane: a request that waits ends
-# with nothing done, and one that is worked is marked for its worker to read between actions.
-def cancel_each(session: Session, gate: Gate, requests: list[int], by: str) -> None:
-    session.execute(Sql.CANCEL, gate.sent(PutBack().model_dump(), by, list[JsonValue](requests)))
-
-
-# A newer request for a lane cancels every unfinished one that came before it and asks something else. One that needs a
-# person is never among them: its lane takes no request at all.
+# A lane has one waiting place, and a new request takes it. The request at work is not touched.
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
     passed = gate.sent(*said(asked), asked_by, key_digest(idempotency_key), new_generation())
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
-    before = session.execute(Sql.UNFINISHED_BEFORE, gate.made(new.id)).fetchall()
-    cancel_each(session, gate, [row["id"] for row in before], f"request {new.id}")
+    session.execute(Sql.REPLACE_WAITING, gate.made(new.id))
     return new
 
 
@@ -508,11 +511,11 @@ class PostgresRecord(Record):
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()],
         )
 
-    # Every request a cancel was asked of that ended a short while ago, however it ended.
+    # Every request that ended a short while ago and was replaced or had a cancel asked of it, however it ended.
     def cancels_answered(self) -> list[Request]:
         shown = self.gate.made(MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
         return self.reading(
-            "reading the requests a cancel was asked of",
+            "reading the requests that were replaced or asked to cancel",
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.CANCELS_ANSWERED, shown).fetchall()],
         )
 
@@ -631,7 +634,8 @@ class PostgresRecord(Record):
 
     def cancel(self, request: int, by: str) -> Request | None:
         with self.session("cancelling a request") as session:
-            cancel_each(session, self.gate, [request], by)
+            # A request that waits ends with nothing done, and one being worked is marked for its worker to read.
+            session.execute(Sql.CANCEL, self.gate.sent(PutBack().model_dump(), by, request))
             row = session.execute(Sql.READ, self.gate.made(request)).fetchone()
             return None if row is None else Request.model_validate(row)
 

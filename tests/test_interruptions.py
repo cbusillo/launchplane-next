@@ -17,11 +17,10 @@ from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, Pret
 from tests.test_requests import MOVE, TO_B
 from tests.test_worker import kept_of
 
-TO_C = {"build": "site:c"}
-A, B, C = "site:a", "site:b", "site:c"
-CANCEL, NEWER, KILL = "a cancel", "a newer request", "a kill"
+A, B = "site:a", "site:b"
+CANCEL, KILL = "a cancel", "a kill"
 KILL_THEN_CANCEL, CANCEL_THEN_KILL = "a kill, then a cancel", "a cancel, then a kill"
-INTERRUPTIONS = (CANCEL, NEWER, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
+INTERRUPTIONS = (CANCEL, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 CANCELS = (CANCEL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
 TOO_LATE = "already renamed for this release"
 
@@ -64,7 +63,6 @@ class Held:
     interrupted: bool = False
     visitors_got: list[str] = field(default_factory=list[str])
     cancel_answers: list[tuple[int, dict[str, Any]]] = field(default_factory=list[tuple[int, dict[str, Any]]])
-    newer: int | None = None
 
     # What a visitor gets is the instance the proxy has loaded, and that instance is on the host for as long as it is.
     def look(self) -> None:
@@ -86,8 +84,6 @@ class Held:
             assert (route.written != "a", route.sends_visitors_to) == (True, "a"), "held after the rename with the proxy on A"
         if self.interruption in (CANCEL, CANCEL_THEN_KILL):
             self.cancel()
-        if self.interruption == NEWER:
-            self.newer = self.client.post(MOVE, json=TO_C).json()["id"]
         if self.interruption in (KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL):
             raise LaunchplaneKilled
         self.proxy.holds_delivery = False
@@ -188,23 +184,6 @@ def test_a_cancel_before_the_rename_wins_and_visitors_only_ever_get_the_old_buil
     assert ({status for status, _ in run.cancel_answers} <= {200, 202}, again.status_code) == (True, 200)
 
 
-@pytest.mark.parametrize(("pause", "interruption"), cells(BEFORE_THE_RENAME, (NEWER,)))
-def test_a_newer_request_before_the_rename_takes_the_lane_from_the_old_build_to_the_newest_and_never_to_the_older(
-    record: Record, pause: Pause, interruption: str
-) -> None:
-    run = held(record, pause, interruption)
-    assert run.newer is not None
-    older, newer = kept_of(record, run.asked), kept_of(record, run.newer)
-    assert (older.stands, older.cancel_asked_by, older.cancel_refused) == (Stands.CANCELLED, f"request {run.newer}", None)
-    assert (newer.stands, outcome_of(newer), run.visitors_got, run.builds_on_the_host(), run.switches()) == (
-        Stands.DONE,
-        "switched",
-        [A, C],
-        [C],
-        1,
-    )
-
-
 @pytest.mark.parametrize(("pause", "interruption"), cells(list(PAUSES.items()), (KILL,)))
 def test_a_kill_with_no_cancel_finishes_the_release_as_asked_and_switches_once(
     record: Record, pause: Pause, interruption: str
@@ -238,24 +217,6 @@ def test_a_cancel_from_the_rename_on_is_told_too_late_and_the_release_is_finishe
     assert (again.status_code, TOO_LATE in again.json()["error"]) == (409, True)
 
 
-@pytest.mark.parametrize(("pause", "interruption"), cells(FROM_THE_RENAME, (NEWER,)))
-def test_a_newer_request_from_the_rename_on_waits_for_the_older_to_finish_and_then_runs(
-    record: Record, pause: Pause, interruption: str
-) -> None:
-    run = held(record, pause, interruption)
-    assert run.newer is not None
-    older, newer = kept_of(record, run.asked), kept_of(record, run.newer)
-    assert older.cancel_refused is not None and TOO_LATE in older.cancel_refused
-    assert (older.stands, outcome_of(older), older.cancel_asked_by) == (Stands.DONE, "switched", f"request {run.newer}")
-    assert (newer.stands, outcome_of(newer), run.visitors_got, run.builds_on_the_host(), run.switches()) == (
-        Stands.DONE,
-        "switched",
-        [A, B, C],
-        [C],
-        2,
-    )
-
-
 @pytest.mark.parametrize("interruption", INTERRUPTIONS)
 def test_a_result_already_recorded_stands_whatever_comes_after_it(record: Record, interruption: str) -> None:
     run = held(record, PAUSES["Z, answered"], interruption)
@@ -269,7 +230,7 @@ def test_a_result_already_recorded_stands_whatever_comes_after_it(record: Record
     assert [(status, "ended as done" in body["error"]) for status, body in run.cancel_answers] == (
         [(409, True)] if interruption in CANCELS else []
     )
-    assert run.visitors_got == ([A, B, C] if interruption == NEWER else [A, B])
+    assert run.visitors_got == [A, B]
 
 
 ENDINGS_A_CANCEL_COMES_BEFORE = {

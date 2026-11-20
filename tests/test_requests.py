@@ -138,6 +138,30 @@ def test_a_request_that_needs_a_person_stops_its_lane_until_it_is_asked_for_agai
     assert idle.client.get(again.headers["location"]).json()["answer"]["outcome"] == "switched"
 
 
+def test_a_replaced_request_says_by_which_to_the_call_that_waited_in_the_list_and_on_the_page_and_is_not_shown_as_wrong(
+    idle: Bed,
+) -> None:
+    at_work = idle.client.post(MOVE, json=TO_B).json()["id"]
+    assert idle.record.take_up(at_work) is not None
+    to_c, key = {"build": "site:c"}, {"Idempotency-Key": "c"}
+    waited = idle.client.post(MOVE, json=to_c, headers=key).json()["id"]
+    newest = idle.client.post(MOVE, json={"build": "site:d"}).json()["id"]
+    told = f"The move of testing of site to site:c was replaced by request {newest} while it waited."
+    asked_and_waited = idle.client.post(MOVE, json=to_c, headers=key, params={"wait": 5})
+    [ended] = idle.client.get("/requests").json()["ended"]
+    [card] = idle.client.get("/running").json()["cards"]
+    [row] = [row for row in card["rows"] if row["name"] == f"Request {waited}"]
+    cancel = idle.client.post(f"/requests/{waited}/cancel", params={"wait": 5})
+    assert (ended["id"], ended["stands"], ended["replaced_by"], row["pills"]) == (
+        waited,
+        "replaced",
+        newest,
+        [{"text": "replaced", "tone": "on purpose"}],
+    )
+    assert (row["note"].startswith(told), cancel.status_code, "ended as replaced" in cancel.json()["error"]) == (True, 409, True)
+    assert (asked_and_waited.status_code, asked_and_waited.json()["error"].startswith(told)) == (409, True)
+
+
 def test_giving_up_a_request_that_needs_a_person_ends_it_and_changes_nothing_on_the_host(idle: Bed) -> None:
     stuck = idle.client.post(MOVE, json=TO_B).json()["id"]
     for _ in range(MOST_ATTEMPTS):

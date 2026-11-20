@@ -14,7 +14,7 @@ from launchplane.gate import GateError
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
 from launchplane.page import request_note
-from launchplane.record import MOST_ATTEMPTS, Asked, Record, RecordError, Refused, Request, Stands
+from launchplane.record import MOST_ATTEMPTS, Asked, Record, RecordError, Request, Stands
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import (
@@ -140,41 +140,6 @@ def test_a_move_killed_just_after_the_switch_is_too_late_to_cancel_though_no_eve
     assert (kept.stands, kept.answer and kept.answer["outcome"], list(proxy.host.instances)) == (Stands.DONE, "switched", [NEW])
 
 
-def test_a_newer_request_cancels_the_one_being_worked_and_the_lane_ends_on_the_newer_build_with_visitors_never_on_the_older(
-    record: Record,
-) -> None:
-    worker, _, proxy = serving_a(record)
-    older = record.write(MOVE_B, CALLER, None)
-    newer: list[int] = []
-
-    def ask_for_c_while_b_is_checked(_container: str) -> None:
-        if not newer:
-            newer.append(record.write(MOVE_C, CALLER, None).id)
-
-    proxy.while_checking = ask_for_c_while_b_is_checked
-    assert (worker.work_next(), worker.work_next(), worker.work_next()) == (True, True, False)
-    cancelled, done = kept_of(record, older.id), kept_of(record, newer[0])
-    routed = [action for action in proxy.host.actions if action.startswith("route")]
-    assert (cancelled.stands, cancelled.cancel_asked_by, done.stands) == (Stands.CANCELLED, f"request {done.id}", Stands.DONE)
-    assert (routed, [each.build for each in proxy.host.instances.values()]) == ([f"route {proxy.written[WEB_ADDRESS]}"], ["site:c"])
-
-
-def test_a_newer_request_ends_one_that_waits_as_cancelled_and_only_the_newer_is_worked(record: Record) -> None:
-    worker, _, proxy = serving_a(record)
-    older, newer = record.write(MOVE_B, CALLER, None), record.write(MOVE_C, CALLER, None)
-    assert (worker.work_next(), worker.work_next()) == (True, False)
-    cancelled = kept_of(record, older.id)
-    assert (cancelled.stands, cancelled.cancel_asked_by, cancelled.attempts) == (Stands.CANCELLED, f"request {newer.id}", [])
-    assert [each.build for each in proxy.host.instances.values()] == ["site:c"]
-
-
-def test_asking_again_for_exactly_what_an_unfinished_request_asks_cancels_nothing(record: Record) -> None:
-    first = record.write(MOVE_B, CALLER, None)
-    again = record.write(MOVE_B, CALLER, None)
-    kept = kept_of(record, first.id)
-    assert (again.id, kept.stands, kept.cancel_asked_by) == (first.id, Stands.WAITING, None)
-
-
 def test_asking_for_what_a_request_being_cancelled_asks_writes_a_new_request_and_does_not_answer_with_that_one(
     record: Record,
 ) -> None:
@@ -183,11 +148,9 @@ def test_asking_for_what_a_request_being_cancelled_asks_writes_a_new_request_and
     assert record.write(MOVE_B, CALLER, None).id != being_cancelled
 
 
-def test_a_request_that_needs_a_person_is_cancelled_neither_by_a_newer_request_nor_by_the_call(record: Record) -> None:
+def test_a_request_that_needs_a_person_is_not_cancelled_by_the_call(record: Record) -> None:
     stuck = record.write(MOVE_B, CALLER, None)
     taken_up_until_it_needs_a_person(record, stuck.id)
-    with pytest.raises(Refused, match="needs a person"):
-        record.write(MOVE_C, CALLER, None)
     after = record.cancel(stuck.id, BY_HAND)
     assert after is not None and (after.stands, after.cancel_asked_by) == (Stands.NEEDS_A_PERSON, None)
 
@@ -491,17 +454,13 @@ def test_a_retire_cancelled_before_it_deleted_the_named_data_set_keeps_it_and_fi
     assert (list(proxy.host.data_sets), proxy.host.instances) == (["data-1"], {})
 
 
-def test_asking_with_a_key_for_exactly_what_an_unfinished_request_asks_cancels_nothing_and_writes_a_request_of_its_own(
+def test_asking_with_a_key_for_exactly_what_an_unfinished_request_asks_replaces_nothing_and_writes_a_request_of_its_own(
     record: Record,
 ) -> None:
     waiting, other = record.write(MOVE_B, CALLER, None), record.write(RETIRE, CALLER, None)
     with_a_key = record.write(RETIRE, CALLER, "one-release")
-    assert (with_a_key.id != other.id, kept_of(record, other.id).stands, kept_of(record, other.id).cancel_asked_by) == (
-        True,
-        Stands.WAITING,
-        None,
-    )
-    assert kept_of(record, waiting.id).cancel_asked_by == f"request {other.id}"
+    assert (with_a_key.id != other.id, kept_of(record, other.id).stands) == (True, Stands.WAITING)
+    assert kept_of(record, waiting.id).replaced_by == other.id
 
 
 def test_a_cancel_that_waits_is_answered_at_once_for_a_request_that_needs_a_person(record: Record) -> None:
@@ -746,29 +705,6 @@ def test_a_cancel_that_cannot_reach_the_gate_says_so_and_the_worker_carries_it_t
         GateAnswer(Verdict.ABANDONED),
         ["a"],
     )
-
-
-def test_a_newer_request_whose_cancel_of_the_older_cannot_reach_the_gate_is_kept_says_so_and_the_worker_carries_the_cancel(
-    record: Record,
-) -> None:
-    worker, lanes, proxy = serving_a(record)
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, GateThatCannotBeReached()))
-    older = client.post(MOVE, json=TO_B).json()["id"]
-    newer: list[tuple[int, str, str]] = []
-
-    def ask_for_c_while_b_is_checked(_container: str) -> None:
-        if not newer:
-            answer = client.post(MOVE, json={"build": "site:c"})
-            newer.append((answer.status_code, answer.headers["location"], answer.json()["error"]))
-
-    proxy.while_checking = ask_for_c_while_b_is_checked
-    while worker.work_next():
-        pass
-    [(status, location, error)] = newer
-    kept = kept_of(record, int(location.rsplit("/", 1)[1]))
-    assert (status, "is kept and will be worked" in error, "could not be carried to the gate" in error) == (503, True, True)
-    assert (kept_of(record, older).stands, kept.stands) == (Stands.CANCELLED, Stands.DONE)
-    assert [each.build for each in proxy.host.instances.values()] == ["site:c"]
 
 
 def test_ending_maintenance_on_a_lane_already_out_ends_as_it_would_have_over_a_cancel_recorded_just_before(
