@@ -10,12 +10,15 @@ type Tell = Callable[[str, str | None], None]
 
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
-@dataclass(frozen=True)
+@dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
     hold: Callable[[], None] = lambda: None
     cancel_asked: Callable[[], bool] = lambda: False
     refuse_cancel: Callable[[str], None] = lambda _why: None
+    generation: str = ""
+    attempt: int = 0
+    edit_unanswered: bool = False
 
 
 NOBODY = Witness()
@@ -27,11 +30,10 @@ TO_PUT_BACK = ", to put the lane back"
 NAMED: dict[type, Callable[[Any], str]] = {
     steps.StartProxy: lambda _step: "start the proxy",
     steps.AwaitRoute: lambda step: f"wait for the proxy to load the route of {step.web_address}",
-    steps.WriteRoute: lambda step: f"write the route of {step.web_address} to {step.container}",
+    steps.EditRoute: lambda step: f"send {step.web_address} to {step.to}" if step.to else f"remove the route of {step.web_address}",
     steps.Switch: lambda step: f"switch {step.web_address} to {step.container}",
     steps.Discard: lambda step: f"retire {step.container}",
     steps.Abandon: lambda step: f"mark the release of {step.web_address} as cancelled",
-    steps.RemoveRoute: lambda step: f"remove the route of {step.web_address} to {step.container}",
     steps.CreateDataSetNetwork: lambda step: f"make the network of the data set {step.data_set}",
     steps.CreateDataSetVolume: lambda step: f"make the volume of the data set {step.data_set}",
     steps.CreateDatabase: lambda step: f"make the database server of the data set {step.data_set}",
@@ -44,7 +46,6 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.RemoveLogins: lambda step: f"remove the logins no container holds from {step.database}",
     steps.Check: lambda step: f"check {step.container} at {step.health_path}",
     steps.AwaitBackgroundService: lambda step: f"watch the background service {step.container} stay up",
-    steps.ShowBackSoon: lambda step: f"switch {step.web_address} to the back soon page",
     steps.StopPart: lambda step: f"stop {step.container}",
     steps.StopDatabase: lambda step: f"stop the database {step.container}",
     steps.StartStopped: lambda step: f"start {step.container}",

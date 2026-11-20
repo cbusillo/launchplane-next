@@ -127,7 +127,7 @@ class HeldLanes(Held, Lanes):
 
 def hold_proxy_delivery(host: ContainerHost, held: bool) -> None:
     if held:
-        host.place_file(PROXY_NAME, UNREADABLE_ROUTES_FILE, "[")
+        host.run_in(PROXY_NAME, ["sh", "-c", f"printf '[' > {UNREADABLE_ROUTES_FILE}"])
     else:
         host.run_in(PROXY_NAME, ["rm", "-f", str(UNREADABLE_ROUTES_FILE)])
 

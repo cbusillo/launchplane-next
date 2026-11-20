@@ -5,8 +5,9 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from launchplane.docker_answers import CommandResult
-from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate, GateError
-from launchplane.instance import Verdict
+from launchplane.gate import ALREADY, DONE, GATE_FOLDER_NAME, LOST, Answer, Gate, GateError
+from launchplane.instance import BACK_SOON, Verdict
+from launchplane.proxy import route_text
 from launchplane.record import Record, Stands
 from tests.pretend_host import EARLIER, GENERATION
 from tests.test_worker import CALLER, MOVE_B, kept_of, serving_a
@@ -55,6 +56,29 @@ class Lane:
 
     def staged(self) -> list[str]:
         return sorted(each.name for each in (self.host.folder / GATE_FOLDER_NAME).glob("*.next"))
+
+    # A change of the route that is no release, asked by one attempt of one request from the routes file as it reads now.
+    def edit(self, to: str | None, generation: str, attempt: int = 1, read: str | None = None) -> str:
+        installed = self.installed() if read is None else read
+        text = "" if to is None else route_text(WEB, to, generation, attempt)
+        return self.gate.edit(WEB, generation, attempt, installed, text, PurePosixPath(self.route))
+
+    def installed(self) -> str:
+        return self.route.read_text() if self.route.exists() else ""
+
+    # The command is sent and does not run: it is on its way, and is run by `arrive` as it was sent.
+    def sent_and_held(self, to: str | None, generation: str) -> list[str]:
+        self.host.runs = False
+        with pytest.raises(GateError):
+            self.edit(to, generation)
+        self.host.runs = True
+        return self.host.sent[-1]
+
+    def arrive(self, command: list[str]) -> str:
+        return self.host.run_in(command[0], command[1:]).output
+
+    def as_it_is(self) -> tuple[str, int]:
+        return self.route.read_text(), self.route.stat().st_ino
 
 
 @pytest.fixture
@@ -221,3 +245,99 @@ def test_a_route_that_is_a_folder_is_refused_before_anything_is_staged_and_the_g
         lane.switch("b")
     lane.route.rmdir()
     assert (lane.staged(), lane.gate.verdict(WEB, GENERATION), lane.switch("b")) == ([], NONE, committed("b"))
+
+
+OLDER, OLD, NEXT = (f"0198c0de-0000-7000-8000-00000000000{number}" for number in (1, 2, 3))
+# What an old request sent that had not run when the request was closed: where its lane's route was, and where it sends it.
+LATE = {
+    "a retire": ("a", None),
+    "a maintenance begin": ("a", BACK_SOON),
+    "a maintenance end": (BACK_SOON, "a"),
+}
+SENT_LATE = pytest.mark.parametrize(("was", "to"), LATE.values(), ids=LATE.keys())
+
+
+@SENT_LATE
+def test_a_command_of_a_closed_request_that_arrives_once_the_lane_is_in_maintenance_leaves_the_same_file_showing_back_soon(
+    lane: Lane, was: str, to: str | None
+) -> None:
+    lane.route.write_text(route_text(WEB, was))
+    late = lane.sent_and_held(to, OLD)
+    assert (lane.gate.fence(WEB, OLD, 1), lane.edit(BACK_SOON, NEXT)) == (NONE, DONE)
+    in_maintenance = lane.as_it_is()
+    assert (lane.arrive(late), lane.as_it_is()) == (LOST, in_maintenance)
+    assert in_maintenance[0] == route_text(WEB, BACK_SOON, NEXT, 1)
+
+
+@SENT_LATE
+def test_a_command_of_a_closed_request_changes_nothing_of_a_route_still_exactly_as_it_read_it(
+    lane: Lane, was: str, to: str | None
+) -> None:
+    lane.route.write_text(route_text(WEB, was))
+    late, before = lane.sent_and_held(to, OLD), lane.as_it_is()
+    assert (lane.gate.fence(WEB, OLD, 1), lane.arrive(late), lane.as_it_is()) == (NONE, LOST, before)
+
+
+def test_an_old_retire_that_runs_before_its_request_is_closed_removes_the_route_and_the_next_request_reads_that_and_decides_again(
+    lane: Lane,
+) -> None:
+    lane.route.write_text(route_text(WEB, "a"))
+    read_by_the_next = lane.installed()
+    late = lane.sent_and_held(None, OLD)
+    assert (lane.arrive(late), lane.gate.fence(WEB, OLD, 1), lane.route.exists()) == (DONE, NONE, False)
+    assert lane.edit(BACK_SOON, NEXT, read=read_by_the_next) == LOST
+    assert (lane.edit(BACK_SOON, NEXT), lane.installed()) == (DONE, route_text(WEB, BACK_SOON, NEXT, 1))
+
+
+def test_a_route_put_back_to_the_same_instance_is_not_the_route_an_older_command_read_though_no_fence_stops_it(lane: Lane) -> None:
+    assert lane.edit("a", OLDER) == DONE
+    late = lane.sent_and_held(BACK_SOON, OLD)
+    assert (lane.edit(BACK_SOON, NEXT), lane.edit("a", NEXT, attempt=2)) == (DONE, DONE)
+    back_on_a = lane.as_it_is()
+    assert (lane.arrive(late), lane.as_it_is()) == (LOST, back_on_a)
+
+
+def test_an_edit_sent_again_after_it_was_made_answers_already_and_puts_no_other_file_in_place(lane: Lane) -> None:
+    lane.route.write_text(route_text(WEB, "a"))
+    read = lane.installed()
+    assert lane.edit(BACK_SOON, NEXT, read=read) == DONE
+    made = lane.as_it_is()
+    assert (lane.edit(BACK_SOON, NEXT, read=read), lane.edit(None, OLD, read=""), lane.as_it_is()) == (ALREADY, LOST, made)
+
+
+def test_an_attempt_later_than_the_fence_edits_and_the_fenced_one_never_does(lane: Lane) -> None:
+    lane.route.write_text(route_text(WEB, "a"))
+    assert lane.gate.fence(WEB, NEXT, 1) == NONE
+    assert (lane.edit(None, NEXT, attempt=1), lane.edit(None, NEXT, attempt=2), lane.route.exists()) == (LOST, DONE, False)
+
+
+def test_an_edit_takes_nothing_from_a_release_staged_and_armed_on_the_lane_and_keeps_no_verdict_of_its_own(lane: Lane) -> None:
+    gate_folder = lane.host.folder / GATE_FOLDER_NAME
+    gate_folder.mkdir()
+    for kind, text in ((".b.next", "to b"), (".armed", "1 b")):
+        (gate_folder / f"{WEB}.{GENERATION}{kind}").write_text(text)
+    assert (lane.edit(BACK_SOON, NEXT), lane.edit(None, NEXT, attempt=2)) == (DONE, DONE)
+    assert (lane.staged(), lane.gate.verdict(WEB, NEXT), lane.gate.verdict(WEB, GENERATION)) == (
+        [f"{WEB}.{GENERATION}.b.next"],
+        NONE,
+        NONE,
+    )
+    assert (lane.switch("b"), lane.route.read_text()) == (committed("b"), "to b")
+
+
+def test_an_edit_of_a_route_that_cannot_be_looked_for_gives_no_answer_and_is_never_taken_as_no_route(lane: Lane) -> None:
+    lane.route.write_text(route_text(WEB, "a"))
+    lane.route.parent.chmod(0o000)
+    try:
+        with pytest.raises(GateError, match="exit code 9"):
+            lane.edit(BACK_SOON, NEXT, read="")
+    finally:
+        lane.route.parent.chmod(0o755)
+    assert lane.installed() == route_text(WEB, "a")
+
+
+def test_an_edit_of_a_route_that_is_a_folder_is_refused_and_nothing_is_put_in_place(lane: Lane) -> None:
+    lane.route.mkdir()
+    with pytest.raises(GateError, match="is not a file"):
+        lane.edit(BACK_SOON, NEXT, read="")
+    assert lane.route.is_dir()

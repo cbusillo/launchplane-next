@@ -82,7 +82,6 @@ class HelperHost(Protocol):
     def is_running(self, container: str) -> bool: ...
     def run_in(self, container: str, command: list[str]) -> CommandResult: ...
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]: ...
-    def place_file(self, container: str, path: PurePosixPath, content: str) -> None: ...
     def read_log_tail(self, container: str) -> str: ...
 
 
@@ -116,8 +115,8 @@ class LoadedRoutes(Read):
 ROUTE_FILE_SUFFIX = ".yml"
 
 
-def route_file_of(web_address: str, suffix: str = ROUTE_FILE_SUFFIX) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}{suffix}"
+def route_file_of(web_address: str) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}{ROUTE_FILE_SUFFIX}"
 
 
 # noinspection HttpUrlsUsage
@@ -125,10 +124,12 @@ def instance_url(container: str) -> str:
     return f"http://{container}:{INSTANCE_PORT}"
 
 
-def route_text(web_address: str, container: str) -> str:
+# A first line, a comment to the proxy, says which installation a route is: one put back is not the file read before.
+def route_text(web_address: str, container: str, generation: str = "", attempt: int = 0) -> str:
     router = {"rule": f"Host(`{web_address}`)", "entryPoints": [ENTRY_POINT], "service": web_address}
     target = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
-    return json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
+    route = json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
+    return f"# {generation} {attempt}\n{route}" if generation else route
 
 
 def container_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
@@ -173,7 +174,7 @@ def written_route_from_file(text: str, web_address: str, written_at: datetime) -
     found = INSTANCE_URL.search(body)
     if found is None or body != route_text(web_address, found["container"]):
         return Unread(asked=f"The routes file {route_file_of(web_address)}", why="it is not the route Launchplane writes")
-    return WrittenRoute(found["container"], written_at)
+    return WrittenRoute(found["container"], written_at, text)
 
 
 def is_loaded(route: Loaded | None, container: str | None, *, enabled: bool) -> bool:
@@ -235,10 +236,6 @@ class TraefikProxy:
         }
         return ProxySeen(runs, self.host.is_running(BACK_SOON), written, self.read_routes() if runs else {})
 
-    def show_back_soon(self, web_address: str) -> None:
-        self.host.ensure_helper(BACK_SOON_PAGE)
-        self.write_route(web_address, BACK_SOON)
-
     def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None:
         started = self.clock()
         while not is_loaded(loaded := self.read_routes().get(web_address), container, enabled=enabled):
@@ -250,30 +247,20 @@ class TraefikProxy:
                 )
             self.sleep(POLL_SECONDS)
 
-    # The gate's files are not the lane's to remove: a command for one of its releases may still arrive.
-    def remove_route(self, web_address: str) -> None:
-        with self.routes_folder:
-            self.run_or_fail(["rm", "-f", str(route_file_of(web_address))], f"Removing the route of {web_address}")
-
-    def write_route(self, web_address: str, container: str) -> None:
-        with self.routes_folder:
-            staged = route_file_of(web_address, ".next")
-            self.host.place_file(PROXY_NAME, staged, route_text(web_address, container))
-            self.run_or_fail(["mv", str(staged), str(route_file_of(web_address))], f"Putting the route of {web_address} in place")
-
     @property
     def gate(self) -> Gate:
         return Gate(self.host, PROXY_NAME, VOLUME_FOLDER, self.routes_folder)
 
     # The one moment a release becomes real, asked of the gate for the exact candidate of one attempt.
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> Answer:
-        text = route_text(web_address, candidate)
+        text = route_text(web_address, candidate, generation, attempt)
         return self.gate.switch(web_address, generation, attempt, candidate, text, route_file_of(web_address))
 
-    def run_or_fail(self, command: list[str], attempt: str) -> None:
-        result = self.host.run_in(PROXY_NAME, command)
-        if not result.succeeded:
-            raise ProxyError(f"{attempt} failed: {result.output}")
+    def edit(self, web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        if container == BACK_SOON:
+            self.host.ensure_helper(BACK_SOON_PAGE)
+        text = "" if container is None else route_text(web_address, container, generation, attempt)
+        return self.gate.edit(web_address, generation, attempt, read, text, route_file_of(web_address))
 
     def fetch(self, *request: str) -> CommandResult:
         return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), *request])

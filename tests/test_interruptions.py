@@ -11,6 +11,7 @@ from launchplane.api import create_app
 from launchplane.instance import LaneBuild, Verdict
 from launchplane.record import Kept, Record, Stands
 from launchplane.steps import Action, Event
+from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
@@ -88,12 +89,12 @@ class Held:
             raise LaunchplaneKilled
         self.proxy.holds_delivery = False
 
-    def take(self, action: Action, *, behind_back_soon: bool = False) -> Event:
+    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         here = not self.interrupted and self.pause.action is not None and isinstance(action, self.pause.action)
         self.look()
         if here and self.pause.when == "before":
             self.interrupt()
-        event = self.forward(action, behind_back_soon=behind_back_soon)
+        event = self.forward(action, witness, behind_back_soon=behind_back_soon)
         self.look()
         if here and self.pause.when == "after":
             self.interrupt()

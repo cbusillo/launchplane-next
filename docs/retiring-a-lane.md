@@ -15,7 +15,7 @@ It reads the host and the proxy again before every step. The next step is the fi
 1. If the lane's routes file is not a route Launchplane writes, stop with `503`, changing nothing: what it sends visitors to is not known. Remove or repair the file by hand, then ask again.
 2. If the proxy is not running, start it.
 3. If the lane's routes file and the proxy disagree about where the web address goes, wait until the proxy has loaded the file. A route the proxy reports as disabled still counts as loaded.
-4. If the lane's routes file sends the web address to an instance, delete that file. No other lane's file is touched.
+4. If the lane has a routes file, ask [the gate](the-move.md#the-gate) to remove it, as the file exactly as it was just read. If the gate answers that the file is no longer that one, nothing was removed and the retire starts again from step 1. No other lane's file is touched, and what the gate keeps of the lane's releases stays.
 5. Retire a background service of the lane.
 6. Retire an instance of the lane: Docker sends the stop signal, waits up to 30 s, then removes it.
 7. If the body names one of the lane's data sets, delete it, unless it has a part twice: then stop with `503`, deleting nothing of it ([retiring a lane with data](data-sets.md#retiring-a-lane-with-data)).
@@ -32,7 +32,7 @@ The web address goes first so that no new request reaches an instance that is st
 
 The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
 
-A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
+A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A removal of the route that was sent and not answered does not fail the request: it stays working, and its [next attempt](requests.md#the-workers) fences the removal, reads the route and finishes the retire. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
 
 ## Known and not fixed
 
@@ -43,6 +43,7 @@ A `503` means the host or proxy could not be read or changed. Retiring stopped w
 
 - Retiring a lane of one idle nginx instance: 2.06 to 2.14 s, mostly Traefik loading the route change. Asking again: 0.07 s.
 - With a 5 s request in flight, the request answered 200 with its whole body.
+- On November 20, with the route removed by the gate: the removal was done 0.18 to 0.20 s after the retire was asked, where a plain `rm` took 0.11 to 0.12 s. The whole retire took as long as before.
 - Killed after the route was gone, while the instance held a 10 s request: the instance kept running with no web address until Launchplane was asked again, the request got its answer, and asking again retired the instance in 0.97 s.
 
 ## On the test bed

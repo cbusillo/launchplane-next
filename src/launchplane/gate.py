@@ -1,4 +1,5 @@
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -26,11 +27,12 @@ from launchplane.instance import Verdict
 #
 # A file that cannot be looked for is never taken as absent: the command fails, and its sender has no answer.
 GATE_FOLDER_NAME = "gate"
+EDITS = DONE, ALREADY, LOST = "done", "already", "lost"
 UNREADABLE = 9
 NOT_A_FILE = 8
 SCRIPT = f"""
 set -eu
-folder=$1 base=$1/$2.$3 operation=$4
+folder=$1 base=$1/$2.$3 operation=$4 route=${{8-}}
 # Asking changes nothing: where nothing was ever kept, there is no verdict, and nothing is made to say so.
 if [ ! -d "$folder" ]; then
     beside=$(ls -a "${{folder%/*}}") || exit {UNREADABLE}
@@ -41,7 +43,7 @@ fi
 
 has() {{
     [ ! -e "$1" ] || return 0
-    names=$(ls -a "$folder") || exit {UNREADABLE}
+    names=$(ls -a "${{1%/*}}") || exit {UNREADABLE}
     ! printf '%s\\n' "$names" | grep -qxF "${{1##*/}}" || exit {UNREADABLE}
     return 1
 }}
@@ -85,11 +87,11 @@ may_arm() {{
 }}
 
 now=$(verdict)
+# A rename onto anything but a file would put the staged file somewhere else and replace no route.
+[ ! -e "$route" ] || [ -f "$route" ] || {{ echo "$route is not a file" >&2; exit {NOT_A_FILE}; }}
 case $operation in
 switch)
-    attempt=$5 candidate=$6 text=$7 route=$8
-    # A rename onto anything but a file would put the staged file somewhere else and replace no route.
-    [ ! -e "$route" ] || [ -f "$route" ] || {{ echo "$route is not a file" >&2; exit {NOT_A_FILE}; }}
+    attempt=$5 candidate=$6 text=$7
     armed
     if [ "$now" = none ] && may_arm && ! has "$base.$candidate.revoked" && ! fenced "$attempt"; then
         [ -z "$armed_candidate" ] || [ "$armed_candidate" = "$candidate" ] || revoke "$armed_candidate"
@@ -112,6 +114,15 @@ abandon)
 discard)
     candidate=$6
     [ "$now" = "committed $candidate" ] || revoke "$candidate" ;;
+edit)
+    attempt=$5 read=$6 text=$7 installed=
+    ! has "$route" || installed=$(cat "$route")
+    if [ "$installed" = "$text" ]; then echo {ALREADY}
+    elif fenced "$attempt" || [ "$installed" != "$read" ]; then echo {LOST}
+    elif [ -z "$text" ]; then rm "$route"; sync "${{route%/*}}"; echo {DONE}
+    else keep "$base.edit" "$text"; mv "$base.edit" "$route"; sync "$route"; echo {DONE}
+    fi
+    exit ;;
 fence)
     attempt=$5
     if [ "$now" = none ]; then
@@ -159,38 +170,42 @@ class Gate:
     def folder(self) -> PurePosixPath:
         return self.root / GATE_FOLDER_NAME
 
-    # A command that does not come back with a verdict has given no answer: it is never taken as none.
-    def ask(self, web_address: str, generation: str, operation: str, *arguments: str | int | PurePosixPath) -> Answer:
-        passed = [str(self.folder), web_address, generation, operation, *map(str, arguments)]
+    # A command that does not come back with an answer has given none: it is never taken as none.
+    def ask[T](self, told: Callable[[str], T | None], web_address: str, generation: str, *asked: str | int | PurePosixPath) -> T:
+        passed = [str(self.folder), web_address, generation, *map(str, asked)]
         with self.reading:
             result = self.host.run_in(self.container, ["flock", str(self.root), "sh", "-c", SCRIPT, "sh", *passed])
-        answer = answer_from(result.output) if result.succeeded else None
+        answer = told(result.output) if result.succeeded else None
         if answer is None:
             raise GateError(
-                f"The gate gave no verdict for the release {generation} of {web_address} when asked to {operation}, so "
-                f"what holds for it is not known: exit code {result.exit_code}, {result.output or 'no output'}"
+                f"The gate gave no answer when asked to {asked[0]} for {web_address}, generation {generation}, so whether the route "
+                f"was changed and what holds there is not known: exit code {result.exit_code}, {result.output or 'no output'}"
             )
         return answer
 
     # Changes nothing.
     @observing()
     def verdict(self, web_address: str, generation: str) -> Answer:
-        return self.ask(web_address, generation, "verdict")
+        return self.ask(answer_from, web_address, generation, "verdict")
 
     # Renames the routes file to the candidate's, once for a generation and only for a candidate no later attempt, no
     # discard, no fence and no cancel has taken the permission from. Asked again, it stages nothing.
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str, text: str, route: PurePosixPath) -> Answer:
-        return self.ask(web_address, generation, "switch", attempt, candidate, text, route)
+        return self.ask(answer_from, web_address, generation, "switch", attempt, candidate, text, route)
 
     def abandon(self, web_address: str, generation: str) -> Answer:
-        return self.ask(web_address, generation, "abandon")
+        return self.ask(answer_from, web_address, generation, "abandon")
 
     # Before a candidate is removed: either its rename won, and the answer says committed to it, or it can never be
     # renamed to from here on.
     def discard(self, web_address: str, generation: str, attempt: int, candidate: str) -> Answer:
-        return self.ask(web_address, generation, "discard", attempt, candidate)
+        return self.ask(answer_from, web_address, generation, "discard", attempt, candidate)
 
     # Before an attempt proposes an ending that is no release: confirms none, and no switch of that attempt or an
     # earlier one, also one still on its way, can rename after it.
     def fence(self, web_address: str, generation: str, attempt: int) -> Answer:
-        return self.ask(web_address, generation, "fence", attempt)
+        return self.ask(answer_from, web_address, generation, "fence", attempt)
+
+    # Makes `text` the routes file, or with none removes it, only for an attempt not fenced and from the file exactly as `read`.
+    def edit(self, web_address: str, generation: str, attempt: int, read: str, text: str, route: PurePosixPath) -> str:
+        return self.ask(lambda said: said if said in EDITS else None, web_address, generation, "edit", attempt, read, text, route)

@@ -54,7 +54,8 @@ def request_loop() -> Generator[RequestLoop]:
 
 
 def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:
-    staged, written = route_file_of(NAME, ".next"), route_file_of(NAME)
+    written = route_file_of(NAME)
+    staged = f"{written}.next"
     on_scratch(f"docker exec -i {PROXY_NAME} sh -c 'cat > {staged} && mv {staged} {written}'", given=route_text(NAME, copy_name))
 
 

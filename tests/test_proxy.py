@@ -13,11 +13,12 @@ import pytest
 
 from launchplane.container_host import ContainerHost, FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
-from launchplane.gate import GATE_FOLDER_NAME, Answer
+from launchplane.gate import DONE, GATE_FOLDER_NAME, Answer, GateError
 from launchplane.instance import BACK_SOON, Conflicting, LaneRoute, LoadedRoute, RouteStatus, Unread, Verdict, WrittenRoute
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
+    ROUTES_FOLDER,
     VOLUME_FOLDER,
     CheckFailed,
     ProxyError,
@@ -72,11 +73,7 @@ class ProxyHost:
         assert container == PROXY_NAME
         if command[0] in self.refused_commands:
             return CommandResult(exit_code=1, output=f"{command[0]}: Read-only file system")
-        if command[0] == "mv":
-            self.files[PurePosixPath(command[2])] = self.files.pop(PurePosixPath(command[1]))
-        elif command[0] == "rm":
-            self.files.pop(PurePosixPath(command[-1]), None)
-        elif "sh" in command:
+        if "sh" in command:
             result = self.run_in_a_folder(command[command.index("sh") :])
             if self.loads_on_write:
                 self.load()
@@ -86,9 +83,6 @@ class ProxyHost:
         else:
             answered = next(self.answers)
             return CommandResult(exit_code=0 if answered else 1, output="" if answered else "Connection refused")
-        if self.loads_on_write:
-            self.load()
-        return CommandResult(exit_code=0, output="")
 
     # The commands of the gate are run as they are, by a real shell, on a folder that stands for the proxy's.
     def run_in_a_folder(self, command: list[str]) -> CommandResult:
@@ -108,12 +102,12 @@ class ProxyHost:
         assert container == PROXY_NAME
         return {path.name: FileRead(text, WRITTEN_AT) for path, text in self.files.items() if folder in path.parents}
 
-    def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
-        assert container == PROXY_NAME
-        self.files[path] = content
-
     def read_log_tail(self, container: str) -> str:
         return f"{container}: {self.log}"
+
+
+def routes_of(host: ProxyHost) -> dict[str, str]:
+    return {path.stem: text for path, text in host.files.items() if path.parent == ROUTES_FOLDER}
 
 
 def lane_route(host: ProxyHost, web_address: str = WEB_ADDRESS) -> LaneRoute:
@@ -122,6 +116,11 @@ def lane_route(host: ProxyHost, web_address: str = WEB_ADDRESS) -> LaneRoute:
 
 def sends_visitors_to(host: ProxyHost) -> dict[str, str]:
     return TraefikProxy(host).read().sends_visitors_to()
+
+
+# A change of a lane's route that is no release, asked as its request's first attempt asks it: from the route as read.
+def edit(proxy: TraefikProxy, web_address: str, container: str | None) -> str:
+    return proxy.edit(web_address, GENERATION, 1, proxy.read().route_of(web_address).installed, container)
 
 
 def ticking(host: ProxyHost, **seconds: float) -> TraefikProxy:
@@ -134,7 +133,7 @@ def test_a_switch_asks_the_gate_to_rename_the_lanes_routes_file_to_the_route_of_
     proxy = TraefikProxy(host)
     assert proxy.switch(OTHER, GENERATION, 1, "b") == Answer(Verdict.COMMITTED, "b")
     assert (host.files[route_file_of(OTHER)], proxy.read().route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == (
-        route_text(OTHER, "b"),
+        route_text(OTHER, "b", GENERATION, 1),
         "b",
         "b",
     )
@@ -144,7 +143,7 @@ def test_removing_a_lanes_route_leaves_what_the_gate_keeps_of_its_releases() -> 
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
     proxy.switch(WEB_ADDRESS, GENERATION, 1, "b")
-    proxy.remove_route(WEB_ADDRESS)
+    assert edit(proxy, WEB_ADDRESS, None) == DONE
     assert (proxy.gate.verdict(WEB_ADDRESS, GENERATION), proxy.read().route_of(WEB_ADDRESS).written) == (
         Answer(Verdict.COMMITTED, "b"),
         None,
@@ -154,30 +153,29 @@ def test_removing_a_lanes_route_leaves_what_the_gate_keeps_of_its_releases() -> 
 def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_place() -> None:
     host = ProxyHost({WEB_ADDRESS: "a"})
     proxy = TraefikProxy(host)
-    place, run_in, read_folder = host.place_file, host.run_in, host.read_folder
+    run_in, read_folder = host.run_in, host.read_folder
     touched: list[str] = []
 
-    def place_slowly(container: str, path: PurePosixPath, content: str) -> None:
-        touched.append("placed")
-        time.sleep(0.1)
-        place(container, path, content)
-
     def run_and_say(container: str, command: list[str]) -> CommandResult:
-        touched.extend(["put in place"] if command[0] == "mv" else [])
+        if command[0] != "flock":
+            return run_in(container, command)
+        touched.append("asked")
+        time.sleep(0.1)
+        touched.append("put in place")
         return run_in(container, command)
 
     def read_and_say(container: str, folder: PurePosixPath) -> dict[str, FileRead]:
         touched.append("read")
         return read_folder(container, folder)
 
-    host.place_file, host.run_in, host.read_folder = place_slowly, run_and_say, read_and_say
-    other_lane = threading.Thread(target=proxy.write_route, args=(OTHER, "b"))
+    host.run_in, host.read_folder = run_and_say, read_and_say
+    other_lane = threading.Thread(target=proxy.edit, args=(OTHER, GENERATION, 1, "", "b"))
     other_lane.start()
     while not touched:
         time.sleep(0.01)
     read = proxy.read().written
     other_lane.join(timeout=5)
-    assert (touched, sorted(read)) == (["placed", "put in place", "read"], [OTHER, WEB_ADDRESS])
+    assert (touched, sorted(read)) == (["asked", "put in place", "read"], [OTHER, WEB_ADDRESS])
 
 
 # The proxy's volume as a folder on this machine. Asked for a path, it hands over everything below it, as Docker does.
@@ -349,29 +347,27 @@ def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visit
 def test_writing_a_route_changes_only_that_lanes_file() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
     other_file = host.files[route_file_of(OTHER)]
-    TraefikProxy(host).write_route(WEB_ADDRESS, "site-t2")
-    assert host.files == {route_file_of(WEB_ADDRESS): route_text(WEB_ADDRESS, "site-t2"), route_file_of(OTHER): other_file}
-    TraefikProxy(host).remove_route(WEB_ADDRESS)
-    assert host.files == {route_file_of(OTHER): other_file}
+    assert edit(TraefikProxy(host), WEB_ADDRESS, "site-t2") == DONE
+    assert routes_of(host) == {WEB_ADDRESS: route_text(WEB_ADDRESS, "site-t2", GENERATION, 1), OTHER: other_file}
+    assert edit(TraefikProxy(host), WEB_ADDRESS, None) == DONE
+    assert routes_of(host) == {OTHER: other_file}
 
 
-@pytest.mark.parametrize("command", ["mv", "rm"])
-def test_a_routes_file_command_that_fails_is_an_error_with_why_not_a_route_taken_as_changed(command: str) -> None:
+@pytest.mark.parametrize("container", ["site-t2", None])
+def test_a_change_of_a_route_the_host_does_not_run_is_an_error_with_why_not_a_route_taken_as_changed(container: str | None) -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1"})
-    host.refused_commands.add(command)
     proxy = TraefikProxy(host)
-    with pytest.raises(ProxyError, match="Read-only file system"):
-        if command == "mv":
-            proxy.write_route(WEB_ADDRESS, "site-t2")
-        else:
-            proxy.remove_route(WEB_ADDRESS)
+    read = proxy.read().route_of(WEB_ADDRESS).installed
+    host.refused_commands.add("flock")
+    with pytest.raises(GateError, match="Read-only file system"):
+        proxy.edit(WEB_ADDRESS, GENERATION, 1, read, container)
 
 
 def test_awaiting_a_route_returns_only_once_the_proxy_has_loaded_it() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1"})
     host.loads_on_write = False
     proxy = ticking(host)
-    proxy.remove_route(WEB_ADDRESS)
+    assert edit(proxy, WEB_ADDRESS, None) == DONE
     assert proxy.read().sends_visitors_to() == {WEB_ADDRESS: "site-t1"}
     proxy.await_route(WEB_ADDRESS, None)
     assert proxy.read().sends_visitors_to() == {}
@@ -414,7 +410,7 @@ def test_an_instance_that_never_answers_fails_its_check_with_the_proxys_error() 
 def test_showing_the_back_soon_page_starts_its_container_and_changes_only_that_lanes_route() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
     host.running.discard(BACK_SOON)
-    TraefikProxy(host).show_back_soon(WEB_ADDRESS)
+    assert edit(TraefikProxy(host), WEB_ADDRESS, BACK_SOON) == DONE
     assert host.running == {PROXY_NAME, BACK_SOON}
     assert sends_visitors_to(host) == {WEB_ADDRESS: BACK_SOON, OTHER: "site-p1"}
 

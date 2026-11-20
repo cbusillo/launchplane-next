@@ -204,7 +204,7 @@ class PretendRecord(Record):
             self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
             self.change(request, attempts=interrupted)
             at_limit = sum(each.ended == "interrupted" for each in interrupted) >= MOST_ATTEMPTS
-            return AtLimit(self.last_attempt[request]) if at_limit else None
+            return AtLimit(self.last_attempt[request], at_limit)
 
     def stop_for_a_person(self, request: int, last: int) -> bool:
         self.reach("leaving a request to a person")

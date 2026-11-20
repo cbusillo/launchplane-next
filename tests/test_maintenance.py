@@ -14,15 +14,14 @@ from launchplane.steps import (
     Check,
     CheckRefused,
     Done,
+    EditRoute,
     Event,
     LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
     ReadLog,
     RemoveLogins,
-    RemoveRoute,
     Retire,
-    ShowBackSoon,
     StartDatabase,
     StartProxy,
     StartRefused,
@@ -30,7 +29,6 @@ from launchplane.steps import (
     Stop,
     StopDatabase,
     StopPart,
-    WriteRoute,
 )
 from tests.pretend_host import (
     SINCE,
@@ -109,7 +107,7 @@ def answered(outcome: MaintenanceOutcome, *, in_maintenance: bool, error: str | 
 KILLED_REPORT = f"The database {DATABASE} did not stop cleanly: it exited with code {KILLED}, so it was killed or it crashed"
 BEGINS: dict[str, tuple[Lane, object]] = {
     "with no proxy running, it is started first": (Lane(None), StartProxy()),
-    "the web address is switched to the back soon page before any part stops": (UP, ShowBackSoon(WEB_ADDRESS)),
+    "the web address is switched to the back soon page before any part stops": (UP, EditRoute(WEB_ADDRESS, BACK_SOON, WEB)),
     "killed after the route was written: no part stops until the proxy has loaded the back soon page": (
         Lane((WEB, BACK_SOON), RUNNING, RUNNING, database(RUNNING)),
         AwaitRoute(WEB_ADDRESS, BACK_SOON),
@@ -140,7 +138,7 @@ BEGINS: dict[str, tuple[Lane, object]] = {
     ),
     "a lane whose route goes to an instance that is gone still shows the back soon page": (
         Lane(("gone", "gone"), None, None, database(RUNNING)),
-        ShowBackSoon(WEB_ADDRESS),
+        EditRoute(WEB_ADDRESS, BACK_SOON, "gone"),
     ),
 }
 
@@ -205,7 +203,7 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
     "the web address is switched back last, once the background service is read as having stayed up": (
         ALL_UP_BEHIND_BACK_SOON,
         (CHECKED,),
-        WriteRoute(WEB_ADDRESS, WEB),
+        EditRoute(WEB_ADDRESS, WEB, BACK_SOON),
     ),
     "a login no container holds is removed while the back soon page still shows, before the web address is switched back": (
         Lane(IN_MAINTENANCE, RUNNING, RUNNING, data_set_named("d1", unheld=("i_left",))),
@@ -219,7 +217,7 @@ ENDS: dict[str, tuple[Lane, tuple[Event, ...], object]] = {
     ),
     "a call that switched the web address back answers ended, from the lane as read then": (
         UP,
-        (CHECKED, WriteRoute(WEB_ADDRESS, WEB), AwaitRoute(WEB_ADDRESS, WEB)),
+        (CHECKED, EditRoute(WEB_ADDRESS, WEB, BACK_SOON), AwaitRoute(WEB_ADDRESS, WEB)),
         answered(MaintenanceOutcome.ENDED, in_maintenance=False),
     ),
     "a web part that failed its check is stopped again": (
@@ -311,7 +309,7 @@ def test_ending_maintenance_neither_keeps_the_back_soon_page_nor_fails_once_back
     untold = (with_database(STARTED_DATABASE, unheld_logins=None),)
     behind = Given((web(RUNNING),), IN_MAINTENANCE, (background_service(RUNNING),), untold)
     back = Given((web(RUNNING),), SERVING, (background_service(RUNNING),), untold)
-    assert decide_end(behind.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)
+    assert decide_end(behind.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == EditRoute(WEB_ADDRESS, WEB, BACK_SOON)
     assert isinstance(decide_end(back.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)), Done)
 
 
@@ -336,7 +334,9 @@ def test_a_move_refuses_a_lane_in_maintenance_before_it_starts_the_proxy() -> No
 
 
 def test_a_lane_in_maintenance_is_retired_as_any_other_route_first_then_its_stopped_parts() -> None:
-    assert decide_retire(Lane(IN_MAINTENANCE).given().judged(Work.RETIRE), None, ()) == RemoveRoute(WEB_ADDRESS, BACK_SOON)
+    assert decide_retire(Lane(IN_MAINTENANCE).given().judged(Work.RETIRE), None, ()) == EditRoute(
+        WEB_ADDRESS, None, BACK_SOON, BACK_SOON
+    )
     assert decide_retire(Lane((None, None)).given().judged(Work.RETIRE), None, ()) == Retire(BACKGROUND_SERVICE)
 
 
@@ -353,9 +353,9 @@ def test_beginning_maintenance_does_not_answer_success_with_the_back_soon_page_n
 
 def test_ending_maintenance_switches_away_from_a_back_soon_page_that_is_not_running() -> None:
     without_page = replace(ALL_UP_BEHIND_BACK_SOON.given(), back_soon_runs=False)
-    assert decide_end(without_page.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)
+    assert decide_end(without_page.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == EditRoute(WEB_ADDRESS, WEB, BACK_SOON)
 
 
 def test_ending_maintenance_starts_nothing_of_a_data_set_its_instance_does_not_use_and_switches_back() -> None:
     spare = replace(ALL_UP_BEHIND_BACK_SOON.given(), data_sets=(STARTED_DATABASE, data_set_named("d2", STOPPED)))
-    assert decide_end(spare.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == WriteRoute(WEB_ADDRESS, WEB)
+    assert decide_end(spare.judged(Work.END_MAINTENANCE), WITH_DATA, (CHECKED,)) == EditRoute(WEB_ADDRESS, WEB, BACK_SOON)

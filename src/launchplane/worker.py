@@ -14,7 +14,7 @@ from launchplane.instance import LaneBuild, Verdict
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
+from launchplane.record import AtLimit, Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 from launchplane.telling import LOOKS, Witness
@@ -166,19 +166,17 @@ class Worker:
             with self.record.turn(*lane) as held:
                 if held is None:
                     return False
-                attempt = self.taken_up(request)
+                attempt = self.taken_up(request, found := self.record.at_limit(request.id))
                 if attempt is not None:
-                    self.carry_through(request, attempt, held)
+                    self.carry_through(request, attempt, held, found)
                 return True
         finally:
             self.let_go(lane)
 
-    # A move interrupted as often as a request may be is left to a person only when the gate, fenced through its last
-    # attempt, has no verdict for it and no cancel is on record. A committed release is finished and a cancel that won
-    # is put back, however often they were interrupted, and with no answer from the gate nothing is decided.
-    def taken_up(self, request: Request) -> int | None:
-        at = self.record.at_limit(request.id) if request.work is Work.MOVE else None
-        if at is None:
+    # A request interrupted as often as one may be is left to a person only once the gate, fenced through its last attempt,
+    # has no verdict for it and no cancel is on record. Otherwise, also with no answer from the gate, it is taken up again.
+    def taken_up(self, request: Request, at: AtLimit | None) -> int | None:
+        if at is None or not at.reached:
             return self.record.take_up(request.id)
         try:
             verdict = self.lanes.fence(request.product, request.lane, request.generation, at.last).verdict
@@ -201,16 +199,27 @@ class Worker:
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
-        return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel)
+        return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel, request.generation, attempt)
 
-    def carry_through(self, request: Request, attempt: int, held: Held) -> None:
+    def carry_through(self, request: Request, attempt: int, held: Held, found: AtLimit | None) -> None:
         witness = self.witness_of(request, attempt, held)
-        if request.work is not Work.MOVE:
-            came_to = self.ending_of(request, attempt, witness)
-            self.record.end(attempt, came_to.stands, came_to.answer, came_to.error)
-            return
-        while not self.move_ended_or_left_open(request, attempt, witness):
+        while request.work is Work.MOVE and not self.move_ended_or_left_open(request, attempt, witness):
             pass
+        if request.work is not Work.MOVE:
+            self.carry_fenced(request, witness, found)
+
+    # Earlier attempts are fenced before this one reads the lane, and an edit it got no answer for is left to the next one.
+    def carry_fenced(self, request: Request, witness: Witness, found: AtLimit | None) -> None:
+        try:
+            if found is not None:
+                self.lanes.fence(request.product, request.lane, request.generation, found.last)
+            came_to = self.ending_of(request, witness.attempt, witness)
+        except HOST_UNREAD as error:
+            came_to = Ending(Stands.FAILED, error=f"{request.attempted()} was not begun: {error}", left_open=True)
+        if came_to.left_open or witness.edit_unanswered:
+            self.left_open(witness.attempt, came_to.error or "")
+        else:
+            self.record.end(witness.attempt, came_to.stands, came_to.answer, came_to.error)
 
     # One round of a move: the call, then the gate's word on its ending, then the record. An ending that is no release
     # is written once the attempt is fenced with no verdict and, where it failed, what the release made is cleaned up and
