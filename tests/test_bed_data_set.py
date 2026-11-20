@@ -14,6 +14,8 @@ import pytest
 
 from launchplane.secret_boundary import SECRET_REMOVED
 from tests.bed import (
+    CONTROL_ADDRESS,
+    CONTROL_PORT,
     SCRATCH_ADDRESS,
     UnexpectedAnswer,
     ask,
@@ -52,7 +54,6 @@ LEAKY_DESCRIPTION = DESCRIPTION | {
 }
 LISTENER = "test-bed-call-listener"
 LISTENER_PORT = 8099
-CONTROL_HOST_NAME = "launchplane.shiny"
 OUTSIDE_ADDRESS = "1.1.1.1"
 
 
@@ -318,7 +319,7 @@ def test_a_quiet_instance_reaches_nothing_outside_until_given_a_way_out(lane_on_
     [background_service] = lane_on_a.background_services
     attempts = {
         "the internet": (OUTSIDE_ADDRESS, 80),
-        "the local network": (socket.gethostbyname(CONTROL_HOST_NAME), 8700),
+        "the local network": (socket.gethostbyname(CONTROL_ADDRESS), CONTROL_PORT),
         "the Docker host": (scratch_ip(), 2376),
         "the listener on the Docker host": (scratch_ip(), LISTENER_PORT),
     }

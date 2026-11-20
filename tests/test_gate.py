@@ -19,7 +19,7 @@ def committed(candidate: str) -> Answer:
     return Answer(Verdict.COMMITTED, candidate)
 
 
-# The gate's command run as it is, by a real shell, on a folder that stands for the proxy's routes folder. The lock is
+# The gate's command run as it is, by a real shell, on a folder that stands for the one the proxy's routes folder is in. The lock is
 # the host's and is left out: these tests send one command at a time.
 @dataclass
 class FolderHost:
@@ -60,7 +60,8 @@ class Lane:
 @pytest.fixture
 def lane(tmp_path: Path) -> Lane:
     host = FolderHost(tmp_path)
-    return Lane(host, Gate(host, "proxy", PurePosixPath(tmp_path)), tmp_path / f"{WEB}.yml")
+    (tmp_path / "routes").mkdir()
+    return Lane(host, Gate(host, "proxy", PurePosixPath(tmp_path)), tmp_path / "routes" / f"{WEB}.yml")
 
 
 def test_a_generation_nothing_was_asked_for_has_no_verdict_and_asking_changes_nothing(lane: Lane) -> None:

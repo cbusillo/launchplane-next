@@ -17,13 +17,19 @@ from launchplane.gate import Answer, Gate
 from launchplane.instance import BACK_SOON, LANE_NETWORK, Conflicting, LoadedRoute, ProxySeen, RouteStatus, Unread, WrittenRoute
 
 PROXY_NAME = "launchplane-proxy"
-ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
+# The routes the proxy loads and the gate's folder lie beside each other in the one volume: the gate renames within one
+# file system, and a reading of the routes carries nothing the gate keeps.
+VOLUME_FOLDER = PurePosixPath("/etc/traefik/launchplane")
+ROUTES_FOLDER = VOLUME_FOLDER / "routes"
 ENTRY_POINT = "web"
 INSTANCE_PORT = 80
+# Traefik watches no folder that is missing when it starts, and a new volume has none.
+ROUTES_FOLDER_THEN_TRAEFIK = ["sh", "-c", f'mkdir -p {ROUTES_FOLDER} && exec traefik "$@"', "sh"]
 PROXY = HelperContainer(
     container=PROXY_NAME,
     image="traefik:v3.7.18",
     command=[
+        *ROUTES_FOLDER_THEN_TRAEFIK,
         f"--entrypoints.{ENTRY_POINT}.address=:{INSTANCE_PORT}",
         "--entrypoints.traefik.address=127.0.0.1:8080",
         "--api.insecure=true",
@@ -31,7 +37,7 @@ PROXY = HelperContainer(
         "--providers.file.watch=true",
     ],
     ports={80: 80},
-    volumes={"launchplane-proxy-routes": str(ROUTES_FOLDER)},
+    volumes={"launchplane-proxy-routes": str(VOLUME_FOLDER)},
     quiet_networks=[LANE_NETWORK],
     outside_network="launchplane-proxy-outside",
 )
@@ -110,12 +116,8 @@ class LoadedRoutes(Read):
 ROUTE_FILE_SUFFIX = ".yml"
 
 
-def route_file_of(web_address: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}{ROUTE_FILE_SUFFIX}"
-
-
-def staged_route_file_of(web_address: str) -> PurePosixPath:
-    return ROUTES_FOLDER / f"{web_address}.next"
+def route_file_of(web_address: str, suffix: str = ROUTE_FILE_SUFFIX) -> PurePosixPath:
+    return ROUTES_FOLDER / f"{web_address}{suffix}"
 
 
 # noinspection HttpUrlsUsage
@@ -255,15 +257,13 @@ class TraefikProxy:
 
     def write_route(self, web_address: str, container: str) -> None:
         with self.routes_folder:
-            self.host.place_file(PROXY_NAME, staged_route_file_of(web_address), route_text(web_address, container))
-            self.run_or_fail(
-                ["mv", str(staged_route_file_of(web_address)), str(route_file_of(web_address))],
-                f"Putting the route of {web_address} in place",
-            )
+            staged = route_file_of(web_address, ".next")
+            self.host.place_file(PROXY_NAME, staged, route_text(web_address, container))
+            self.run_or_fail(["mv", str(staged), str(route_file_of(web_address))], f"Putting the route of {web_address} in place")
 
     @property
     def gate(self) -> Gate:
-        return Gate(self.host, PROXY_NAME, ROUTES_FOLDER, self.routes_folder)
+        return Gate(self.host, PROXY_NAME, VOLUME_FOLDER, self.routes_folder)
 
     # The one moment a release becomes real, asked of the gate for the exact candidate of one attempt.
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> Answer:

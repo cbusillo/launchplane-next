@@ -6,7 +6,7 @@ import sys
 
 CONTROL_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_CONTROL_SHELL", "lp-control"))
 SCRATCH_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_SCRATCH_SHELL", "lp-scratch"))
-SCRATCH_HOST_NAME = "docker-lp-scratch.shiny"
+SCRATCH_HOST_NAME = os.environ.get("LAUNCHPLANE_SCRATCH_ADDRESS", "docker-lp-scratch.shiny")
 NEW_KEY = "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256"
 
 ENSURE_AUTHORITY = f"""

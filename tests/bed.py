@@ -12,6 +12,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -19,6 +20,8 @@ LAUNCHPLANE_URL = os.environ.get("LAUNCHPLANE_URL", "")
 SCRATCH_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_SCRATCH_SHELL", "lp-scratch"))
 SCRATCH_ADDRESS = os.environ.get("LAUNCHPLANE_SCRATCH_ADDRESS", "docker-lp-scratch.shiny")
 CONTROL_SHELL = shlex.split(os.environ.get("LAUNCHPLANE_CONTROL_SHELL", "lp-control"))
+CONTROL = urlsplit(LAUNCHPLANE_URL)
+CONTROL_ADDRESS, CONTROL_PORT = CONTROL.hostname or "", CONTROL.port or 80
 
 PAUSE_THAT_KEEPS_CLIENT_PORTS_FREE = 0.02
 

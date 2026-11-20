@@ -2,6 +2,11 @@
 # Run on the control container by scripts/deploy-control, as root, after the tree is in /opt/launchplane.
 set -eu
 cd /opt/launchplane
+if ! grep -q '^LAUNCHPLANE_CONTAINER_HOST=' /etc/launchplane/bed.env 2>/dev/null; then
+    echo "Installing Launchplane stopped: /etc/launchplane/bed.env does not say which container host this control manages." >&2
+    echo "Write it once, e.g. LAUNCHPLANE_CONTAINER_HOST=tcp://<scratch host>:2376, and deploy again." >&2
+    exit 1
+fi
 UV_PYTHON_INSTALL_DIR=/opt/uv-python uv sync --locked --no-dev --no-editable --python 3.15 --quiet
 if ! command -v psql >/dev/null; then
     apt-get update --quiet --quiet

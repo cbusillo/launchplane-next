@@ -9,7 +9,7 @@ import pytest
 from launchplane.docker_answers import CommandResult, ContainerHostError
 from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate, GateError
 from launchplane.instance import Verdict, new_generation
-from launchplane.proxy import INSTANCE_URL, PROXY_NAME, ROUTES_FOLDER, route_file_of, route_text
+from launchplane.proxy import INSTANCE_URL, PROXY_NAME, VOLUME_FOLDER, route_file_of, route_text
 from tests.bed import SCRATCH_SHELL, needs_test_bed, on_scratch, wait_for
 
 pytestmark = needs_test_bed
@@ -18,7 +18,7 @@ pytestmark = needs_test_bed
 # no worker, planner or record. A web address no lane has.
 WEB = "proof.gate-proof.test"
 ROUTE = route_file_of(WEB)
-GATE_FOLDER = ROUTES_FOLDER / GATE_FOLDER_NAME
+GATE_FOLDER = VOLUME_FOLDER / GATE_FOLDER_NAME
 NONE, ABANDONED = Answer(Verdict.NONE), Answer(Verdict.ABANDONED)
 HELD_BIN = "/tmp/gate-proof-bin"  # noqa: S108 a folder inside the proxy's container
 AFTER_THE_RENAME, HOLD = "/tmp/gate-proof-after-the-rename", "/tmp/gate-proof-hold"  # noqa: S108
@@ -116,7 +116,7 @@ def proof() -> Iterator[Proof]:
     clean = f"rm -rf {HELD_BIN} {AFTER_THE_RENAME} {HOLD} {LOCK_HELD} {ROUTE}; rm -f {GATE_FOLDER}/{WEB}.*"
     in_proxy(clean)
     host = ScratchHost()
-    made = Proof(host, Gate(host, PROXY_NAME, ROUTES_FOLDER), new_generation())
+    made = Proof(host, Gate(host, PROXY_NAME, VOLUME_FOLDER), new_generation())
     made.look()
     yield made
     in_proxy(clean)
@@ -155,10 +155,10 @@ def test_a_rename_whose_reply_alone_is_lost_is_committed_when_asked_again_and_ha
 def test_a_switch_accepted_and_held_before_the_lock_renames_nothing_once_its_candidate_was_discarded_meanwhile(
     proof: Proof,
 ) -> None:
-    lock = ROUTES_FOLDER
+    lock = VOLUME_FOLDER
     in_proxy(f"touch {LOCK_HELD}; flock {lock} sh -c 'while [ -e {LOCK_HELD} ]; do sleep 0.1; done'", flags="--detach")
     # The held switch is another sender's: one Launchplane sends its gate commands one at a time.
-    stale_sender = Proof(proof.host, Gate(proof.host, PROXY_NAME, ROUTES_FOLDER), proof.generation, proof.inodes, proof.answers)
+    stale_sender = Proof(proof.host, Gate(proof.host, PROXY_NAME, VOLUME_FOLDER), proof.generation, proof.inodes, proof.answers)
     sender = threading.Thread(target=stale_sender.switch_and_keep_the_answer, args=("b",))
     sender.start()
     wait_for(lambda: bool(proof.waiting_for_the_lock()), seconds=30)

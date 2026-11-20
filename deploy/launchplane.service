@@ -6,7 +6,7 @@ Wants=network-online.target postgresql.service
 [Service]
 User=launchplane
 WorkingDirectory=/var/lib/launchplane
-Environment=LAUNCHPLANE_CONTAINER_HOST=tcp://docker-lp-scratch.shiny:2376
+EnvironmentFile=/etc/launchplane/bed.env
 Environment=LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS=/var/lib/launchplane/tls
 Environment=LAUNCHPLANE_LISTEN_ADDRESS=0.0.0.0
 Environment=LAUNCHPLANE_LISTEN_PORT=8700

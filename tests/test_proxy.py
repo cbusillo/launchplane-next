@@ -1,5 +1,8 @@
+import io
 import json
+import os
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -8,14 +11,14 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from launchplane.container_host import FileRead, HelperContainer
+from launchplane.container_host import ContainerHost, FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
-from launchplane.gate import Answer
+from launchplane.gate import GATE_FOLDER_NAME, Answer
 from launchplane.instance import BACK_SOON, Conflicting, LaneRoute, LoadedRoute, RouteStatus, Unread, Verdict, WrittenRoute
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
-    ROUTES_FOLDER,
+    VOLUME_FOLDER,
     CheckFailed,
     ProxyError,
     TraefikProxy,
@@ -24,6 +27,7 @@ from launchplane.proxy import (
     route_text,
 )
 from tests.pretend_host import GENERATION
+from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 
 WEB_ADDRESS = "testing.site.test"
 OTHER = "production.site.test"
@@ -90,14 +94,14 @@ class ProxyHost:
     def run_in_a_folder(self, command: list[str]) -> CommandResult:
         with tempfile.TemporaryDirectory() as folder:
             for path, text in self.files.items():
-                there = Path(folder) / path.relative_to(ROUTES_FOLDER)
+                there = Path(folder) / path.relative_to(VOLUME_FOLDER)
                 there.parent.mkdir(parents=True, exist_ok=True)
                 there.write_text(text)
             ran = subprocess.run(  # noqa: S603
-                [argument.replace(str(ROUTES_FOLDER), folder) for argument in command], capture_output=True, text=True, check=False
+                [argument.replace(str(VOLUME_FOLDER), folder) for argument in command], capture_output=True, text=True, check=False
             )
             kept = (each for each in Path(folder).rglob("*") if each.is_file())
-            self.files = {ROUTES_FOLDER / each.relative_to(folder): each.read_text() for each in kept}
+            self.files = {VOLUME_FOLDER / each.relative_to(folder): each.read_text() for each in kept}
         return CommandResult(exit_code=ran.returncode, output=(ran.stdout or ran.stderr).strip())
 
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]:
@@ -174,6 +178,41 @@ def test_the_routes_folder_is_not_read_while_another_lanes_file_is_being_put_in_
     read = proxy.read().written
     other_lane.join(timeout=5)
     assert (touched, sorted(read)) == (["placed", "put in place", "read"], [OTHER, WEB_ADDRESS])
+
+
+# The proxy's volume as a folder on this machine. Asked for a path, it hands over everything below it, as Docker does.
+class VolumeContainer(RecordingContainer):
+    volume: Path
+    handed_over: list[str]
+
+    def get_archive(self, path: str) -> tuple[list[bytes], dict[str, object]]:
+        asked = self.volume / PurePosixPath(path).relative_to(VOLUME_FOLDER)
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            tar.add(asked, arcname=asked.name)
+            self.handed_over = tar.getnames()
+        return [archive.getvalue()], {}
+
+
+@pytest.mark.parametrize("status", ["running", "exited"])
+def test_reading_the_routes_takes_none_of_the_thousands_of_files_the_gate_keeps_off_the_host(tmp_path: Path, status: str) -> None:
+    route = tmp_path / route_file_of(WEB_ADDRESS).relative_to(VOLUME_FOLDER)
+    route.parent.mkdir()
+    route.write_text(route_text(WEB_ADDRESS, "site-t1"))
+    os.utime(route, (WRITTEN_AT.timestamp(), WRITTEN_AT.timestamp()))
+    (tmp_path / GATE_FOLDER_NAME).mkdir()
+    for release in range(3000):
+        (tmp_path / GATE_FOLDER_NAME / f"{WEB_ADDRESS}.{release}.armed").write_text("1 site-t1")
+    docker = RecordingDocker()
+    loaded = ExecResult(0, loaded_from({route_file_of(WEB_ADDRESS): route.read_text()}).encode())
+    proxy = VolumeContainer(PROXY_NAME, {}, [], {}, status=status, answers=[loaded])
+    proxy.volume, docker.containers.by_name[PROXY_NAME] = tmp_path, proxy
+    seen = TraefikProxy(ContainerHost(docker.as_client(), "tcp://scratch:2376")).read()
+    assert (seen.runs, seen.written, proxy.handed_over) == (
+        status == "running",
+        {WEB_ADDRESS: WrittenRoute("site-t1", WRITTEN_AT)},
+        ["routes", f"routes/{WEB_ADDRESS}.yml"],
+    )
 
 
 UNEXPECTED_ANSWERS = {

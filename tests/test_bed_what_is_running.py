@@ -7,9 +7,8 @@ from typing import Any
 
 import pytest
 
-from tests.bed import ask, needs_test_bed, on_scratch, remove_product_copies
+from tests.bed import CONTROL_ADDRESS, ask, needs_test_bed, on_scratch, remove_product_copies
 
-CONTROL_HOST_NAME = "launchplane.shiny"
 PRODUCT = "test-bed-placed"
 AWKWARD_BUILD = 'build "1", with a comma'
 
@@ -40,7 +39,7 @@ def clean_scratch() -> Iterator[None]:
 
 @contextmanager
 def control_cut_off_from_scratch() -> Generator[None]:
-    control_address = socket.gethostbyname(CONTROL_HOST_NAME)
+    control_address = socket.gethostbyname(CONTROL_ADDRESS)
     rule = f"INPUT --source {control_address} --protocol tcp --dport 2376 --jump DROP"
     on_scratch(f"iptables --insert {rule}")
     try:
