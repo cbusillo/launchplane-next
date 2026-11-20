@@ -107,7 +107,7 @@ def lose_the_first_reply_to(host: object, change: str) -> None:
     setattr(host, change, made_and_not_answered)
 
 
-def refuse(*_sent: object) -> NoReturn:
+def refuse(*_sent: object, **_named: object) -> NoReturn:
     raise ContainerHostRefused("The change on test was refused: pull access denied")
 
 
@@ -191,7 +191,7 @@ def test_a_request_found_working_whose_fence_the_host_refuses_to_run_does_nothin
     worker, fence = worker_on(proxy, record), proxy.gate.fence
     request = record.write(asked, CALLER, None)
     assert record.take_up(request.id) is not None
-    setattr(proxy.gate, "fence", refuse)
+    proxy.gate.fence = refuse
     assert worker.work_next() is True
     assert (left_working_after_an_interruption(record, request.id), proxy.host.actions) == ("pull access denied", [])
     proxy.gate.fence = fence
