@@ -162,6 +162,7 @@ PostgreSQL 17 from Debian's packages runs on the control container as the system
 - **A request that needs a person is not told to anyone.** It shows on the page and in `GET /requests`.
 - **A worker can lose its lane's turn while one action on the host is under way.** The turn is asked before each action, not during it. An action can take as long as a check, 20 s, or a stop, 30 s. If the lock's connection ends in that time and another Launchplane takes the lane, that one action still finishes. With one worker in one process this needs a lost connection and a second Launchplane.
 - **A secret no container holds any more is not known to be one.** A caller who sends the password of a container already removed has it stored as sent, in a build or a data set name.
+- **A request that arrives at the moment a worker takes up the request waiting on its lane is held for 1 s.** PostgreSQL finds the two waiting on each other and ends one. Either the waiting request is replaced and never begins, or it is worked and the call answers `503` saying that whether its request was written is not known; it was not. The same was true of a newer request before the waiting place.
 - **Untried:** two Launchplane processes on one record. The lane's turn and the count of attempts are built for it and tested against PostgreSQL, not on the test bed.
 
 ## Measured
@@ -179,7 +180,7 @@ With each lane its own turn, on November 17, nginx lanes:
 - On November 20, with the gate and 3,188 files in its folder: one lane moved in 5.9 to 7.0 s over ten moves, and two at once in 9.6, 10.8 and 9.3 s. Before the routes were read without the gate's files, two at once took 10.5 s. `tests/test_bed_lanes.py` reports that time and does not judge by it.
 - A call answered `202` in 50 ms from another machine.
 - A move cancelled by the call while its new instance was being checked ended as `cancelled` 2.4 s later, with the instance removed. The web address answered from the old build throughout, and no request failed.
-- A newer request asked 2 s into a move: the first ended `cancelled`, and the lane ended on the newer build.
+- On November 20, a move held before its switch while a second and a third request arrived for its lane: the second ended `replaced` at once with no attempt, the first ended `switched` 2 s after the hold was let go, and the third `switched` 5 s after that. A probe every 0.5 s was answered by the old build, then the first build, then the third, and never failed.
 - Cancelled, then killed with `kill -9` before its worker read the mark: after the restart the request was taken up and ended `cancelled`, with two attempts, `interrupted` and `cancelled`.
 - With every PostgreSQL process stopped with `SIGSTOP`, `/running` answered `200` in 6.2 s with the host and `record_error`. Restarting Launchplane then took 3 s.
 - Docker's client warned once in 22 minutes of tests that its pool of 10 connections was full. It opens another connection then, and nothing failed.
