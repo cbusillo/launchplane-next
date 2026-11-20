@@ -171,8 +171,8 @@ class Gate:
         return self.root / GATE_FOLDER_NAME
 
     # A command that does not come back with an answer has given none: it is never taken as none.
-    def ask[Told](self, told: Callable[[str], Told | None], web_address: str, generation: str, *asked: object) -> Told:
-        passed = [str(self.folder), web_address, generation, *(f"{each}" for each in asked)]
+    def ask[T](self, told: Callable[[str], T | None], web_address: str, generation: str, *asked: str | int | PurePosixPath) -> T:
+        passed = [str(self.folder), web_address, generation, *map(str, asked)]
         with self.reading:
             result = self.host.run_in(self.container, ["flock", str(self.root), "sh", "-c", SCRIPT, "sh", *passed])
         answer = told(result.output) if result.succeeded else None
