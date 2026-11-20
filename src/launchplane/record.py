@@ -166,10 +166,11 @@ class Kept(Request):
     events: list[Event]
 
 
-# A request interrupted as often as one may be. `last` is the last attempt it was given.
+# A request found working. `last` is the last attempt it was given, and `reached` whether it was interrupted as often as one may be.
 @dataclass(frozen=True)
 class AtLimit:
     last: int
+    reached: bool = True
 
 
 class Record(Protocol):
@@ -578,7 +579,7 @@ class PostgresRecord(Record):
                 return None
             session.execute(Sql.INTERRUPT, taken)
             attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
-            return AtLimit(attempts["last"]) if attempts["interrupted"] >= MOST_ATTEMPTS else None
+            return AtLimit(attempts["last"], attempts["interrupted"] >= MOST_ATTEMPTS)
 
     # Whether the move now needs a person: only if, with its row locked, it is still working, was given no attempt
     # after the one the gate was fenced through, and no cancel is on record for it.

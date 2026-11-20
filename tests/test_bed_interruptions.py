@@ -839,3 +839,25 @@ def test_a_retire_frozen_before_the_gates_lock_and_let_go_with_its_lane_in_maint
         in_proxy(f"kill -CONT {process} 2>/dev/null; rm -f {GATE_HELD}")
         let_go()
     assert ask_and_wait(f"{lane}/maintenance/end", {})[1]["outcome"] == "ended"
+
+
+def test_beginning_maintenance_whose_route_change_is_made_and_its_reply_lost_goes_on_until_no_part_of_the_lane_runs() -> None:
+    let_go()
+    lane = f"/lanes/{LEDGER.product}/{LEDGER.lane}"
+    assert move_lane(LEDGER.product, LEDGER.lane, LEDGER.builds[0])[0] == 200
+    hold("lose.proxy.edit")
+    try:
+        ended = request_ended(ask(f"{lane}/maintenance/begin", {})[1]["id"])
+    finally:
+        let_go()
+    assert (ended["stands"], ended["answer"]["outcome"], [each["ended"] for each in ended["attempts"]]) == (
+        "done",
+        "in maintenance",
+        ["unfinished", "done"],
+    )
+    parts = [each for kind in ("instances", "background_services") for each in running()[kind] if each["lane"] == LEDGER.lane]
+    assert (answering_or_back_soon(LEDGER), {each["state"] for each in parts if each["product"] == LEDGER.product}) == (
+        BACK_SOON,
+        {"stopped"},
+    )
+    assert ask_and_wait(f"{lane}/maintenance/end", {})[1]["outcome"] == "ended"
