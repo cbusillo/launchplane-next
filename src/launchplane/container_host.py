@@ -270,10 +270,10 @@ class ContainerHost:
             return database.model_copy(update={"accepts_connections": False})
         try:
             with attempting(f"Reading the logins of the database {database.container}", self.address):
-                unheld = sorted(set(self.logins.read_logins(database.container)) - held)
+                unheld: tuple[str, ...] | Unread = tuple(sorted(set(self.logins.read_logins(database.container)) - held))
         except ContainerHostError as error:
-            return database.model_copy(update={"accepts_connections": True, "unheld_logins": Unread(why=str(error))})
-        return database.model_copy(update={"accepts_connections": True, "unheld_logins": tuple(unheld)})
+            unheld = Unread(asked=f"The logins of the database {database.container}", why=str(error))
+        return database.model_copy(update={"accepts_connections": True, "unheld_logins": unheld})
 
     def accepts_connections(self, container: str) -> bool:
         with attempting(f"Asking the database {container} whether it accepts connections", self.address):
@@ -446,9 +446,16 @@ class ContainerHost:
         with attempting(f"Stopping and removing {container}", self.address):
             self.retire_container(container)
 
-    def remove_unheld_logins(self, database: str) -> None:
+    # A read that fails is answered as unread and nothing is removed. A removal that fails is raised.
+    def remove_unheld_logins(self, database: str) -> Unread | None:
+        try:
+            with attempting(f"Reading the logins of the database {database} and who holds them", self.address):
+                unheld = self.logins.unheld(database)
+        except ContainerHostError as error:
+            return Unread(asked=f"Which logins of the database {database} no container holds", why=str(error))
         with attempting(f"Removing the logins no container holds from the database {database}", self.address):
-            self.logins.remove_unheld(database)
+            self.logins.remove(database, unheld)
+        return None
 
     def read_log_tail(self, container: str) -> str:
         with attempting(f"Reading the log of {container}", self.address):

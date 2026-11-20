@@ -11,7 +11,7 @@ import pytest
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult
 from launchplane.gate import Answer
-from launchplane.instance import BACK_SOON, LaneRoute, LoadedRoute, RouteStatus, Verdict
+from launchplane.instance import BACK_SOON, Conflicting, LaneRoute, LoadedRoute, RouteStatus, Unread, Verdict, WrittenRoute
 from launchplane.proxy import (
     LOADED_ROUTES_URL,
     PROXY_NAME,
@@ -19,6 +19,7 @@ from launchplane.proxy import (
     CheckFailed,
     ProxyError,
     TraefikProxy,
+    instance_url,
     route_file_of,
     route_text,
 )
@@ -204,14 +205,15 @@ def test_a_proxy_with_no_routes_of_its_own_sends_no_web_address_anywhere() -> No
 
 
 def test_a_proxy_that_is_not_running_is_told_apart_from_one_with_no_routes() -> None:
-    assert lane_route(ProxyHost({}, running=False)) == LaneRoute(loaded=None, written=None, proxy_runs=False)
-    assert lane_route(ProxyHost({})) == LaneRoute(loaded=None, written=None)
+    assert lane_route(ProxyHost({}, running=False)) == LaneRoute(loaded=None, file=None, proxy_runs=False)
+    assert lane_route(ProxyHost({})) == LaneRoute(loaded=None, file=None)
 
 
 def test_a_route_written_and_not_yet_loaded_reads_as_both() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1"})
     host.files[route_file_of(WEB_ADDRESS)] = route_text(WEB_ADDRESS, "site-t2")
-    assert lane_route(host) == LaneRoute(LoadedRoute("site-t1", RouteStatus.ENABLED), written="site-t2")
+    route = lane_route(host)
+    assert (route.loaded, route.written) == (LoadedRoute("site-t1", RouteStatus.ENABLED), "site-t2")
 
 
 def test_a_route_launchplane_did_not_write_is_an_error() -> None:
@@ -240,7 +242,8 @@ def test_a_lane_file_that_is_not_the_route_launchplane_writes_is_that_lanes_faul
     host.files[route_file_of(WEB_ADDRESS)] = text
     seen = TraefikProxy(host).read()
     assert (seen.route_of(OTHER).written, seen.route_of(WEB_ADDRESS).written) == ("site-p1", None)
-    assert "not the route Launchplane writes" in (seen.route_of(WEB_ADDRESS).unread or "")
+    unread = seen.route_of(WEB_ADDRESS).file
+    assert isinstance(unread, Unread) and "not the route Launchplane writes" in str(unread)
 
 
 FIRST_LINES = {
@@ -256,15 +259,42 @@ def test_a_route_with_this_first_line_is_a_route_all_the_same_and_says_nothing_o
     host.files[route_file_of(WEB_ADDRESS)] = stamp + route_text(WEB_ADDRESS, "site-t1")
     host.load()
     route = lane_route(host)
-    assert (route.written, route.unread, route.sends_visitors_to) == ("site-t1", None, "site-t1")
+    assert (route.file, route.sends_visitors_to) == (WrittenRoute("site-t1", WRITTEN_AT), "site-t1")
 
 
-def test_a_web_address_the_proxy_has_two_routes_for_is_read_as_routed_twice_and_never_as_one_target() -> None:
+SECOND_ROUTERS = {
+    "to another instance, listed after": ("zz", "site-t2"),
+    "to another instance, listed before": ("aa", "site-t2"),
+    "to the same instance": ("zz", "site-t1"),
+}
+
+
+@pytest.mark.parametrize(("key", "target"), SECOND_ROUTERS.values(), ids=SECOND_ROUTERS.keys())
+def test_a_second_router_for_a_web_address_reads_as_a_conflict_naming_both_and_is_never_one_target(key: str, target: str) -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
     loaded = json.loads(host.loaded)
-    loaded["routers"]["foreign@file"] = loaded["routers"][f"{WEB_ADDRESS}@file"]
+    second = {f"{key}@file": loaded["routers"][f"{WEB_ADDRESS}@file"] | {"service": key}}
+    loaded["routers"] = second | loaded["routers"] if key == "aa" else loaded["routers"] | second
+    loaded["services"][f"{key}@file"] = {"loadBalancer": {"servers": [{"url": instance_url(target)}]}}
     host.loaded = json.dumps(loaded)
-    assert TraefikProxy(host).read().routed_twice == {WEB_ADDRESS}
+    seen = TraefikProxy(host).read()
+    route = seen.route_of(WEB_ADDRESS)
+    assert isinstance(route.loaded, Conflicting)
+    assert {(each.router, each.container) for each in route.loaded.seen} == {
+        (f"{WEB_ADDRESS}@file", "site-t1"),
+        (f"{key}@file", target),
+    }
+    assert (route.sends_visitors_to, route.names, seen.sends_visitors_to()) == (None, {"site-t1", target}, {OTHER: "site-p1"})
+
+
+def test_waiting_for_a_route_never_takes_one_of_two_routers_for_the_route_loaded() -> None:
+    host = ProxyHost({WEB_ADDRESS: "site-t1"})
+    loaded = json.loads(host.loaded)
+    loaded["routers"]["zz@file"] = loaded["routers"][f"{WEB_ADDRESS}@file"]
+    host.loaded = json.dumps(loaded)
+    proxy = TraefikProxy(host, sleep=lambda _: None, clock=iter(range(1000)).__next__, load_deadline_seconds=3)
+    with pytest.raises(ProxyError, match=f"has 2 answers where it must have one: the router {WEB_ADDRESS}@file to site-t1"):
+        proxy.await_route(WEB_ADDRESS, "site-t1")
 
 
 def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visitors() -> None:
@@ -272,7 +302,8 @@ def test_a_route_the_proxy_has_disabled_reads_with_its_status_and_sends_no_visit
     loaded = json.loads(host.loaded)
     loaded["routers"][f"{WEB_ADDRESS}@file"]["status"] = "disabled"
     host.loaded = json.dumps(loaded)
-    assert lane_route(host) == LaneRoute(LoadedRoute("site-t1", RouteStatus.DISABLED), "site-t1")
+    route = lane_route(host)
+    assert (route.loaded, route.written) == (LoadedRoute("site-t1", RouteStatus.DISABLED), "site-t1")
     assert sends_visitors_to(host) == {OTHER: "site-p1"}
 
 
@@ -314,7 +345,7 @@ def test_awaiting_an_enabled_route_does_not_return_for_a_route_the_proxy_has_loa
     host.loaded = json.dumps(loaded)
     proxy = TraefikProxy(host, sleep=lambda _: None, clock=iter(range(1000)).__next__, load_deadline_seconds=3)
     proxy.await_route(WEB_ADDRESS, "site-t1")
-    with pytest.raises(ProxyError, match="still sends it to site-t1, with that route disabled"):
+    with pytest.raises(ProxyError, match=r"the proxy has loaded: the router \S+ to site-t1, disabled"):
         proxy.await_route(WEB_ADDRESS, "site-t1", enabled=True)
 
 
@@ -324,7 +355,7 @@ def test_a_route_the_proxy_never_loads_is_an_error_carrying_the_proxys_log() -> 
     host.files[route_file_of(WEB_ADDRESS)] = route_text(WEB_ADDRESS, "site-t2")
     proxy = TraefikProxy(host, sleep=lambda _: None, clock=iter(range(1000)).__next__, load_deadline_seconds=3)
     with pytest.raises(
-        ProxyError, match=r"send testing.site.test to site-t2 and the proxy still sends it to site-t1[\s\S]*error while"
+        ProxyError, match=r"send testing.site.test to site-t2, and the proxy has loaded: the router \S+ to site-t1[\s\S]*error while"
     ):
         proxy.await_route(WEB_ADDRESS, "site-t2")
 
@@ -351,8 +382,8 @@ def test_showing_the_back_soon_page_starts_its_container_and_changes_only_that_l
 
 def test_since_when_is_read_from_the_route_file_of_a_lane_in_maintenance_and_of_no_other() -> None:
     host = ProxyHost({WEB_ADDRESS: BACK_SOON, OTHER: "site-p1"})
-    assert lane_route(host) == LaneRoute(LoadedRoute(BACK_SOON, RouteStatus.ENABLED), BACK_SOON, WRITTEN_AT)
-    assert lane_route(host, OTHER) == LaneRoute(LoadedRoute("site-p1", RouteStatus.ENABLED), "site-p1")
+    assert (lane_route(host).file, lane_route(host).back_soon_since) == (WrittenRoute(BACK_SOON, WRITTEN_AT), WRITTEN_AT)
+    assert (lane_route(host, OTHER).written, lane_route(host, OTHER).back_soon_since) == ("site-p1", None)
 
 
 def test_the_mark_of_maintenance_is_read_from_the_route_file_while_the_proxy_is_down() -> None:

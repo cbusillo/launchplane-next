@@ -64,6 +64,11 @@ class ContainerHostRefused(ContainerHostError):
     pass
 
 
+# A database server answered no to the removal of a login. The removal failed: nothing about it is unread.
+class LoginRemovalRefused(ContainerHostRefused):
+    pass
+
+
 @contextmanager
 def observing() -> Generator[None]:
     try:
@@ -238,15 +243,16 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         networks=attached_networks(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
         mounts=mounts_of(summary),
-        generation=generation_in(summary.labels),
+        generation=generation_in(summary.labels, summary.name),
     )
 
 
-def generation_in(labels: dict[str, str]) -> Stamp:
+def generation_in(labels: dict[str, str], part: str) -> Stamp:
     stamped = labels.get(GENERATION_LABEL)
     if stamped is None or is_generation(stamped):
         return stamped
-    return Unread(why=f"its label {GENERATION_LABEL}, {len(stamped)} characters long, is not a generation")
+    why = f"its label {GENERATION_LABEL}, {len(stamped)} characters long, is not a generation"
+    return Unread(asked=f"Which generation made {part}", why=why)
 
 
 def running_for(details: DockerContainerDetails, now: datetime) -> float | None:
@@ -269,7 +275,7 @@ def background_service_from(
         instance=summary.labels.get(INSTANCE_LABEL),
         mounts=mounts_of(summary),
         data_set=summary.labels.get(DATA_SET_LABEL),
-        generation=generation_in(summary.labels),
+        generation=generation_in(summary.labels, summary.name),
     )
 
 
@@ -322,7 +328,7 @@ def data_sets_from(
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
-    made_by = {key: generation_in(network.labels or {}) for key, network in marked}
+    made_by = {key: generation_in(network.labels or {}, f"the network {network.name}") for key, network in marked}
     by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
     by_database = grouped(databases)
     return [

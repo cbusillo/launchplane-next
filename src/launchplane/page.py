@@ -20,6 +20,7 @@ TONE = {
     Shown.LEFT_UNFINISHED: Standing.WRONG,
     Shown.WRONG: Standing.WRONG,
     Shown.UNREAD: Standing.UNREAD,
+    Shown.CONFLICTING: Standing.CONFLICTING,
 }
 STANDS_TONE = {
     Stands.WAITING: Standing.ON_PURPOSE,

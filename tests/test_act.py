@@ -22,6 +22,7 @@ from launchplane.steps import MaintenanceOutcome, Outcome, RetireOutcome
 from tests.pretend_host import (
     EARLIER,
     GENERATION,
+    NOT_LAUNCHPLANES_ROUTE,
     SINCE,
     WEB_ADDRESS,
     WITH_DATA,
@@ -196,7 +197,7 @@ def test_a_routes_file_that_is_not_launchplanes_with_no_loaded_route_stops_the_c
     proxy = lane_brought_up_with_a()
     instance = proxy.written.pop(WEB_ADDRESS)
     proxy.loaded.clear()
-    proxy.unread[WEB_ADDRESS] = "The routes file is not the route Launchplane writes"
+    proxy.unread[WEB_ADDRESS] = NOT_LAUNCHPLANES_ROUTE
     proxy.host.actions.clear()
     with pytest.raises(Stopped, match="not the route Launchplane writes"):
         call(lanes_on(proxy))
@@ -217,7 +218,7 @@ TAKES_A_DATABASE_AWAY: dict[str, Callable[[Lanes], object]] = {
 def test_no_database_is_stopped_or_removed_while_a_loaded_route_names_it(call: Callable[[Lanes], object]) -> None:
     proxy = lane_brought_up_with_a()
     proxy.route("elsewhere.site.test", "database-data-1")
-    with pytest.raises(Waiting, match="the proxy sends the visitors of elsewhere"):
+    with pytest.raises(Waiting, match="The proxy sends the visitors of elsewhere"):
         call(lanes_on(proxy))
     [database] = proxy.host.data_sets["data-1"].databases
     assert database.state == InstanceState.RUNNING
@@ -226,8 +227,8 @@ def test_no_database_is_stopped_or_removed_while_a_loaded_route_names_it(call: C
 def test_nothing_is_stopped_or_removed_while_the_proxy_has_two_routes_for_one_web_address() -> None:
     proxy = lane_brought_up_with_a()
     instance = proxy.written[WEB_ADDRESS]
-    proxy.routed_twice.add("elsewhere.site.test")
-    with pytest.raises(Waiting, match="two routes for elsewhere"):
+    proxy.route_twice("elsewhere.site.test", "one", "another")
+    with pytest.raises(Waiting, match=r"Where the proxy sends elsewhere\.site\.test has 2 answers"):
         lanes_on(proxy).retire("site", "testing")
     assert instance in proxy.host.instances
 

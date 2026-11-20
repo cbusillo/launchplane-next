@@ -27,14 +27,32 @@ class Mount(BaseModel):
     path: str
 
 
+# No answer: the question was put and what came back cannot be used. Never taken for nothing there.
 class Unread(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    asked: str
     why: str
 
+    def __str__(self) -> str:
+        return f"{self.asked} could not be read: {self.why}"
 
-# The generation that made a part, where one did. A stamp that is not a generation is unread, never taken for none.
-type Stamp = str | Unread | None
+
+# More than one thing where the question has room for one. No one of them is taken for the answer.
+@dataclass(frozen=True)
+class Conflicting[Seen]:
+    asked: str
+    seen: tuple[Seen, ...]
+
+    def __str__(self) -> str:
+        return f"{self.asked} has {len(self.seen)} answers where it must have one: {'; '.join(map(str, self.seen))}"
+
+
+# What a question asked of the host was answered: the value, None for nothing there, or one of the two that are no
+# answer. It stays one of the four from the reading to whatever is decided from it.
+type Answered[Value] = Value | Unread | Conflicting[Value] | None
+# The generation that made a part, where one did. A stamp that is not a generation is unread.
+type Stamp = Answered[str]
 
 
 class RunningInstance(BaseModel):
@@ -85,7 +103,8 @@ class DataSetDatabase(BaseModel):
     mounts: tuple[Mount, ...] = ()
     exit_code: int | None = None
     image: str | None = None
-    unheld_logins: tuple[str, ...] | Unread | None = None
+    # Asked only of a server that accepts connections. A list that was read and is empty is ().
+    unheld_logins: Answered[tuple[str, ...]] = None
 
 
 class DataSet(BaseModel):
@@ -133,6 +152,11 @@ class RouteStatus(StrEnum):
 class LoadedRoute:
     container: str
     status: RouteStatus
+    # Which of the proxy's routers it is: what tells two for one web address apart, and nothing else.
+    router: str = field(default="", compare=False)
+
+    def __str__(self) -> str:
+        return f"the router {self.router} to {self.container}, {self.status}"
 
 
 @dataclass(frozen=True)
@@ -141,52 +165,56 @@ class WrittenRoute:
     written_at: datetime
 
 
+# What the proxy has loaded and what the routes file says are two observations. A file ahead of the proxy is a wait.
 @dataclass(frozen=True)
 class LaneRoute:
-    loaded: LoadedRoute | None
-    written: str | None
-    back_soon_since: datetime | None = None
+    loaded: LoadedRoute | Conflicting[LoadedRoute] | None
+    file: Answered[WrittenRoute]
     proxy_runs: bool = True
     back_soon_runs: bool = True
-    # Why the lane's routes file is not a route Launchplane writes, where it is not.
-    unread: str | None = None
+
+    @property
+    def written(self) -> str | None:
+        return self.file.container if isinstance(self.file, WrittenRoute) else None
 
     # The mark is the lane's own route file, so it reads the same while the proxy is down.
     @property
     def in_maintenance(self) -> bool:
         return self.written == BACK_SOON
 
+    @property
+    def back_soon_since(self) -> datetime | None:
+        return self.file.written_at if isinstance(self.file, WrittenRoute) and self.in_maintenance else None
+
     # What visitors get is what the running proxy has loaded, never what the file says.
     @property
     def sends_visitors_to(self) -> str | None:
-        if not self.proxy_runs or self.loaded is None or self.loaded.status != RouteStatus.ENABLED:
+        if not self.proxy_runs or not isinstance(self.loaded, LoadedRoute) or self.loaded.status != RouteStatus.ENABLED:
             return None
         return self.loaded.container
+
+    # Every container the routes file or a loaded router names, so each side of a conflict too.
+    @property
+    def names(self) -> set[str]:
+        loaded = self.loaded.seen if isinstance(self.loaded, Conflicting) else (self.loaded,)
+        return {each.container for each in (*loaded, self.file) if isinstance(each, LoadedRoute | WrittenRoute)}
 
 
 @dataclass(frozen=True)
 class ProxySeen:
     runs: bool
     back_soon_runs: bool
-    written: Mapping[str, WrittenRoute] = field(default_factory=dict[str, WrittenRoute])
-    loaded: Mapping[str, LoadedRoute] = field(default_factory=dict[str, LoadedRoute])
-    unread: Mapping[str, str] = field(default_factory=dict[str, str])
-    # Web addresses the proxy has loaded two routes for, so where their visitors go is not known from `loaded`.
-    routed_twice: frozenset[str] = frozenset()
+    written: Mapping[str, WrittenRoute | Unread] = field(default_factory=dict[str, WrittenRoute | Unread])
+    loaded: Mapping[str, LoadedRoute | Conflicting[LoadedRoute]] = field(
+        default_factory=dict[str, LoadedRoute | Conflicting[LoadedRoute]]
+    )
 
     def route_of(self, web_address: str) -> LaneRoute:
-        written = self.written.get(web_address)
-        return LaneRoute(
-            loaded=self.loaded.get(web_address),
-            written=None if written is None else written.container,
-            back_soon_since=written.written_at if written is not None and written.container == BACK_SOON else None,
-            proxy_runs=self.runs,
-            back_soon_runs=self.back_soon_runs,
-            unread=self.unread.get(web_address),
-        )
+        return LaneRoute(self.loaded.get(web_address), self.written.get(web_address), self.runs, self.back_soon_runs)
 
     def sends_visitors_to(self) -> dict[str, str]:
-        return {web_address: route.container for web_address, route in self.loaded.items() if route.status == RouteStatus.ENABLED}
+        one = {web_address: route for web_address, route in self.loaded.items() if isinstance(route, LoadedRoute)}
+        return {web_address: route.container for web_address, route in one.items() if route.status == RouteStatus.ENABLED}
 
 
 def web_address_of(product: str, lane: str) -> str:

@@ -8,6 +8,7 @@ from launchplane.plan import (
     is_checked,
     is_turned_back,
     left_for_a_move,
+    login_step,
     prepared,
     problems_switching_to,
     put_back_or_what_is_left,
@@ -25,11 +26,11 @@ from launchplane.steps import (
     CheckRefused,
     Done,
     Event,
+    LoginsUnread,
     LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
     ReadLog,
-    RemoveLogins,
     ShowBackSoon,
     StartRefused,
     StartStopped,
@@ -74,12 +75,14 @@ def answer_for(product: str, lane: str, route: LaneRoute, outcome: MaintenanceOu
 
 
 def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None:
-    if not judged.findings:
+    holders_unread = {event.container for event in done if isinstance(event, LoginsUnread)}
+    left = (finding for finding in judged.findings if finding.kind != Kind.LOGINS_UNREAD)
+    found = [finding for finding in left if not (finding.kind == Kind.LOGIN_UNHELD and finding.subject in holders_unread)]
+    if not found:
         return None
     state = "is in maintenance" if judged.lane.route.in_maintenance else "is out of maintenance"
     return Stop(
-        f"The lane {state} and is not as it must be, so the call does not answer success: {sentences(list(judged.findings))}. "
-        f"{changes_so_far(done)}"
+        f"The lane {state} and is not as it must be, so the call does not answer success: {sentences(found)}. {changes_so_far(done)}"
     )
 
 
@@ -163,12 +166,10 @@ def background_service_step(judged: Judgement, done: tuple[Event, ...]) -> Actio
 # A login nobody holds goes, and what else is found is said, while the back soon page still shows, so the lane never comes
 # back with it unsaid. Like a move, ending maintenance answers for the instance and its data set, not for another data set.
 def rest_step(judged: Judgement, instance: RunningInstance, done: tuple[Event, ...]) -> Action | Stop | None:
-    unheld = judged.of_kind(Kind.LOGIN_UNHELD)
-    if unheld:
-        return RemoveLogins(unheld[0].subject)
+    if (step := login_step(judged, done)) is not None:
+        return step
     # Switching back is what takes visitors off a back soon page that is not running.
-    found = [*left_for_a_move(judged, instance), *judged.of_kind(Kind.LOGINS_UNREAD)]
-    left = [finding for finding in found if finding.kind != Kind.BACK_SOON_STOPPED]
+    left = [finding for finding in left_for_a_move(judged, instance) if finding.kind != Kind.BACK_SOON_STOPPED]
     if not left:
         return None
     return Stop(

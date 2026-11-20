@@ -15,12 +15,12 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
-    Unread,
 )
 from launchplane.judge import Work
 from launchplane.product import Product, ProductError
 from tests.pretend_host import (
     D1,
+    LOGINS_NOT_TOLD,
     NEW,
     NEW_BACKGROUND_SERVICE,
     NEW_ON_D1,
@@ -151,9 +151,7 @@ WITH_A_DATABASE: dict[str, Given] = {
     "a data set with no volume and no database": serving(NEW_ON_D1, data_sets=(data_set_named("d1", None, volume=False),)),
     "a second data set whose database is stopped": serving(NEW_ON_D1, data_sets=(D1, data_set_named("d2", STOPPED))),
     "a login no container holds": serving(NEW_ON_D1, data_sets=(data_set_named("d1", unheld=("i_left",)),)),
-    "logins that could not be read": serving(
-        NEW_ON_D1, data_sets=(with_database(D1, unheld_logins=Unread(why="psql: no such database")),)
-    ),
+    "logins that could not be read": serving(NEW_ON_D1, data_sets=(with_database(D1, unheld_logins=LOGINS_NOT_TOLD),)),
     "a lane retired with its data set kept": Given(data_sets=(D1,)),
     "a route removed by hand": Given((NEW_ON_D1,), background_services=(NEW_BACKGROUND_SERVICE,), data_sets=(D1,)),
     "a route removed by hand from an instance that can reach out": Given(
@@ -228,7 +226,7 @@ def test_the_status_call_answers_this_for_the_lane_as_read(name: str) -> None:
 
 
 def test_the_three_lists_of_sentences_are_the_findings_by_how_each_is_shown() -> None:
-    given = serving(NEW_ON_D1, OLD_ON_D1, data_sets=(with_database(D1, unheld_logins=Unread(why="no answer")),))
+    given = serving(NEW_ON_D1, OLD_ON_D1, data_sets=(with_database(D1, unheld_logins=LOGINS_NOT_TOLD),))
     at_rest, moving = lane_answer(given.judged(None)), lane_answer(given.judged(Work.MOVE))
     beside, unread = (finding.sentence for finding in at_rest.findings)
     assert (at_rest.problems, at_rest.left_unfinished, at_rest.release_under_way) == ([unread], [beside], [])

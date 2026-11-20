@@ -697,7 +697,7 @@ def test_a_proxy_that_does_not_load_a_renamed_route_leaves_the_release_working_h
     assert (
         held.stands,
         {each.ended for each in held.attempts},
-        proxy.loaded[WEB_ADDRESS].container,
+        proxy.loaded_to(WEB_ADDRESS),
         sorted(proxy.host.instances),
     ) == (
         Stands.WORKING,

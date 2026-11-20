@@ -24,6 +24,7 @@ from launchplane.docker_answers import (
     PRODUCT_LABEL,
     ContainerHostError,
     ContainerHostRefused,
+    LoginRemovalRefused,
     attempting,
     checked,
     command_result,
@@ -34,6 +35,7 @@ from launchplane.instance import DataSetUse, new_password
 
 RULES_READ = TypeAdapter(list[RuleRead])
 LOGINS_READ = TypeAdapter(list[str])
+PSQL_STATEMENT_REFUSED = 3
 
 type Filters = dict[str, str | list[str] | bool]
 
@@ -89,23 +91,29 @@ class HostLogins:
     def read_logins(self, database: str) -> list[str]:
         return self.read(database, "Reading the logins", READ_LOGINS, LOGINS_READ)
 
-    def remove_unheld(self, database: str) -> None:
+    # The reads a removal stands on: which data set the server is of, its logins, and then who holds them.
+    def unheld(self, database: str) -> list[str]:
         labels = self.client.containers.get(database).labels
         product, data_set = labels.get(PRODUCT_LABEL), labels.get(DATA_SET_LABEL)
         if product is None or data_set is None:
-            raise ContainerHostRefused(
-                f"The database {database} does not say which product and data set it is, so Launchplane cannot tell "
-                "which containers hold its logins. No login was removed."
-            )
+            raise ContainerHostError(f"The database {database} does not say its data set, so who holds its logins is not known.")
         # The logins are read before the containers, so one made between the two reads is not taken for one nothing holds.
         logins = self.read_logins(database)
-        for login in sorted(set(logins) - self.held(product, data_set)):
-            self.answer(database, f"Removing the login {login}", REMOVE_LOGIN, login=login)
+        return sorted(set(logins) - self.held(product, data_set))
+
+    # Only logins read as unheld just now are removed. A statement the server refuses is its answer, with its own words.
+    def remove(self, database: str, logins: list[str]) -> None:
+        for number, login in enumerate(logins):
+            result = command_result(self.client.containers.get(database), psql_command(REMOVE_LOGIN, login=login))
+            failure = LoginRemovalRefused if result.exit_code == PSQL_STATEMENT_REFUSED else ContainerHostError
+            if not result.succeeded:
+                why = f"{result.output or 'no answer'}. Removed before it: {logins[:number]}."
+                raise failure(f"The database {database} did not remove the login {login}: {why}")
 
     def make(self, instance: str, use: DataSetUse) -> dict[str, str]:
         self.require_rules(use)
         # A start that failed after its login was made left one that no call has answered for yet.
-        self.remove_unheld(use.database_container)
+        self.remove(use.database_container, self.unheld(use.database_container))
         login, password = login_of(instance), new_password()
         self.secrets.note([password])
         # A statement that fails is written whole into the server's log, so the server is never sent the password.

@@ -74,7 +74,9 @@ It stops with `503`, leaving the back soon page, when:
 - the data set has a fault a move would also stop for;
 - the web part passed its check and is attached or mounted where it must not be;
 - the background service is missing, doubled, of another build, or attached or mounted where it must not be;
-- anything else is found about the instance or its data set once everything runs, or logins could not be read.
+- anything else is found about the instance or its data set once everything runs.
+
+Logins that could not be read do not keep the back soon page: the lane comes back, and the answer lists the server in `logins_not_read`.
 
 A back soon page that is not running does not stop it: switching back is what takes visitors off it.
 

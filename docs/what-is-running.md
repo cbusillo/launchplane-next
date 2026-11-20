@@ -42,7 +42,7 @@ Data set networks and volumes carry the product, lane and data set labels too.
 - `mounts` lists everything a container has mounted, each with `source` (a volume's name, or a folder of the host) and `path`.
 - `receives_visitors_for` is the web address whose visitors the proxy sends to the instance, or `null`.
 - `accepts_connections` is asked at that moment of every running database server, and is `null` for one that is not running.
-- `unheld_logins` lists the [logins](data-sets.md#logins) on a server that accepts connections which no container on the host holds. It is `{"why": "…"}` when the server was asked and could not tell, and `null` for a server that does not accept connections.
+- `unheld_logins` lists the [logins](data-sets.md#logins) on a server that accepts connections which no container on the host holds. It is `{"asked": "…", "why": "…"}` when the server was asked and could not tell, and `null` for a server that does not accept connections, which was not asked. An empty list is a server that was read and has none.
 - `exit_code` is the code a stopped database server exited with, and `null` while it is not stopped. `0` is a clean stop. `image` is the image the server runs.
 - `web_addresses` are every one the proxy routes, and the one of every lane on the host, so a route to an instance that is gone is shown. `answers` is whether a request for `/` at that web address, made inside the proxy, succeeded just now, and `error` is why not. The lane's judgement has the same sentence, about the instance the web address is sent to. A web address the proxy routes nowhere is not requested.
 - A web address of a lane in [maintenance](maintenance.md) has `sends_to_container` `launchplane-back-soon` and `answers` `false`. `shows_back_soon_page` is `true` while the back soon page's container runs.
@@ -66,14 +66,14 @@ A call for one lane lists only that lane's containers, so a container of another
 
 No answer and no log line repeats a secret a container holds: see [no secret leaves Launchplane](data-sets.md#no-secret-leaves-launchplane). A `503` without `read_at` means Launchplane could not read the secrets and made no answer.
 
-Anything asked is either known or could not be read, with the reason. What could not be read is never taken for no, for nothing or for fine: it is shown as `could not be read` on the lane, on the part and on the page, and a call that needs it stops with `503` and the reason.
+Anything asked of the host has one of four answers: what is there, nothing there, could not be read, or conflicting. The four stay apart from the reading to what a call decides. What could not be read is never taken for no, for nothing or for fine: it is shown as `could not be read` with what was asked and the reason, on the lane, on the part and on the page. Two things where there must be one are shown as `conflicting`, each of them named, and neither is chosen: see [two routers](the-move.md#two-routers-for-one-web-address). What a call does without an answer depends on whether it needs it: see [logins](data-sets.md#logins).
 
 ## The page
 
 `GET /` is one HTML file with its style and script inline. It loads nothing else and reads no host itself, so it opens even when the host cannot be read.
 
 - It asks `/running` once a second, each time after the last answer arrived, and gives up on one answer after 15 s.
-- It draws `cards` as given and decides nothing: every word and every colour is in the answer. A card has a `title`, `pills`, `in_maintenance_since` and `rows`. A row has a `name`, a `value` in pieces drawn as text, as code or as a build, `pills`, and a `note` shown small under it. A pill has `text` and a `tone`: `good` is green, `wrong` red, `on purpose` blue and `could not be read` amber.
+- It draws `cards` as given and decides nothing: every word and every colour is in the answer. A card has a `title`, `pills`, `in_maintenance_since` and `rows`. A row has a `name`, a `value` in pieces drawn as text, as code or as a build, `pills`, and a `note` shown small under it. A pill has `text` and a `tone`: `good` is green, `wrong` and `conflicting` red, `on purpose` blue and `could not be read` amber.
 - A lane's card has its condition as a pill, and `in maintenance` beside it when the lane is in maintenance and its condition is something else. Then its web address, then what the judgement found, one row each, then its background service, its instances with the active one first, and its data sets. A data set's row has the image of its database server, written as a build is, with that server's state, and the server's container name in the small line.
 - The colour of a part's state is its standing in the judgement, so a running part with something wrong about it is red.
 - A lane's requests that have not ended are rows on its card, and a record that cannot be read is a card of its own: see [requests on the page](requests.md#on-the-page).

@@ -1,4 +1,4 @@
-"""Launchplane as it is, with every call it makes on the container host, the proxy and the record able to be held.
+"""Launchplane as it is, with every call it makes on the container host, its logins, the proxy and the record able to be held.
 
 A test harness, run on the control container in place of the service: `python -m tests.held_launchplane`. It changes
 nothing Launchplane does. A hold stops one call for as long as the hold stands: before the call is forwarded, or after
@@ -20,16 +20,19 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
+import docker
+
 from launchplane import api
 from launchplane.act import Lanes
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
+from launchplane.host_logins import HostLogins
 from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, TraefikProxy
 from launchplane.record import PostgresRecord
 
 HOLDS = Path(os.environ.get("LAUNCHPLANE_HOLDS", "/var/lib/launchplane/holds"))
 PORT = int(os.environ.get("LAUNCHPLANE_HOLDS_PORT", "8701"))
-POINT = re.compile(r"(before|after|lose|fail|refuse)\.(host|proxy|record|lanes)\.[a-z_]+|proxy-delivery|interrupt-switch")
+POINT = re.compile(r"(before|after|lose|fail|refuse)\.(host|logins|proxy|record|lanes)\.[a-z_]+|proxy-delivery|interrupt-switch")
 M3_BIN = "/tmp/launchplane-m3-bin"  # noqa: S108 inside the test proxy
 PROXY_DELIVERY = "proxy-delivery"
 # Traefik reads every file of its routes folder or none: one it cannot read keeps it on the routes it has loaded.
@@ -93,8 +96,16 @@ class Held:
         return held_around(f"{type(self).held_as}.{name}", value)
 
 
+class HeldLogins(Held, HostLogins):
+    held_as = "logins"
+
+
 class HeldHost(Held, ContainerHost):
     held_as = "host"
+
+    def __init__(self, client: docker.DockerClient, address: str) -> None:
+        super().__init__(client, address)
+        self.logins = HeldLogins(client, address, self.secrets)
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
         if held_once("interrupt-switch", repr(command)):

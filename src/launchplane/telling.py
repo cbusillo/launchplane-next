@@ -8,30 +8,14 @@ from launchplane.steps import Action, Event
 type Tell = Callable[[str, str | None], None]
 
 
-def tell_nobody(_did: str, _error: str | None) -> None:
-    pass
-
-
-def hold_nothing() -> None:
-    pass
-
-
-def never_cancelled() -> bool:
-    return False
-
-
-def refuse_to_nobody(_why: str) -> None:
-    pass
-
-
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
 @dataclass(frozen=True)
 class Witness:
-    tell: Tell = tell_nobody
-    hold: Callable[[], None] = hold_nothing
-    cancel_asked: Callable[[], bool] = never_cancelled
-    refuse_cancel: Callable[[str], None] = refuse_to_nobody
+    tell: Tell = lambda _did, _error: None
+    hold: Callable[[], None] = lambda: None
+    cancel_asked: Callable[[], bool] = lambda: False
+    refuse_cancel: Callable[[str], None] = lambda _why: None
 
 
 NOBODY = Witness()
@@ -68,6 +52,10 @@ NAMED: dict[type, Callable[[Any], str]] = {
 }
 
 
+# How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.
+LOOKS = ("wait for ", "check ", "watch ", "read the log ", "mark the release ")
+
+
 def named(action: Action) -> str:
     return NAMED[type(action)](action)
 
@@ -75,12 +63,10 @@ def named(action: Action) -> str:
 # One line for a thing done, and the real error where it was refused.
 def told(action: Action, event: Event) -> tuple[str, str | None]:
     match event:
-        case steps.CheckRefused(report=report) | steps.BackgroundServiceRefused(report=report) | steps.StartRefused(report=report):
+        case steps.Refused(report=report):
             return named(action), report
         case steps.LogRead(unreadable=unreadable):
             return named(action), unreadable
-        case steps.RemovalRefused(report=report):
-            return named(action), report
         case steps.Discarded(kept=True):
             return named(action), "The gate answered that the routes file was renamed to it, so it was kept."
         case steps.Switched(won=False):

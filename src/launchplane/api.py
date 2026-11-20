@@ -147,7 +147,7 @@ def lane_answer(judged: Judgement) -> LaneAnswer:
         in_maintenance=judged.lane.route.in_maintenance,
         in_maintenance_since=judged.lane.route.back_soon_since,
         findings=list(judged.findings),
-        problems=judged.shown_as(Shown.WRONG, Shown.UNREAD),
+        problems=judged.shown_as(Shown.CONFLICTING, Shown.WRONG, Shown.UNREAD),
         release_under_way=judged.shown_as(Shown.UNDER_WAY),
         left_unfinished=judged.shown_as(Shown.LEFT_UNFINISHED),
         parts=dict(judged.parts),

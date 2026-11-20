@@ -15,7 +15,12 @@ class Outcome(StrEnum):
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-class MoveResult(BaseModel):
+# Every answer says which servers did not tell their logins, so that none was looked for there.
+class Result(BaseModel):
+    logins_not_read: list[str] = []
+
+
+class MoveResult(Result):
     product: str
     lane: str
     build: str
@@ -33,7 +38,7 @@ class RetireOutcome(StrEnum):
     UNCHANGED = "unchanged"
 
 
-class RetireResult(BaseModel):
+class RetireResult(Result):
     product: str
     lane: str
     web_address: str
@@ -53,7 +58,7 @@ class MaintenanceOutcome(StrEnum):
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-class MaintenanceResult(BaseModel):
+class MaintenanceResult(Result):
     product: str
     lane: str
     web_address: str
@@ -64,7 +69,7 @@ class MaintenanceResult(BaseModel):
 
 
 # The answer of a request that a cancel ended: what was done to put its lane back as it was.
-class PutBack(BaseModel):
+class PutBack(Result):
     put_back: list[str] = []
     # Data sets the request made. Putting a lane back never deletes data, so they stay.
     data_sets_kept: list[str] = []
@@ -277,6 +282,11 @@ class RemovalRefused(Refused):
     pass
 
 
+# A read a removal of logins stands on failed, so none was sent. A removal the server refuses is an error, never this.
+class LoginsUnread(Refused):
+    pass
+
+
 @dataclass(frozen=True)
 class Done[Answer]:
     answer: Answer
@@ -341,4 +351,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | CheckRefused | BackgroundServiceRefused | StartRefused | LogRead | Switched | Discarded | RemovalRefused
+type Event = Action | Refused | LogRead | Switched | Discarded

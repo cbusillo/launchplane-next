@@ -17,10 +17,10 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | `none` | no such instance | The lane must not be in [maintenance](maintenance.md), its routes file must be one Launchplane writes, and the proxy must run and have loaded it. If the instance receiving visitors already is this build with nothing wrong, the move finishes around it. Otherwise whatever an earlier request or attempt left goes through the gate and is removed, the data set is made ready, and a new instance is started. | is carried to the gate |
 | `committed` | the instance the gate names is not on the host | Stop, and touch nothing else. The request stays working. | too late |
 | `committed` | the proxy does not send visitors to it yet | Start the proxy if it is not running. Wait for it to send visitors there. | too late |
-| `committed` | the proxy sends visitors to it | Retire the background service of any other instance. Start the new instance's, where the product has one, and watch it. Only once it has stayed up, remove the other instances. Remove the logins no container holds, and answer `switched`. | too late |
+| `committed` | the proxy sends visitors to it | Retire the background service of any other instance. Start the new instance's, where the product has one, and watch it. Only once it has stayed up, remove the other instances. Remove the logins no container holds, and answer `switched`. While the logins of its data set cannot be read, wait. | too late |
 | `abandoned` | the routes file or the proxy names an instance of this release, or a part's release cannot be read | Wait, and touch nothing. | won |
 | `abandoned` | anything of this generation is left | Remove its background service, then take its instance through the gate and remove it. Data stays. | won |
-| `abandoned` | nothing of it is left | Wait for a database server it had just made, remove the logins no container holds, and end as `cancelled`. | won |
+| `abandoned` | nothing of it is left | Remove the logins no container holds, where they can be read, and end as `cancelled`. | won |
 
 - **A release always makes its own candidate.** An instance left by an earlier request, or by an earlier attempt of this request, is never switched to.
 - **An instance of a release is removed in one way,** through the gate. The gate is asked about the generation that made it. If it answers that the routes file was renamed to that very instance, the instance stays, and where it is of the release being worked that release is finished as the committed one. Otherwise the gate has taken away every permission to switch to it, and it is removed. An instance an earlier release was renamed to is retired only once this release is committed to another instance and the proxy sends visitors there with the route enabled. An instance whose release cannot be read from its label, or that the routes file or the proxy names, is not removed: the move waits.
@@ -31,16 +31,16 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 
 | The gate answers | The request may end as |
 | --- | --- |
-| `committed` | `done` and `switched` only, once the instance serves and the rest is finished. Until then it stays `working`, with why in `error`, and is taken up again by itself, ahead of newer work on its lane, however often. Neither a retry nor a give-up ends it. |
+| `committed` | `done` and `switched` only, once the instance serves and the rest is finished. Until then it stays `working`, with why in `error`, and is taken up again by itself, ahead of newer work on its lane, however often. Neither a retry nor a give-up ends it. One thing ends it otherwise: a database server that refuses to remove a login no container holds. The request then ends `failed` with the server's error, and the release stays switched. |
 | `abandoned` | `cancelled`, once the lane is put back. It stays `working` while the host cannot be read. It ends as `failed` only when Docker refused to remove a part of the release, its instance or its background service, and the part is still there, and `error` then says that the cancel won and what could not be removed. |
-| `none` | `failed`, `unchanged` or `repaired`, and only after the gate has confirmed `none` and refused every switch of this attempt and earlier ones, also one still on its way. Before `failed` is written, what the release made is removed, through the gate and the guard, and a fresh reading shows none of it left. A call the host did not answer, a wait, a guard that refused, or 50 steps is no failure: nothing is ended, and the request is taken up again after 5 s. |
+| `none` | `failed`, `unchanged` or `repaired`, and only after the gate has confirmed `none` and refused every switch of this attempt and earlier ones, also one still on its way. Before `failed` is written, the instance the release started is removed, through the gate and the guard, and a fresh reading shows it gone. A background service the move started for the instance that already serves is left: it is live work, and only a cancel takes it back. Where a server's logins could not be read then, `error` says that whether a login was left is not known. A call the host did not answer, a wait, a login list a finished move still needs, two routers for the web address, a guard that refused, or 50 steps is no failure: nothing is ended, and the request is taken up again after 5 s. |
 | no answer | nothing. No ending is written and the attempt is not counted. The request is taken up again after 5 s. |
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `switched` | 200 | The gate says the routes file was renamed for this request's generation, and the web address points at a running instance of this build. A request taken up again after a kill answers this too, though another attempt did the rename. |
 | `unchanged` | 200 | It already did, and nothing was done. |
-| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. |
+| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
@@ -64,7 +64,15 @@ A routes file that is otherwise not exactly the route Launchplane writes for tha
 
 A move that finds the file and the loaded route disagreeing before it has switched anything waits for the proxy, or stops with where each sends the web address and the proxy's log. A proxy that cannot be asked, or a loaded route Launchplane did not write, stops the call.
 
-No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the call stops with `503` and says so. A database server about to be stopped or deleted is checked the same way. While the proxy has two routes for one web address, where those visitors go is not known, and nothing is stopped or removed. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
+No action of any call stops or removes a container the proxy's loaded routes send visitors to. That is checked on its own at the moment of the action, from the loaded routes and from no stamp or mark, and the call stops with `503` and says so. A database server about to be stopped or deleted is checked the same way. While the proxy has two routers for one web address, of any lane, where those visitors go is not known, and nothing is stopped or removed. A retire has removed the route by then, and a move retires the old instance only once the proxy has loaded the switch.
+
+### Two routers for one web address
+
+The proxy must have one router for a web address. When it has loaded two, from a second file in the routes folder, that is a conflict, also when both send the web address to the same instance, and in whatever order the proxy lists them. Neither is taken for where visitors go.
+
+- The lane's `condition` is `conflicting`, with one finding that names each router, the container it sends to and its status. The web address says `conflicting` with the same sentence, and has no `sends_to_container`.
+- No call changes anything on that lane. A move stays `working` with the same sentence in `error`, starts, switches and removes nothing, and is taken up again every 5 s. Once the proxy has one router it goes on by itself. A retire and the maintenance calls answer `503` with the sentence, having changed nothing.
+- Nothing puts it right by itself: remove the file Launchplane did not write.
 
 An instance that exists and does not receive visitors is left over from a move cut short. The next move of the lane, to any build, retires it. The web address points at exactly one instance the whole time.
 
@@ -103,7 +111,11 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **Asking for the old build while its instance is still stopping answers `check failed` for a good build.** Confirmed once, after a kill during retirement. Asking again works, and the web address never moves.
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
-- **Two routers for one web address, one of them not written by Launchplane, can make a move answer `unchanged` for the wrong instance.** Found by the checker; not reproduced on the test bed. Comes back if anything else writes to the routes folder.
+- **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A removal of logins that found none left to remove is listed as one.
+- **Two routers on another lane's web address can stop a retire after its route is removed.** The retire removes its lane's route first, and the guard then refuses to remove any container while any web address has two routers. That lane has lost its visitors, and its retire has ended as `failed`. Ask again once the other lane has one router.
+- **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
+- **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
+- **A retire or a maintenance call refused for two routers is not taken up again when there is one.** It has ended as `failed`. Ask again.
 - **Only the move passes the gate.** A retire and beginning or ending maintenance are cancelled as before, by a mark in the record their worker reads between actions.
 - **The gate does not know whose turn a lane is.** It refuses a switch after a cancel of its generation, after its candidate was discarded, and after its attempt was fenced. A worker that lost its lane's turn, and whose attempt nobody has fenced, can still switch.
 - **A gate command waits for the lock for as long as something holds it.** Docker's client gives up after 5 s, and the caller then has no answer: the request stays working and is taken up again. Only a test holds the lock for long.
@@ -123,6 +135,9 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - Caddy 2.11.9 was tried first. Reloading its routes dropped 3 of 3,407 requests over 30 switches; Traefik dropped 0 of 3,426.
 - On November 18, the 111 cases of `tests/test_bed_interruptions.py`, each a move held at one point and interrupted one way, passed in 35 minutes. No probe of a web address failed in any of them, and the lane beside was never touched.
 - A cancel sent while a release was held just after its rename was answered `409` while the old build still answered visitors.
+- On November 19, all 139 test-bed tests passed in 50 min 7 s, the four of `tests/test_bed_host_answers.py` in 2 min 47 s.
+- A repaired background service whose move waited on a refused login read kept one container and wrote 41 beats in 8 s. The request was taken up again every 5 s and ended `done` within 8 s of the read answering.
+- A second routes file made the lane `conflicting` within 5 s. A move asked then stayed `working`, and ended `switched` within 25 s of the file being removed.
 - The Docker SDK over the certificate connection gave everything the move needed. Nothing was missing that a container manager such as Dokploy would have given.
 
 ## On the test bed
@@ -131,9 +146,12 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_move.py -v
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_interruptions.py -v
 uv run pytest tests/test_interruptions.py -v
+LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_host_answers.py -v
 ```
 
 Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
+
+`tests/test_bed_host_answers.py` runs under the same harness as the interruptions below, with the product `test-bed-answers`. It refuses the reading of a database server's logins after a repaired background service has passed its watch, and reads that service's container and the rows it writes from the scratch container while the request stays `working`. It puts a database server on another volume in a data set's place, asks for a start and then a retire. And it puts a second routes file into the proxy's folder, once with a router listed before the lane's own and once after.
 
 ### Holding a move and interrupting it
 
@@ -161,7 +179,7 @@ curl -X DELETE http://launchplane.shiny:8701/holds
 curl -X POST   http://launchplane.shiny:8701/kill
 ```
 
-- A hold is `before.` or `after.`, then `host`, `proxy`, `record` or `lanes`, then the name of the method. `?only=<text>` holds only a call whose arguments have that text.
+- A hold is `before.` or `after.`, then `host`, `logins`, `proxy`, `record` or `lanes`, then the name of the method. `logins` are the questions put to a database server, so `fail.logins.read_logins` is a server that cannot tell its logins. `?only=<text>` holds only a call whose arguments have that text.
 - `fail.` in place of `before.` makes the call fail as a host that cannot be reached, and `refuse.` as a host that answers no, for as long as the hold stands. `lose.` lets the call take effect once and, where it succeeded, gives its caller the error of a lost reply.
 - `GET /holds` answers `held`, and `stopped_at`: the holds a call is stopped at now.
 - `proxy-delivery` puts a file Traefik cannot read into the routes folder. Traefik then loads no change to any routes file and goes on serving the routes it has, and its API goes on answering. Letting go removes the file, and Traefik loads what is there. Measured on Traefik v3.7.18.

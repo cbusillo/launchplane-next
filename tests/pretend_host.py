@@ -4,12 +4,13 @@ from datetime import UTC, datetime
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
-from launchplane.docker_answers import ContainerHostError
+from launchplane.docker_answers import ContainerHostError, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
 from launchplane.gate import GateError
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
+    Conflicting,
     DataSet,
     DataSetDatabase,
     DataSetUse,
@@ -26,6 +27,7 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
+    Unread,
     Verdict,
     WrittenRoute,
     background_service_container_of,
@@ -41,6 +43,9 @@ WEB_ADDRESS = "testing.site.test"
 GENERATION = "01a1ef36-c51d-74d9-86a1-ff0199cf7a3d"
 EARLIER = "01a1ef36-0000-7000-8000-000000000001"
 SINCE = datetime(2026, 11, 16, 14, 2, tzinfo=UTC)
+NOT_LAUNCHPLANES_ROUTE = Unread(asked="The routes file", why="it is not the route Launchplane writes")
+LOGINS_NOT_TOLD = Unread(asked="The logins of the database database-d1", why="psql: no such database")
+NO_GENERATION = Unread(asked="Which generation made new", why="the label is no generation")
 QUIET = {LANE_NETWORK: True, "network-d1": True, "network-d2": True, "bridge": False}
 WITH_DATA = Product(
     health_path="/health",
@@ -68,6 +73,8 @@ class PretendHost:
         self.databases_that_must_be_killed: set[str] = set()
         self.parts_that_will_not_start: set[str] = set()
         self.logins_left_in: dict[str, tuple[str, ...]] = {}
+        self.holders_unread: set[str] = set()
+        self.removals_refused: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -113,10 +120,15 @@ class PretendHost:
             of_lane(self.instances.values()), of_lane(self.background_services.values()), of_lane(self.data_sets.values()), networks
         )
 
-    def remove_unheld_logins(self, database: str) -> None:
+    def remove_unheld_logins(self, database: str) -> Unread | None:
+        self.record(f"remove logins from {database}")
+        if database in self.holders_unread:
+            return Unread(asked=f"Which logins of the database {database} no container holds", why="timed out")
+        if database in self.removals_refused:
+            raise LoginRemovalRefused(f"The database {database} did not remove the login i_left: it owns objects")
         self.logins_left_in.pop(database, None)
         self.change_database(database, unheld_logins=())
-        self.record(f"remove logins from {database}")
+        return None
 
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
         self.place(target, container, use=use, generation=generation)
@@ -311,8 +323,9 @@ class GateNeverAsked:
         assert product and lane and generation and attempt
         return self.answers
 
-    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /) -> None:
-        assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
+        assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness and logins
+        return []
 
 
 class PretendProxy:
@@ -321,11 +334,10 @@ class PretendProxy:
         self.running = running
         self.starts = starts
         self.back_soon_runs = True
-        self.loaded: dict[str, LoadedRoute] = {}
+        self.loaded: dict[str, LoadedRoute | Conflicting[LoadedRoute]] = {}
         self.written: dict[str, str] = {}
         self.gate = PretendGate(self)
-        self.unread: dict[str, str] = {}
-        self.routed_twice: set[str] = set()
+        self.unread: dict[str, Unread] = {}
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
         self.holds_delivery = False
         self.failing: set[str] = set()
@@ -345,11 +357,19 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()},
+            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()} | self.unread,
             loaded=dict(self.loaded) if self.running else {},
-            unread=dict(self.unread),
-            routed_twice=frozenset(self.routed_twice),
         )
+
+    # A second router for the web address, as a routes file put beside Launchplane's makes the proxy load one.
+    def route_twice(self, web_address: str, *containers: str) -> None:
+        seen = tuple(LoadedRoute(each, RouteStatus.ENABLED, f"router-{number}@file") for number, each in enumerate(containers))
+        self.loaded[web_address] = Conflicting(f"Where the proxy sends {web_address}", seen)
+
+    def loaded_to(self, web_address: str) -> str:
+        route = self.loaded[web_address]
+        assert isinstance(route, LoadedRoute), route
+        return route.container
 
     def route(self, web_address: str, container: str) -> None:
         self.written[web_address] = container
@@ -365,7 +385,8 @@ class PretendProxy:
         assert written == container, f"awaited {web_address} at {container}, written to {written}"
         if self.holds_delivery:
             raise ProxyError(f"The proxy did not load the routes file of {web_address} within 10 s.")
-        self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()}
+        twice = {each: route for each, route in self.loaded.items() if isinstance(route, Conflicting)}
+        self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()} | twice
         self.while_awaiting()
 
     def write_route(self, web_address: str, container: str) -> None:

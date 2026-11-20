@@ -2,7 +2,6 @@ import json
 import re
 import threading
 import time
-from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from launchplane.container_host import FileRead, HelperContainer
 from launchplane.docker_answers import CommandResult, observing
 from launchplane.gate import Answer, Gate
-from launchplane.instance import BACK_SOON, LANE_NETWORK, LoadedRoute, ProxySeen, RouteStatus, WrittenRoute
+from launchplane.instance import BACK_SOON, LANE_NETWORK, Conflicting, LoadedRoute, ProxySeen, RouteStatus, Unread, WrittenRoute
 
 PROXY_NAME = "launchplane-proxy"
 ROUTES_FOLDER = PurePosixPath("/etc/traefik/launchplane")
@@ -148,46 +147,35 @@ def web_address_in(router: LoadedRouter) -> str:
     return match["web_address"]
 
 
-def lane_routes_by_web_address(routes: LoadedRoutes) -> dict[str, LoadedRoute]:
-    from_files = (router for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE))
-    return {web_address_in(router): LoadedRoute(container_behind(router, routes.services), router.status) for router in from_files}
+type Loaded = LoadedRoute | Conflicting[LoadedRoute]
 
 
-def web_addresses_routed_twice(routes: LoadedRoutes) -> frozenset[str]:
-    seen = Counter(web_address_in(router) for key, router in routes.routers.items() if key.endswith(FROM_ROUTES_FILE))
-    return frozenset(web_address for web_address, times in seen.items() if times > 1)
-
-
-def routes_from_answer(answer: str) -> LoadedRoutes:
-    try:
-        return LoadedRoutes.model_validate_json(answer)
-    except ValidationError as error:
-        raise ProxyError(f"The proxy's loaded routes did not have the expected shape, so nothing was changed: {error}") from error
-
-
-def loaded_routes_from_answer(answer: str) -> dict[str, LoadedRoute]:
-    return lane_routes_by_web_address(routes_from_answer(answer))
+# Two routers for one web address are a conflict whatever each sends it to, and in whatever order the proxy lists them.
+def lane_routes_by_web_address(routes: LoadedRoutes) -> dict[str, Loaded]:
+    seen: dict[str, list[LoadedRoute]] = {}
+    for key, router in sorted(routes.routers.items()):
+        if key.endswith(FROM_ROUTES_FILE):
+            found = seen.setdefault(web_address_in(router), [])
+            found.append(LoadedRoute(container_behind(router, routes.services), router.status, key))
+    return {
+        web_address: found[0] if len(found) == 1 else Conflicting(f"Where the proxy sends {web_address}", tuple(found))
+        for web_address, found in seen.items()
+    }
 
 
 # A first line the proxy reads as a comment is not part of the route. A file that is otherwise not the route Launchplane
 # writes for its web address is said to be that, for its lane alone.
-def written_route_from_file(text: str, web_address: str, written_at: datetime) -> WrittenRoute | str:
+def written_route_from_file(text: str, web_address: str, written_at: datetime) -> WrittenRoute | Unread:
     first, _, rest = text.partition("\n")
     body = rest if first.startswith("#") else text
     found = INSTANCE_URL.search(body)
     if found is None or body != route_text(web_address, found["container"]):
-        return f"The routes file {route_file_of(web_address)} is not the route Launchplane writes for {web_address}"
+        return Unread(asked=f"The routes file {route_file_of(web_address)}", why="it is not the route Launchplane writes")
     return WrittenRoute(found["container"], written_at)
 
 
-def sent_by(route: LoadedRoute | None) -> str:
-    if route is None or route.status == RouteStatus.ENABLED:
-        return str(None if route is None else route.container)
-    return f"{route.container}, with that route {route.status}"
-
-
-def is_loaded(route: LoadedRoute | None, container: str | None, *, enabled: bool) -> bool:
-    if route is None or container is None:
+def is_loaded(route: Loaded | None, container: str | None, *, enabled: bool) -> bool:
+    if not isinstance(route, LoadedRoute) or container is None:
         return route is None and container is None
     return route.container == container and (route.status == RouteStatus.ENABLED or not enabled)
 
@@ -216,14 +204,16 @@ class TraefikProxy:
             self.sleep(POLL_SECONDS)
 
     @observing()
-    def read_routes(self) -> LoadedRoutes:
+    def read_routes(self) -> dict[str, Loaded]:
         result = self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "-", LOADED_ROUTES_URL])
         if not result.succeeded:
             raise ProxyError(f"Reading the proxy's loaded routes failed: {result.output}")
-        return routes_from_answer(result.output)
-
-    def read_loaded(self) -> dict[str, LoadedRoute]:
-        return lane_routes_by_web_address(self.read_routes())
+        try:
+            return lane_routes_by_web_address(LoadedRoutes.model_validate_json(result.output))
+        except ValidationError as error:
+            raise ProxyError(
+                f"The proxy's loaded routes did not have the expected shape, so nothing was changed: {error}"
+            ) from error
 
     def read_folder(self) -> dict[str, FileRead]:
         with self.routes_folder:
@@ -234,23 +224,14 @@ class TraefikProxy:
     @observing()
     def read(self) -> ProxySeen:
         runs = self.is_running()
-        files_read = self.read_folder()
-        routes = {
+        written = {
             name.removesuffix(ROUTE_FILE_SUFFIX): written_route_from_file(
                 file.text, name.removesuffix(ROUTE_FILE_SUFFIX), file.changed_at
             )
-            for name, file in files_read.items()
+            for name, file in self.read_folder().items()
             if name.endswith(ROUTE_FILE_SUFFIX)
         }
-        loaded = self.read_routes() if runs else LoadedRoutes(routers={}, services={})
-        return ProxySeen(
-            runs=runs,
-            back_soon_runs=self.host.is_running(BACK_SOON),
-            written={web_address: route for web_address, route in routes.items() if isinstance(route, WrittenRoute)},
-            loaded=lane_routes_by_web_address(loaded),
-            unread={web_address: why for web_address, why in routes.items() if isinstance(why, str)},
-            routed_twice=web_addresses_routed_twice(loaded),
-        )
+        return ProxySeen(runs, self.host.is_running(BACK_SOON), written, self.read_routes() if runs else {})
 
     def show_back_soon(self, web_address: str) -> None:
         self.host.ensure_helper(BACK_SOON_PAGE)
@@ -258,11 +239,11 @@ class TraefikProxy:
 
     def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None:
         started = self.clock()
-        while not is_loaded(loaded := self.read_loaded().get(web_address), container, enabled=enabled):
+        while not is_loaded(loaded := self.read_routes().get(web_address), container, enabled=enabled):
             if self.clock() - started >= self.load_deadline_seconds:
                 raise ProxyError(
                     f"The proxy did not load the routes file of {web_address} within {self.load_deadline_seconds:g} s: "
-                    f"it is written to send {web_address} to {container} and the proxy still sends it to {sent_by(loaded)}. "
+                    f"it is written to send {web_address} to {container}, and the proxy has loaded: {loaded or 'no route'}. "
                     f"The proxy's last log lines:\n{self.host.read_log_tail(PROXY_NAME)}"
                 )
             self.sleep(POLL_SECONDS)
@@ -294,23 +275,14 @@ class TraefikProxy:
         if not result.succeeded:
             raise ProxyError(f"{attempt} failed: {result.output}")
 
+    def fetch(self, *request: str) -> CommandResult:
+        return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), *request])
+
     def request_instance(self, container: str, health_path: str) -> CommandResult:
-        url = instance_url(container) + health_path
-        return self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", "-T", str(CHECK_REQUEST_SECONDS), url])
+        return self.fetch(instance_url(container) + health_path)
 
     def why_web_address_fails(self, web_address: str) -> str | None:
-        command = [
-            "wget",
-            "-q",
-            "-O",
-            "/dev/null",
-            "-T",
-            str(CHECK_REQUEST_SECONDS),
-            "--header",
-            f"Host: {web_address}",
-            WEB_ADDRESS_URL,
-        ]
-        result = self.host.run_in(PROXY_NAME, command)
+        result = self.fetch("--header", f"Host: {web_address}", WEB_ADDRESS_URL)
         return None if result.succeeded else result.output
 
     def check_instance(self, container: str, health_path: str) -> None:

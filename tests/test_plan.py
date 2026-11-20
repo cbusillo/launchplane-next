@@ -15,11 +15,10 @@ from launchplane.instance import (
     RouteStatus,
     RunningBackgroundService,
     RunningInstance,
-    Unread,
     Verdict,
 )
 from launchplane.judge import Judgement, Kind, Work, judge
-from launchplane.plan import Move, decide_move, decide_retire, too_late_to_cancel
+from launchplane.plan import Move, decide_clean_up, decide_move, decide_retire, too_late_to_cancel
 from launchplane.product import Product
 from launchplane.steps import (
     Abandon,
@@ -64,10 +63,14 @@ from tests.pretend_host import (
     D1,
     EARLIER,
     GENERATION,
+    LOGINS_NOT_TOLD,
     NEW,
     NEW_BACKGROUND_SERVICE,
     NEW_ON_D1,
+    NO_GENERATION,
+    NOT_LAUNCHPLANES_ROUTE,
     OLD,
+    OLD_BACKGROUND_SERVICE,
     OLD_ON_D1,
     SINCE,
     STRAY,
@@ -269,11 +272,11 @@ FOLLOWS_THE_GATE = {
     ),
     "abandoned with a part whose release cannot be read is waited on": (
         ABANDONED,
-        Case((OLD, changed(NEW, generation=Unread(why="the label is no generation"))), SERVING_OLD, (), None),
+        Case((OLD, changed(NEW, generation=NO_GENERATION)), SERVING_OLD, (), None),
     ),
     "no verdict with a leftover whose release cannot be read is waited on, and the gate is not skipped": (
         NO_VERDICT,
-        Case((OLD, changed(NEW, generation=Unread(why="the label is no generation"))), SERVING_OLD, (), None),
+        Case((OLD, changed(NEW, generation=NO_GENERATION)), SERVING_OLD, (), None),
     ),
 }
 
@@ -550,14 +553,15 @@ def test_a_move_does_not_answer_while_a_running_server_has_a_login_no_container_
     assert next_data_move_step(AT_REST_WITH_A_LOGIN_LEFT) == RemoveLogins("database-d1")
 
 
-def test_a_failed_check_is_not_answered_until_the_login_of_the_instance_it_removed_is_gone() -> None:
+def test_a_failed_check_is_not_ended_until_the_login_of_the_instance_it_removed_is_gone() -> None:
     refused = (
         StartInstance(TARGET, "new", USE_D1),
         CheckRefused("new", "Connection refused"),
         gone("new"),
     )
     case = DataCase((on_data(OLD, "d1"),), "old", (LEFT_ON_D1,), refused, None, (background_service_of(on_data(OLD, "d1")),))
-    assert next_data_move_step(case) == RemoveLogins("database-d1")
+    move = a_move(given_data(case).judged(Work.MOVE), refused, NO_VERDICT, WITH_DATA)
+    assert decide_clean_up(move, logins=True) == RemoveLogins("database-d1")
 
 
 def retire_step_with(found: DataSet, delete: str | None = None) -> object:
@@ -575,24 +579,36 @@ def test_a_retire_answers_with_a_stopped_server_whose_logins_wait_for_its_next_s
 UNKNOWN_LOGINS = {
     "does not accept connections": data_set_named("d1", accepts=False),
     "was not asked whether it accepts connections": with_database(D1, accepts_connections=None, unheld_logins=None),
-    "could not tell its logins": with_database(D1, unheld_logins=Unread(why="psql: no such database")),
+    "could not tell its logins": with_database(D1, unheld_logins=LOGINS_NOT_TOLD),
 }
 
 
 @pytest.mark.parametrize("found", UNKNOWN_LOGINS.values(), ids=UNKNOWN_LOGINS.keys())
-def test_a_retire_does_not_answer_success_over_a_running_server_that(found: DataSet) -> None:
-    step = retire_step_with(found)
-    assert isinstance(step, Stop)
-    assert "could not be read" in step.reason
+def test_a_retire_is_finished_and_neither_waits_nor_fails_over_a_running_server_that(found: DataSet) -> None:
+    assert isinstance(retire_step_with(found), Done)
 
 
-def test_a_move_stops_over_logins_that_could_not_be_read_in_the_words_the_status_call_has_for_them() -> None:
+def test_a_move_that_has_done_everything_else_waits_and_does_not_stop_over_unread_logins_of_the_data_set_it_serves_from() -> None:
     case = DataCase((NEW_ON_D1,), "new", (UNKNOWN_LOGINS["could not tell its logins"],), (), None, (NEW_BACKGROUND_SERVICE,))
     step = next_data_move_step(case)
     [unread] = given_data(case).judged(None).findings
-    assert isinstance(step, Stop)
-    assert "unknown: psql: no such database" in unread.sentence
+    assert isinstance(step, Wait)
+    assert unread.sentence == "The logins of the database database-d1 could not be read: psql: no such database"
     assert unread.sentence in step.reason
+
+
+@pytest.mark.parametrize("found", UNKNOWN_LOGINS.values(), ids=UNKNOWN_LOGINS.keys())
+def test_a_cancel_that_won_ends_as_put_back_and_names_in_what_it_found_a_running_server_that(found: DataSet) -> None:
+    judged = Given((OLD_ON_D1,), ("old", "old"), (OLD_BACKGROUND_SERVICE,), (found,)).judged(Work.MOVE)
+    step = decide_move(a_move(judged, (Abandon(WEB_ADDRESS, GENERATION),), ABANDONED, WITH_DATA))
+    assert isinstance(step, Done) and isinstance(step.answer, PutBack)
+    assert any("database-d1" in finding for finding in step.answer.findings)
+
+
+def test_a_move_neither_waits_nor_stops_over_unread_logins_of_a_data_set_it_does_not_serve_from() -> None:
+    other = with_database(data_set_named("d2"), unheld_logins=LOGINS_NOT_TOLD)
+    case = DataCase((NEW_ON_D1,), "new", (D1, other), (), None, (NEW_BACKGROUND_SERVICE,))
+    assert isinstance(next_data_move_step(case), Done)
 
 
 def test_a_data_set_named_for_deleting_is_deleted_without_its_logins_being_removed_first() -> None:
@@ -693,17 +709,19 @@ def test_a_move_with_data_stops_with_why_instead_of_switching_or_answering_succe
     assert reason in step.reason
 
 
-def test_a_retire_stops_background_services_first_and_deletes_every_part_of_the_named_data_set() -> None:
+def test_a_retire_stops_background_services_first_and_deletes_the_named_data_set_only_where_it_has_no_part_twice() -> None:
     doubled = data_set_named("d2", databases=("database-a", "database-b"))
 
     def step(
         instances: tuple[RunningInstance, ...], background_services: tuple[RunningBackgroundService, ...], delete: str | None
     ) -> Action | Done[RetireResult] | Stop:
         judged = Given(instances, background_services=background_services, data_sets=(D1, doubled)).judged(Work.RETIRE)
-        return decide_retire(judged, delete, ())
+        return cast("Action | Done[RetireResult] | Stop", decide_retire(judged, delete, ()))
 
     assert step((OLD_ON_D1,), (background_service_of(OLD_ON_D1),), "d1") == Retire("old-background-service")
-    assert step((), (), "d2") == DeleteDataSet(doubled)
+    assert step((), (), "d1") == DeleteDataSet(D1)
+    refused = step((), (), "d2")
+    assert isinstance(refused, Stop) and "2 database servers (database-a, database-b)" in refused.reason
     kept = step((), (), None)
     assert isinstance(kept, Done)
     assert kept.answer.kept_data_sets == ["d1", "d2"]
@@ -711,7 +729,7 @@ def test_a_retire_stops_background_services_first_and_deletes_every_part_of_the_
 
 def test_a_routes_file_launchplane_did_not_write_is_that_lanes_fault_and_stops_its_move() -> None:
     proxy = Given((OLD,), ("old", None)).proxy()
-    proxy.unread[WEB_ADDRESS] = "The routes file is not the route Launchplane writes"
+    proxy.unread[WEB_ADDRESS] = NOT_LAUNCHPLANES_ROUTE
     lane = Reading(SINCE, proxy.read(), proxy.host.read(), {WEB_ADDRESS: None}).lane("site", "testing")
     judged = judge(lane, Product(), Work.MOVE)
     step = decide_move(a_move(judged, (), NO_VERDICT, Product()))

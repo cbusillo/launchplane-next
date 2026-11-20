@@ -2,6 +2,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Protocol
 
 from launchplane import maintenance, plan, steps
@@ -10,6 +11,7 @@ from launchplane.docker_answers import ContainerHostError, ContainerHostRefused,
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     BACK_SOON,
+    Conflicting,
     DataSet,
     DataSetUse,
     LaneBuild,
@@ -17,6 +19,7 @@ from launchplane.instance import (
     OnHost,
     ProxySeen,
     Reading,
+    Unread,
     Verdict,
     new_container_name,
     new_data_set_name,
@@ -72,7 +75,7 @@ class InstanceHost(Protocol):
     def stop_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
     def retire_instance(self, container: str) -> None: ...
-    def remove_unheld_logins(self, database: str) -> None: ...
+    def remove_unheld_logins(self, database: str) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
 
 
@@ -177,27 +180,22 @@ TAKE: dict[type, Take] = {
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.Abandon: lambda _host, proxy, step: proxy.gate.abandon(step.web_address, step.generation),
-    steps.RemoveLogins: lambda host, _proxy, step: host.remove_unheld_logins(step.database),
     steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
     steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
     steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
 }
 
 
-# A change that puts a lane back is told before it is made, so it is in the record even if the record is lost just after.
+# Nothing is told as done before it is done: a change that put a lane back is marked so once the host has made it.
 def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness, *, back: bool) -> Event:
     witness.hold()
-    tell = witness.tell
-    told_before = back and plan.change_made_by(action) is not None
-    if told_before:
-        tell(f"{named(action)}{TO_PUT_BACK}", None)
     try:
         event = take(action)
     except (ContainerHostError, ProxyError) as error:
-        tell(named(action), str(error))
+        witness.tell(named(action), str(error))
         raise
-    if not told_before:
-        tell(*told(action, event))
+    did, refusal = told(action, event)
+    witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
     return event
 
 
@@ -219,20 +217,26 @@ def settle[Answer](
     cancel: Cancel | None = None
     while True:
         lane = read()
-        if cancel is None and witness.cancel_asked():
-            cancel = Cancel()
+        # Two answers where a lane has room for one hold it: no winner is chosen, neither is touched, no call answers success.
+        if isinstance(lane.route.loaded, Conflicting):
+            raise Waiting(f"{lane.route.loaded}. The lane is held as it is until the proxy has one. Nothing more was done.")
+        cancel = cancel or (Cancel() if witness.cancel_asked() else None)
         back = plan.is_turned_back(cancel)
-        step = next_step(judged_as(lane, back), tuple(done), cancel)
+        judged = judged_as(lane, back)
+        step = next_step(judged, tuple(done), cancel)
         if isinstance(step, TooLate):
             witness.refuse_cancel(step.reason)
             cancel = Cancel(refused=True)
             continue
+        unread = [each.report for each in done if isinstance(each, steps.LoginsUnread)]
         if isinstance(step, Done):
+            if isinstance(step.answer, steps.Result):
+                step.answer.logins_not_read = [*(finding.sentence for finding in judged.of_kind(*plan.LOGINS_UNKNOWN)), *unread]
             if isinstance(step.answer, PutBack):
                 raise Cancelled(step.answer)
             return step.answer
         if isinstance(step, Stop):
-            raise (Waiting if isinstance(step, steps.Wait) else Stopped)(step.reason)
+            raise (Waiting if isinstance(step, steps.Wait) else Stopped)(" ".join([step.reason, *unread]))
         if isinstance(step, steps.CannotPutBack):
             raise CouldNotPutBack(step.reason)
         if len(done) == MOST_STEPS:
@@ -324,25 +328,20 @@ class Lanes:
 
     # The lane is read, and then the gate is asked, so the gate's answer is never older than the reading it is set beside.
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness = NOBODY) -> MoveResult:
-        product, web_address = self.read_product(target.product), web_address_of(target.product, target.lane)
+        product = self.read_product(target.product)
+        of = (target, product, generation, attempt)
         return settle(
             *self.judging(target.product, target.lane, product, Work.MOVE),
-            lambda judged, done, cancel: plan.decide_move(
-                plan.Move(
-                    judged,
-                    target,
-                    product,
-                    self.name_fresh(target),
-                    done,
-                    generation,
-                    attempt,
-                    self.gate().verdict(web_address, generation),
-                ),
-                cancel,
-            ),
+            lambda judged, done, cancel: plan.decide_move(self.release(judged, done, *of), cancel),
             self.take,
             witness,
         )
+
+    def release(
+        self, judged: Judgement, done: tuple[Event, ...], target: LaneBuild, product: Product, generation: str, attempt: int
+    ) -> plan.Move:
+        verdict = self.gate().verdict(web_address_of(target.product, target.lane), generation)
+        return plan.Move(judged, target, product, self.name_fresh(target), done, generation, attempt, verdict)
 
     # The gate is a command in the proxy's container, so a proxy that is absent or stopped is started before a move asks.
     def gate(self) -> AskedGate:
@@ -352,25 +351,14 @@ class Lanes:
 
     # After a move failed with no verdict and its attempt was fenced. It reads nothing of the product's description:
     # what the generation made is known by its stamp.
-    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness = NOBODY) -> None:
-        target, web_address = LaneBuild(product=product, lane=lane, build=""), web_address_of(product, lane)
-        settle(
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY, *, logins: bool) -> list[str]:
+        of = (LaneBuild(product=product, lane=lane, build=""), Product(), generation, attempt)
+        return settle(
             *self.judging(product, lane, self.description_of(product), Work.MOVE),
-            lambda judged, done, _cancel: plan.decide_clean_up(
-                plan.Move(
-                    judged,
-                    target,
-                    Product(),
-                    self.name_fresh(target),
-                    done,
-                    generation,
-                    attempt,
-                    self.gate().verdict(web_address, generation),
-                )
-            ),
+            lambda judged, done, _cancel: plan.decide_clean_up(self.release(judged, done, *of), logins=logins),
             self.take,
-            witness,
-        )
+            by,
+        ).logins_not_read
 
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
     # one can rename after it.
@@ -396,12 +384,11 @@ class Lanes:
         return settle(*judging, maintenance.decide_begin, self.take, witness)
 
     def end_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
-        # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read.
+        # The mark is looked at first: on a lane that is not in maintenance nothing is changed and no part is read. A mark
+        # that is no answer is not taken for no mark.
         web_address = web_address_of(product, lane)
         route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
-        if route.unread is not None:
-            raise Stopped(f"{route.unread}, so the lane is not brought out of maintenance. Nothing was changed.")
-        if not route.in_maintenance:
+        if not (route.in_maintenance or isinstance(route.file, Unread) or isinstance(route.loaded, Conflicting)):
             if route.proxy_runs and not is_loaded_as_written(route):
                 self.proxy.await_route(web_address, route.written)
             return maintenance.answer_for(product, lane, route, MaintenanceOutcome.NOT_IN_MAINTENANCE)
@@ -410,7 +397,7 @@ class Lanes:
             # Turned back, it is stopping the lane again, and the lane is judged as one going into maintenance.
             *self.judging(product, lane, description, Work.END_MAINTENANCE, Work.BEGIN_MAINTENANCE),
             lambda judged, done, cancel: maintenance.decide_end(judged, description, done, cancel),
-            self.take_behind_back_soon,
+            partial(self.take, behind_back_soon=True),
             witness,
         )
 
@@ -435,27 +422,33 @@ class Lanes:
             containers = {database.container for database in action.found.databases}
         else:
             return
-        seen = self.proxy.read()
-        if seen.routed_twice:
-            raise Waiting(
-                f"Launchplane was about to {named(action)}, and the proxy has two routes for "
-                f"{', '.join(sorted(seen.routed_twice))}, so where those visitors go is not known. Nothing more was done."
-            )
-        sent_here = sorted(web_address for web_address, route in seen.loaded.items() if route.container in containers)
-        if sent_here:
-            raise Waiting(
-                f"Launchplane was about to {named(action)}, and the proxy sends the visitors of {', '.join(sent_here)} to "
-                "what it would take away, so that was left running. Nothing more was done."
-            )
+        for web_address, route in sorted(self.proxy.read().loaded.items()):
+            if isinstance(route, Conflicting):
+                why = f"{route}, so where those visitors go is not known"
+            elif route.container in containers:
+                why = f"The proxy sends the visitors of {web_address} to what it would take away, so that was left running"
+            else:
+                continue
+            raise Waiting(f"Launchplane was about to {named(action)}. {why}. Nothing more was done.")
 
-    def take(self, action: Action) -> Event:
+    # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
+    def take(self, action: Action, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.Check):
-            return self.check(action.container, action.health_path)
+            return self.check(action.container, action.health_path, with_log=not behind_back_soon)
         if isinstance(action, steps.AwaitBackgroundService):
-            return self.await_background_service(action.container)
+            return self.await_background_service(action.container, with_log=not behind_back_soon)
+        if isinstance(action, steps.ReadLog):
+            return self.read_log(action.container)
+        if isinstance(action, steps.RemoveLogins):
+            unread = self.host.remove_unheld_logins(action.database)
+            return action if unread is None else steps.LoginsUnread(action.database, str(unread))
         if isinstance(action, steps.StartStopped):
-            return self.start_stopped(action)
+            try:
+                self.host.start_part(action.container)
+            except ContainerHostError as error:
+                return steps.StartRefused(action.container, str(error))
+            return action
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
@@ -480,23 +473,6 @@ class Lanes:
             return steps.RemovalRefused(container, str(error))
         return steps.Discarded(container, kept=False)
 
-    def start_stopped(self, action: steps.StartStopped) -> Event:
-        try:
-            self.host.start_part(action.container)
-        except ContainerHostError as error:
-            return steps.StartRefused(action.container, str(error))
-        return action
-
-    # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
-    def take_behind_back_soon(self, action: Action) -> Event:
-        if isinstance(action, steps.Check):
-            return self.check(action.container, action.health_path, with_log=False)
-        if isinstance(action, steps.AwaitBackgroundService):
-            return self.await_background_service(action.container, with_log=False)
-        if isinstance(action, steps.ReadLog):
-            return self.read_log(action.container)
-        return self.take(action)
-
     def read_log(self, container: str) -> Event:
         try:
             return steps.LogRead(container, self.host.read_log_tail(container))
@@ -507,7 +483,7 @@ class Lanes:
         return plan.failure_report(str(error), self.host.read_log_tail(container)) if with_log else str(error)
 
     @observing()
-    def check(self, container: str, health_path: str, *, with_log: bool = True) -> Event:
+    def check(self, container: str, health_path: str, *, with_log: bool) -> Event:
         try:
             self.proxy.check_instance(container, health_path)
         except CheckFailed as error:
@@ -515,7 +491,7 @@ class Lanes:
         return steps.Check(container, health_path)
 
     @observing()
-    def await_background_service(self, container: str, *, with_log: bool = True) -> Event:
+    def await_background_service(self, container: str, *, with_log: bool) -> Event:
         try:
             self.host.await_background_service(container, BACKGROUND_SERVICE_STEADY_SECONDS)
         except PartStopped as error:
