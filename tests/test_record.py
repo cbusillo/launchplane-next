@@ -119,6 +119,7 @@ def test_asking_again_for_a_request_that_needs_a_person_replaces_the_one_that_wa
 
 # Held at the moment its row is locked to be taken up, as a worker holds it, while a newer request arrives. PostgreSQL
 # ends one of the two, and whichever it is, a request is never both replaced and worked.
+# noinspection SqlResolve
 def test_a_request_being_taken_up_as_a_newer_one_arrives_is_worked_or_replaced_and_never_both(
     postgres_record: PostgresRecord, migrated_database: str
 ) -> None:

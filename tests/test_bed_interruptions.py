@@ -463,7 +463,7 @@ def test_a_result_already_saved_stands_whatever_comes_after_it(lane: Lane, pause
     assert run.visitors_got == run.got(*lane.builds[:2])
 
 
-# Answers as gunicorn would, so a visitor it ever reached would show among the answers.
+# Answers as Gunicorn would, so a visitor it ever reached would show among the answers.
 NEVER_STARTED = "kennethreitz/httpbin@sha256:599fe5e5073102dbb0ee3dbb65f049dab44fa9fc251f6835c9990f8fb196a72b"
 
 

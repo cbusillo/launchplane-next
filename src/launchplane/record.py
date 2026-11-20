@@ -279,7 +279,7 @@ class Sql:
         order by product, lane, id
     ) oldest_of_each_lane order by id
     """
-    # One statement, so a request taken up in that moment is left to be worked: only one that still waits is replaced.
+    # One statement, so a request taken up at that moment is left to be worked: only one that still waits is replaced.
     # One that asks exactly what the new request asks is left too.
     REPLACE_WAITING: Final = """
     update request older set stands = 'replaced', ended_at = now(), replaced_by = new.id from request new
