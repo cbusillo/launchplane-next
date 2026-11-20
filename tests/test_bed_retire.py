@@ -89,8 +89,10 @@ def in_background(action: Callable[[], object]) -> threading.Thread:
     return thread
 
 
-def watch_lane_until(thread: threading.Thread) -> list[LaneSeen]:
-    seen: list[LaneSeen] = []
+# The lane is read once before the action is begun, so how it stood then is seen however fast the action's first change is.
+def watch_lane_during(action: Callable[[], object]) -> list[LaneSeen]:
+    seen = [lane_seen(read_running())]
+    thread = in_background(action)
     while thread.is_alive():
         now = lane_seen(read_running())
         if not seen or seen[-1] != now:
@@ -122,7 +124,7 @@ def lane_serving_slow_build() -> Iterator[None]:
 def test_retiring_takes_the_name_away_first_then_the_copies_and_no_other_lane_changes() -> None:
     before = other_lanes(read_running())
     with request_in_flight(seconds=5):
-        seen = watch_lane_until(in_background(lambda: retire(PRODUCT, LANE)))
+        seen = watch_lane_during(lambda: retire(PRODUCT, LANE))
     assert seen == [LaneSeen(routed=True, copies=1), LaneSeen(routed=False, copies=1), LaneSeen(routed=False, copies=0)]
     assert other_lanes(read_running()) == before
 
