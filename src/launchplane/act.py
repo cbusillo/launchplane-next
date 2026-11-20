@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from launchplane import maintenance, plan, steps
 from launchplane.container_host import PartStopped
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
+from launchplane.gate import LOST
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     BACK_SOON,
@@ -92,13 +93,11 @@ class Proxy(Protocol):
     def start(self) -> None: ...
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None: ...
-    def write_route(self, web_address: str, container: str) -> None: ...
+    def edit(self, web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str: ...
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer: ...
     @property
     def gate(self) -> AskedGate: ...
-    def remove_route(self, web_address: str) -> None: ...
     def check_instance(self, container: str, health_path: str) -> None: ...
-    def show_back_soon(self, web_address: str) -> None: ...
     def why_web_address_fails(self, web_address: str) -> str | None: ...
 
 
@@ -157,13 +156,9 @@ def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
 
-type Take = Callable[[InstanceHost, Proxy, Any], object]
-
-TAKE: dict[type, Take] = {
+TAKE: dict[type, Callable[[InstanceHost, Proxy, Any], object]] = {
     steps.StartProxy: lambda _host, proxy, _step: proxy.start(),
     steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container, enabled=step.enabled),
-    steps.WriteRoute: lambda _host, proxy, step: proxy.write_route(step.web_address, step.container),
-    steps.RemoveRoute: lambda _host, proxy, step: proxy.remove_route(step.web_address),
     steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(
         step.product, step.lane, step.data_set, step.generation
     ),
@@ -180,17 +175,16 @@ TAKE: dict[type, Take] = {
     ),
     steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
     steps.Abandon: lambda _host, proxy, step: proxy.gate.abandon(step.web_address, step.generation),
-    steps.ShowBackSoon: lambda _host, proxy, step: proxy.show_back_soon(step.web_address),
     steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
     steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
 }
 
 
 # Nothing is told as done before it is done: a change that put a lane back is marked so once the host has made it.
-def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Witness, *, back: bool) -> Event:
+def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) -> Event:
     witness.hold()
     try:
-        event = take(action)
+        event = take(action, witness)
     except (ContainerHostError, ProxyError) as error:
         witness.tell(named(action), str(error))
         raise
@@ -199,6 +193,7 @@ def taken_and_told(action: Action, take: Callable[[Action], Event], witness: Wit
     return event
 
 
+type Take = Callable[[Action, Witness], Event]
 type Decided[Answer] = Action | Done[Answer] | Done[PutBack] | Stop | TooLate | steps.CannotPutBack
 type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], Decided[Answer]]
 
@@ -210,7 +205,7 @@ def settle[Answer](
     read: Callable[[], LaneReading],
     judged_as: Callable[[LaneReading, bool], Judgement],
     next_step: Decide[Answer],
-    take: Callable[[Action], Event],
+    take: Take,
     witness: Witness,
 ) -> Answer:
     done: list[Event] = []
@@ -432,8 +427,13 @@ class Lanes:
             raise Waiting(f"Launchplane was about to {named(action)}. {why}. Nothing more was done.")
 
     # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
-    def take(self, action: Action, *, behind_back_soon: bool = False) -> Event:
+    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
+        if isinstance(action, steps.EditRoute):
+            # Marked before it is sent: a change asked for and not answered may still be made.
+            witness.sent = True
+            edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
+            return action if edit != LOST else steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path, with_log=not behind_back_soon)
         if isinstance(action, steps.AwaitBackgroundService):

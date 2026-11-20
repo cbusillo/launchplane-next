@@ -211,13 +211,13 @@ def test_ending_maintenance_still_fails_over_another_finding_and_says_the_lookup
     proxy = lane_in_maintenance()
     proxy.host.logins_left_in[DATABASE] = ("i_left",)
     proxy.host.holders_unread.add(DATABASE)
-    write_route = proxy.write_route
+    edit = proxy.edit
 
-    def back_with_a_way_out(web_address: str, container: str) -> None:
-        write_route(web_address, container)
-        proxy.host.attach(container, "bridge", quiet=False)
+    def back_with_a_way_out(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        proxy.host.attach(container or "", "bridge", quiet=False)
+        return edit(web_address, generation, attempt, read, container)
 
-    proxy.write_route = back_with_a_way_out
+    proxy.edit = back_with_a_way_out
     request = record.write(END, CALLER, None)
     assert worker_on(proxy, record).work_next() is True
     kept = kept_of(record, request.id)
@@ -319,8 +319,7 @@ LOOKING = (
 )
 CHANGING = (
     steps.StartProxy(),
-    steps.WriteRoute(WEB_ADDRESS, "a"),
-    steps.RemoveRoute(WEB_ADDRESS, "a"),
+    steps.EditRoute(WEB_ADDRESS, "a", ""),
     steps.CreateDataSetNetwork("site", "testing", "d1"),
     steps.CreateDataSetVolume("site", "testing", "d1"),
     steps.CreateDatabase("site", "testing", "d1", "network", "volume", "image"),
@@ -330,7 +329,6 @@ CHANGING = (
     steps.StartBackgroundService(BUILD_A, "a", None, ()),
     steps.Retire("a"),
     steps.RemoveLogins("database"),
-    steps.ShowBackSoon(WEB_ADDRESS),
     steps.StopPart("a"),
     steps.StopDatabase("database"),
     steps.StartStopped("a"),

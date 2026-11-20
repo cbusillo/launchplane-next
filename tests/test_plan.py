@@ -38,6 +38,7 @@ from launchplane.steps import (
     Discard,
     Discarded,
     Done,
+    EditRoute,
     Event,
     FreshNames,
     MoveResult,
@@ -45,7 +46,6 @@ from launchplane.steps import (
     PutBack,
     RemovalRefused,
     RemoveLogins,
-    RemoveRoute,
     Retire,
     RetireOutcome,
     RetireResult,
@@ -367,21 +367,26 @@ def retired(route_removed_to: str | None, containers: list[str]) -> Done[RetireR
 RETIRES = {
     "with no proxy running, it is started first": Case((OLD,), (None, None), (), StartProxy()),
     "a route written and not loaded is waited for first": Case((OLD,), ("old", "new"), (), AwaitRoute(WEB_ADDRESS, "new")),
-    "the route goes first": Case((OLD,), ("old", "old"), (), RemoveRoute(WEB_ADDRESS, "old")),
+    "the route goes first": Case((OLD,), ("old", "old"), (), EditRoute(WEB_ADDRESS, None, "old", "old")),
     "no instance stops until the proxy has loaded the route gone": Case(
-        (OLD,), ("old", None), (RemoveRoute(WEB_ADDRESS, "old"),), AwaitRoute(WEB_ADDRESS, None)
+        (OLD,), ("old", None), (EditRoute(WEB_ADDRESS, None, "old", "old"),), AwaitRoute(WEB_ADDRESS, None)
     ),
-    "instances retire once the route is gone": Case((OLD, STRAY), (None, None), (RemoveRoute(WEB_ADDRESS, "old"),), Retire("old")),
+    "instances retire once the route is gone": Case(
+        (OLD, STRAY), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"),), Retire("old")
+    ),
     "a finished retirement answers what it removed": Case(
-        (), (None, None), (RemoveRoute(WEB_ADDRESS, "old"), Retire("old")), retired("old", ["old"])
+        (), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"), Retire("old")), retired("old", ["old"])
     ),
     "a lane whose route was already gone answers no route removed": Case((), (None, None), (Retire("old"),), retired(None, ["old"])),
     "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
     "a lane whose loaded route is disabled has it removed": Case(
-        (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), RemoveRoute(WEB_ADDRESS, "old")
+        (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), EditRoute(WEB_ADDRESS, None, "old", "old")
     ),
     "a disabled route still loaded is waited for gone before any instance stops": Case(
-        (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), None), (RemoveRoute(WEB_ADDRESS, "old"),), AwaitRoute(WEB_ADDRESS, None)
+        (OLD,),
+        (LoadedRoute("old", RouteStatus.DISABLED), None),
+        (EditRoute(WEB_ADDRESS, None, "old", "old"),),
+        AwaitRoute(WEB_ADDRESS, None),
     ),
 }
 

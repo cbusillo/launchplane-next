@@ -163,6 +163,8 @@ class LoadedRoute:
 class WrittenRoute:
     container: str
     written_at: datetime
+    # The routes file exactly as read.
+    installed: str = field(default="", compare=False)
 
 
 # What the proxy has loaded and what the routes file says are two observations. A file ahead of the proxy is a wait.
@@ -176,6 +178,10 @@ class LaneRoute:
     @property
     def written(self) -> str | None:
         return self.file.container if isinstance(self.file, WrittenRoute) else None
+
+    @property
+    def installed(self) -> str:
+        return self.file.installed if isinstance(self.file, WrittenRoute) else ""
 
     # The mark is the lane's own route file, so it reads the same while the proxy is down.
     @property

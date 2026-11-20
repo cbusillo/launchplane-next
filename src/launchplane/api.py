@@ -288,7 +288,7 @@ class Calls:
     # for can no longer be renamed for once it is given up.
     def worked_again_since_decided(self, request: int, response: Response) -> NotFinished | None:
         kept = self.record.read(request)
-        if kept is None or kept.work is not Work.MOVE or kept.stands is not Stands.NEEDS_A_PERSON:
+        if kept is None or kept.stands is not Stands.NEEDS_A_PERSON:
             return None
         verdict = self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict
         if verdict is Verdict.NONE:

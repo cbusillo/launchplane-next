@@ -5,8 +5,8 @@ from datetime import UTC, datetime
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
 from launchplane.docker_answers import ContainerHostError, LoginRemovalRefused
+from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
-from launchplane.gate import GateError
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
@@ -336,6 +336,7 @@ class PretendProxy:
         self.back_soon_runs = True
         self.loaded: dict[str, LoadedRoute | Conflicting[LoadedRoute]] = {}
         self.written: dict[str, str] = {}
+        self.edited: dict[str, tuple[str, str]] = {}
         self.gate = PretendGate(self)
         self.unread: dict[str, Unread] = {}
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
@@ -357,7 +358,8 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={web_address: WrittenRoute(container, SINCE) for web_address, container in self.written.items()} | self.unread,
+            written={web_address: WrittenRoute(to, SINCE, self.installed(web_address)) for web_address, to in self.written.items()}
+            | self.unread,
             loaded=dict(self.loaded) if self.running else {},
         )
 
@@ -375,10 +377,6 @@ class PretendProxy:
         self.written[web_address] = container
         self.loaded[web_address] = LoadedRoute(container, RouteStatus.ENABLED)
 
-    def show_back_soon(self, web_address: str) -> None:
-        self.written[web_address] = BACK_SOON
-        self.host.record("show back soon")
-
     def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None:
         assert enabled in (True, False)
         written = self.written.get(web_address)
@@ -389,17 +387,30 @@ class PretendProxy:
         self.loaded = {each: LoadedRoute(to, RouteStatus.ENABLED) for each, to in self.written.items()} | twice
         self.while_awaiting()
 
-    def write_route(self, web_address: str, container: str) -> None:
-        self.written[web_address] = container
-        self.host.record(f"route {container}")
+    # What stands for the routes file: the container it sends visitors to and, once an edit put it in place, which edit.
+    def installed(self, web_address: str) -> str:
+        to = self.written.get(web_address, "")
+        container, text = self.edited.get(web_address, ("", ""))
+        return text if to and to == container else to
+
+    # As the gate does it.
+    def edit(self, web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        text = "" if container is None else f"{container} {generation} {attempt}"
+        installed = self.installed(web_address)
+        if installed == text:
+            return ALREADY
+        if attempt <= self.gate.of(generation).fenced or installed != read:
+            return LOST
+        if container is None:
+            del self.written[web_address]
+        else:
+            self.written[web_address], self.edited[web_address] = container, (container, text)
+        self.host.record({None: "unroute", BACK_SOON: "show back soon"}.get(container, f"route {container}"))
+        return DONE
 
     # As on the host, the two that pass the gate exclude each other: one finds what the other did.
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
         return self.gate.switch(web_address, generation, attempt, candidate)
-
-    def remove_route(self, web_address: str) -> None:
-        del self.written[web_address]
-        self.host.record("unroute")
 
     def check_instance(self, container: str, health_path: str) -> None:
         self.host.record(f"check {container}{health_path}")

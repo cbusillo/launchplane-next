@@ -1,4 +1,4 @@
-from launchplane.instance import DataSetUse, InstanceState, LaneReading, LaneRoute, RunningInstance, web_address_of
+from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneReading, LaneRoute, RunningInstance, web_address_of
 from launchplane.judge import Judgement, Kind
 from launchplane.plan import (
     Step,
@@ -25,20 +25,19 @@ from launchplane.steps import (
     Check,
     CheckRefused,
     Done,
+    EditRoute,
     Event,
     LoginsUnread,
     LogRead,
     MaintenanceOutcome,
     MaintenanceResult,
     ReadLog,
-    ShowBackSoon,
     StartRefused,
     StartStopped,
     Stop,
     StopDatabase,
     StopPart,
     TooLate,
-    WriteRoute,
 )
 
 STARTED_AGAIN = {Kind.STOPPED, Kind.NOT_RUNNING, Kind.UNSTEADY}
@@ -100,7 +99,7 @@ def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | No
                 f"{lane.lane} of {lane.product} has no route, no instance, no background service and no data set on the host, "
                 "so there is nothing to put in maintenance. Nothing was changed."
             )
-        return ShowBackSoon(lane.web_address)
+        return EditRoute(lane.web_address, BACK_SOON, route.installed)
     if (stop := next_to_stop(lane)) is not None:
         return stop
     killed = judged.of_kind(Kind.KILLED)
@@ -202,7 +201,7 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
             "Beginning maintenance again stops what was started."
         )
     step = background_service_step(judged, done) or rest_step(judged, instance, done)
-    return step or WriteRoute(answer.web_address, instance.container)
+    return step or EditRoute(answer.web_address, instance.container, lane.route.installed)
 
 
 def decide_end(

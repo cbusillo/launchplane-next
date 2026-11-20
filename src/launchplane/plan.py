@@ -35,6 +35,7 @@ from launchplane.steps import (
     Discard,
     Discarded,
     Done,
+    EditRoute,
     Event,
     FreshNames,
     LoginsUnread,
@@ -43,12 +44,10 @@ from launchplane.steps import (
     PutBack,
     RemovalRefused,
     RemoveLogins,
-    RemoveRoute,
     Result,
     Retire,
     RetireOutcome,
     RetireResult,
-    ShowBackSoon,
     StartBackgroundService,
     StartDatabase,
     StartInstance,
@@ -61,7 +60,6 @@ from launchplane.steps import (
     Switched,
     TooLate,
     Wait,
-    WriteRoute,
 )
 
 type Step[Answer] = Action | Done[Answer] | Stop
@@ -77,18 +75,17 @@ def failure_report(why: str, log_tail: str) -> str:
     return f"{why}\nIts last log lines:\n{log_tail}"
 
 
-CHANGES: dict[type, Callable[[Any], str]] = {
+CHANGES: dict[type, Callable[[Any], str | None]] = {
     StartProxy: lambda _step: "started the proxy",
     CreateDataSetNetwork: lambda step: f"made part of the data set {step.data_set}",
     CreateDataSetVolume: lambda step: f"made part of the data set {step.data_set}",
     CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
     StartDatabase: lambda step: f"started the database {step.container}",
     StartInstance: lambda step: f"started the instance {step.container}",
-    WriteRoute: lambda step: f"wrote the route to {step.container}",
+    EditRoute: lambda step: f"wrote the route to {step.to}" if step.to else None,
     StartBackgroundService: lambda step: f"started the background service of {step.instance}",
     Retire: lambda step: f"retired {step.container}",
     RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
-    ShowBackSoon: lambda step: f"switched {step.web_address} to the back soon page",
     StopPart: lambda step: f"stopped {step.container}",
     StopDatabase: lambda step: f"stopped {step.container}",
     StartStopped: lambda step: f"started {step.container}",
@@ -564,7 +561,7 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     if (step := loading_step(judged)) is not None:
         return step
     if (written := route.written) is not None:
-        return RemoveRoute(web_address, written)
+        return EditRoute(web_address, None, route.installed, written)
     if lane.background_services:
         return Retire(min(running.container for running in lane.background_services))
     if lane.instances:
@@ -577,10 +574,10 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
         )
     if named is not None:
         return DeleteDataSet(named)
-    route_removed_to = next((event.container for event in done if isinstance(event, RemoveRoute)), None)
+    route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)
     retired = [event.container for event in done if isinstance(event, Retire)]
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = any(isinstance(event, RemoveRoute | Retire | RemoveLogins) for event in done)
+    changed = any(isinstance(event, EditRoute | Retire | RemoveLogins) for event in done)
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,

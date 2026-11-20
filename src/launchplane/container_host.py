@@ -501,7 +501,3 @@ class ContainerHost:
             return {
                 name: FileRead(content.decode(), changed_at) for name, (content, changed_at) in files_in(b"".join(chunks)).items()
             }
-
-    def place_file(self, container: str, path: PurePosixPath, content: str) -> None:
-        with attempting(f"Placing {path} in {container}", self.address):
-            self.client.containers.get(container).put_archive(str(path.parent), tar_of(path.name, content.encode()))  # pyright: ignore[reportUnknownMemberType]

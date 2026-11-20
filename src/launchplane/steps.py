@@ -146,10 +146,13 @@ class Check:
     health_path: str = "/"
 
 
+# The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.
 @dataclass(frozen=True)
-class WriteRoute:
+class EditRoute:
     web_address: str
-    container: str
+    to: str | None
+    read: str
+    was: str | None = None
 
 
 # The rename of a release, asked of the gate for the candidate of one attempt. `Switched` is what it is once taken:
@@ -206,12 +209,6 @@ class AwaitBackgroundService:
 
 
 @dataclass(frozen=True)
-class RemoveRoute:
-    web_address: str
-    container: str
-
-
-@dataclass(frozen=True)
 class Retire:
     container: str
 
@@ -224,11 +221,6 @@ class DeleteDataSet:
 @dataclass(frozen=True)
 class RemoveLogins:
     database: str
-
-
-@dataclass(frozen=True)
-class ShowBackSoon:
-    web_address: str
 
 
 @dataclass(frozen=True)
@@ -328,11 +320,10 @@ class Cancel:
 type Action = (
     StartProxy
     | AwaitRoute
-    | WriteRoute
+    | EditRoute
     | Switch
     | Discard
     | Abandon
-    | RemoveRoute
     | CreateDataSetNetwork
     | CreateDataSetVolume
     | CreateDatabase
@@ -345,7 +336,6 @@ type Action = (
     | RemoveLogins
     | Check
     | AwaitBackgroundService
-    | ShowBackSoon
     | StopPart
     | StopDatabase
     | StartStopped

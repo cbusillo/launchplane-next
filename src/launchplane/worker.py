@@ -201,16 +201,27 @@ class Worker:
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
-        return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel)
+        return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel, request.generation, attempt)
 
     def carry_through(self, request: Request, attempt: int, held: Held) -> None:
         witness = self.witness_of(request, attempt, held)
         if request.work is not Work.MOVE:
             came_to = self.ending_of(request, attempt, witness)
-            self.record.end(attempt, came_to.stands, came_to.answer, came_to.error)
+            if self.is_closed(request, witness, came_to):
+                self.record.end(attempt, came_to.stands, came_to.answer, came_to.error)
             return
         while not self.move_ended_or_left_open(request, attempt, witness):
             pass
+
+    # A change of the route asked for by this attempt, or by an earlier one of a request found working, is made by the
+    # time the fence answers or never. With no answer the lane stays with the request.
+    def is_closed(self, request: Request, witness: Witness, came_to: Ending) -> bool:
+        try:
+            if witness.sent or request.stands is Stands.WORKING:
+                self.lanes.fence(request.product, request.lane, request.generation, witness.attempt)
+        except HOST_UNREAD as error:
+            return not self.left_open(witness.attempt, f"{came_to.error or 'It was done.'} It is not ended yet: {error}")
+        return True
 
     # One round of a move: the call, then the gate's word on its ending, then the record. An ending that is no release
     # is written once the attempt is fenced with no verdict and, where it failed, what the release made is cleaned up and

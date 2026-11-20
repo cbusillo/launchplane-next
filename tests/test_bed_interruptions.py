@@ -1,6 +1,7 @@
 import http.client
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cache
@@ -17,6 +18,7 @@ from tests.bed import (
     RequestLoop,
     UnexpectedAnswer,
     ask,
+    ask_and_wait,
     hold,
     holds,
     kill_held_launchplane,
@@ -46,6 +48,8 @@ THE_RENAME = "proxy.switch"
 TURN, TAKE_UP, GATE_ANSWER = "before.record.turn", "before.record.take_up", "after.lanes.abandon"
 UNTOUCHED = "untouched"
 NOTHING = "no lane"
+# Traefik loads a changed routes file within 2 s.
+SECONDS_THE_PROXY_TAKES_TO_LOAD = 4
 
 
 # One lane under test: its three builds, and what a visitor is answered by each.
@@ -777,3 +781,61 @@ def test_case_8_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_e
         True,
     )
     assert (again[0], ended["error"] in again[1]["error"], case.renames_of(asked["generation"])) == (409, True, 0)
+
+
+BACK_SOON = "the back soon page"
+
+
+# What a visitor gets, where the back soon page is an answer and no failure.
+def answering_or_back_soon(lane: Lane) -> str:
+    connection = http.client.HTTPConnection(scratch_ip(), 80, timeout=5)
+    try:
+        connection.request("GET", "/", headers={"Host": lane.web_address})
+        response = connection.getresponse()
+        response.read()
+        return BACK_SOON if (response.status, response.getheader("Retry-After")) == (503, "60") else answering(lane)
+    finally:
+        connection.close()
+
+
+def edit_waiting_for_the_lock(generation: str) -> set[str]:
+    return processes_whose("comm", "flock") & processes_whose("cmdline", generation)
+
+
+def routes_file_of(lane: Lane) -> str:
+    return in_proxy(f"stat -c %i {route_file_of(lane.web_address)} && cat {route_file_of(lane.web_address)}")
+
+
+def test_a_retire_frozen_before_the_gates_lock_and_let_go_with_its_lane_in_maintenance_removes_nothing_and_back_soon_stays() -> None:
+    let_go()
+    lane = f"/lanes/{SITE.product}/{SITE.lane}"
+    assert move_lane(SITE.product, SITE.lane, A)[0] == 200
+    serving = instances_of(SITE)
+    hold("before.proxy.edit")
+    status, asked = ask(f"{lane}/retire", {})
+    process = ""
+    try:
+        wait_until_stopped_at("before.proxy.edit")
+        in_proxy(HOLD_THE_GATE, flags="--detach")
+        hold(TAKE_UP)
+        let_go("before.proxy.edit")
+        wait_for(lambda: bool(edit_waiting_for_the_lock(asked["generation"])), seconds=60)
+        [process] = edit_waiting_for_the_lock(asked["generation"])
+        in_proxy(f"kill -STOP {process}; rm -f {GATE_HELD}")
+        kill_held_launchplane()
+        wait_until_stopped_at(TAKE_UP)
+        marked = cancel(asked["id"])
+        let_go()
+        assert (status, marked[0], ended_as(asked["id"])[0]) == (202, 202, "cancelled")
+        assert ask_and_wait(f"{lane}/maintenance/begin", {})[1]["outcome"] == "in maintenance"
+        in_maintenance = routes_file_of(SITE)
+        with request_loop(lambda: answering_or_back_soon(SITE)) as loop:
+            in_proxy(f"kill -CONT {process}")
+            wait_for(lambda: not edit_waiting_for_the_lock(asked["generation"]), seconds=30)
+            time.sleep(SECONDS_THE_PROXY_TAKES_TO_LOAD)
+        assert (routes_file_of(SITE), loop.failures, loop.answers_in_order()) == (in_maintenance, [], [BACK_SOON])
+        assert [each["container"] for each in instances_of(SITE)] == [each["container"] for each in serving]
+    finally:
+        in_proxy(f"kill -CONT {process} 2>/dev/null; rm -f {GATE_HELD}")
+        let_go()
+    assert ask_and_wait(f"{lane}/maintenance/end", {})[1]["outcome"] == "ended"
