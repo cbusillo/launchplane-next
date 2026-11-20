@@ -138,7 +138,7 @@ def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_
 
     proxy.edit = not_the_route_read_once
     answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(tell=lambda did, error: told.append((did, error))))
-    switch = f"switch {WEB_ADDRESS} to the back soon page"
+    switch = f"send {WEB_ADDRESS} to {BACK_SOON}"
     assert (answer.outcome, told[:2]) == (
         MaintenanceOutcome.IN_MAINTENANCE,
         [(switch, "The gate left the route: it was not the one read."), (switch, None)],

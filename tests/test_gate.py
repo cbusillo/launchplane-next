@@ -7,7 +7,7 @@ import pytest
 from launchplane.docker_answers import CommandResult
 from launchplane.gate import ALREADY, DONE, GATE_FOLDER_NAME, LOST, Answer, Gate, GateError
 from launchplane.instance import BACK_SOON, Verdict
-from launchplane.proxy import installed_text, route_text
+from launchplane.proxy import route_text
 from launchplane.record import Record, Stands
 from tests.pretend_host import EARLIER, GENERATION
 from tests.test_worker import CALLER, MOVE_B, kept_of, serving_a
@@ -60,7 +60,7 @@ class Lane:
     # A change of the route that is no release, asked by one attempt of one request from the routes file as it reads now.
     def edit(self, to: str | None, generation: str, attempt: int = 1, read: str | None = None) -> str:
         installed = self.installed() if read is None else read
-        text = "" if to is None else installed_text(WEB, to, generation, attempt)
+        text = "" if to is None else route_text(WEB, to, generation, attempt)
         return self.gate.edit(WEB, generation, attempt, installed, text, PurePosixPath(self.route))
 
     def installed(self) -> str:
@@ -266,7 +266,7 @@ def test_a_command_of_a_closed_request_that_arrives_once_the_lane_is_in_maintena
     assert (lane.gate.fence(WEB, OLD, 1), lane.edit(BACK_SOON, NEXT)) == (NONE, DONE)
     in_maintenance = lane.as_it_is()
     assert (lane.arrive(late), lane.as_it_is()) == (LOST, in_maintenance)
-    assert in_maintenance[0] == installed_text(WEB, BACK_SOON, NEXT, 1)
+    assert in_maintenance[0] == route_text(WEB, BACK_SOON, NEXT, 1)
 
 
 @SENT_LATE
@@ -286,7 +286,7 @@ def test_an_old_retire_that_runs_before_its_request_is_closed_removes_the_route_
     late = lane.sent_and_held(None, OLD)
     assert (lane.arrive(late), lane.gate.fence(WEB, OLD, 1), lane.route.exists()) == (DONE, NONE, False)
     assert lane.edit(BACK_SOON, NEXT, read=read_by_the_next) == LOST
-    assert (lane.edit(BACK_SOON, NEXT), lane.installed()) == (DONE, installed_text(WEB, BACK_SOON, NEXT, 1))
+    assert (lane.edit(BACK_SOON, NEXT), lane.installed()) == (DONE, route_text(WEB, BACK_SOON, NEXT, 1))
 
 
 def test_a_route_put_back_to_the_same_instance_is_not_the_route_an_older_command_read_though_no_fence_stops_it(lane: Lane) -> None:

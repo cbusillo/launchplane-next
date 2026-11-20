@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from launchplane import steps
-from launchplane.instance import BACK_SOON
 from launchplane.steps import Action, Event
 
 type Tell = Callable[[str, str | None], None]
@@ -29,20 +28,10 @@ NOBODY = Witness()
 TO_PUT_BACK = ", to put the lane back"
 
 
-def route_edit_named(step: steps.EditRoute) -> str:
-    if step.to in (None, BACK_SOON):
-        return (
-            f"switch {step.web_address} to the back soon page"
-            if step.to
-            else f"remove the route of {step.web_address} to {step.was}"
-        )
-    return f"write the route of {step.web_address} to {step.to}"
-
-
 NAMED: dict[type, Callable[[Any], str]] = {
     steps.StartProxy: lambda _step: "start the proxy",
     steps.AwaitRoute: lambda step: f"wait for the proxy to load the route of {step.web_address}",
-    steps.EditRoute: route_edit_named,
+    steps.EditRoute: lambda step: f"send {step.web_address} to {step.to}" if step.to else f"remove the route of {step.web_address}",
     steps.Switch: lambda step: f"switch {step.web_address} to {step.container}",
     steps.Discard: lambda step: f"retire {step.container}",
     steps.Abandon: lambda step: f"mark the release of {step.web_address} as cancelled",

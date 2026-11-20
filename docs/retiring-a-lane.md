@@ -43,6 +43,7 @@ A `503` means the host or proxy could not be read or changed. Retiring stopped w
 
 - Retiring a lane of one idle nginx instance: 2.06 to 2.14 s, mostly Traefik loading the route change. Asking again: 0.07 s.
 - With a 5 s request in flight, the request answered 200 with its whole body.
+- On November 20, with the route removed by the gate: the removal was done 0.18 to 0.20 s after the retire was asked, where a plain `rm` took 0.11 to 0.12 s. The whole retire took as long as before.
 - Killed after the route was gone, while the instance held a 10 s request: the instance kept running with no web address until Launchplane was asked again, the request got its answer, and asking again retired the instance in 0.97 s.
 
 ## On the test bed

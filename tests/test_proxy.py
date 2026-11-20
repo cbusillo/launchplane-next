@@ -23,7 +23,6 @@ from launchplane.proxy import (
     CheckFailed,
     ProxyError,
     TraefikProxy,
-    installed_text,
     instance_url,
     route_file_of,
     route_text,
@@ -137,7 +136,7 @@ def test_a_switch_asks_the_gate_to_rename_the_lanes_routes_file_to_the_route_of_
     proxy = TraefikProxy(host)
     assert proxy.switch(OTHER, GENERATION, 1, "b") == Answer(Verdict.COMMITTED, "b")
     assert (host.files[route_file_of(OTHER)], proxy.read().route_of(OTHER).written, sends_visitors_to(host)[OTHER]) == (
-        installed_text(OTHER, "b", GENERATION, 1),
+        route_text(OTHER, "b", GENERATION, 1),
         "b",
         "b",
     )
@@ -352,7 +351,7 @@ def test_writing_a_route_changes_only_that_lanes_file() -> None:
     host = ProxyHost({WEB_ADDRESS: "site-t1", OTHER: "site-p1"})
     other_file = host.files[route_file_of(OTHER)]
     assert edit(TraefikProxy(host), WEB_ADDRESS, "site-t2") == DONE
-    assert routes_of(host) == {WEB_ADDRESS: installed_text(WEB_ADDRESS, "site-t2", GENERATION, 1), OTHER: other_file}
+    assert routes_of(host) == {WEB_ADDRESS: route_text(WEB_ADDRESS, "site-t2", GENERATION, 1), OTHER: other_file}
     assert edit(TraefikProxy(host), WEB_ADDRESS, None) == DONE
     assert routes_of(host) == {OTHER: other_file}
 

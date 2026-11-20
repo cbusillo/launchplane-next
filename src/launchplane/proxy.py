@@ -124,15 +124,12 @@ def instance_url(container: str) -> str:
     return f"http://{container}:{INSTANCE_PORT}"
 
 
-def route_text(web_address: str, container: str) -> str:
+# A first line, a comment to the proxy, says which installation a route is: one put back is not the file read before.
+def route_text(web_address: str, container: str, generation: str = "", attempt: int = 0) -> str:
     router = {"rule": f"Host(`{web_address}`)", "entryPoints": [ENTRY_POINT], "service": web_address}
     target = {"loadBalancer": {"servers": [{"url": instance_url(container)}]}}
-    return json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
-
-
-# Its first line, a comment to the proxy, says which installation a route is: one put back is not the one read before.
-def installed_text(web_address: str, container: str, generation: str, attempt: int) -> str:
-    return f"# {generation} {attempt}\n{route_text(web_address, container)}"
+    route = json.dumps({"http": {"routers": {web_address: router}, "services": {web_address: target}}}, indent=2)
+    return f"# {generation} {attempt}\n{route}" if generation else route
 
 
 def container_behind(router: LoadedRouter, services: Mapping[str, object]) -> str:
@@ -256,14 +253,13 @@ class TraefikProxy:
 
     # The one moment a release becomes real, asked of the gate for the exact candidate of one attempt.
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> Answer:
-        text = installed_text(web_address, candidate, generation, attempt)
+        text = route_text(web_address, candidate, generation, attempt)
         return self.gate.switch(web_address, generation, attempt, candidate, text, route_file_of(web_address))
 
-    # With no container the route is removed. The gate's own files stay: a command for a release may still arrive.
     def edit(self, web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
         if container == BACK_SOON:
             self.host.ensure_helper(BACK_SOON_PAGE)
-        text = "" if container is None else installed_text(web_address, container, generation, attempt)
+        text = "" if container is None else route_text(web_address, container, generation, attempt)
         return self.gate.edit(web_address, generation, attempt, read, text, route_file_of(web_address))
 
     def fetch(self, *request: str) -> CommandResult:

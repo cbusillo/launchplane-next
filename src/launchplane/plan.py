@@ -75,14 +75,14 @@ def failure_report(why: str, log_tail: str) -> str:
     return f"{why}\nIts last log lines:\n{log_tail}"
 
 
-CHANGES: dict[type, Callable[[Any], str | None]] = {
+CHANGES: dict[type, Callable[[Any], str]] = {
     StartProxy: lambda _step: "started the proxy",
     CreateDataSetNetwork: lambda step: f"made part of the data set {step.data_set}",
     CreateDataSetVolume: lambda step: f"made part of the data set {step.data_set}",
     CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
     StartDatabase: lambda step: f"started the database {step.container}",
     StartInstance: lambda step: f"started the instance {step.container}",
-    EditRoute: lambda step: f"wrote the route to {step.to}" if step.to else None,
+    EditRoute: lambda step: f"sent {step.web_address} to {step.to}" if step.to else f"removed the route of {step.web_address}",
     StartBackgroundService: lambda step: f"started the background service of {step.instance}",
     Retire: lambda step: f"retired {step.container}",
     RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",

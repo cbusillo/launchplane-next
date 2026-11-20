@@ -17,7 +17,6 @@ from launchplane.instance import Verdict
 #   <web address>.<generation>.<candidate>.revoked  the candidate may never be armed
 #   <web address>.<generation>.fenced               "<attempt>": no attempt up to this one may arm
 #   <web address>.<generation>.abandoned            a cancel won
-#   <web address>.<generation>.edit                 a routes file that is no release's, staged
 #
 # The staged file is finished and made durable, then the mark that arms it, and then the routes file is put in place by
 # renaming the staged file. While a generation is armed, only that rename takes its staged file away. So armed with the
@@ -27,8 +26,6 @@ from launchplane.instance import Verdict
 # the same order, and at no moment is a generation armed with its staged file gone unless it was renamed.
 #
 # A file that cannot be looked for is never taken as absent: the command fails, and its sender has no answer.
-#
-# An edit is a change of the route that is no release, made only by an attempt not fenced and from the file as it was read.
 GATE_FOLDER_NAME = "gate"
 EDITS = DONE, ALREADY, LOST = "done", "already", "lost"
 UNREADABLE = 9
@@ -175,16 +172,14 @@ class Gate:
         return self.root / GATE_FOLDER_NAME
 
     # A command that does not come back with an answer has given none: it is never taken as none.
-    def ask[Told](
-        self, told: Callable[[str], Told | None], web_address: str, generation: str, operation: str, *arguments: object
-    ) -> Told:
-        passed = [str(self.folder), web_address, generation, operation, *map(str, arguments)]
+    def ask[Told](self, told: Callable[[str], Told | None], web_address: str, generation: str, *asked: object) -> Told:
+        passed = [str(self.folder), web_address, generation, *map(str, asked)]
         with self.reading:
             result = self.host.run_in(self.container, ["flock", str(self.root), "sh", "-c", SCRIPT, "sh", *passed])
         answer = told(result.output) if result.succeeded else None
         if answer is None:
             raise GateError(
-                f"The gate gave no verdict for the release {generation} of {web_address} when asked to {operation}, so "
+                f"The gate gave no verdict for the release {generation} of {web_address} when asked to {asked[0]}, so "
                 f"what holds for it is not known: exit code {result.exit_code}, {result.output or 'no output'}"
             )
         return answer
@@ -212,6 +207,6 @@ class Gate:
     def fence(self, web_address: str, generation: str, attempt: int) -> Answer:
         return self.ask(answer_from, web_address, generation, "fence", attempt)
 
-    # Makes `text` the routes file, or with none removes it.
+    # Makes `text` the routes file, or with none removes it, only for an attempt not fenced and from the file exactly as `read`.
     def edit(self, web_address: str, generation: str, attempt: int, read: str, text: str, route: PurePosixPath) -> str:
         return self.ask(lambda said: said if said in EDITS else None, web_address, generation, "edit", attempt, read, text, route)
