@@ -221,8 +221,8 @@ class Record(Protocol):
     def take_up(self, request: int) -> Taken | None: ...
     def leave_open(self, attempt: int, why: str) -> None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
-    def about_to(self, attempt: int, did: str, action: dict[str, JsonValue]) -> int: ...
-    def complete(self, attempt: int, line: int, outcome: dict[str, JsonValue], error: str | None = None) -> None: ...
+    def about_to(self, attempt: int, did: str, action: Sent) -> int: ...
+    def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None: ...
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool: ...
@@ -257,8 +257,8 @@ def how_replaced(request: Request) -> str:
     )
 
 
-# Why a request a cancel was asked of did not end as cancelled, from what was kept when it ended. None where nothing
-# kept says more than how it stands.
+# Why a cancel that was asked of a request did not end it, from what was kept when it ended. None where nothing kept
+# says more than how the request stands.
 def how_not_cancelled(request: Request) -> str | None:
     if request.cancel_refused is not None:
         return request.cancel_refused
@@ -586,17 +586,16 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
-    def about_to(self, attempt: int, did: str, action: dict[str, JsonValue]) -> int:
+    def about_to(self, attempt: int, did: str, action: Sent) -> int:
         with self.session("writing what is about to be done") as session:
-            line = Sent.model_validate(action).model_dump(mode="json")
-            row = session.execute(Sql.ABOUT_TO, self.gate.made(did, line, attempt)).fetchone()
+            row = session.execute(Sql.ABOUT_TO, self.gate.made(did, action.model_dump(mode="json"), attempt)).fetchone()
             if row is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so it was not written and not done: {did}")
             return row["id"]
 
-    def complete(self, attempt: int, line: int, outcome: dict[str, JsonValue], error: str | None = None) -> None:
+    def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None:
         with self.session("writing what came of a change") as session:
-            known = Reply.model_validate(outcome).model_dump(mode="json", exclude_unset=True)
+            known = outcome.model_dump(mode="json", exclude_unset=True)
             if session.execute(Sql.COMPLETE, self.gate.made(known, error, line, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what came of a change was not written.")
 

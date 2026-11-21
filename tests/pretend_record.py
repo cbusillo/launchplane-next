@@ -21,7 +21,9 @@ from launchplane.record import (
     PostgresRecord,
     Record,
     RecordError,
+    Reply,
     Request,
+    Sent,
     Stands,
     Taken,
     Unconfirmed,
@@ -201,22 +203,22 @@ class PretendRecord(Record):
         self.change(request, events=[*found.events, event])
         return event.id
 
-    def about_to(self, attempt: int, did: str, action: dict[str, JsonValue]) -> int:
+    def about_to(self, attempt: int, did: str, action: Sent) -> int:
         self.reach("writing what is about to be done")
         with self.writing:
             request = self.open_attempts.get(attempt)
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so it was not written and not done: {did}")
-            return self.written(request, self.cleaned(did=did, action=action))
+            return self.written(request, self.cleaned(did=did, action=action.model_dump(mode="json")))
 
-    def complete(self, attempt: int, line: int, outcome: dict[str, JsonValue], error: str | None = None) -> None:
+    def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None:
         self.reach("writing what came of a change")
         with self.writing:
             request = self.open_attempts.get(attempt)
             events = [] if request is None else self.kept[request].events
             if request is None or line not in {each.id for each in events}:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what came of a change was not written.")
-            new = self.cleaned(outcome=outcome, error=error)
+            new = self.cleaned(outcome=outcome.model_dump(mode="json", exclude_unset=True), error=error)
             completed = [each if each.id != line else self.completed(each, new["outcome"], new["error"]) for each in events]
             self.change(request, events=completed)
 

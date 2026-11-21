@@ -465,7 +465,7 @@ class ContainerHost:
             return self.retire_container(container)
 
     # A read that fails is answered as unread and nothing is removed. A removal that fails is raised, and says which
-    # logins were removed before it. Otherwise the logins removed are answered, and none where every login was held.
+    # logins were removed before it. Otherwise, the logins removed are answered, and none where every login was held.
     def remove_unheld_logins(self, database: str) -> Unread | list[str]:
         try:
             with attempting(f"Reading the logins of the database {database} and who holds them", self.address):

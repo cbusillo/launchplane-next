@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 from itertools import count
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -9,7 +9,7 @@ from launchplane.act import Lanes
 from launchplane.api import why_not_cancelled
 from launchplane.instance import Verdict
 from launchplane.page import line_of, request_note
-from launchplane.record import Asked, Event, Interrupted, Kept, Record, Stands
+from launchplane.record import Asked, Event, Interrupted, Kept, Record, Reply, Sent, Stands
 from launchplane.telling import Said, Seen
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
@@ -91,8 +91,9 @@ INTERRUPTED: dict[str, Callable[[Record], tuple[PretendProxy, int]]] = {
 # What a fresh worker does to the host from there, and how the request then stands.
 def carried_on(record: PretendRecord, proxy: PretendProxy, request: int) -> tuple[list[str], Kept, object]:
     calls: list[str] = []
-    host = cast("Any", Recorded(proxy.host, "host", calls))
-    lanes = Lanes(host, cast("Any", Recorded(proxy, "proxy", calls)), lambda _product: WITH_DATA, numbered_names())
+    host: Any = Recorded(proxy.host, "host", calls)
+    routes: Any = Recorded(proxy, "proxy", calls)
+    lanes = Lanes(host, routes, lambda _product: WITH_DATA, numbered_names())
     worker = Worker(record, lanes, NO_SECRETS)
     while kept_of(record, request).stands is Stands.WORKING:
         assert worker.work_next() is True
@@ -104,20 +105,19 @@ def carried_on(record: PretendRecord, proxy: PretendProxy, request: int) -> tupl
 def test_erasing_action_history_changes_the_account_but_not_the_next_host_action(
     monkeypatch: pytest.MonkeyPatch, interrupted: Callable[[Record], tuple[PretendProxy, int]]
 ) -> None:
-    carried: list[tuple[list[str], Kept, object]] = []
-    for erased in (False, True):
-        numbers = count(1)
-        monkeypatch.setattr(
-            "tests.pretend_record.new_generation", lambda numbers=numbers: f"01a1ef36-0000-7000-8000-{next(numbers):012}"
-        )
+    def carried_from_the_interruption(*, erased: bool) -> tuple[list[str], Kept, object]:
+        generations = count(1)
+        monkeypatch.setattr("tests.pretend_record.new_generation", lambda: f"01a1ef36-0000-7000-8000-{next(generations):012}")
         record = PretendRecord()
         proxy, request = interrupted(record)
         kept = kept_of(record, request)
         assert [each for each in kept.events if each.action is not None], "the interruption left no action line to erase"
         if erased:
             record.change(request, events=[each for each in kept.events if each.action is None])
-        carried.append(carried_on(record, proxy, request))
-    (calls, with_history, left), (calls_erased, without_history, left_erased) = carried
+        return carried_on(record, proxy, request)
+
+    calls, with_history, left = carried_from_the_interruption(erased=False)
+    calls_erased, without_history, left_erased = carried_from_the_interruption(erased=True)
     assert calls and (calls, left) == (calls_erased, left_erased)
     assert (with_history.stands, without_history.stands) == (Stands.DONE, Stands.DONE)
     assert with_history.answer != without_history.answer
@@ -189,13 +189,13 @@ def test_a_request_that_stops_says_what_every_attempt_of_it_changed_before_that(
 def test_a_line_is_written_before_its_change_is_sent_and_only_the_attempt_that_is_open_adds_to_it(record: Record) -> None:
     request = record.write(MOVE_B, CALLER, None)
     first = begun(record, request.id)
-    line = record.about_to(first, "send testing.site.test to a", {"verb": "route", "subject": WEB_ADDRESS, "to": "a"})
+    line = record.about_to(first, "send testing.site.test to a", Sent(verb="route", subject=WEB_ADDRESS, to="a"))
     [written] = kept_of(record, request.id).events
     second = begun(record, request.id)
     with pytest.raises(Interrupted):
-        record.complete(first, line, {"said": "changed"})
-    record.complete(second, line, {"seen": Seen.OURS.value}, "the reply was lost")
-    record.complete(second, line, {"seen_at": "2026-11-21T10:00:00+00:00"})
+        record.complete(first, line, Reply(said=Said.CHANGED))
+    record.complete(second, line, Reply(seen=Seen.OURS), "the reply was lost")
+    record.complete(second, line, Reply(seen_at=datetime(2026, 11, 21, 10, tzinfo=UTC)))
     [read_back] = kept_of(record, request.id).events
     assert (written.action is not None, written.outcome, written.is_unanswered, written.is_credited) == (True, None, True, False)
     assert read_back.outcome is not None and (read_back.outcome.said, read_back.outcome.seen, read_back.error) == (

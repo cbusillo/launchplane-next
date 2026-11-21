@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from launchplane.account import accounted, seen_of, so_far, was_sent
+from launchplane.account import accounted, seen_of, so_far, unseen, was_sent
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
@@ -16,8 +16,8 @@ from launchplane.instance import LaneBuild, LaneReading, LaneRoute, Verdict
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands
-from launchplane.secret_boundary import JsonValue, Secrets
+from launchplane.record import Held, Interrupted, Record, RecordError, Reply, Request, Sent, Stands
+from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, Result, RetireResult
 from launchplane.telling import NOBODY, Answered, Change, Said, Witness
 
@@ -82,10 +82,6 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
             return lanes.begin_maintenance(product, lane, witness)
         case Work.END_MAINTENANCE:
             return lanes.end_maintenance(product, lane, witness)
-
-
-def now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 # Several threads each take the oldest request of a lane none of them is on, so a lane has one worker and its requests
@@ -176,15 +172,14 @@ class Worker:
     # and what is seen is written to its line. Nothing the attempt does is chosen from it.
     def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, LaneReading | None], None]:
         kept = self.record.read(request.id)
-        events = [] if kept is None else kept.events
-        lines = [(each, each.action) for each in events if each.action is not None and each.outcome is None]
+        lines = [] if kept is None else unseen(kept)
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
         def look(route: LaneRoute, lane: LaneReading | None) -> None:
             for line, sent in list(lines):
                 seen = seen_of(sent, request.generation, stamps[line.attempt], route, lane)
                 if seen is not None:
-                    self.record.complete(attempt, line.id, {"seen": seen.value, "seen_at": now()})
+                    self.record.complete(attempt, line.id, Reply(seen=seen, seen_at=datetime.now(UTC)))
                     lines.remove((line, sent))
 
         return look
@@ -195,11 +190,11 @@ class Worker:
             self.record.note(attempt, did, refusal)
 
         def about_to(did: str, change: Change) -> Answered:
-            line = self.record.about_to(attempt, did, dict(change))
+            line = self.record.about_to(attempt, did, Sent.model_validate(change))
 
             def answered(said: Said | None, error: str | None, changed: Sequence[str]) -> None:
-                outcome: dict[str, JsonValue] = {} if said is None else {"said": said.value, "at": now(), "changed": list(changed)}
-                self.record.complete(attempt, line, outcome, error)
+                heard = Reply() if said is None else Reply(said=said, at=datetime.now(UTC), changed=list(changed))
+                self.record.complete(attempt, line, heard, error)
 
             return answered
 

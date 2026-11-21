@@ -22,6 +22,8 @@ from launchplane.record import (
     Record,
     RecordError,
     Refused,
+    Reply,
+    Sent,
     Stands,
     Unconfirmed,
     how_not_cancelled,
@@ -454,7 +456,7 @@ def test_the_migration_to_action_lines_leaves_an_ended_request_and_an_interrupte
         RetireOutcome.UNCHANGED,
     )
     attempt = begun(postgres_record, 2)
-    postgres_record.complete(attempt, postgres_record.about_to(attempt, "retire old", {"verb": "remove", "subject": "old"}), {})
+    postgres_record.complete(attempt, postgres_record.about_to(attempt, "retire old", Sent(verb="remove", subject="old")), Reply())
     taken_up = postgres_record.read(2)
     assert taken_up is not None and [each.ended for each in taken_up.attempts] == ["interrupted", "interrupted", None]
     assert [each.is_unanswered for each in taken_up.events] == [False, True]
@@ -521,10 +523,10 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
         return True
     if Verdict in kinds:
         return Verdict.COMMITTED
-    if parameter == "action":
-        return {"verb": f"said with {HELD}", "subject": HELD, "to": f"to {HELD}", "was": HELD}
-    if parameter == "outcome":
-        return {"changed": [HELD, f"within {HELD}"]}
+    if hint is Sent:
+        return Sent(verb=f"said with {HELD}", subject=HELD, to=f"to {HELD}", was=HELD)
+    if hint is Reply:
+        return Reply(changed=[HELD, f"within {HELD}"])
     if str in kinds:
         return f"said with {HELD} in it"
     if any(get_origin(kind) is dict for kind in kinds):
