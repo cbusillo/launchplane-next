@@ -504,7 +504,7 @@ def retire_step_back(judged: Judgement, delete_data_set: str | None) -> StepBack
     )
 
 
-# What the host shows of the data set a cancelled retire named: whole and kept, or with parts already gone.
+# What the host shows of the data set named by a retire that a cancel came too late for: whole, or with parts gone.
 def what_is_left_of(judged: Judgement, delete_data_set: str | None) -> str:
     back = " Moving the lane to a build brings it back on its data set."
     left = judged.lane.data_set(delete_data_set)

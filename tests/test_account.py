@@ -7,7 +7,7 @@ import pytest
 
 from launchplane.act import Lanes
 from launchplane.api import why_not_cancelled
-from launchplane.docker_answers import ContainerHostError
+from launchplane.docker_answers import ContainerHostError, LoginRemovalRefused
 from launchplane.instance import DataSetUse, LaneBuild, ProxySeen, Verdict
 from launchplane.page import cards, line_of, request_note
 from launchplane.record import Asked, Event, Interrupted, Kept, Record, Reply, Sent, Stands, how_cancelled
@@ -246,6 +246,14 @@ def test_a_request_asked_again_on_a_lane_already_as_asked_is_credited_with_nothi
 BY_HAND = "a call from the address 192.0.2.7"
 
 
+# The request as it ended, its answer, its one line for a change of the route, and what that line was read back as.
+def ended_with_its_route_line(record: Record, request: int) -> tuple[Kept, dict[str, Any], Event, Seen | None]:
+    kept = kept_of(record, request)
+    [line] = [each for each in kept.events if each.action is not None and each.action.verb == "route"]
+    assert kept.answer is not None and line.outcome is not None
+    return kept, kept.answer, line, line.outcome.seen
+
+
 def test_a_retire_cancelled_with_part_of_its_named_data_set_deleted_says_which_parts_and_that_what_is_left_is_not_whole(
     record: Record,
 ) -> None:
@@ -288,14 +296,14 @@ def test_a_start_killed_once_its_login_is_made_has_a_line_for_the_login_and_one_
     request = record.write(MOVE_B, CALLER, None)
     with pytest.raises(LaunchplaneKilled):
         worker_on(proxy, record).work_next()
-    login, container = [each for each in kept_of(record, request.id).events if each.action is not None]
-    [new] = [made.split()[0] for made in proxy.host.logins_made[1:]]
-    assert login.outcome is not None and (login.did, login.action and login.action.verb, login.outcome.said) == (
+    made, started = [each for each in kept_of(record, request.id).events if each.action is not None]
+    [new] = [each.split()[0] for each in proxy.host.logins_made[1:]]
+    assert made.outcome is not None and (made.did, made.action and made.action.verb, made.outcome.said) == (
         f"make the login of {new} in the database {DATABASE}",
         "make login",
         Said.CHANGED,
     )
-    assert (container.did, container.outcome, new in proxy.host.instances) == (f"start the instance {new} of site:b", None, False)
+    assert (started.did, started.outcome, new in proxy.host.instances) == (f"start the instance {new} of site:b", None, False)
 
 
 def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_completed_as_the_requests_own_by_a_later_reading(
@@ -321,10 +329,9 @@ def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_completed_
         worker.work_next()
     proxy.switch, proxy.read = switch, read_and_then_it_lands
     assert worker.work_next() is True
-    kept = kept_of(record, request.id)
-    [line] = [each for each in kept.events if each.action is not None and each.action.verb == "route"]
-    assert kept.answer is not None and line.outcome is not None
-    assert (kept.answer["outcome"], kept.answer["unanswered"], line.did in kept.answer["did"], line.outcome.seen) == (
+    kept, answer, line, seen = ended_with_its_route_line(record, request.id)
+    assert (kept.stands, answer["outcome"], answer["unanswered"], line.did in answer["did"], seen) == (
+        Stands.DONE,
         "switched",
         [],
         True,
@@ -379,11 +386,34 @@ def test_a_route_as_asked_that_another_hand_installed_is_not_the_requests_own(re
     assert worker.work_next() is True
     proxy.route(WEB_ADDRESS, instance)
     assert worker.work_next() is True
-    kept = kept_of(record, request.id)
-    [line] = [each for each in kept.events if each.action is not None and each.action.verb == "route"]
-    assert kept.answer is not None and line.outcome is not None
-    assert (kept.answer["outcome"], line.outcome.seen, kept.answer["unanswered"]) == (
+    kept, answer, line, seen = ended_with_its_route_line(record, request.id)
+    assert (kept.stands, answer["outcome"], seen, answer["unanswered"]) == (
+        Stands.DONE,
         "not in maintenance",
         Seen.AS_ASKED,
         [line.did],
     )
+
+
+def test_a_removal_of_logins_refused_after_one_was_removed_is_a_change_of_the_request_and_says_which(record: Record) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.change_database(DATABASE, unheld_logins=("i_left", "i_owns_a_table"))
+
+    def refused_at_the_second(database: str) -> NoReturn:
+        refused = LoginRemovalRefused(f"The database {database} did not remove the login i_owns_a_table: it owns objects")
+        refused.changed = ("i_left",)
+        raise refused
+
+    proxy.host.remove_unheld_logins = refused_at_the_second
+    request = record.write(MOVE_A, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    [line] = kept.events
+    assert line.outcome is not None and kept.error is not None
+    assert (kept.stands, line.outcome.said, line.outcome.changed, line.is_credited) == (
+        Stands.FAILED,
+        Said.REFUSED,
+        ["i_left"],
+        True,
+    )
+    assert f"Before that, this request did: remove the logins no container holds from {DATABASE}." in kept.error
