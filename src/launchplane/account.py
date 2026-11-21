@@ -31,11 +31,6 @@ def unanswered(kept: Kept) -> list[str]:
     return [event.did for event in kept.events if event.is_unanswered]
 
 
-# Each change that has a line and nothing known of what came of it.
-def unseen(kept: Kept) -> list[tuple[Event, Sent]]:
-    return [(event, sent) for event in kept.events if (sent := event.action) is not None and event.outcome is None]
-
-
 def was_sent(kept: Kept, verb: str, subject: str) -> bool:
     return any(sent is not None and (sent.verb, sent.subject) == (verb, subject) for sent in (each.action for each in kept.events))
 
@@ -90,8 +85,11 @@ def so_far(kept: Kept) -> str:
 
 
 # What a reading shows of a change that had no answer. `stamp` is how the routes file names the attempt that sent it.
-# None is a change the reading cannot show either way.
-def seen_of(sent: Sent, generation: str, stamp: str, route: LaneRoute, lane: LaneReading | None) -> Seen | None:
+# None is a line the reading cannot show either way, or one that needs no reading: no change, or one with an answer.
+def seen_of(line: Event, generation: str, stamp: str, route: LaneRoute, lane: LaneReading | None) -> Seen | None:
+    sent = line.action
+    if sent is None or line.outcome is not None:
+        return None
     if sent.verb == "route":
         if isinstance(route.file, Unread):
             return None

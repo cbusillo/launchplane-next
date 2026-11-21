@@ -245,6 +245,13 @@ With each lane its own turn, on November 17, nginx lanes:
 - A move held before its switch and killed four times was `working` with attempts `interrupted` four times and a fifth open, and the page said `Taken up 5 times`. Let go, it ended `switched` with one rename, and a probe of the web address never failed.
 - The 63 test-bed tests passed in 22 minutes 30 s, one after another. None ran side by side: tests in five of the seven files kill Launchplane, stop PostgreSQL, restart Docker or stop the proxy, which reaches every lane. Lanes are worked side by side inside the tests of `tests/test_bed_lanes.py`.
 
+With each change written down before it is sent, on November 21:
+
+- One nginx lane moved from one build to another in 5.9 to 6.1 s over five moves, as before.
+- Ending maintenance of a lane with a database and a background service, held before its change of the route, then held once the change was on the host, and killed there: the routes file named the request's generation and attempt, the request was taken up 1.5 s after the kill, read the route back as its own and ended `ended` with two attempts. A visitor got the back soon page until the change and the instance after it, the lane beside it answered throughout, and an end asked after it answered `not in maintenance`.
+- The migration ran on the test bed's record, which held 25,600 requests, as part of a deploy that took the usual time.
+- The 62 test-bed tests of the move, maintenance, retiring, lanes, host answers and data sets passed in 24 minutes 40 s.
+
 ## On the test bed
 
 ```

@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from launchplane.account import accounted, seen_of, so_far, unseen, was_sent
+from launchplane.account import accounted, seen_of, so_far, was_sent
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
@@ -172,15 +172,15 @@ class Worker:
     # and what is seen is written to its line. Nothing the attempt does is chosen from it.
     def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, LaneReading | None], None]:
         kept = self.record.read(request.id)
-        lines = [] if kept is None else unseen(kept)
+        lines = [] if kept is None else [each for each in kept.events if each.action is not None and each.outcome is None]
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
         def look(route: LaneRoute, lane: LaneReading | None) -> None:
-            for line, sent in list(lines):
-                seen = seen_of(sent, request.generation, stamps[line.attempt], route, lane)
+            for line in list(lines):
+                seen = seen_of(line, request.generation, stamps[line.attempt], route, lane)
                 if seen is not None:
                     self.record.complete(attempt, line.id, Reply(seen=seen, seen_at=datetime.now(UTC)))
-                    lines.remove((line, sent))
+                    lines.remove(line)
 
         return look
 
