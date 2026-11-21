@@ -94,8 +94,7 @@ def asked_for(request: Request) -> str:
 INTERRUPTED = "Launchplane stopped, or lost its record, while it was at work on it."
 
 
-# How often a request was taken up, and why the last attempt of it that is over did not end it. It is taken up again by
-# itself however often, so one that can never end says here what keeps it.
+# How often a request was taken up, and why its last attempt that is over did not end it: what keeps one that never ends.
 def taken_up(request: Kept) -> str:
     over = [attempt for attempt in request.attempts if attempt.ended is not None]
     if not over:
@@ -185,7 +184,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests, status.gate_answers),
+            *request_rows(requests, status.cancels_decided),
             *([] if judged is None else finding_rows(judged)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])
@@ -251,7 +250,9 @@ def request_cards(status: Status) -> list[Card]:
     requests = shown_requests(status)
     lanes = sorted({(each.product, each.lane) for each in requests} - on_host)
     of = {lane: [each for each in requests if (each.product, each.lane) == lane] for lane in lanes}
-    return [Card(title=f"{product} · {lane}", rows=request_rows(of[product, lane], status.gate_answers)) for product, lane in lanes]
+    return [
+        Card(title=f"{product} · {lane}", rows=request_rows(of[product, lane], status.cancels_decided)) for product, lane in lanes
+    ]
 
 
 def record_card(status: Status) -> list[Card]:

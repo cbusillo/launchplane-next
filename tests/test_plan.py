@@ -239,7 +239,7 @@ CANCELS = {
 
 
 @pytest.mark.parametrize(("gate", "case"), CANCELS.values(), ids=CANCELS.keys())
-def test_with_a_cancel_asked_a_move_does_what_the_gate_answers_for_its_generation(gate: GateAnswer, case: Case) -> None:
+def test_with_a_cancel_asked_a_move_does_what_the_cancels_decided_for_its_generation(gate: GateAnswer, case: Case) -> None:
     assert next_move_step(replace(case, gate=gate), Cancel()) == case.step
 
 

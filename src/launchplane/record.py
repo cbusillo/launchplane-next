@@ -6,7 +6,7 @@ from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Final, LiteralString, Protocol
+from typing import Any, Final, LiteralString, NamedTuple, Protocol
 
 import psycopg
 from psycopg.rows import DictRow, dict_row
@@ -167,8 +167,7 @@ class Kept(Request):
 
 
 # An attempt begun. `again` says the request had one before it, which may have sent the host a change that has not run yet.
-@dataclass(frozen=True)
-class Taken:
+class Taken(NamedTuple):
     attempt: int
     again: bool
 
@@ -540,9 +539,8 @@ class PostgresRecord(Record):
             session.execute(Sql.END, self.gate.made(stands.value, attempt, stands.value, answer, error))
             return True
 
-    # Only a request at work that no attempt is open for, and that was given no attempt after `last`: so nothing was
-    # done for it since whoever asks read `last`. Its row is locked until it is ended, against being taken up and
-    # against a cancel: one a cancel was asked of is the cancel's to end.
+    # Only a request at work with no attempt open and none after `last`, so nothing was done for it since `last` was
+    # read, and with no cancel asked: that one is the cancel's to end. Its row is locked until it is ended.
     def give_up(self, request: int, last: int) -> Request | None:
         with self.session("giving a request up") as session:
             given_up = self.gate.made(request)

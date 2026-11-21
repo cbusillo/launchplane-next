@@ -17,7 +17,7 @@ from launchplane.proxy import ProxyError
 from launchplane.record import Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
-from launchplane.telling import LOOKS, Witness
+from launchplane.telling import LOOKS, NOBODY, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -42,7 +42,7 @@ type Lane = tuple[str, str]
 class Carries(Protocol):
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult: ...
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, by: Witness, /, *, logins: bool) -> list[str]: ...
-    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
+    def fence(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY, /) -> GateAnswer: ...
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
@@ -169,7 +169,7 @@ class Worker:
                 taken = self.record.take_up(request.id)
                 if taken is not None:
                     witness = self.witness_of(request, taken.attempt, held)
-                    while not self.ended_or_left_open(request, witness, taken.again):
+                    while not self.ended_or_left_open(request, taken.attempt, witness, taken.again):
                         pass
                 return True
         finally:
@@ -193,8 +193,7 @@ class Worker:
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made
     # is cleaned up and read to be gone. False is another round: the record holds a cancel the gate had not decided, and now has.
-    def ended_or_left_open(self, request: Request, witness: Witness, again: bool) -> bool:
-        attempt = witness.attempt
+    def ended_or_left_open(self, request: Request, attempt: int, witness: Witness, again: bool) -> bool:
         came_to = self.ending_of(request, attempt, witness, again)
         if came_to.left_open:
             return self.left_open(attempt, came_to.error or "")

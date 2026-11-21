@@ -20,7 +20,6 @@ from pydantic import BaseModel
 from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
@@ -47,7 +46,7 @@ from launchplane.steps import CANCEL_WON, MaintenanceResult, MoveResult, RetireR
 from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker, carried_out
 
-type StatusReader = Callable[[], Status]
+type StatusReader = Callable[..., Status]
 
 
 log = logging.getLogger(__name__)
@@ -261,6 +260,17 @@ NOT_CONFIRMED = (
 )
 
 
+PART_WAY = "its lane is part way, neither as it was before the request nor as the request would leave it."
+
+
+# Who a look works for: it is stopped, saying why, before anything on the host is started or changed, or a cancel refused.
+def looking(why: str, *, turned_back: bool = False) -> Witness:
+    def stop(*_why: str) -> None:
+        raise Stopped(why)
+
+    return Witness(hold=stop, cancel_asked=lambda: turned_back, refuse_cancel=stop)
+
+
 class Calls:
     def __init__(self, record: Record, wake: Callable[[], object], gate: Carries, read: StatusReader) -> None:
         self.record = record
@@ -276,63 +286,54 @@ class Calls:
             if too_late is not None:
                 self.record.refuse_cancel(request.id, too_late)
 
-    # Giving up is a look that changes nothing, and one ending: only while no attempt of the request is open, and only on a
-    # lane read as the request would leave it or as it was before. A release the gate has decided ends as decided, by itself.
+    # Giving up is no force. With no attempt open, the request's attempts are fenced at the gate, as a take-up fences
+    # them, so nothing they sent can still land. The gate's answer and the lane are then read, and one write ends it.
     def give_up(self, request: int, response: Response) -> KeptRequest | NotFinished:
-        unchanged = f"Request {request} was not given up and nothing was changed"
+        unchanged = f"Request {request} was not given up"
         try:
             kept = self.record.read(request)
             if kept is None:
                 return self.none_such(request, response)
             if kept.stands is not Stands.WORKING or kept.cancel_asked_at is not None:
-                why = f"{unchanged}: it is {kept.stands}, or a cancel was asked of it. Only a request at work is given up."
-                return not_finished(response, HTTPStatus.CONFLICT, why)
-            status = self.read_status()
-            # A gate that cannot be asked without starting the proxy has given no answer: the look starts nothing.
-            asked = kept.work is Work.MOVE or not status.reading.proxy.runs
-            decided = status.gate_answers.get(request) if asked else GateAnswer(Verdict.NONE)
-            if decided is not None and decided.verdict is not Verdict.NONE:
-                why = f"{unchanged}: the gate answers {decided.verdict} for its release, so it is ended as that by itself."
-                return not_finished(response, HTTPStatus.CONFLICT, why)
-            if kept.attempts[-1].ended is None or decided is None or not self.is_as_before_or_as_asked(kept, status):
-                why = (
-                    f"{unchanged}: it is being worked at this moment, or {kept.lane} of {kept.product} could not be read or is "
-                    "part way, neither as it was before the request nor as the request would leave it. It is still at work."
-                )
-                return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
-            given_up = self.record.give_up(request, kept.attempts[-1].id)
+                why = f"{unchanged}: it is {kept.stands}{'' if kept.cancel_asked_at is None else ', and a cancel was asked of it'}."
+                return not_finished(response, HTTPStatus.CONFLICT, f"{why} Only a request at work is given up.")
+            last, lane = kept.attempts[-1], (kept.product, kept.lane)
+            if last.ended is None:
+                return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{unchanged}: it is being worked at this moment.")
+            proxy_stopped = looking("the proxy is stopped, and the gate is not asked without starting it.")
+            decided = self.gate.fence(*lane, kept.generation, last.id, proxy_stopped).verdict
+            if decided is not Verdict.NONE:
+                return not_finished(response, HTTPStatus.CONFLICT, f"{unchanged}: the gate answers {decided} for its release.")
+            if (why_not := self.why_not_let_go(kept, lane)) is not None:
+                return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{unchanged}, and is still at work: {why_not}")
+            given_up = self.record.give_up(request, last.id)
         except RecordError as error:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, self.not_known(request, error))
         except UNREADABLE as error:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{unchanged}: {error}")
         if given_up is None:
-            why = f"{unchanged}: it was taken up again or ended, or a cancel was asked of it, while its lane was read."
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
+            why = "a cancel was asked of it" if self.record.cancel_asked(request) else "it was taken up again"
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{unchanged}: {why} while its lane was read.")
         return given_up
 
-    # A move is as it was before where the host shows nothing its release made. Any other request is asked of its planner.
-    def is_as_before_or_as_asked(self, kept: Kept, status: Status) -> bool:
-        if self.would_act_on_nothing(kept, turned_back=False):
-            return True
-        if kept.work is not Work.MOVE:
-            return self.would_act_on_nothing(kept, turned_back=True)
-        of_lane = (judged for judged in status.lanes if (judged.lane.product, judged.lane.lane) == (kept.product, kept.lane))
-        return all(judged.is_untouched_by(kept.generation) for judged in of_lane)
+    # None where the lane is as the request would leave it or as it was before, which for a move is nothing its release made.
+    def why_not_let_go(self, kept: Kept, lane: tuple[str, str]) -> str | None:
+        as_asked = self.why_it_would_act(kept, turned_back=False)
+        if kept.work is Work.MOVE:
+            as_before = "; ".join(why for judged in self.read_status(lane).lanes for why in judged.left_by(kept.generation)) or None
+        else:
+            as_before = self.why_it_would_act(kept, turned_back=True)
+        return None if None in (as_asked, as_before) else as_before if as_asked == PART_WAY else as_asked
 
-    # The request's own planner, on what the host shows now and stopped before it acts or refuses a cancel: whether it
-    # would do nothing, or turned back put nothing back.
-    def would_act_on_nothing(self, kept: Kept, *, turned_back: bool) -> bool:
-        def stop_before_acting(*_why: str) -> None:
-            raise Stopped
-
-        witness = Witness(hold=stop_before_acting, cancel_asked=lambda: turned_back, refuse_cancel=stop_before_acting)
+    # The request's own planner, stopped before it acts or refuses a cancel. None where it has nothing to do and read every login.
+    def why_it_would_act(self, kept: Kept, *, turned_back: bool) -> str | None:
         try:
-            carried_out(self.gate, kept, 0, witness)
-        except Stopped:
-            return False
-        except Cancelled:
-            pass
-        return True
+            unread = carried_out(self.gate, kept, 0, looking(PART_WAY, turned_back=turned_back)).logins_not_read
+        except Stopped as stopped:
+            return str(stopped)
+        except Cancelled as cancelled:
+            unread = cancelled.put_back.logins_not_read
+        return "; ".join(unread) or None
 
     def keep[Answer: BaseModel](
         self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float

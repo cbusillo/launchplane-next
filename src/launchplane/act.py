@@ -148,8 +148,8 @@ class Status:
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
     cancels: list[Request] = field(default_factory=list[Request])
-    # What the gate answers for each move being worked. None is a gate that gave no answer.
-    gate_answers: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
+    # What the gate answers for each move being worked that a cancel was asked of. None is a gate that gave no answer.
+    cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -295,10 +295,10 @@ class Lanes:
         except RecordError as error:
             return [], str(error)
 
-    def read_status(self) -> Status:
+    def read_status(self, only: Lane | None = None) -> Status:
         # A request taken up or ended while the host is read is at work on what was read.
         before, unread_before = self.kept_or_why_not(self.read_unfinished)
-        reading = self.read(EVERY_LANE)
+        reading = self.read(EVERY_LANE if only is None else Scope(lane=only, web_addresses=True))
         requests, unread_after = self.kept_or_why_not(self.read_unfinished, unread_before)
         cancels, record_error = self.kept_or_why_not(self.read_cancels, unread_after)
         requests = [] if record_error else requests
@@ -310,8 +310,8 @@ class Lanes:
             judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
-        moving = [each for each in requests if (each.work, each.stands) == (Work.MOVE, Stands.WORKING)]
-        decided = {each.id: self.cancel_decided(each) for each in moving}
+        marked = [each for each in requests if (each.work, each.stands) == (Work.MOVE, Stands.WORKING) and each.cancel_asked_at]
+        decided = {each.id: self.cancel_decided(each) for each in marked}
         return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancels, decided)
 
     # Asked as the gate is, and nothing is started to ask it: a status call changes nothing.
@@ -324,7 +324,7 @@ class Lanes:
     # The lane is read, and then the gate is asked, so the gate's answer is never older than the reading it is set beside.
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness = NOBODY) -> MoveResult:
         product = self.read_product(target.product)
-        of = (target, product, generation, attempt)
+        of = (target, product, generation, attempt, witness)
         return settle(
             *self.judging(target.product, target.lane, product, Work.MOVE),
             lambda judged, done, cancel: plan.decide_move(self.release(judged, done, *of), cancel),
@@ -333,21 +333,22 @@ class Lanes:
         )
 
     def release(
-        self, judged: Judgement, done: tuple[Event, ...], target: LaneBuild, product: Product, generation: str, attempt: int
+        self, judged: Judgement, done: tuple[Event, ...], to: LaneBuild, product: Product, generation: str, attempt: int, by: Witness
     ) -> plan.Move:
-        verdict = self.gate().verdict(web_address_of(target.product, target.lane), generation)
-        return plan.Move(judged, target, product, self.name_fresh(target), done, generation, attempt, verdict)
+        verdict = self.gate(by).verdict(web_address_of(to.product, to.lane), generation)
+        return plan.Move(judged, to, product, self.name_fresh(to), done, generation, attempt, verdict)
 
     # The gate is a command in the proxy's container, so a proxy that is absent or stopped is started before a move asks.
-    def gate(self) -> AskedGate:
+    def gate(self, by: Witness = NOBODY) -> AskedGate:
         if not self.proxy.is_running():
+            by.hold()
             self.proxy.start()
         return self.proxy.gate
 
     # After a move failed with no verdict and its attempt was fenced. It reads nothing of the product's description:
     # what the generation made is known by its stamp.
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY, *, logins: bool) -> list[str]:
-        of = (LaneBuild(product=product, lane=lane, build=""), Product(), generation, attempt)
+        of = (LaneBuild(product=product, lane=lane, build=""), Product(), generation, attempt, by)
         return settle(
             *self.judging(product, lane, self.description_of(product), Work.MOVE),
             lambda judged, done, _cancel: plan.decide_clean_up(self.release(judged, done, *of), logins=logins),
@@ -358,8 +359,8 @@ class Lanes:
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
     # one can rename after it. A host that refuses to run it has given no answer.
     @observing()
-    def fence(self, product: str, lane: str, generation: str, attempt: int) -> GateAnswer:
-        return self.gate().fence(web_address_of(product, lane), generation, attempt)
+    def fence(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY) -> GateAnswer:
+        return self.gate(by).fence(web_address_of(product, lane), generation, attempt)
 
     # A cancel of a move, carried to the gate by whoever asks. Why it came too late, or None when it won there.
     def abandon(self, product: str, lane: str, generation: str) -> str | None:

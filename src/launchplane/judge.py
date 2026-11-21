@@ -152,12 +152,12 @@ class Judgement:
     def of_kind(self, *kinds: Kind) -> list[Finding]:
         return [finding for finding in self.findings if finding.kind in kinds]
 
-    # As it was before a release: nothing on the lane carries its generation or a stamp that could not be read, and every
-    # database server has told its logins and has none without a holder.
-    def is_untouched_by(self, generation: str) -> bool:
-        made = (*self.lane.instances, *self.lane.background_services, *self.lane.data_sets)
-        settled = not self.of_kind(*LOGIN_KINDS, Kind.NOT_ACCEPTING, Kind.NOT_ASKED)
-        return settled and all(isinstance(part.generation, str | None) and part.generation != generation for part in made)
+    # Why the lane is not as it was before a release: a stamp that is unread or its own, or logins untold or without a holder.
+    def left_by(self, generation: str) -> list[str]:
+        made = [part.generation for part in (*self.lane.instances, *self.lane.background_services, *self.lane.data_sets)]
+        unread = [str(stamp) for stamp in made if not isinstance(stamp, str | None)]
+        logins = [finding.sentence for finding in self.of_kind(*LOGIN_KINDS, Kind.NOT_ACCEPTING, Kind.NOT_ASKED)]
+        return [*unread, *logins, *(["A part its release made is on the lane"] * (generation in made))]
 
     # What is wrong with the instance itself. Starting another in its place does not make a web address answer.
     def about_instance(self, instance: RunningInstance) -> list[Finding]:

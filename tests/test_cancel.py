@@ -470,7 +470,7 @@ CANCEL_ON_RECORD = {
 
 
 @pytest.mark.parametrize(("unreadable", "said"), CANCEL_ON_RECORD.values(), ids=CANCEL_ON_RECORD.keys())
-def test_a_working_move_with_a_cancel_on_record_shows_what_the_gate_answers_for_it(
+def test_a_working_move_with_a_cancel_on_record_shows_what_the_cancels_decided_for_it(
     record: Record, unreadable: str | None, said: str
 ) -> None:
     bed = bed_on(record)

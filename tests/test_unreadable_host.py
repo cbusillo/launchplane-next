@@ -4,14 +4,16 @@ from typing import NoReturn
 import pytest
 from fastapi.testclient import TestClient
 
+from launchplane.act import Lanes
 from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.gate import LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Asked, Kept, Record, Request, Stands
 from launchplane.telling import NOBODY
 from launchplane.worker import Worker, carried_out
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy
+from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy, numbered_names
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_host_answers import (
     BEGIN,
@@ -193,7 +195,7 @@ def test_a_first_change_the_host_refuses_ends_the_request_failed_with_the_hosts_
     assert (again.id != request.id, kept_of(record, again.id).stands) == (True, Stands.DONE)
 
 
-def test_a_request_found_working_whose_fence_the_host_refuses_to_run_does_nothing_and_stays_working_until_the_gate_answers(
+def test_a_request_found_working_whose_fence_the_host_refuses_to_run_does_nothing_and_stays_working_until_the_cancels_decided(
     record: Record, kind: str
 ) -> None:
     asked, lane, _, _, _, is_as_asked, _ = KINDS[kind]
@@ -297,12 +299,7 @@ def test_giving_up_a_move_that_started_its_instance_and_has_not_switched_is_refu
     assert (worker.work_next(), (kept_of(record, request).answer or {}).get("outcome")) == (True, "switched")
 
 
-# The attempts the gate was told to fence, of any release. The pretend gate lists a release once it is asked about.
-def fenced_at_the_gate(proxy: PretendProxy) -> set[int]:
-    return {kept.fenced for kept in proxy.gate.kept.values()} - {-1}
-
-
-def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_and_changes_nothing_on_the_host_or_at_the_gate(
+def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_changes_nothing_and_its_late_switch_can_no_longer_rename(
     record: Record,
 ) -> None:
     worker, lanes, proxy = serving_a(record)
@@ -313,17 +310,78 @@ def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_and_changes_no
     given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(
         f"/requests/{request.id}/give-up"
     )
+    late = proxy.gate.switch(WEB_ADDRESS, request.generation, 1, "a-late-candidate")
     assert (given_up.status_code, given_up.json()["stands"], "A person gave it up" in given_up.json()["error"]) == (
         200,
         "failed",
         True,
     )
-    assert (proxy.host.actions, fenced_at_the_gate(proxy), proxy.written, worker.work_next()) == (
-        [],
-        set(),
-        {WEB_ADDRESS: "a"},
-        False,
+    assert (proxy.host.actions, late.verdict.value, proxy.written, worker.work_next()) == ([], "none", {WEB_ADDRESS: "a"}, False)
+
+
+LATE_EDITS = {"a retire's removal of the route": (RETIRE, None), "maintenance's back soon page": (BEGIN, BACK_SOON)}
+
+
+@pytest.mark.parametrize(("asked", "to"), LATE_EDITS.values(), ids=LATE_EDITS.keys())
+def test_a_change_of_the_route_sent_before_a_give_up_and_run_after_it_changes_nothing(
+    record: Record, asked: Asked, to: str | None
+) -> None:
+    client, proxy, _, request = cut_short(record, asked, lane_brought_up_with_a, changes=0)
+    kept, read = kept_of(record, request), proxy.installed(WEB_ADDRESS)
+    given_up = client.post(f"/requests/{request}/give-up")
+    late = proxy.edit(WEB_ADDRESS, kept.generation, kept.attempts[-1].id, read, to)
+    assert (given_up.status_code, late, proxy.installed(WEB_ADDRESS)) == (200, LOST, read)
+
+
+# From the moment a give-up is asked, something happens on the host as the lane is read for the given time.
+def at_reading(proxy: PretendProxy, number: int, happens: Callable[[], object]) -> None:
+    read, readings = proxy.host.read, list[int]()
+
+    def read_as_it_happens(lane: tuple[str, str] | None = None) -> OnHost:
+        readings.append(1)
+        if len(readings) == number:
+            happens()
+        return read(lane)
+
+    proxy.host.read = read_as_it_happens
+
+
+@pytest.mark.parametrize("reading", [1, 2])
+def test_a_switch_sent_before_a_give_up_and_run_while_the_lane_is_looked_at_renames_nothing_and_the_give_up_is_refused(
+    record: Record, reading: int
+) -> None:
+    proxy = PretendProxy(PretendHost())
+    lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
+    worker, read_again = Worker(record, lanes, NO_SECRETS), unread_after_the_first_change(proxy)
+    request = record.write(MOVE_B, CALLER, None)
+    assert worker.work_next() is True
+    read_again()
+    [candidate], sent_by = proxy.host.instances, kept_of(record, request.id).attempts[-1].id
+    at_reading(proxy, reading, lambda: proxy.switch(WEB_ADDRESS, request.generation, sent_by, candidate))
+    given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(
+        f"/requests/{request.id}/give-up"
     )
+    assert (given_up.status_code, proxy.written, kept_of(record, request.id).stands) == (503, {}, Stands.WORKING)
+
+
+def test_giving_up_a_retire_while_the_logins_of_the_database_it_keeps_cannot_be_read_is_refused_saying_so(record: Record) -> None:
+    client, proxy, _, request = cut_short(record, RETIRE, lane_brought_up_with_a, changes=0)
+    proxy.host.change_database(DATABASE, unheld_logins=NOT_TOLD)
+    given_up = client.post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, str(NOT_TOLD) in given_up.json()["error"], kept_of(record, request).stands) == (
+        503,
+        True,
+        Stands.WORKING,
+    )
+
+
+def test_giving_up_a_move_that_repaired_a_background_service_on_a_lane_now_as_asked_ends_it_and_the_service_stays(
+    record: Record,
+) -> None:
+    proxy = lane_whose_background_service_is_gone()
+    client, _, worker, request = cut_short(record, MOVE_A, lambda: proxy, changes=2)
+    given_up = client.post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, len(proxy.host.background_services), worker.work_next()) == (200, 1, False)
 
 
 def test_giving_up_the_first_move_of_a_lane_that_made_only_the_network_of_its_data_set_is_refused_and_the_move_finishes_it(
@@ -360,15 +418,28 @@ def test_giving_up_a_move_that_made_nothing_on_a_lane_whose_database_has_a_login
     assert (given_up.status_code, kept_of(record, request).stands, proxy.host.actions) == (503, Stands.WORKING, [])
 
 
-def test_a_give_up_refused_while_the_proxy_is_stopped_does_not_start_the_proxy_and_changes_nothing(record: Record) -> None:
+def stop_the_proxy(proxy: PretendProxy) -> None:
+    proxy.running = False
+
+
+@pytest.mark.parametrize(
+    "stops_at_reading", [0, 1, 2], ids=["before the give-up", "as the lane is first read", "as it is read again"]
+)
+def test_a_give_up_of_a_move_whose_proxy_is_stopped_or_stops_as_the_lane_is_read_is_refused_and_does_not_start_the_proxy(
+    record: Record, stops_at_reading: int
+) -> None:
     worker, lanes, proxy = serving_a(record)
     read_again = unread_after_the_first_change(proxy)
     request = record.write(MOVE_B, CALLER, None).id
     assert worker.work_next() is True
     read_again()
-    proxy.running, made = False, list(proxy.host.actions)
+    made = list(proxy.host.actions)
+    at_reading(proxy, stops_at_reading, lambda: stop_the_proxy(proxy))
+    if not stops_at_reading:
+        stop_the_proxy(proxy)
     given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(f"/requests/{request}/give-up")
-    assert (given_up.status_code, proxy.running, proxy.host.actions, fenced_at_the_gate(proxy)) == (503, False, made, set())
+    assert (given_up.status_code, proxy.running, proxy.host.actions) == (503, False, made)
+    assert ("the proxy is stopped" in given_up.json()["error"]) is (stops_at_reading == 0)
 
 
 def test_a_cancel_accepted_after_a_give_up_has_read_the_lane_and_before_it_ends_the_request_wins_and_the_give_up_changes_nothing(
