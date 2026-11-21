@@ -14,10 +14,10 @@ from launchplane.instance import LaneBuild, Verdict
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import AtLimit, Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
+from launchplane.record import Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
-from launchplane.telling import LOOKS, Witness
+from launchplane.telling import LOOKS, NOBODY, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -42,7 +42,7 @@ type Lane = tuple[str, str]
 class Carries(Protocol):
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult: ...
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, by: Witness, /, *, logins: bool) -> list[str]: ...
-    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer: ...
+    def fence(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY, /) -> GateAnswer: ...
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None: ...
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
@@ -166,26 +166,14 @@ class Worker:
             with self.record.turn(*lane) as held:
                 if held is None:
                     return False
-                attempt = self.taken_up(request, found := self.record.at_limit(request.id))
-                witness = None if attempt is None else self.witness_of(request, attempt, held)
-                while witness is not None and not self.ended_or_left_open(request, witness.attempt, witness, found):
-                    pass
+                taken = self.record.take_up(request.id)
+                if taken is not None:
+                    witness = self.witness_of(request, taken.attempt, held)
+                    while not self.ended_or_left_open(request, taken.attempt, witness, taken.again):
+                        pass
                 return True
         finally:
             self.let_go(lane)
-
-    # A request interrupted as often as one may be is left to a person only once the gate, fenced through its last attempt,
-    # has no verdict for it and no cancel is on record. Otherwise, also with no answer from the gate, it is taken up again.
-    def taken_up(self, request: Request, at: AtLimit | None) -> int | None:
-        if at is None or not at.reached:
-            return self.record.take_up(request.id)
-        try:
-            verdict = self.lanes.fence(request.product, request.lane, request.generation, at.last).verdict
-        except HOST_UNREAD:
-            verdict = None
-        if verdict is Verdict.NONE and self.record.stop_for_a_person(request.id, at.last):
-            return None
-        return self.record.take_up(request.id, exempt=True)
 
     # What a call is given to say what it did, to ask before each action, and to ask between actions.
     def witness_of(self, request: Request, attempt: int, held: Held) -> Witness:
@@ -205,8 +193,8 @@ class Worker:
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made
     # is cleaned up and read to be gone. False is another round: the record holds a cancel the gate had not decided, and now has.
-    def ended_or_left_open(self, request: Request, attempt: int, witness: Witness, found: AtLimit | None) -> bool:
-        came_to = self.ending_of(request, attempt, witness, found)
+    def ended_or_left_open(self, request: Request, attempt: int, witness: Witness, again: bool) -> bool:
+        came_to = self.ending_of(request, attempt, witness, again)
         if came_to.left_open:
             return self.left_open(attempt, came_to.error or "")
         if came_to.verdict is Verdict.NONE and request.work is Work.MOVE:
@@ -244,20 +232,20 @@ class Worker:
             self.record.refuse_cancel(request.id, too_late)
         return False
 
-    # No ending is written and the attempt is not counted. The request is taken up again by itself, after a while and
+    # No ending is written. The request is taken up again by itself, after a while and
     # ahead of newer work on its lane, which stays this worker's until then.
     def left_open(self, attempt: int, why: str) -> bool:
         self.record.leave_open(attempt, why)
         self.sleep(SECONDS_BEFORE_TAKING_UP_AGAIN)
         return True
 
-    def ending_of(self, request: Request, attempt: int, witness: Witness, found: AtLimit | None) -> Ending:
+    def ending_of(self, request: Request, attempt: int, witness: Witness, again: bool) -> Ending:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
             # A change of the route an earlier attempt sent may still arrive: it is fenced before this one reads the lane.
-            if found is not None and request.work is not Work.MOVE:
-                self.lanes.fence(request.product, request.lane, request.generation, found.last)
+            if again and request.work is not Work.MOVE:
+                self.lanes.fence(request.product, request.lane, request.generation, attempt - 1)
             answer = carried_out(self.lanes, request, attempt, witness)
         except Cancelled as cancelled:
             kept = self.record.read(request.id)
