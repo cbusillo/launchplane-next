@@ -299,7 +299,7 @@ class Calls:
         return not_finished(response, HTTPStatus.CONFLICT, f"{why} It is being worked again and will be finished.")
 
     # The request's own call, on what the host shows now and stopped before it acts: whether it would answer with nothing
-    # done or, cancelled, with nothing put back. So the one check of a finished maintenance or retire is its planner's.
+    # done or, with a cancel asked, nothing put back. So the one check of a finished maintenance or retire is its planner's.
     def has_nothing_to_do(self, kept: Kept, cancelled: bool) -> bool:
         def stop_before_acting() -> None:
             raise WouldAct

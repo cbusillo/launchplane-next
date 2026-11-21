@@ -369,7 +369,7 @@ class Lanes:
         return plan.too_late_to_cancel(web_address) if answer.verdict is Verdict.COMMITTED else None
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
-        answer = settle(
+        answer: RetireResult = settle(
             *self.judging(product, lane, self.description_of(product), Work.RETIRE),
             lambda judged, done, cancel: plan.decide_retire(judged, delete_data_set, done, cancel),
             self.take,
