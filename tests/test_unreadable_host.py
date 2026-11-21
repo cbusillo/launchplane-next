@@ -382,9 +382,9 @@ def test_a_cancel_accepted_after_a_give_up_has_read_the_lane_and_before_it_ends_
     client, end = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)), record.give_up
     cancelled: list[int] = []
 
-    def end_after_a_cancel(given_up: int, last: int) -> Request | None:
-        cancelled.append(client.post(f"/requests/{given_up}/cancel").status_code)
-        return end(given_up, last)
+    def end_after_a_cancel(ending: int, last: int) -> Request | None:
+        cancelled.append(client.post(f"/requests/{ending}/cancel").status_code)
+        return end(ending, last)
 
     monkeypatch.setattr(record, "give_up", end_after_a_cancel)
     given_up = client.post(f"/requests/{request}/give-up")
