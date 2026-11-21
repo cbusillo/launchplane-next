@@ -38,15 +38,15 @@ def seen_of(line: Event, stamp: str, route: LaneRoute) -> Seen | None:
 def accounted[Answer: Result](answer: Answer, kept: Kept | None) -> Answer:
     if kept is None:
         return answer
-    routes = [event.action for event in kept.events if event.action is not None and event.is_credited]
+    routes = [event.route for event in kept.events if event.is_credited]
     again = len(kept.attempts) > 1
     update: dict[str, object] = {"not_known": NOT_KNOWN} if again else {}
     if isinstance(answer, MaintenanceResult) and answer.outcome in ENDED:
         # A lane found out of maintenance was ended by this request only if a route it published says so.
-        published = any(each.to not in (None, BACK_SOON) for each in routes)
+        published = any(to not in (None, BACK_SOON) for to, _ in routes)
         update["outcome"] = MaintenanceOutcome.ENDED if published else MaintenanceOutcome.NOT_IN_MAINTENANCE
     if isinstance(answer, RetireResult):
-        removed = next((each.was for each in routes if each.to is None), None)
+        removed = next((was for to, was in routes if to is None), None)
         update["route_removed_to_container"] = answer.route_removed_to_container or removed
         update["outcome"] = RetireOutcome.NOT_KNOWN if again and answer.outcome is RetireOutcome.UNCHANGED else answer.outcome
     if isinstance(answer, MoveResult) and again and answer.outcome is Outcome.UNCHANGED:

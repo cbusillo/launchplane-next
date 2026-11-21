@@ -1,6 +1,7 @@
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
+from launchplane import telling
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     DataSet,
@@ -60,7 +61,6 @@ from launchplane.steps import (
     TooLate,
     Wait,
 )
-from launchplane.telling import named
 
 type Step[Answer] = Action | Done[Answer] | Stop
 type StepBack = Step[PutBack] | TooLate
@@ -88,7 +88,7 @@ def change_made_by(event: Event) -> str | None:
     if isinstance(event, Switched | Discarded):
         changed = event.won if isinstance(event, Switched) else not event.kept
         return f"{'switch the route to' if isinstance(event, Switched) else 'retire'} {event.container}" if changed else None
-    return named(event) if isinstance(event, CHANGES) else None
+    return telling.named(event) if isinstance(event, CHANGES) else None
 
 
 def changes_made(done: tuple[Event, ...]) -> list[str]:

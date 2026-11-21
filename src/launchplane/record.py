@@ -188,6 +188,11 @@ class Event(BaseModel):
     def is_route(self) -> bool:
         return self.action is not None and self.action.verb == "route"
 
+    # Where a change of the route sent visitors, and where they went before it.
+    @property
+    def route(self) -> tuple[str | None, str | None]:
+        return (None, None) if self.action is None else (self.action.to, self.action.was)
+
     # Whether this is a change of the route the request is known to have made: the gate said so, or the routes file
     # names the request and the attempt that sent it.
     @property

@@ -265,11 +265,12 @@ PART_WAY = "its lane is part way, neither as it was before the request nor as th
 
 
 # Who a look works for: it is stopped, saying why, before anything on the host is started or changed, or a cancel refused.
+# It looks for a request that had attempts before, so nothing it is told says that the request changed nothing.
 def looking(why: str, *, turned_back: bool = False) -> Witness:
     def stop(*_why: str) -> None:
         raise Stopped(why)
 
-    return Witness(hold=stop, cancel_asked=lambda: turned_back, refuse_cancel=stop)
+    return Witness(hold=stop, cancel_asked=lambda: turned_back, refuse_cancel=stop, again=True)
 
 
 class Calls:

@@ -16,11 +16,11 @@ class Outcome(StrEnum):
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-# What is said, in these words wherever it is said, of a request taken up more than once. What an attempt did to the
-# lane's parts, its data set and its logins is known only to that attempt, so an earlier one's is lost with it.
+# What is said, in these words wherever it is said, of a request that had an attempt before the one that speaks. What an
+# attempt did to the lane's parts, its data set and its logins is known only to that attempt, so an earlier one's is lost.
 NOT_KNOWN = (
-    "This request was taken up more than once, and what its earlier attempts changed on the lane's parts, its data set "
-    "and its logins is not known."
+    "This request was interrupted, and what its earlier attempts changed on the lane's parts, its data set and its logins "
+    "is not known."
 )
 
 

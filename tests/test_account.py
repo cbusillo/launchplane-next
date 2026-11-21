@@ -8,7 +8,7 @@ import pytest
 from launchplane.act import Lanes
 from launchplane.api import why_not_cancelled
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import BACK_SOON, ProxySeen, Verdict
+from launchplane.instance import BACK_SOON, DataSet, ProxySeen, Verdict
 from launchplane.page import cards, line_of, request_note
 from launchplane.record import Event, Interrupted, Kept, Record, Reply, Sent, Stands, how_cancelled
 from launchplane.steps import NOT_KNOWN
@@ -314,9 +314,9 @@ def test_a_retire_cancelled_with_its_named_data_set_part_deleted_does_not_say_th
 ) -> None:
     proxy = lane_brought_up_with_a()
 
-    def connection_lost_once_the_volume_is_gone(found: object) -> NoReturn:
-        proxy.host.change_data_set("site", "testing", "data-1", volumes=(), databases=())
-        raise ContainerHostError(f"Deleting {found} on test failed: the connection was lost")
+    def connection_lost_once_the_volume_is_gone(found: DataSet) -> NoReturn:
+        proxy.host.change_data_set("site", "testing", found.data_set, volumes=(), databases=())
+        raise ContainerHostError(f"Deleting the data set {found.data_set} on test failed: the connection was lost")
 
     proxy.host.delete_data_set = connection_lost_once_the_volume_is_gone
     worker, request = worker_on(proxy, record), record.write(RETIRE.model_copy(update={"delete_data_set": "data-1"}), CALLER, None)

@@ -455,7 +455,7 @@ class Lanes:
     def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.EditRoute | steps.Switch):
-            return route_changed(witness, action, lambda: self.route_sent(action, witness))
+            return route_changed(witness, action, partial(self.route_sent, action, witness))
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path, with_log=not behind_back_soon)
         if isinstance(action, steps.AwaitBackgroundService):

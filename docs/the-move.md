@@ -261,7 +261,7 @@ ssh root@launchplane.shiny 'docker -H tcp://docker-lp-scratch.shiny:2376 exec la
 curl -X POST $H/kill; curl -X DELETE $H/holds
 ```
 
-   Within a few seconds the request's row on the card turns `done` and stays for 10 minutes. Its note says it ended as done, that it was taken up more than once and what its earlier attempts changed on the lane's parts is not known, and then its lines, the last of them `send held.test-bed-gate-ledger.test to <instance>: may have been sent, no answer, then read as made by this request`.
+   Within a few seconds the request's row on the card turns `done` and stays for 10 minutes. Its note says it ended as done, that it was interrupted and what its earlier attempts changed on the lane's parts, its data set and its logins is not known, and then its lines, the last of them `send held.test-bed-gate-ledger.test to <instance>: may have been sent, no answer, then read as made by this request`.
 
 ```
 curl -s $L/requests/<id>                                   # stands done, answer.outcome ended, attempts interrupted then done
