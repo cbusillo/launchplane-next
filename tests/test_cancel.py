@@ -804,7 +804,7 @@ DECIDED = pytest.mark.parametrize(("decide", "stands", "instances"), DECIDED_AT_
 
 
 @DECIDED
-def test_giving_up_a_move_whose_release_the_gate_has_decided_and_that_is_not_finished_is_refused_and_the_move_is_finished(
+def test_giving_up_a_move_whose_release_the_gate_has_decided_is_refused_and_it_ends_as_the_gate_decided(
     record: Record, decide: Callable[[PretendGate, str], object], stands: Stands, instances: list[str]
 ) -> None:
     worker, lanes, proxy = serving_a(record)
@@ -814,8 +814,8 @@ def test_giving_up_a_move_whose_release_the_gate_has_decided_and_that_is_not_fin
     proxy.host.place(TO_BUILD_B, NEW, generation=kept_of(record, asked).generation)
     decide(proxy.gate, kept_of(record, asked).generation)
     refused = client.post(f"/requests/{asked}/give-up")
-    assert (refused.status_code, "is part way" in refused.json()["error"], kept_of(record, asked).stands) == (
-        503,
+    assert (refused.status_code, "the gate answers" in refused.json()["error"], kept_of(record, asked).stands) == (
+        409,
         True,
         Stands.WORKING,
     )

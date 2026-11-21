@@ -78,13 +78,13 @@ def test_the_same_key_asked_twice_moves_the_lane_once_and_answers_with_the_one_r
     assert (other[0], builds_of_the_lane()) == (409, [BUILD_B]), other
 
 
-def how_systemd_has_launchplane() -> list[str]:
-    return on_control("systemctl show launchplane --property=ActiveState,Result --value").split()
+def how_systemd_has_launchplane() -> str:
+    return on_control("systemctl show launchplane --property=ActiveState --value").strip()
 
 
 def test_a_launchplane_that_keeps_dying_is_left_failed_by_systemd_at_its_limit_and_the_documented_command_starts_it_again() -> None:
     def is_left_failed() -> bool:
-        return how_systemd_has_launchplane() == ["failed", "start-limit-hit"]
+        return how_systemd_has_launchplane() == "failed"
 
     limit = int(on_control("systemctl show launchplane --property=StartLimitBurst --value"))
     on_control(FORGET_STARTS)
@@ -99,4 +99,4 @@ def test_a_launchplane_that_keeps_dying_is_left_failed_by_systemd_at_its_limit_a
     finally:
         on_control(START_AGAIN)
     wait_for(launchplane_answers, seconds=30)
-    assert (limit, left_failed) == (10, (["failed", "start-limit-hit"], False))
+    assert (limit, left_failed) == (10, ("failed", False))

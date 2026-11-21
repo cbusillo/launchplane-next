@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance
+from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
@@ -282,7 +282,8 @@ class Calls:
 
     # Giving up is no force. It ends a request at work only while no attempt of it is open, so nothing is being done for
     # it, and only on a lane read as the request would leave it or as it was before the request. A change of the route
-    # its last attempt sent may still arrive, so that attempt is fenced before the lane is read.
+    # its last attempt sent may still arrive, so that attempt is fenced before the lane is read. A release the gate has
+    # decided ends as the gate decided, by itself.
     def give_up(self, request: int, response: Response) -> KeptRequest | NotFinished:
         try:
             kept = read_until(self.record, request, SECONDS_WAITED_TO_GIVE_UP, is_resting)
@@ -296,7 +297,10 @@ class Calls:
                 why = f"{unchanged}: it is being worked at this moment, so its lane cannot be read as it will be left. Ask again."
                 return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
             last = kept.attempts[-1].id
-            self.gate.fence(kept.product, kept.lane, kept.generation, last)
+            decided = self.gate.fence(kept.product, kept.lane, kept.generation, last).verdict
+            if decided is not Verdict.NONE:
+                why = f"{unchanged}: the gate answers {decided} for its release, so it is ended as that by itself."
+                return not_finished(response, HTTPStatus.CONFLICT, why)
             if not (self.would_act_on_nothing(kept, turned_back=False) or self.would_act_on_nothing(kept, turned_back=True)):
                 why = (
                     f"{unchanged}: {kept.lane} of {kept.product} is part way, neither as it was before the request nor as the "
