@@ -891,7 +891,7 @@ def route_lines(request: dict[str, Any]) -> list[dict[str, Any]]:
     return [each for each in request["events"] if each["action"] is not None and each["action"]["verb"] == "route"]
 
 
-def test_ending_maintenance_killed_with_its_route_change_on_the_host_and_no_reply_says_ended_and_the_end_after_it_claims_nothing() -> (
+def test_ending_maintenance_killed_with_its_route_change_on_the_host_and_no_reply_says_ended_and_the_next_end_claims_nothing() -> (
     None
 ):
     let_go()
