@@ -146,6 +146,11 @@ class RecordingApi:
     made: RecordingContainers
     system_times: Iterator[str] = field(default_factory=lambda: iter(()))
     refuses_to_describe: set[str] = field(default_factory=set[str])
+    commands: builtins.list[tuple[RecordingContainer, builtins.list[str]]] = field(
+        default_factory=lambda: builtins.list[tuple[RecordingContainer, builtins.list[str]]]()
+    )
+    results: builtins.list[ExecResult] = field(default_factory=lambda: builtins.list[ExecResult]())
+    inspection_lost: bool = False
 
     def containers(self, **options: object) -> list[dict[str, Any]]:
         return [found.listed for found in self.made.list(filters=options.get("filters"))]
@@ -157,6 +162,22 @@ class RecordingApi:
     @staticmethod
     def volumes(**_options: object) -> dict[str, object]:
         return {"Volumes": []}
+
+    # A command is made, started and asked how it ended, as Docker's client does it. One whose container is not there is
+    # refused before it is made. `inspection_lost` is a daemon that ran the command and then cannot say how it ended.
+    def exec_create(self, container: str, command: builtins.list[str]) -> dict[str, Any]:
+        self.commands.append((self.made.get(container), command))
+        return {"Id": len(self.commands) - 1}
+
+    def exec_start(self, made: int) -> bytes:
+        container, command = self.commands[made]
+        self.results.append(container.exec_run(command))
+        return self.results[-1].output
+
+    def exec_inspect(self, made: int) -> dict[str, Any]:
+        if self.inspection_lost:
+            raise APIError(f"No such exec instance: {made}")
+        return {"ExitCode": self.results[-1].exit_code}
 
     def inspect_container(self, container: str) -> dict[str, Any]:
         if container in self.refuses_to_describe:

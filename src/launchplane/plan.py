@@ -16,6 +16,7 @@ from launchplane.instance import (
 from launchplane.judge import LOGIN_KINDS, Finding, Judgement, Kind, subjects_of
 from launchplane.product import Product
 from launchplane.steps import (
+    NOT_KNOWN,
     Abandon,
     Action,
     AwaitBackgroundService,
@@ -29,7 +30,7 @@ from launchplane.steps import (
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
-    DeletePart,
+    DeleteDataSet,
     Discard,
     Discarded,
     Done,
@@ -50,11 +51,16 @@ from launchplane.steps import (
     StartDatabase,
     StartInstance,
     StartProxy,
+    StartStopped,
     Stop,
+    StopDatabase,
+    StopPart,
     Switch,
+    Switched,
     TooLate,
     Wait,
 )
+from launchplane.telling import named
 
 type Step[Answer] = Action | Done[Answer] | Stop
 type StepBack = Step[PutBack] | TooLate
@@ -68,6 +74,32 @@ def failure_report(why: str, log_tail: str) -> str:
     if not log_tail:
         return f"{why} It wrote no log."
     return f"{why}\nIts last log lines:\n{log_tail}"
+
+
+# The steps that change the host. A step that reads, waits, checks or only asks the gate is not among them.
+CHANGES = (
+    *(StartProxy, CreateDataSetNetwork, CreateDataSetVolume, CreateDatabase, StartDatabase, StartInstance, EditRoute),
+    *(StartBackgroundService, Retire, RemoveLogins, StopPart, StopDatabase, StartStopped),
+)
+
+
+# What a step that was taken changed. A switch the gate did not rename for, and an instance it kept, changed nothing.
+def change_made_by(event: Event) -> str | None:
+    if isinstance(event, Switched | Discarded):
+        changed = event.won if isinstance(event, Switched) else not event.kept
+        return f"{'switch the route to' if isinstance(event, Switched) else 'retire'} {event.container}" if changed else None
+    return named(event) if isinstance(event, CHANGES) else None
+
+
+def changes_made(done: tuple[Event, ...]) -> list[str]:
+    return [change for change in map(change_made_by, done) if change is not None]
+
+
+# What an attempt changed is all its request changed only where it is the first.
+def changes_so_far(done: tuple[Event, ...], *, again: bool) -> str:
+    changes = changes_made(done)
+    before = f"Before that, this attempt did: {'; '.join(changes)}. Those changes stay." if changes else ""
+    return f"{before} {NOT_KNOWN}".strip() if again else before or "Nothing was changed."
 
 
 def sentences(findings: list[Finding]) -> str:
@@ -239,17 +271,18 @@ class Move:
         started = {event.container for event in self.done if isinstance(event, StartInstance)}
         return next((instance for instance in self.lane.instances if instance.container in started), None)
 
-    # What the host shows now. What the request changed to get there is its account's to say, over every attempt.
     def answer(self, **update: object) -> MoveResult:
-        receiving = self.instance(self.lane.route.written)
+        receiving, done = self.instance(self.lane.route.written), self.done
+        settled = Outcome.REPAIRED if changes_made(done) else Outcome.UNCHANGED
         answer = MoveResult(
             product=self.target.product,
             lane=self.target.lane,
             build=self.target.build,
             web_address=self.lane.web_address,
-            outcome=Outcome.SWITCHED if self.gate.verdict is Verdict.COMMITTED else Outcome.UNCHANGED,
+            outcome=Outcome.SWITCHED if self.gate.verdict is Verdict.COMMITTED else settled,
             container_receiving_visitors=self.lane.route.written,
             data_set=None if receiving is None else receiving.data_set,
+            did=changes_made(done),
         )
         return answer.model_copy(update=update)
 
@@ -490,42 +523,21 @@ def decide_retire(
     return retire_step(judged, None if cancel else delete_data_set, done)
 
 
-# The first thing a retire changes is the route, and nothing it removes after that can be put back.
+# After the route, nothing a retire removes can be put back. Of its data set, only what the host shows is said.
 def retire_step_back(judged: Judgement, delete_data_set: str | None) -> StepBack:
     lane = judged.lane
     if (step := loading_step(judged)) is not None:
         return step
     if lane.route.written is not None:
         return put_back_or_what_is_left(judged, None)
+    left = lane.data_set(delete_data_set)
+    whole = left is not None and not any(finding.kind in PARTS_GONE for finding in judged.about_data_set(left))
+    kept = f" The data set {delete_data_set}, named for deleting, is kept: the cancel came before it was deleted." if whole else ""
+    saved = f" Moving the lane to a build brings it back on its data set.{kept}" if whole or not delete_data_set else ""
     return TooLate(
         f"{lane.web_address} has no route, so retiring {lane.lane} of {lane.product} could not be cancelled and is finished "
-        "as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself."
-        f"{what_is_left_of(judged, delete_data_set)}"
+        f"as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself.{saved}"
     )
-
-
-# What the host shows of the data set named by a retire that a cancel came too late for: whole, or with parts gone.
-def what_is_left_of(judged: Judgement, delete_data_set: str | None) -> str:
-    back = " Moving the lane to a build brings it back on its data set."
-    left = judged.lane.data_set(delete_data_set)
-    if left is None:
-        return back
-    gone = [finding for finding in judged.about_data_set(left) if finding.kind in PARTS_GONE]
-    if gone:
-        return (
-            f" Of the data set {left.data_set}, named for deleting, what is left is kept, and it is not whole: {sentences(gone)}. "
-            "The lane cannot be moved back onto it as it is."
-        )
-    return f"{back} The data set {left.data_set}, named for deleting, is kept: the cancel came before any of it was deleted."
-
-
-# In the order a whole data set went before: its database servers, then its volumes, then its networks.
-def next_to_delete(found: DataSet) -> DeletePart:
-    if found.databases:
-        return DeletePart(found.data_set, "database server", found.databases[0].container)
-    if found.volumes:
-        return DeletePart(found.data_set, "volume", found.volumes[0])
-    return DeletePart(found.data_set, "network", found.networks[0].name)
 
 
 def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
@@ -544,16 +556,19 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     if doubled:
         return Stop(f"{sentences(doubled)}, so nothing of the data set was deleted: which is its data is not known.")
     if named is not None:
-        return next_to_delete(named)
-    # What the lane has now. What this request removed and deleted is its account's to say, over every attempt.
+        return DeleteDataSet(named)
+    retired = [event.container for event in done if isinstance(event, Retire)]
+    deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
+    changed = any(isinstance(event, EditRoute | Retire | RemoveLogins) for event in done)
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,
             lane=lane.lane,
             web_address=web_address,
-            outcome=RetireOutcome.UNCHANGED,
-            route_removed_to_container=None,
-            retired_containers=[],
+            outcome=RetireOutcome.DELETED if deleted else RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
+            route_removed_to_container=next((event.was for event in done if isinstance(event, EditRoute)), None),
+            retired_containers=retired,
+            deleted_data_set=deleted,
             kept_data_sets=sorted(found.data_set for found in lane.data_sets),
         )
     )

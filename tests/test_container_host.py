@@ -13,6 +13,7 @@ from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.data_set import RULES_AS_READ, RULES_FILE, login_of
 from launchplane.docker_answers import (
     ContainerHostError,
+    ContainerHostRefused,
     HostAnswers,
     Listed,
     LoginRemovalRefused,
@@ -107,7 +108,7 @@ def test_a_stopped_database_docker_lists_but_does_not_describe_is_an_error_not_o
 def test_a_database_is_given_longer_to_stop_than_a_part_before_docker_kills_it() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
-    host.start_instance(TARGET, "shop-testing-1", None, None, {})
+    host.start_instance(TARGET, "shop-testing-1", None)
     host.stop_part("shop-testing-1")
     host.stop_database(DATABASE)
     assert docker.containers.by_name["shop-testing-1"].calls[-1] == "stop within 30 s"
@@ -258,17 +259,18 @@ def test_a_password_made_for_a_lane_is_known_as_a_secret_before_docker_is_given_
     host.create_database("shop", "testing", "d1", DATA_SET_NETWORK, VOLUME, "postgres:18-alpine")
     docker.containers.by_name[DATABASE].answers = [
         ExecResult(0, json.dumps(RULES_AS_READ).encode()),
+        ExecResult(0, b"[]"),
         ExecResult(0),
     ]
-    host.start_instance(TARGET, WEB, LINK, None, host.make_login(WEB, LINK))
+    host.start_instance(TARGET, WEB, LINK)
     assert known_when_given == [True, True]
 
 
 def test_an_instance_is_stamped_with_the_generation_that_made_it_and_read_back_with_it() -> None:
     docker = RecordingDocker()
     host = ContainerHost(docker.as_client(), "test")
-    host.start_instance(TARGET, WEB, None, GENERATION, {})
-    host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None, None, {})
+    host.start_instance(TARGET, WEB, None, GENERATION)
+    host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None)
     assert {each.container: each.generation for each in host.read().instances} == {
         WEB: GENERATION,
         "shop-testing-bbbbbbbbbbbb": None,
@@ -328,8 +330,8 @@ def test_no_command_run_in_the_database_server_to_make_a_login_carries_the_passw
     docker = RecordingDocker()
     host = database_made(docker)
     server = docker.containers.by_name[DATABASE]
-    server.answers = [ExecResult(0, json.dumps(RULES_AS_READ).encode()), ExecResult(0)]
-    host.start_instance(TARGET, WEB, LINK, None, host.make_login(WEB, LINK))
+    server.answers = [ExecResult(0, json.dumps(RULES_AS_READ).encode()), ExecResult(0, b"[]"), ExecResult(0)]
+    host.start_instance(TARGET, WEB, LINK)
     given, run_in_the_server = given_to(docker, WEB), " ".join(server.calls)
     assert (given["PGUSER"], server.answers) == ("i_aaaaaaaaaaaa", [])
     assert ("--set=verifier=SCRAM-SHA-256$4096:" in run_in_the_server, given["PGPASSWORD"] in run_in_the_server) == (True, False)
@@ -348,7 +350,7 @@ def test_a_background_service_is_given_the_login_its_instance_holds_and_none_is_
 def test_a_background_service_whose_instance_holds_no_login_is_not_started() -> None:
     docker = RecordingDocker()
     host = database_made(docker)
-    host.start_instance(TARGET, WEB, None, None, {})
+    host.start_instance(TARGET, WEB, None)
     with pytest.raises(ContainerHostError, match="holds no database login"):
         host.start_background_service(TARGET, WEB, LINK, ["work"])
     assert BACKGROUND_SERVICE not in docker.containers.by_name
@@ -401,10 +403,7 @@ def test_logins_whose_holders_could_not_be_listed_are_unread_and_never_a_server_
 
 
 def test_only_the_logins_no_container_holds_on_the_fresh_reading_are_removed() -> None:
-    assert removals_sent(RecordingDocker(), ROLES, ExecResult(0), ExecResult(0)) == (
-        ["i_left", "i_left_too"],
-        ["i_left", "i_left_too"],
-    )
+    assert removals_sent(RecordingDocker(), ROLES, ExecResult(0), ExecResult(0)) == (None, ["i_left", "i_left_too"])
 
 
 def test_a_removal_the_server_refuses_is_a_refused_write_with_its_error_and_says_which_login_went_before_it() -> None:
@@ -459,7 +458,7 @@ def test_nothing_is_attached_to_a_lanes_network_that_exists_and_is_not_quiet() -
     docker = RecordingDocker()
     docker.networks.made[LANE_NETWORK] = network(True, {}, name=LANE_NETWORK, labels={})
     with pytest.raises(ContainerHostError, match="not quiet"):
-        ContainerHost(docker.as_client(), "test").start_instance(TARGET, "shop-testing-1", None, None, {})
+        ContainerHost(docker.as_client(), "test").start_instance(TARGET, "shop-testing-1", None)
     assert docker.containers.by_name == {}
 
 
@@ -538,3 +537,15 @@ def test_a_description_launchplane_cannot_read_is_an_error_naming_the_file(tmp_p
     (tmp_path / "shop.json").write_text('{"database": {"image": "postgres:18"}, "datbase": {}}')
     with pytest.raises(ProductError, match=r"shop\.json"):
         ProductFolder(tmp_path).read("shop")
+
+
+def test_a_command_docker_ran_and_cannot_say_how_it_ended_is_no_answer_and_one_it_would_not_make_is_a_refusal() -> None:
+    docker = RecordingDocker()
+    host = ContainerHost(docker.as_client(), "test")
+    host.start_instance(TARGET, WEB, None)
+    docker.api.inspection_lost = True
+    with pytest.raises(ContainerHostError, match="was sent, and Docker could not say how it ended") as lost:
+        host.run_in(WEB, ["flock", "the gate"])
+    with pytest.raises(ContainerHostRefused):
+        host.run_in("a-container-that-is-gone", ["flock", "the gate"])
+    assert (isinstance(lost.value, ContainerHostRefused), docker.containers.by_name[WEB].calls[-1]) == (False, "flock the gate")

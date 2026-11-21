@@ -34,7 +34,7 @@ from launchplane.steps import (
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
-    DeletePart,
+    DeleteDataSet,
     Discard,
     Discarded,
     Done,
@@ -116,7 +116,7 @@ class Case:
     gate: GateAnswer = NO_VERDICT
 
 
-def answer(outcome: Outcome, receiving: str | None, error: str | None = None) -> Done[MoveResult]:
+def answer(outcome: Outcome, receiving: str | None, error: str | None = None, did: tuple[str, ...] = ()) -> Done[MoveResult]:
     return Done(
         MoveResult(
             product="site",
@@ -125,6 +125,7 @@ def answer(outcome: Outcome, receiving: str | None, error: str | None = None) ->
             web_address=WEB_ADDRESS,
             outcome=outcome,
             container_receiving_visitors=receiving,
+            did=list(did),
             error=error,
         )
     )
@@ -152,7 +153,7 @@ MOVES = {
         (NEW,),
         ("new", "new"),
         (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", kept=False)),
-        answer(Outcome.SWITCHED, "new"),
+        answer(Outcome.SWITCHED, "new", did=("start the instance new of b", "switch the route to new", "retire old")),
         gate=COMMITTED_TO_NEW,
     ),
     "a switch found in the routes file answers switched, though this attempt did none of it": Case(
@@ -163,8 +164,8 @@ MOVES = {
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), gone("stray")),
-    "a finished cleanup answers the lane as it is, and leaves what was changed to the request's account": Case(
-        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.UNCHANGED, "new")
+    "a finished cleanup answers repaired, with what it did": Case(
+        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.REPAIRED, "new", did=("retire stray",))
     ),
     "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
         (OLD, NEW), ("old", "old"), (), gone("new")
@@ -185,7 +186,7 @@ MOVES = {
         (OLD,),
         ("old", "old"),
         (STARTED_NEW, REFUSED, Discarded("new", kept=False)),
-        answer(Outcome.CHECK_FAILED, "old", "Connection refused"),
+        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("start the instance new of b", "retire new")),
     ),
 }
 
@@ -348,17 +349,18 @@ def test_a_committed_release_whose_route_the_proxy_reports_not_enabled_is_waited
     assert next_move_step(replace(disabled, gate=COMMITTED_TO_NEW)) == disabled.step
 
 
-# What the planner answers once nothing is left: the lane as it is. What was removed is the request's account's to say.
-NOTHING_LEFT = Done(
-    RetireResult(
-        product="site",
-        lane="testing",
-        web_address=WEB_ADDRESS,
-        outcome=RetireOutcome.UNCHANGED,
-        route_removed_to_container=None,
-        retired_containers=[],
+def retired(route_removed_to: str | None, containers: list[str]) -> Done[RetireResult]:
+    outcome = RetireOutcome.RETIRED if route_removed_to or containers else RetireOutcome.UNCHANGED
+    return Done(
+        RetireResult(
+            product="site",
+            lane="testing",
+            web_address=WEB_ADDRESS,
+            outcome=outcome,
+            route_removed_to_container=route_removed_to,
+            retired_containers=containers,
+        )
     )
-)
 
 
 RETIRES = {
@@ -371,10 +373,11 @@ RETIRES = {
     "instances retire once the route is gone": Case(
         (OLD, STRAY), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"),), Retire("old")
     ),
-    "a finished retirement answers": Case(
-        (), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"), Retire("old")), NOTHING_LEFT
+    "a finished retirement answers what it removed": Case(
+        (), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"), Retire("old")), retired("old", ["old"])
     ),
-    "a retired lane answers": Case((), (None, None), (), NOTHING_LEFT),
+    "a lane whose route was already gone answers no route removed": Case((), (None, None), (Retire("old"),), retired(None, ["old"])),
+    "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
     "a lane whose loaded route is disabled has it removed": Case(
         (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), EditRoute(WEB_ADDRESS, None, "old", "old")
     ),
@@ -613,16 +616,7 @@ def test_a_move_neither_waits_nor_stops_over_unread_logins_of_a_data_set_it_does
 
 
 def test_a_data_set_named_for_deleting_is_deleted_without_its_logins_being_removed_first() -> None:
-    assert retire_step_with(LEFT_ON_D1, delete="d1") == DeletePart("d1", "database server", "database-d1")
-
-
-def test_a_data_set_is_deleted_one_part_at_a_time_its_database_server_then_its_volume_then_its_network() -> None:
-    without_server = data_set_named("d1", None)
-    only_network = data_set_named("d1", None, volume=False)
-    assert [retire_step_with(left, delete="d1") for left in (without_server, only_network)] == [
-        DeletePart("d1", "volume", "volume-d1"),
-        DeletePart("d1", "network", "network-d1"),
-    ]
+    assert retire_step_with(LEFT_ON_D1, delete="d1") == DeleteDataSet(LEFT_ON_D1)
 
 
 def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:
@@ -729,7 +723,7 @@ def test_a_retire_stops_background_services_first_and_deletes_the_named_data_set
         return cast("Action | Done[RetireResult] | Stop", decide_retire(judged, delete, ()))
 
     assert step((OLD_ON_D1,), (background_service_of(OLD_ON_D1),), "d1") == Retire("old-background-service")
-    assert step((), (), "d1") == DeletePart("d1", "database server", "database-d1")
+    assert step((), (), "d1") == DeleteDataSet(D1)
     refused = step((), (), "d2")
     assert isinstance(refused, Stop) and "2 database servers (database-a, database-b)" in refused.reason
     kept = step((), (), None)

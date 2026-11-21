@@ -413,8 +413,8 @@ RETIRED_NOTHING = RetireResult(
     product="site",
     lane="other",
     web_address="other.site.test",
-    outcome=RetireOutcome.RETIRED,
-    route_removed_to_container="old",
+    outcome=RetireOutcome.UNCHANGED,
+    route_removed_to_container=None,
     retired_containers=[],
 )
 # noinspection SqlResolve
@@ -453,10 +453,12 @@ def test_the_migration_to_action_lines_leaves_an_ended_request_and_an_interrupte
         "remove the route of other.site.test",
         False,
         False,
-        RetireOutcome.UNCHANGED,
+        RetireOutcome.NOT_KNOWN,
     )
     attempt = begun(postgres_record, 2)
-    postgres_record.complete(attempt, postgres_record.about_to(attempt, "retire old", Sent(verb="remove", subject="old")), Reply())
+    postgres_record.complete(
+        attempt, postgres_record.about_to(attempt, "remove the route", Sent(verb="route", subject="other.site.test")), Reply()
+    )
     taken_up = postgres_record.read(2)
     assert taken_up is not None and [each.ended for each in taken_up.attempts] == ["interrupted", "interrupted", None]
     assert [each.is_unanswered for each in taken_up.events] == [False, True]
@@ -526,7 +528,7 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
     if hint is Sent:
         return Sent(verb=f"said with {HELD}", subject=HELD, to=f"to {HELD}", was=HELD)
     if hint is Reply:
-        return Reply(changed=[HELD, f"within {HELD}"])
+        return Reply.model_validate({"said": "changed", f"named {HELD}": [HELD]})
     if str in kinds:
         return f"said with {HELD} in it"
     if any(get_origin(kind) is dict for kind in kinds):

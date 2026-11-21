@@ -78,7 +78,7 @@ class CheckFailed(Exception):
 
 
 class HelperHost(Protocol):
-    def ensure_helper(self, helper: HelperContainer) -> bool: ...
+    def ensure_helper(self, helper: HelperContainer) -> None: ...
     def is_running(self, container: str) -> bool: ...
     def run_in(self, container: str, command: list[str]) -> CommandResult: ...
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]: ...
@@ -198,14 +198,13 @@ class TraefikProxy:
     def is_running(self) -> bool:
         return self.host.is_running(PROXY_NAME)
 
-    def start(self) -> bool:
-        made = self.host.ensure_helper(PROXY)
+    def start(self) -> None:
+        self.host.ensure_helper(PROXY)
         started = self.clock()
         while not (result := self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", LOADED_ROUTES_URL])).succeeded:
             if self.clock() - started >= self.load_deadline_seconds:
                 raise ProxyError(f"The proxy did not answer within {self.load_deadline_seconds:g} s of starting: {result.output}")
             self.sleep(POLL_SECONDS)
-        return made
 
     @observing()
     def read_routes(self) -> dict[str, Loaded]:

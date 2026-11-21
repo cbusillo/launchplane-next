@@ -88,10 +88,9 @@ def retire_answering(product: str, lane: str, _delete_data_set: str | None, _wit
         product=product,
         lane=lane,
         web_address="testing.site.test",
-        outcome=RetireOutcome.UNCHANGED,
+        outcome=RetireOutcome.RETIRED,
         route_removed_to_container=None,
-        retired_containers=[],
-        kept_data_sets=[f"data-{SECRET}"],
+        retired_containers=[f"site-testing-{SECRET}"],
     )
 
 
@@ -223,7 +222,7 @@ def test_a_secret_in_the_name_of_a_json_value_is_removed_like_one_in_the_value()
 def test_cleaning_replaces_only_the_secret_and_keeps_the_explanation_around_it() -> None:
     status, text = answer_to(ANSWERS["a move that stopped"], GivenSecrets(on_host=frozenset({SECRET})))
     explanation = "The move of testing of site to site:b stopped, and is safe to ask again: The lane is not as it must be: "
-    assert (status, json.loads(text.split("\n")[-1])) == (503, {"error": f"{explanation}{SECRET_REMOVED} Nothing was changed."})
+    assert (status, json.loads(text.split("\n")[-1])) == (503, {"error": explanation + SECRET_REMOVED})
 
 
 def test_the_page_opens_when_the_secrets_cannot_be_read() -> None:

@@ -113,8 +113,7 @@ NO_ANSWER = "may have been sent, no answer"
 def line_of(event: Event, attempt_is_open: bool) -> str:
     if event.action is None:
         return event.did if event.error is None else f"{event.did}, refused"
-    did = f"{event.did}, to put the lane back" if event.action.back else event.did
-    reply = event.outcome
+    did, reply = event.did, event.outcome
     if reply is None:
         return f"about to {did}" if attempt_is_open and event.error is None else f"{did}: {NO_ANSWER}"
     heard = NO_ANSWER if reply.said is None else HEARD[reply.said]
@@ -131,10 +130,11 @@ def done_so_far(request: Kept) -> str:
     return f"{taken_up(request)}So far: {'; '.join(lines)}." if lines else f"{taken_up(request)}Nothing done so far."
 
 
-# A request that has just ended keeps its lines on the page, so the last of them can be read after it has ended.
+# A request that has just ended keeps its lines on the page, so the last of them can be read after it has ended. What
+# its answer says is not known is said here in the same words.
 def how_it_ended(request: Kept) -> str:
-    lines = "; ".join(lines_of(request)) or "none"
-    return f"{request.error or f'It ended as {request.stands}.'} Its lines: {lines}."
+    ended = request.error or " ".join(filter(None, [f"It ended as {request.stands}.", (request.answer or {}).get("not_known")]))
+    return f"{ended} Its lines: {'; '.join(lines_of(request)) or 'none'}."
 
 
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.

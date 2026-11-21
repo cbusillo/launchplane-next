@@ -1,6 +1,5 @@
 import threading
 from collections.abc import Callable
-from typing import Any
 
 import pytest
 
@@ -20,8 +19,6 @@ from launchplane.judge import Condition, Kind, Shown, Work
 from launchplane.product import Product, ProductError
 from launchplane.record import Asked, Kept, RecordError, Stands
 from launchplane.steps import MaintenanceOutcome, Outcome, RetireOutcome
-from launchplane.worker import Worker
-from tests.given_secrets import GivenSecrets
 from tests.pretend_host import (
     EARLIER,
     GENERATION,
@@ -35,25 +32,10 @@ from tests.pretend_host import (
     lanes_on,
     numbered_names,
 )
-from tests.pretend_record import PretendRecord
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 BUILD_B = LaneBuild(product="site", lane="testing", build="site:b")
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
-
-
-# The answer of a call carried as the worker carries it. What a request changed is said from its lines in the record,
-# so a call made with nobody to write them down answers only what the host shows.
-def answer_worked(lanes: Lanes, asked: Asked) -> dict[str, Any]:
-    record = PretendRecord()
-    request = record.write(asked, "a test", None)
-    assert Worker(record, lanes, GivenSecrets()).work_next() is True
-    kept = record.kept[request.id]
-    assert kept.answer is not None, kept.error
-    return kept.answer
-
-
-RETIRE = Asked(product="site", lane="testing", work=Work.RETIRE)
 
 
 def lanes_serving(build: LaneBuild, container: str) -> tuple[Lanes, PretendProxy]:
@@ -134,18 +116,18 @@ def test_a_proxy_that_never_runs_stops_the_move_with_an_error_not_a_loop() -> No
 
 def test_retiring_removes_the_route_before_any_instance() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
-    result = answer_worked(lanes, RETIRE)
+    result = lanes.retire("site", "testing")
     assert proxy.host.actions == ["unroute", "retire a"]
-    assert (result["outcome"], result["route_removed_to_container"], result["retired_containers"]) == ("retired", "a", ["a"])
+    assert (result.outcome, result.route_removed_to_container, result.retired_containers) == (RetireOutcome.RETIRED, "a", ["a"])
 
 
 def test_a_retire_that_finishes_on_its_last_allowed_step_answers_retired_not_stopped() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
     for number in range(MOST_STEPS - 3):
         proxy.host.place(BUILD_A, f"b{number:02}")
-    result = answer_worked(lanes, RETIRE)
+    result = lanes.retire("site", "testing")
     assert len(proxy.host.actions) == MOST_STEPS - 1
-    assert (result["outcome"], proxy.host.instances) == ("retired", {})
+    assert (result.outcome, proxy.host.instances) == (RetireOutcome.RETIRED, {})
 
 
 def lane_brought_up_with_a() -> PretendProxy:
@@ -197,8 +179,8 @@ def test_retiring_a_lane_with_data_stops_its_background_service_first_and_keeps_
     kept = lanes_on(proxy).retire("site", "testing")
     assert proxy.host.actions == ["unroute", f"retire {background_service_container_of(instance)}", f"retire {instance}"]
     assert (kept.deleted_data_set, kept.kept_data_sets) == (None, ["data-1"])
-    deleted = answer_worked(lanes_on(proxy), RETIRE.model_copy(update={"delete_data_set": "data-1"}))
-    assert (deleted["outcome"], deleted["deleted_data_set"], deleted["kept_data_sets"]) == ("deleted", "data-1", [])
+    deleted = lanes_on(proxy).retire("site", "testing", delete_data_set="data-1")
+    assert (deleted.outcome, deleted.deleted_data_set, deleted.kept_data_sets) == (RetireOutcome.DELETED, "data-1", [])
 
 
 NOT_LAUNCHPLANES: dict[str, Callable[[Lanes], object]] = {
@@ -255,16 +237,16 @@ def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_th
     proxy = lane_brought_up_with_a()
     proxy.host.actions.clear()
     proxy.host.change_database("database-data-1", unheld_logins=("i_left",))
-    moved = answer_worked(lanes_on(proxy), MOVE_B.model_copy(update={"build": BUILD_A.build}))
+    moved = lanes_on(proxy).move(BUILD_A, GENERATION, 1)
     proxy.host.change_database("database-data-1", unheld_logins=("i_left_again",))
-    retired = answer_worked(lanes_on(proxy), RETIRE)
-    assert (moved["outcome"], proxy.host.actions[0], proxy.host.actions[-1]) == (
-        "repaired",
+    retired = lanes_on(proxy).retire("site", "testing")
+    assert (moved.outcome, proxy.host.actions[0], proxy.host.actions[-1]) == (
+        Outcome.REPAIRED,
         "remove logins from database-data-1",
         "remove logins from database-data-1",
     )
-    assert (retired["outcome"], [each.unheld_logins for each in proxy.host.data_sets["data-1"].databases]) == (
-        "retired",
+    assert (retired.outcome, [each.unheld_logins for each in proxy.host.data_sets["data-1"].databases]) == (
+        RetireOutcome.RETIRED,
         [()],
     )
 

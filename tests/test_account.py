@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import UTC, datetime
 from itertools import count
 from typing import Any, NoReturn
@@ -7,37 +7,31 @@ import pytest
 
 from launchplane.act import Lanes
 from launchplane.api import why_not_cancelled
-from launchplane.docker_answers import ContainerHostError, LoginRemovalRefused
-from launchplane.instance import DataSetUse, LaneBuild, ProxySeen, Verdict
+from launchplane.docker_answers import ContainerHostError
+from launchplane.instance import BACK_SOON, ProxySeen, Verdict
 from launchplane.page import cards, line_of, request_note
-from launchplane.record import Asked, Event, Interrupted, Kept, Record, Reply, Sent, Stands, how_cancelled
+from launchplane.record import Event, Interrupted, Kept, Record, Reply, Sent, Stands, how_cancelled
+from launchplane.steps import NOT_KNOWN
 from launchplane.telling import Said, Seen
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import (
-    NOT_LAUNCHPLANES_ROUTE,
-    WEB_ADDRESS,
-    WITH_DATA,
-    LaunchplaneKilled,
-    PretendHost,
-    PretendProxy,
-    numbered_names,
-)
+from tests.pretend_host import NOT_LAUNCHPLANES_ROUTE, WEB_ADDRESS, WITH_DATA, LaunchplaneKilled, PretendProxy, numbered_names
 from tests.pretend_record import PretendRecord, begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance
 from tests.test_host_answers import (
-    DATABASE,
+    BEGIN,
     END,
     MOVE_A,
     REFUSED,
     RETIRE,
     cancelled_while_checking,
-    lane_whose_background_service_is_gone,
     lane_with_a_login_the_server_will_not_remove,
     worker_on,
 )
 from tests.test_route_edits import accepted_and_not_answered
 from tests.test_worker import CALLER, MOVE_B, kept_of, serving_a
+
+BY_HAND = "a call from the address 192.0.2.7"
 
 
 # Every call made on a part of the pretend host, in order and with what it was given.
@@ -74,12 +68,13 @@ def ending_maintenance_with_its_route_change_made_and_not_answered(record: Recor
     return proxy, request.id
 
 
-# The line of the start says the host answered it changed, and the host shows no background service.
-def a_start_answered_done_beside_a_host_that_shows_none(record: Record) -> tuple[PretendProxy, int]:
-    proxy = lane_whose_background_service_is_gone()
-    request = record.write(MOVE_A, CALLER, None)
-    killed_after(len(["start", "await"]), proxy, record)
-    proxy.host.background_services.clear()
+# The line of the change to the back soon page says the gate made it, and the routes file sends visitors to the instance.
+def a_route_change_answered_done_beside_a_host_that_shows_otherwise(record: Record) -> tuple[PretendProxy, int]:
+    proxy = lane_brought_up_with_a()
+    instance = proxy.written[WEB_ADDRESS]
+    request = record.write(BEGIN, CALLER, None)
+    killed_after(len(["show back soon", "stop the background service"]), proxy, record)
+    proxy.route(WEB_ADDRESS, instance)
     return proxy, request.id
 
 
@@ -92,7 +87,7 @@ def part_way_through_a_retire(record: Record) -> tuple[PretendProxy, int]:
 
 INTERRUPTED: dict[str, Callable[[Record], tuple[PretendProxy, int]]] = {
     "ending maintenance, its route change made and never answered": ending_maintenance_with_its_route_change_made_and_not_answered,
-    "a line that says done beside a host that shows otherwise": a_start_answered_done_beside_a_host_that_shows_none,
+    "a line that says done beside a host that shows otherwise": a_route_change_answered_done_beside_a_host_that_shows_otherwise,
     "part way through a retire": part_way_through_a_retire,
 }
 
@@ -108,6 +103,10 @@ def carried_on(record: PretendRecord, proxy: PretendProxy, request: int) -> tupl
         assert worker.work_next() is True
     left = (proxy.written, sorted(proxy.host.instances), sorted(proxy.host.background_services), sorted(proxy.host.data_sets))
     return calls, kept_of(record, request), left
+
+
+def credited(kept: Kept) -> list[str]:
+    return [each.did for each in kept.events if each.is_credited]
 
 
 @pytest.mark.parametrize("interrupted", INTERRUPTED.values(), ids=INTERRUPTED.keys())
@@ -129,10 +128,19 @@ def test_erasing_action_history_changes_the_account_but_not_the_next_host_action
     calls_erased, without_history, left_erased = carried_from_the_interruption(erased=True)
     assert calls and (calls, left) == (calls_erased, left_erased)
     assert (with_history.stands, without_history.stands) == (Stands.DONE, Stands.DONE)
-    assert with_history.answer != without_history.answer
+    assert credited(with_history) != credited(without_history)
 
 
-def test_a_move_that_only_waited_and_checked_over_two_attempts_answers_unchanged(record: Record) -> None:
+def test_a_request_asked_again_on_a_lane_already_as_asked_answers_unchanged_and_says_nothing_is_not_known(record: Record) -> None:
+    proxy = lane_brought_up_with_a()
+    request = record.write(MOVE_A, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None
+    assert (kept.answer["outcome"], kept.answer["did"], kept.answer["not_known"], kept.events) == ("unchanged", [], None, [])
+
+
+def test_a_move_taken_up_again_that_then_finds_nothing_to_do_says_not_known_and_never_unchanged(record: Record) -> None:
     proxy = lane_brought_up_with_a()
     proxy.loaded.clear()
     proxy.holds_delivery = True
@@ -141,43 +149,34 @@ def test_a_move_that_only_waited_and_checked_over_two_attempts_answers_unchanged
     proxy.holds_delivery = False
     assert worker.work_next() is True
     kept = kept_of(record, request.id)
-    assert (
-        kept.answer is not None
-        and [each.did for each in kept.events] == [f"wait for the proxy to load the route of {WEB_ADDRESS}"] * 2
-    )
-    assert ([each.ended for each in kept.attempts], kept.answer["outcome"], kept.answer["did"]) == (
-        ["unfinished", "done"],
-        "unchanged",
-        [],
-    )
-
-
-# A move to the build a lane already serves, whose one change is the removal of the logins left in its server, made by
-# `remove`: how the request ended, and what its one line was answered.
-def moved_with_logins_removed_by(record: Record, remove: Callable[[PretendHost, str], list[str]], *left: str) -> tuple[Kept, Reply]:
-    proxy = lane_brought_up_with_a()
-    proxy.host.change_database(DATABASE, unheld_logins=left)
-
-    def removed(database: str) -> list[str]:
-        return remove(proxy.host, database)
-
-    proxy.host.remove_unheld_logins = removed
-    request = record.write(MOVE_A, CALLER, None)
-    assert worker_on(proxy, record).work_next() is True
-    kept = kept_of(record, request.id)
-    [line] = kept.events
-    assert line.outcome is not None
-    return kept, line.outcome
-
-
-def test_a_clean_up_of_logins_that_removed_none_is_no_change_of_the_request(record: Record) -> None:
-    def held_by_the_time_it_is_read_again(host: PretendHost, database: str) -> list[str]:
-        host.change_database(database, unheld_logins=())
-        return []
-
-    kept, said = moved_with_logins_removed_by(record, held_by_the_time_it_is_read_again, "i_left")
     assert kept.answer is not None
-    assert (said.said, kept.answer["outcome"], kept.answer["did"]) == (Said.ALREADY, "unchanged", [])
+    assert ([each.ended for each in kept.attempts], kept.answer["outcome"], kept.answer["not_known"]) == (
+        ["unfinished", "done"],
+        "not known",
+        NOT_KNOWN,
+    )
+    [row] = [row for row in cards(serving_the_page(proxy, record).read_status())[0].rows if row.name.startswith("Request")]
+    assert NOT_KNOWN in (row.note or "")
+
+
+def serving_the_page(proxy: PretendProxy, record: Record) -> Lanes:
+    return Lanes(proxy.host, proxy, lambda _product: WITH_DATA, read_unfinished=record.unfinished, read_ended=record.ended_lately)
+
+
+def test_a_request_that_stops_says_nothing_was_changed_only_on_its_first_attempt_and_not_known_once_taken_up_again(
+    record: Record,
+) -> None:
+    first, again = lane_brought_up_with_a(), lane_brought_up_with_a()
+    first.unread[WEB_ADDRESS] = NOT_LAUNCHPLANES_ROUTE
+    stopped_at_once = record.write(MOVE_A, CALLER, None)
+    assert worker_on(first, record).work_next() is True
+    again.host.background_services.clear()
+    interrupted = record.write(MOVE_A.model_copy(update={"lane": "other"}), CALLER, None)
+    assert begun(record, interrupted.id) > 0
+    again.unread["other.site.test"] = NOT_LAUNCHPLANES_ROUTE
+    assert worker_on(again, record).work_next() is True
+    errors = [kept_of(record, each.id).error or "" for each in (stopped_at_once, interrupted)]
+    assert [("Nothing was changed." in error, NOT_KNOWN in error) for error in errors] == [(True, False), (False, True)]
 
 
 def test_a_cancel_that_won_and_whose_clean_up_was_refused_is_a_cancel_that_won_on_the_page_and_to_a_cancel_asked_again(
@@ -192,18 +191,6 @@ def test_a_cancel_that_won_and_whose_clean_up_was_refused_is_a_cancel_that_won_o
         why_not_cancelled(never_asked)
         == f"Request {kept.id} ended as failed, so it was not cancelled. Nothing was changed by this call."
     )
-
-
-def test_a_request_that_stops_says_what_every_attempt_of_it_changed_before_that(record: Record) -> None:
-    proxy = lane_whose_background_service_is_gone()
-    request = record.write(MOVE_A, CALLER, None)
-    killed_after(len(["start", "await"]), proxy, record)
-    [instance] = proxy.host.instances
-    proxy.unread[WEB_ADDRESS] = NOT_LAUNCHPLANES_ROUTE
-    assert worker_on(proxy, record).work_next() is True
-    kept = kept_of(record, request.id)
-    assert kept.stands is Stands.FAILED and kept.error is not None
-    assert f"Before that, this request did: start the background service of {instance}. Those changes stay." in kept.error
 
 
 def test_a_line_is_written_before_its_change_is_sent_and_only_the_attempt_that_is_open_adds_to_it(record: Record) -> None:
@@ -233,7 +220,7 @@ LINES = {
     "send x to a: may have been sent, no answer": (LINE | {"action": ROUTE}, False),
     "send x to a: done": (LINE | {"action": ROUTE, "outcome": {"said": "changed"}}, False),
     "send x to a: found already as asked": (LINE | {"action": ROUTE, "outcome": {"said": "already as asked"}}, False),
-    "send x to a, to put the lane back: refused": (LINE | {"action": ROUTE | {"back": True}, "outcome": {"said": "refused"}}, True),
+    "send x to a: refused": (LINE | {"action": ROUTE, "outcome": {"said": "refused"}}, True),
     "send x to a: may have been sent, no answer, then read as made by this request": (
         LINE | {"action": ROUTE, "outcome": {"seen": "made by this request"}, "error": "lost"},
         False,
@@ -244,85 +231,18 @@ LINES = {
 
 
 @pytest.mark.parametrize(("shown", "line"), LINES.items(), ids=LINES.keys())
-def test_the_page_says_how_far_each_change_is_known_to_have_got_and_shows_a_line_written_before_this_as_it_was(
+def test_the_page_says_how_far_a_change_of_the_route_is_known_to_have_got_and_shows_any_other_line_as_a_note(
     shown: str, line: tuple[dict[str, Any], bool]
 ) -> None:
     assert line_of(Event.model_validate(line[0]), line[1]) == shown
 
 
-def test_a_request_asked_again_on_a_lane_already_as_asked_is_credited_with_nothing(record: Record) -> None:
-    proxy = lane_brought_up_with_a()
-    request = record.write(Asked.model_validate(MOVE_A.model_dump()), CALLER, None)
-    assert worker_on(proxy, record).work_next() is True
-    kept = kept_of(record, request.id)
-    assert kept.answer is not None and (kept.answer["outcome"], kept.answer["did"], kept.answer["unanswered"]) == (
-        "unchanged",
-        [],
-        [],
-    )
-
-
-BY_HAND = "a call from the address 192.0.2.7"
-
-
 # The request as it ended, its answer, its one line for a change of the route, and what that line was read back as.
 def ended_with_its_route_line(record: Record, request: int) -> tuple[Kept, dict[str, Any], Event, Seen | None]:
     kept = kept_of(record, request)
-    [line] = [each for each in kept.events if each.action is not None and each.action.verb == "route"]
+    [line] = [each for each in kept.events if each.is_route]
     assert kept.answer is not None and line.outcome is not None
     return kept, kept.answer, line, line.outcome.seen
-
-
-def test_a_retire_cancelled_with_part_of_its_named_data_set_deleted_says_which_parts_and_that_what_is_left_is_not_whole(
-    record: Record,
-) -> None:
-    proxy = lane_brought_up_with_a()
-    delete = proxy.host.delete_part
-
-    def connection_lost_before_the_network_goes(part: str, name: str) -> bool:
-        if part == "network":
-            raise ContainerHostError(f"Deleting the network {name} on test failed: the connection was lost")
-        return delete(part, name)
-
-    proxy.host.delete_part = connection_lost_before_the_network_goes
-    worker, request = worker_on(proxy, record), record.write(RETIRE.model_copy(update={"delete_data_set": "data-1"}), CALLER, None)
-    assert worker.work_next() is True
-    record.cancel(request.id, BY_HAND)
-    assert worker.work_next() is True
-    kept = kept_of(record, request.id)
-    assert kept.stands is Stands.DONE and kept.answer is not None and kept.cancel_refused is not None
-    assert (kept.answer["deleted"], kept.answer["deleted_data_set"], kept.answer["kept_data_sets"]) == (
-        [f"delete the {part} of the data set data-1" for part in ("database server database-data-1", "volume volume-data-1")],
-        None,
-        ["data-1"],
-    )
-    assert ("it is not whole" in kept.cancel_refused, "before any of it was deleted" in kept.cancel_refused) == (True, False)
-    assert "brings it back on its data set" not in kept.cancel_refused
-
-
-def test_a_start_killed_once_its_login_is_made_has_a_line_for_the_login_and_one_for_the_container_it_never_made(
-    record: Record,
-) -> None:
-    proxy = lane_brought_up_with_a()
-
-    def killed(
-        target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, login: Mapping[str, str]
-    ) -> NoReturn:
-        assert target and container and use and generation and login
-        raise LaunchplaneKilled
-
-    proxy.host.start_instance = killed
-    request = record.write(MOVE_B, CALLER, None)
-    with pytest.raises(LaunchplaneKilled):
-        worker_on(proxy, record).work_next()
-    made, started = [each for each in kept_of(record, request.id).events if each.action is not None]
-    [new] = [each.split()[0] for each in proxy.host.logins_made[1:]]
-    assert made.outcome is not None and (made.did, made.action and made.action.verb, made.outcome.said) == (
-        f"make the login of {new} in the database {DATABASE}",
-        "make login",
-        Said.CHANGED,
-    )
-    assert (started.did, started.outcome, new in proxy.host.instances) == (f"start the instance {new} of site:b", None, False)
 
 
 def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_completed_as_the_requests_own_by_a_later_reading(
@@ -349,16 +269,25 @@ def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_completed_
     proxy.switch, proxy.read = switch, read_and_then_it_lands
     assert worker.work_next() is True
     kept, answer, line, seen = ended_with_its_route_line(record, request.id)
-    assert (kept.stands, answer["outcome"], answer["unanswered"], line.did in answer["did"], seen) == (
-        Stands.DONE,
-        "switched",
-        [],
-        True,
-        Seen.OURS,
-    )
+    assert (kept.stands, answer["outcome"], seen, line.is_credited) == (Stands.DONE, "switched", Seen.OURS, True)
 
 
-def test_a_cancel_whose_clean_up_had_no_answer_does_not_say_that_nothing_had_to_be_put_back(record: Record) -> None:
+def test_a_route_as_asked_that_another_hand_installed_is_not_the_requests_own(record: Record) -> None:
+    proxy = lane_in_maintenance()
+    [instance] = proxy.host.instances
+    accepted_and_not_answered(proxy, has_run=False)
+    request = record.write(END, CALLER, None)
+    worker = worker_on(proxy, record)
+    assert worker.work_next() is True
+    proxy.route(WEB_ADDRESS, instance)
+    assert worker.work_next() is True
+    kept, answer, line, seen = ended_with_its_route_line(record, request.id)
+    assert (kept.stands, answer["outcome"], seen, line.is_unanswered) == (Stands.DONE, "not in maintenance", Seen.AS_ASKED, True)
+
+
+def test_a_cancel_whose_clean_up_had_no_answer_says_what_it_did_is_not_known_and_not_that_nothing_had_to_be_put_back(
+    record: Record,
+) -> None:
     worker, _, proxy = serving_a(record)
     request, retire = record.write(MOVE_B, CALLER, None), proxy.host.retire_instance
 
@@ -377,8 +306,27 @@ def test_a_cancel_whose_clean_up_had_no_answer_does_not_say_that_nothing_had_to_
     assert worker.work_next() is True
     kept = kept_of(record, request.id)
     said = how_cancelled(kept)
-    assert (kept.stands, "Nothing on the host had to be put back" in said) == (Stands.CANCELLED, False)
-    assert "Nothing is known to have been put back. No answer was had to: retire site-testing-0" in said
+    assert (kept.stands, "Nothing on the host had to be put back" in said, NOT_KNOWN in said) == (Stands.CANCELLED, False, True)
+
+
+def test_a_retire_cancelled_with_its_named_data_set_part_deleted_does_not_say_the_lane_can_be_moved_back_onto_it(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+
+    def connection_lost_once_the_volume_is_gone(found: object) -> NoReturn:
+        proxy.host.change_data_set("site", "testing", "data-1", volumes=(), databases=())
+        raise ContainerHostError(f"Deleting {found} on test failed: the connection was lost")
+
+    proxy.host.delete_data_set = connection_lost_once_the_volume_is_gone
+    worker, request = worker_on(proxy, record), record.write(RETIRE.model_copy(update={"delete_data_set": "data-1"}), CALLER, None)
+    assert worker.work_next() is True
+    record.cancel(request.id, BY_HAND)
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.stands is Stands.DONE and kept.answer is not None and kept.cancel_refused is not None
+    assert (kept.answer["not_known"], kept.answer["kept_data_sets"]) == (NOT_KNOWN, ["data-1"])
+    assert ("brings it back on its data set" in kept.cancel_refused, "is kept" in kept.cancel_refused) == (False, False)
 
 
 def test_a_request_that_has_just_ended_stays_on_its_lanes_card_with_its_last_lines(record: Record) -> None:
@@ -396,31 +344,19 @@ def test_a_request_that_has_just_ended_stays_on_its_lanes_card_with_its_last_lin
     assert f"switch {WEB_ADDRESS} to {new}: done" in row.note
 
 
-def test_a_route_as_asked_that_another_hand_installed_is_not_the_requests_own(record: Record) -> None:
-    proxy = lane_in_maintenance()
-    [instance] = proxy.host.instances
-    accepted_and_not_answered(proxy, has_run=False)
-    request = record.write(END, CALLER, None)
-    worker = worker_on(proxy, record)
-    assert worker.work_next() is True
-    proxy.route(WEB_ADDRESS, instance)
-    assert worker.work_next() is True
-    kept, answer, line, seen = ended_with_its_route_line(record, request.id)
-    assert (kept.stands, answer["outcome"], seen, answer["unanswered"]) == (
-        Stands.DONE,
-        "not in maintenance",
-        Seen.AS_ASKED,
-        [line.did],
-    )
+def test_a_route_already_as_asked_when_the_gate_is_sent_the_change_is_no_change_of_the_request(record: Record) -> None:
+    proxy = lane_brought_up_with_a()
+    edit = proxy.edit
 
+    def already_there(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        proxy.edit = edit
+        edit(web_address, generation, attempt, read, container)
+        return edit(web_address, generation, attempt, read, container)
 
-def test_a_removal_of_logins_refused_after_one_was_removed_is_a_change_of_the_request_and_says_which(record: Record) -> None:
-    def refused_at_the_second(_host: PretendHost, database: str) -> NoReturn:
-        refused = LoginRemovalRefused(f"The database {database} did not remove the login i_owns_a_table: it owns objects")
-        refused.changed = ("i_left",)
-        raise refused
-
-    kept, said = moved_with_logins_removed_by(record, refused_at_the_second, "i_left", "i_owns_a_table")
-    assert kept.error is not None
-    assert (kept.stands, said.said, said.changed, kept.events[0].is_credited) == (Stands.FAILED, Said.REFUSED, ["i_left"], True)
-    assert f"Before that, this request did: remove the logins no container holds from {DATABASE}." in kept.error
+    proxy.edit = already_there
+    request = record.write(BEGIN, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    line = next(each for each in kept.events if each.is_route)
+    assert line.outcome is not None and line.action is not None
+    assert (line.action.to, line.outcome.said, line.is_credited) == (BACK_SOON, Said.ALREADY, False)

@@ -51,7 +51,7 @@ class HostLogins:
         self.secrets = secrets
 
     def answer(self, database: str, attempt: str, ask: Ask, **variables: str) -> str:
-        result = command_result(self.client.containers.get(database), psql_command(ask, **variables))
+        result = command_result(self.client, database, psql_command(ask, **variables))
         if not result.succeeded:
             raise ContainerHostError(
                 f"{attempt} in the database {database} on {self.address} failed: {result.output or 'no answer'}"
@@ -104,16 +104,16 @@ class HostLogins:
     # Only logins read as unheld just now are removed. A statement the server refuses is its answer, with its own words.
     def remove(self, database: str, logins: list[str]) -> None:
         for number, login in enumerate(logins):
-            result = command_result(self.client.containers.get(database), psql_command(REMOVE_LOGIN, login=login))
+            result = command_result(self.client, database, psql_command(REMOVE_LOGIN, login=login))
             failure = LoginRemovalRefused if result.exit_code == PSQL_STATEMENT_REFUSED else ContainerHostError
             if not result.succeeded:
                 why = f"{result.output or 'no answer'}. Removed before it: {logins[:number]}."
-                refused = failure(f"The database {database} did not remove the login {login}: {why}")
-                refused.changed = tuple(logins[:number])
-                raise refused
+                raise failure(f"The database {database} did not remove the login {login}: {why}")
 
     def make(self, instance: str, use: DataSetUse) -> dict[str, str]:
         self.require_rules(use)
+        # A start that failed after its login was made left one that no call has answered for yet.
+        self.remove(use.database_container, self.unheld(use.database_container))
         login, password = login_of(instance), new_password()
         self.secrets.note([password])
         # A statement that fails is written whole into the server's log, so the server is never sent the password.

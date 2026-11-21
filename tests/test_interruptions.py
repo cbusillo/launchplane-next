@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,7 +59,7 @@ class Held:
     record: Record
     pause: Pause
     interruption: str
-    forward: Callable[..., Event | steps.Already]
+    forward: Callable[..., Event]
     asked: int = 0
     interrupted: bool = False
     visitors_got: list[str] = field(default_factory=list[str])
@@ -89,12 +89,12 @@ class Held:
             raise LaunchplaneKilled
         self.proxy.holds_delivery = False
 
-    def take(self, action: Action, witness: Witness, login: Mapping[str, str], *, behind_back_soon: bool) -> Event | steps.Already:
+    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         here = not self.interrupted and self.pause.action is not None and isinstance(action, self.pause.action)
         self.look()
         if here and self.pause.when == "before":
             self.interrupt()
-        event = self.forward(action, witness, login, behind_back_soon=behind_back_soon)
+        event = self.forward(action, witness, behind_back_soon=behind_back_soon)
         self.look()
         if here and self.pause.when == "after":
             self.interrupt()
@@ -150,8 +150,8 @@ def launchplane_serving_a(record: Record) -> tuple[PretendProxy, Lanes, Worker, 
 
 def held(record: Record, pause: Pause, interruption: str) -> Held:
     proxy, lanes, worker, client = launchplane_serving_a(record)
-    run = Held(proxy, client, worker, record, pause, interruption, lanes.send)
-    lanes.send = run.take
+    run = Held(proxy, client, worker, record, pause, interruption, lanes.take)
+    lanes.take = run.take
     run.run()
     return run
 

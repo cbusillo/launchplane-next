@@ -1,8 +1,7 @@
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from functools import partial
-from typing import NoReturn
 
 import pytest
 
@@ -157,8 +156,8 @@ def test_a_step_the_host_refuses_before_the_switch_fails_the_request_with_the_re
 ) -> None:
     worker, _, proxy = serving_a(record)
 
-    def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, login: Mapping[str, str]) -> None:
-        assert use is None and generation is not None and not login
+    def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+        assert use is None and generation is not None
         raise ContainerHostRefused(f"Starting the instance {container} from build {target.build} on test failed: no such image")
 
     proxy.host.start_instance = refuse
@@ -175,7 +174,7 @@ def test_a_step_the_host_refuses_after_the_switch_leaves_the_request_working_wit
     worker, _, proxy = serving_a(record)
     retire = proxy.host.retire_instance
 
-    def refuse(container: str) -> NoReturn:
+    def refuse(container: str) -> None:
         raise ContainerHostError(f"Retiring {container} on test failed: the daemon is busy")
 
     proxy.host.retire_instance = refuse
@@ -266,7 +265,7 @@ def test_the_request_being_worked_shows_on_its_lanes_card_with_what_it_has_done_
     proxy.while_checking = read_the_card
     record.write(MOVE_B, CALLER, None)
     worker.work_next()
-    assert shown == [("moving to site:b", ["working"], "So far: start the instance site-testing-0 of site:b: done.")]
+    assert shown == [("moving to site:b", ["working"], "So far: start the instance site-testing-0 of site:b.")]
 
 
 def test_a_request_for_a_lane_with_nothing_on_the_host_still_shows_on_the_page(record: Record) -> None:

@@ -3,17 +3,16 @@ from collections.abc import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane import steps
 from launchplane.act import Lanes, Stopped, Waiting
 from launchplane.api import create_app
 from launchplane.instance import BACK_SOON, HostNetwork, Mount, Unread
 from launchplane.judge import Work
 from launchplane.record import Asked, Kept, Record, Stands
-from launchplane.telling import NAMED, change_of
+from launchplane.steps import NOT_KNOWN
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
-from tests.test_act import BUILD_A, lane_brought_up_with_a, lane_in_maintenance, lanes_on
+from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_worker import CALLER, MOVE_B, kept_of
 
 DATABASE = "database-data-1"
@@ -59,7 +58,7 @@ def test_a_repair_whose_last_login_read_fails_stays_working_with_the_background_
     assert worker.work_next() is True
     done = kept_of(record, request.id)
     assert done.stands is Stands.DONE and done.answer is not None
-    assert (done.answer["outcome"], done.answer["did"]) == ("repaired", [f"start the background service of {service.instance}"])
+    assert (done.answer["outcome"], done.answer["did"], done.answer["not_known"]) == ("not known", [], NOT_KNOWN)
     assert [action.split()[0] for action in host.actions] == ["start", "await"]
 
 
@@ -291,38 +290,3 @@ def test_under_two_routers_for_its_web_address_this_call_changes_nothing_and_doe
     with pytest.raises(Waiting, match="has 2 answers where it must have one"):
         call(lanes_on(proxy))
     assert proxy.host.actions == []
-
-
-LOOKING = (
-    steps.AwaitRoute(WEB_ADDRESS, "a"),
-    steps.AwaitDatabase("database"),
-    steps.Check("a"),
-    steps.AwaitBackgroundService("a"),
-    steps.ReadLog("a"),
-    steps.Abandon(WEB_ADDRESS, GENERATION),
-)
-CHANGING = (
-    steps.StartProxy(),
-    steps.EditRoute(WEB_ADDRESS, "a", ""),
-    steps.CreateDataSetNetwork("site", "testing", "d1"),
-    steps.CreateDataSetVolume("site", "testing", "d1"),
-    steps.CreateDatabase("site", "testing", "d1", "network", "volume", "image"),
-    steps.StartDatabase("database"),
-    steps.DeletePart("d1", "volume", "volume-d1"),
-    steps.MakeLogin("a", "database"),
-    steps.StartInstance(BUILD_A, "a"),
-    steps.StartBackgroundService(BUILD_A, "a", None, ()),
-    steps.Retire("a"),
-    steps.RemoveLogins("database"),
-    steps.StopPart("a"),
-    steps.StopDatabase("database"),
-    steps.StartStopped("a"),
-    steps.Switch(WEB_ADDRESS, "a", GENERATION, 1),
-    steps.Discard(WEB_ADDRESS, "a", GENERATION, 1),
-)
-
-
-def test_every_step_is_a_change_written_down_before_it_is_sent_or_a_look_that_is_not() -> None:
-    assert {type(each) for each in (*LOOKING, *CHANGING)} == set(NAMED)
-    assert [change_of(each) for each in LOOKING] == [None] * len(LOOKING)
-    assert [change_of(each) is None for each in CHANGING] == [False] * len(CHANGING)

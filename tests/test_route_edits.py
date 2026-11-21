@@ -5,7 +5,7 @@ from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Record, Stands
 from launchplane.steps import MaintenanceOutcome
-from launchplane.telling import Answered, Change, Said, Seen, Witness
+from launchplane.telling import Answered, Said, Seen, Witness
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
@@ -162,8 +162,8 @@ def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_
     edit = proxy.edit
     told: list[tuple[str, Said | None, str | None]] = []
 
-    def about_to(did: str, _change: Change) -> Answered:
-        return lambda said, error, _changed: told.append((did, said, error))
+    def about_to(did: str, _to: str | None, _was: str | None) -> Answered:
+        return lambda said, error: told.append((did, said, error))
 
     def not_the_route_read_once(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
         proxy.edit = edit

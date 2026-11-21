@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -76,7 +76,6 @@ class PretendHost:
         self.logins_left_in: dict[str, tuple[str, ...]] = {}
         self.holders_unread: set[str] = set()
         self.removals_refused: set[str] = set()
-        self.logins_made: list[str] = []
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -122,32 +121,17 @@ class PretendHost:
             of_lane(self.instances.values()), of_lane(self.background_services.values()), of_lane(self.data_sets.values()), networks
         )
 
-    def remove_unheld_logins(self, database: str) -> Unread | list[str]:
+    def remove_unheld_logins(self, database: str) -> Unread | None:
         self.record(f"remove logins from {database}")
         if database in self.holders_unread:
             return Unread(asked=f"Which logins of the database {database} no container holds", why="timed out")
         if database in self.removals_refused:
             raise LoginRemovalRefused(f"The database {database} did not remove the login i_left: it owns objects")
         self.logins_left_in.pop(database, None)
-        unheld = [
-            login
-            for found in self.data_sets.values()
-            for each in found.databases
-            if each.container == database
-            for login in (each.unheld_logins if isinstance(each.unheld_logins, tuple) else ())
-        ]
         self.change_database(database, unheld_logins=())
-        return unheld
+        return None
 
-    # A login is made on the server before any container holds it.
-    def make_login(self, instance: str, use: DataSetUse) -> dict[str, str]:
-        self.logins_made.append(f"{instance} in {use.database_container}")
-        return {"PGUSER": instance}
-
-    def start_instance(
-        self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, login: Mapping[str, str]
-    ) -> None:
-        assert (use is None) == (not login), f"{container} was started on {use} with the login {login}"
+    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
         self.place(target, container, use=use, generation=generation)
         self.record(f"start {container}")
 
@@ -209,17 +193,15 @@ class PretendHost:
         self.change_data_set(product, lane, data_set, databases=(database,))
         self.record(f"database {data_set} on {network} and {volume} from {image}")
 
-    def start_database(self, container: str) -> bool:
+    def start_database(self, container: str) -> None:
         self.change_database(container, state=InstanceState.RUNNING, exit_code=None, accepts_connections=False)
         self.record(f"start database {container}")
-        return True
 
-    def stop_database(self, container: str) -> bool:
+    def stop_database(self, container: str) -> None:
         exit_code = 137 if container in self.databases_that_must_be_killed else 0
         stopped = {"state": InstanceState.STOPPED, "exit_code": exit_code, "accepts_connections": None, "unheld_logins": None}
         self.change_database(container, **stopped)
         self.record(f"stop database {container}")
-        return True
 
     def change_part(self, container: str, state: InstanceState) -> None:
         if container in self.background_services:
@@ -230,44 +212,30 @@ class PretendHost:
         else:
             self.instances[container] = self.instances[container].model_copy(update={"state": state})
 
-    def start_part(self, container: str) -> bool:
+    def start_part(self, container: str) -> None:
         if container in self.parts_that_will_not_start:
             raise ContainerHostRefused(f"Starting {container} on test was refused: no such image")
         self.change_part(container, InstanceState.RUNNING)
         self.record(f"start {container}")
-        return True
 
-    def stop_part(self, container: str) -> bool:
+    def stop_part(self, container: str) -> None:
         self.change_part(container, InstanceState.STOPPED)
         self.record(f"stop {container}")
-        return True
 
     def await_database(self, container: str) -> None:
         self.change_database(container, accepts_connections=True, unheld_logins=self.logins_left_in.get(container, ()))
         self.record(f"await {container}")
 
-    # As on the host, a data set is there for as long as any part of it is.
-    def delete_part(self, part: str, name: str) -> bool:
-        self.record(f"delete {part} {name}")
-        for found in list(self.data_sets.values()):
-            left = found.model_copy(
-                update={
-                    "databases": tuple(each for each in found.databases if each.container != name),
-                    "volumes": tuple(each for each in found.volumes if each != name),
-                    "networks": tuple(each for each in found.networks if each.name != name),
-                }
-            )
-            self.data_sets[found.data_set] = left
-            if not (left.databases or left.volumes or left.networks):
-                del self.data_sets[found.data_set]
-        return True
+    def delete_data_set(self, found: DataSet) -> None:
+        del self.data_sets[found.data_set]
+        self.record(f"delete {found.data_set}")
 
-    # As Docker: one that is not there is answered as nothing removed.
-    def retire_instance(self, container: str) -> bool:
-        parts = self.background_services if container in self.background_services else self.instances
-        removed = parts.pop(container, None) is not None
+    def retire_instance(self, container: str) -> None:
+        if container in self.background_services:
+            del self.background_services[container]
+        else:
+            del self.instances[container]
         self.record(f"retire {container}")
-        return removed
 
     def read_log_tail(self, container: str) -> str:
         part = self.background_services.get(container) or self.instances[container]
@@ -399,10 +367,9 @@ class PretendProxy:
     def is_running(self) -> bool:
         return self.running
 
-    def start(self) -> bool:
+    def start(self) -> None:
         self.running = self.starts
         self.host.record("start proxy")
-        return True
 
     def read(self) -> ProxySeen:
         return ProxySeen(

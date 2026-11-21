@@ -156,28 +156,25 @@ class Attempt(BaseModel):
     ended: str | None
 
 
-# What a change line says before the change is sent: the one thing chosen, and whether it puts the lane back.
+# What the line of a change of the route says before the change is sent: where it sends visitors, and where they went.
 class Sent(BaseModel):
     verb: str
     subject: str
-    back: bool = False
-    # Of a change of the route: where it sends visitors, and where they were sent when it was chosen.
     to: str | None = None
     was: str | None = None
 
 
-# What came of a change that was sent. `said` is the host's own answer and `seen` what a later attempt read of the host:
-# two facts, and neither is made from the other. `changed` names what the host had changed, also before a refusal.
+# What came of a change that was sent. `said` is the gate's own answer and `seen` what a later attempt read of the
+# routes file: two facts, and neither is made from the other.
 class Reply(BaseModel):
     said: Said | None = None
     at: datetime | None = None
-    changed: list[str] = []
     seen: Seen | None = None
     seen_at: datetime | None = None
 
 
-# One line of what a request did. A change has `action`, written before it was sent, and `outcome` once anything is known
-# of it. A line with neither is a read, a wait or a check, or was written before changes were written down ahead.
+# One line of what a request did. A change of the route has `action`, written before it was sent, and `outcome` once
+# anything is known of it. Every other line is a note, written once the thing was done or refused.
 class Event(BaseModel):
     id: int = Field(exclude=True)
     at: datetime
@@ -187,16 +184,21 @@ class Event(BaseModel):
     action: Sent | None = None
     outcome: Reply | None = None
 
-    # Whether this is a change the request is known to have made: the host said so, or shows it with the request's mark.
+    @property
+    def is_route(self) -> bool:
+        return self.action is not None and self.action.verb == "route"
+
+    # Whether this is a change of the route the request is known to have made: the gate said so, or the routes file
+    # names the request and the attempt that sent it.
     @property
     def is_credited(self) -> bool:
         reply = self.outcome
-        return reply is not None and (reply.said is Said.CHANGED or reply.seen is Seen.OURS or bool(reply.changed))
+        return self.is_route and reply is not None and (reply.said is Said.CHANGED or reply.seen is Seen.OURS)
 
-    # Whether the change may have acted, or may yet, with nothing to put it down to this request.
+    # Whether the change may have been made, or may yet be, with nothing to put it down to this request.
     @property
     def is_unanswered(self) -> bool:
-        return self.action is not None and not self.is_credited and (self.outcome is None or self.outcome.said is None)
+        return self.is_route and not self.is_credited and (self.outcome is None or self.outcome.said is None)
 
 
 class Kept(Request):
@@ -243,13 +245,9 @@ def key_digest(idempotency_key: str | None) -> str | None:
 
 def how_cancelled(request: Request) -> str:
     answer = PutBack.model_validate(request.answer or {})
-    did = "Nothing on the host had to be put back."
-    if answer.put_back:
-        did = f"Done to put the lane back: {'; '.join(answer.put_back)}."
-    elif answer.unanswered:
-        did = "Nothing is known to have been put back."
-    if answer.unanswered:
-        did += f" No answer was had to: {'; '.join(answer.unanswered)}. Each may have been sent."
+    did = f"Done to put the lane back: {'; '.join(answer.put_back)}." if answer.put_back else ""
+    # Nothing is said to have needed putting back where part of what the request did is not known.
+    did = f"{did} {answer.not_known or ''}".strip() or "Nothing on the host had to be put back."
     kept = f" It made the data set {', '.join(answer.data_sets_kept)}, which is kept." if answer.data_sets_kept else ""
     return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}{kept}"
 

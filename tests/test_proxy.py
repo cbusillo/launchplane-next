@@ -63,10 +63,8 @@ class ProxyHost:
     def load(self) -> None:
         self.loaded = loaded_from(self.files)
 
-    def ensure_helper(self, helper: HelperContainer) -> bool:
-        started = helper.container not in self.running
+    def ensure_helper(self, helper: HelperContainer) -> None:
         self.running.add(helper.container)
-        return started
 
     def is_running(self, container: str) -> bool:
         return container in self.running

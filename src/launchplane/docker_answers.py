@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
+import docker
 import requests
 from docker.errors import APIError, DockerException
-from docker.models.containers import Container
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from launchplane.instance import (
@@ -52,8 +52,7 @@ INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
 
 
 class ContainerHostError(Exception):
-    # What the action it ends had already changed on the host, where its adapter can say.
-    changed: tuple[str, ...] = ()
+    pass
 
 
 class TornRead(Exception):
@@ -429,9 +428,17 @@ class CommandResult:
         return self.exit_code == 0
 
 
-def command_result(container: Container, command: list[str]) -> CommandResult:
-    result = container.exec_run(command)
-    exit_code, output = result.exit_code, result.output
-    if exit_code is None or not isinstance(output, bytes):
-        raise ContainerHostError(f"Running {command[0]} in {container.name} returned before the command finished.")
+# A command Docker refuses to make has not run, and that refusal is the host's answer. Once Docker was told to start
+# it, not hearing how it ended is no answer: the command may have run, so that is never taken for a refusal.
+def command_result(client: docker.DockerClient, container: str, command: list[str]) -> CommandResult:
+    made = client.api.exec_create(container, command)["Id"]  # pyright: ignore[reportUnknownMemberType]
+    try:
+        output = client.api.exec_start(made)
+        exit_code: object = client.api.exec_inspect(made)["ExitCode"]
+    except APIError as error:
+        raise ContainerHostError(
+            f"Running {command[0]} in {container} was sent, and Docker could not say how it ended: {error}"
+        ) from error
+    if not isinstance(exit_code, int):
+        raise ContainerHostError(f"Running {command[0]} in {container} returned before the command finished.")
     return CommandResult(exit_code=exit_code, output=output.decode(errors="replace").strip())

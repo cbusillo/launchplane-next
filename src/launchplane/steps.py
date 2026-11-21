@@ -1,26 +1,34 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import BaseModel
 
-from launchplane.instance import DataSetUse, LaneBuild
+from launchplane.instance import DataSet, DataSetUse, LaneBuild
 
 
 class Outcome(StrEnum):
     SWITCHED = "switched"
     UNCHANGED = "unchanged"
     REPAIRED = "repaired"
+    NOT_KNOWN = "not known"
     CHECK_FAILED = "check failed"
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-# Every answer says which servers did not tell their logins, so that none was looked for there, and each change the
-# request sent that was never answered and that the host does not show to be its own: it may have acted, or may yet.
+# What is said, in these words wherever it is said, of a request taken up more than once. What an attempt did to the
+# lane's parts, its data set and its logins is known only to that attempt, so an earlier one's is lost with it.
+NOT_KNOWN = (
+    "This request was taken up more than once, and what its earlier attempts changed on the lane's parts, its data set "
+    "and its logins is not known."
+)
+
+
+# Every answer says which servers did not tell their logins, so that none was looked for there, and `not_known` where
+# part of what the request did is not known.
 class Result(BaseModel):
     logins_not_read: list[str] = []
-    unanswered: list[str] = []
+    not_known: str | None = None
 
 
 class MoveResult(Result):
@@ -39,6 +47,7 @@ class RetireOutcome(StrEnum):
     RETIRED = "retired"
     DELETED = "deleted"
     UNCHANGED = "unchanged"
+    NOT_KNOWN = "not known"
 
 
 class RetireResult(Result):
@@ -48,8 +57,6 @@ class RetireResult(Result):
     outcome: RetireOutcome
     route_removed_to_container: str | None
     retired_containers: list[str]
-    # Each part of a data set this request deleted, and the data set itself once the lane has nothing left of it.
-    deleted: list[str] = []
     deleted_data_set: str | None = None
     kept_data_sets: list[str] = []
 
@@ -218,19 +225,9 @@ class Retire:
     container: str
 
 
-# One part of a data set named for deleting. Each is its own change: a set is whole only until the first is gone.
 @dataclass(frozen=True)
-class DeletePart:
-    data_set: str
-    part: Literal["database server", "volume", "network"]
-    name: str
-
-
-# The login an instance is given, made before its container is: the server has it from here on, whatever comes after.
-@dataclass(frozen=True)
-class MakeLogin:
-    instance: str
-    database: str
+class DeleteDataSet:
+    found: DataSet
 
 
 @dataclass(frozen=True)
@@ -284,6 +281,11 @@ class BackgroundServiceRefused(Refused):
     pass
 
 
+# The gate found the routes file already as asked, so the edit that was sent changed nothing.
+class RouteAsAsked(Refused):
+    pass
+
+
 # Docker answered that it will not remove the part.
 class RemovalRefused(Refused):
     pass
@@ -292,12 +294,6 @@ class RemovalRefused(Refused):
 # A read a removal of logins stands on failed, so none was sent. A removal the server refuses is an error, never this.
 class LoginsUnread(Refused):
     pass
-
-
-# A change the host answered it already had as asked: sent, and no change of the request that sent it.
-@dataclass(frozen=True)
-class Already:
-    action: Action
 
 
 @dataclass(frozen=True)
@@ -346,8 +342,7 @@ type Action = (
     | CreateDatabase
     | StartDatabase
     | AwaitDatabase
-    | DeletePart
-    | MakeLogin
+    | DeleteDataSet
     | StartInstance
     | StartBackgroundService
     | Retire

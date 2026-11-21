@@ -1,25 +1,26 @@
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from launchplane.account import accounted, seen_of, so_far, was_sent
+from launchplane.account import accounted, seen_of
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import LaneBuild, LaneReading, LaneRoute, Verdict
+from launchplane.instance import LaneBuild, LaneRoute, Verdict, web_address_of
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import Held, Interrupted, Record, RecordError, Reply, Request, Sent, Stands
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, Result, RetireResult
-from launchplane.telling import NOBODY, Answered, Change, Said, Seen, Witness
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
+from launchplane.telling import NOBODY, Answered, Said, Seen, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -74,7 +75,7 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
     match request.work:
         case Work.MOVE:
             if request.build is None:
-                raise Stopped("The request names no build to move to.")
+                raise Stopped("The request names no build to move to. Nothing was changed.")
             return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), request.generation, attempt, witness)
         case Work.RETIRE:
             return lanes.retire(product, lane, request.delete_data_set, witness)
@@ -168,24 +169,20 @@ class Worker:
         finally:
             self.let_go(lane)
 
-    # Each change an earlier attempt may have sent and had no answer to is looked for in every reading this attempt
-    # makes anyway, until one shows it as the request's own: a change still on its way can land after the first reading.
-    # What is seen is written to its line when it differs from what was seen before. Nothing the attempt does is chosen from it.
-    def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, LaneReading | None], None]:
+    # Each change of the route an earlier attempt may have sent with no answer is looked for in every reading this attempt
+    # makes anyway, until one shows it as the request's own: it may land after the first. Nothing is chosen from it.
+    def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute], None]:
         kept = self.record.read(request.id)
-        lines = {} if kept is None else {each.id: each for each in kept.events if each.is_unanswered}
-        last = {each.id: None if each.outcome is None else each.outcome.seen for each in lines.values()}
+        lines = [] if kept is None else [each for each in kept.events if each.is_unanswered]
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
-        def look(route: LaneRoute, lane: LaneReading | None) -> None:
-            for line in list(lines.values()):
-                sent = line.action
-                seen = None if sent is None else seen_of(sent, request.generation, stamps[line.attempt], route, lane)
-                if seen not in (None, last[line.id]):
+        def look(route: LaneRoute) -> None:
+            for line in list(lines):
+                seen = seen_of(line, stamps[line.attempt], route)
+                if seen is not None:
                     self.record.complete(attempt, line.id, Reply(seen=seen, seen_at=datetime.now(UTC)))
-                    last[line.id] = seen
                 if seen is Seen.OURS:
-                    del lines[line.id]
+                    lines.remove(line)
 
         return look
 
@@ -194,12 +191,12 @@ class Worker:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
 
-        def about_to(did: str, change: Change) -> Answered:
-            line = self.record.about_to(attempt, did, Sent.model_validate(change))
+        def about_to(did: str, to: str | None, was: str | None) -> Answered:
+            route = Sent(verb="route", subject=web_address_of(request.product, request.lane), to=to, was=was)
+            line = self.record.about_to(attempt, did, route)
 
-            def answered(said: Said | None, error: str | None, changed: Sequence[str]) -> None:
-                heard = Reply() if said is None else Reply(said=said, at=datetime.now(UTC), changed=list(changed))
-                self.record.complete(attempt, line, heard, error)
+            def answered(said: Said | None, error: str | None) -> None:
+                self.record.complete(attempt, line, Reply() if said is None else Reply(said=said, at=datetime.now(UTC)), error)
 
             return answered
 
@@ -211,11 +208,9 @@ class Worker:
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
-        def cancel_asked() -> bool:
-            return self.record.cancel_asked(request.id)
-
         look = self.reading_back(request, attempt) if again else NOBODY.look
-        return Witness(tell, hold, cancel_asked, refuse_cancel, request.generation, attempt, about_to, look)
+        asked = partial(self.record.cancel_asked, request.id)
+        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, about_to, look, again)
 
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made
@@ -266,14 +261,6 @@ class Worker:
         self.sleep(SECONDS_BEFORE_TAKING_UP_AGAIN)
         return True
 
-    def accounted[Told: Result](self, request: Request, answer: Told) -> Told:
-        kept = self.record.read(request.id)
-        return answer if kept is None else accounted(answer, kept)
-
-    def so_far(self, request: Request) -> str:
-        kept = self.record.read(request.id)
-        return "" if kept is None else so_far(kept)
-
     def ending_of(self, request: Request, attempt: int, witness: Witness, again: bool) -> Ending:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
@@ -283,16 +270,15 @@ class Worker:
                 self.lanes.fence(request.product, request.lane, request.generation, attempt - 1)
             answer = carried_out(self.lanes, request, attempt, witness)
         except Cancelled as cancelled:
-            return ending(Stands.CANCELLED, self.accounted(request, cancelled.put_back), verdict=Verdict.ABANDONED)
+            put_back = accounted(cancelled.put_back, self.record.read(request.id))
+            return ending(Stands.CANCELLED, put_back, verdict=Verdict.ABANDONED)
         except CouldNotPutBack as error:
             return Ending(Stands.FAILED, error=str(error), verdict=Verdict.ABANDONED)
         except STOPPED as error:
             # A call that could not reach the host, was told to wait, or ran out of steps has learned nothing to end on.
             # A refusal the host answered with is an answer.
             unsure = isinstance(error, (Waiting, *HOST_UNREAD)) and not isinstance(error, ContainerHostRefused)
-            why = (
-                str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error} {self.so_far(request)}"
-            )
+            why = str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error}"
             return Ending(Stands.FAILED, error=why, left_open=unsure, write_refused=isinstance(error, LoginRemovalRefused))
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
         except Interrupted, RecordError:
@@ -301,12 +287,11 @@ class Worker:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
             return Ending(Stands.FAILED, error=why)
-        kept = self.record.read(request.id)
-        answer = answer if kept is None else accounted(answer, kept)
+        answer = accounted(answer, self.record.read(request.id))
         named = request.delete_data_set
         gone = isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets)
-        # The lane has no such data set. Where no attempt sent its deletion, the request named one the lane never had.
-        if gone and (kept is None or not was_sent(kept, "delete", named or "")):
+        # The lane has no such data set. Only a first attempt knows it deleted nothing: an earlier one may have deleted it.
+        if gone and not again:
             why = f"{request.attempted()} was done. It named the data set {named}, which the lane does not have, to delete."
             return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
         failed = answer.outcome in NOT_A_SUCCESS

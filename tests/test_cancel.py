@@ -13,7 +13,8 @@ from launchplane.gate import GateError
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
 from launchplane.page import request_note
-from launchplane.record import Asked, Record, RecordError, Request, Stands
+from launchplane.record import Asked, Record, RecordError, Request, Stands, how_cancelled
+from launchplane.steps import NOT_KNOWN
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import (
@@ -86,12 +87,7 @@ def test_a_move_cancelled_before_the_switch_removes_the_instance_it_started_and_
         None,
     )
     assert (proxy.written, list(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a"])
-    last = kept.events[-1]
-    assert ([each.ended for each in kept.attempts], last.did, last.action and last.action.back) == (
-        ["cancelled"],
-        f"retire {NEW}",
-        True,
-    )
+    assert ([each.ended for each in kept.attempts], kept.events[-1].did) == (["cancelled"], f"retire {NEW}")
 
 
 def test_a_move_cancelled_after_the_switch_is_finished_as_asked_and_says_the_cancel_came_too_late(record: Record) -> None:
@@ -413,8 +409,9 @@ def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_a
     assert (kept.stands, [each.ended for each in kept.attempts], put_back_by(kept)) == (
         Stands.CANCELLED,
         ["interrupted", "cancelled"],
-        [f"retire {NEW}"],
+        [],
     )
+    assert (NOT_KNOWN in how_cancelled(kept), "Nothing on the host had to be put back" in how_cancelled(kept)) == (True, False)
 
 
 def test_ending_maintenance_cancelled_over_a_database_that_had_to_be_killed_does_not_end_as_cancelled_and_says_why(
