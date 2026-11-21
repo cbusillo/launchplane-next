@@ -250,10 +250,10 @@ curl -s -H 'Host: untouched.test-bed-gate-ledger.test' $V                       
 ```
 curl -X PUT $H/holds/after.proxy.edit; curl -X DELETE $H/holds/before.proxy.edit
 curl $H/holds                                                                                # stopped_at: after.proxy.edit
-ssh root@launchplane.shiny 'docker -H tcp://docker-lp-scratch.shiny:2376 exec launchplane-proxy head -1 /etc/traefik/launchplane/routes/held.test-bed-gate-ledger.test.yml'
+ssh root@docker-lp-scratch.shiny 'docker exec launchplane-proxy head -1 /etc/traefik/launchplane/routes/held.test-bed-gate-ledger.test.yml'
 ```
 
-   The routes file's first line is the request's `generation` and the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply.
+   The last command is run on the scratch container. The routes file's first line is the request's `generation` and the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply.
 
 3. **Killed, and let go.**
 
