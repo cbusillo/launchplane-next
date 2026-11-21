@@ -389,31 +389,37 @@ class ContainerHost:
             options = database_options(product, lane, data_set, network, volume, image)
             self.start_set_up(self.create(replace(options, environment=server_environment(throwaway_password))))
 
-    def start_database(self, container: str) -> None:
+    def start_database(self, container: str) -> bool:
         with attempting(f"Starting the database {container}", self.address):
-            self.start_set_up(self.client.containers.get(container))
+            return self.start_set_up(self.client.containers.get(container))
 
-    # A server made and never started has no set-up yet, and one with data does not run it again.
+    # A server made and never started has no set-up yet, and one with data does not run it again. False is a server
+    # that was running when it was looked at: Docker answers a start of it with success and starts nothing.
     @staticmethod
-    def start_set_up(database: Container) -> None:
+    def start_set_up(database: Container) -> bool:
         database.put_archive(str(SET_UP_PATH.parent), tar_of(SET_UP_PATH.name, SET_UP_SCRIPT.encode()))  # pyright: ignore[reportUnknownMemberType]
         database.start()
+        return database.status != "running"
 
-    def start_part(self, container: str) -> None:
+    def start_part(self, container: str) -> bool:
         with attempting(f"Starting {container}", self.address):
-            self.client.containers.get(container).start()
+            found = self.client.containers.get(container)
+            found.start()
+            return found.status != "running"
 
-    def stop_part(self, container: str) -> None:
-        self.stop(container, RETIRE_GRACE_SECONDS)
+    def stop_part(self, container: str) -> bool:
+        return self.stop(container, RETIRE_GRACE_SECONDS)
 
-    def stop_database(self, container: str) -> None:
-        self.stop(container, DATABASE_STOP_GRACE_SECONDS)
+    def stop_database(self, container: str) -> bool:
+        return self.stop(container, DATABASE_STOP_GRACE_SECONDS)
 
-    def stop(self, container: str, grace_seconds: int) -> None:
+    # False is a container that was not there to stop.
+    def stop(self, container: str, grace_seconds: int) -> bool:
         with attempting(f"Stopping {container}", self.address):
             found = self.find_container(container)
             if found is not None:
                 found.stop(timeout=grace_seconds)
+            return found is not None
 
     def await_database(self, container: str) -> None:
         started = self.clock()
@@ -425,29 +431,42 @@ class ContainerHost:
                 )
             self.sleep(POLL_SECONDS)
 
-    def delete_data_set(self, found: DataSet) -> None:
-        with attempting(f"Deleting the data set {found.data_set}", self.address):
-            for database in found.databases:
-                self.retire_container(database.container)
-            for volume in found.volumes:
-                with suppress(NotFound):
-                    self.client.volumes.get(volume).remove()
-            for network in found.networks:
-                with suppress(NotFound):
-                    self.client.networks.get(network.name).remove()
+    # Answers each part it removed, and none where nothing of the data set was there. A removal that fails says in its
+    # error which parts were removed before it.
+    def delete_data_set(self, found: DataSet) -> list[str]:
+        removed: list[str] = []
+        try:
+            with attempting(f"Deleting the data set {found.data_set}", self.address):
+                for database in found.databases:
+                    removed += [database.container] if self.retire_container(database.container) else []
+                for volume in found.volumes:
+                    with suppress(NotFound):
+                        self.client.volumes.get(volume).remove()
+                        removed.append(volume)
+                for network in found.networks:
+                    with suppress(NotFound):
+                        self.client.networks.get(network.name).remove()
+                        removed.append(network.name)
+        except ContainerHostError as error:
+            error.changed = tuple(removed)
+            raise
+        return removed
 
-    def retire_container(self, container: str) -> None:
+    # False is a container that was not there to remove.
+    def retire_container(self, container: str) -> bool:
         found = self.find_container(container)
         if found is not None:
             found.stop(timeout=RETIRE_GRACE_SECONDS)
             found.remove()
+        return found is not None
 
-    def retire_instance(self, container: str) -> None:
+    def retire_instance(self, container: str) -> bool:
         with attempting(f"Stopping and removing {container}", self.address):
-            self.retire_container(container)
+            return self.retire_container(container)
 
-    # A read that fails is answered as unread and nothing is removed. A removal that fails is raised.
-    def remove_unheld_logins(self, database: str) -> Unread | None:
+    # A read that fails is answered as unread and nothing is removed. A removal that fails is raised, and says which
+    # logins were removed before it. Otherwise the logins removed are answered, and none where every login was held.
+    def remove_unheld_logins(self, database: str) -> Unread | list[str]:
         try:
             with attempting(f"Reading the logins of the database {database} and who holds them", self.address):
                 unheld = self.logins.unheld(database)
@@ -455,7 +474,7 @@ class ContainerHost:
             return Unread(asked=f"Which logins of the database {database} no container holds", why=str(error))
         with attempting(f"Removing the logins no container holds from the database {database}", self.address):
             self.logins.remove(database, unheld)
-        return None
+        return unheld
 
     def read_log_tail(self, container: str) -> str:
         with attempting(f"Reading the log of {container}", self.address):
@@ -464,7 +483,8 @@ class ContainerHost:
                 return ""
             return found.logs(tail=LOG_TAIL_LINES).decode(errors="replace")
 
-    def ensure_helper(self, helper: HelperContainer) -> None:
+    # False is a helper found running: nothing was made or started.
+    def ensure_helper(self, helper: HelperContainer) -> bool:
         with attempting(f"Starting Launchplane's own container {helper.container}", self.address), self.making_what_lanes_share:
             found = self.find_container(helper.container)
             if found is None:
@@ -475,6 +495,7 @@ class ContainerHost:
                 self.create(helper_options(helper)).start()
             elif found.status != "running":
                 found.start()
+            return found is None or found.status != "running"
 
     @observing()
     def is_running(self, container: str) -> bool:

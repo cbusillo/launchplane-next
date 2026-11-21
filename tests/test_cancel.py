@@ -86,7 +86,12 @@ def test_a_move_cancelled_before_the_switch_removes_the_instance_it_started_and_
         None,
     )
     assert (proxy.written, list(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a"])
-    assert ([each.ended for each in kept.attempts], kept.events[-1].did) == (["cancelled"], f"retire {NEW}, to put the lane back")
+    last = kept.events[-1]
+    assert ([each.ended for each in kept.attempts], last.did, last.action and last.action.back) == (
+        ["cancelled"],
+        f"retire {NEW}",
+        True,
+    )
 
 
 def test_a_move_cancelled_after_the_switch_is_finished_as_asked_and_says_the_cancel_came_too_late(record: Record) -> None:
@@ -793,7 +798,7 @@ def test_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_as_
         True,
     )
     assert (proxy.written, sorted(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a", NEW])
-    assert request_note(kept, {}) == kept.error
+    assert (kept.release_verdict, kept.error in (request_note(kept, {}) or "")) == (Verdict.ABANDONED, True)
 
 
 DECIDED_AT_THE_GATE: dict[str, tuple[Callable[[PretendGate, str], object], Stands, list[str]]] = {

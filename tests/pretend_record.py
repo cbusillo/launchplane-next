@@ -46,6 +46,7 @@ class PretendRecord(Record):
     open_attempts: dict[int, int] = field(default_factory=dict[int, int])
     turns: dict[tuple[str, str], object] = field(default_factory=dict[tuple[str, str], object])
     attempts_begun: int = 0
+    lines_written: int = 0
     reachable: bool = True
     gate: Gate = field(default_factory=lambda: Gate(GivenSecrets()))
     confirms_writes: bool = True
@@ -191,9 +192,38 @@ class PretendRecord(Record):
             request = self.open_attempts.get(attempt)
             if request is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
-            found = self.kept[request]
-            event = Event(at=now(), attempt=len(found.attempts), **self.cleaned(did=did, error=error))
-            self.change(request, events=[*found.events, event])
+            self.written(request, self.cleaned(did=did, error=error))
+
+    def written(self, request: int, line: dict[str, Any]) -> int:
+        found = self.kept[request]
+        self.lines_written += 1
+        event = Event.model_validate({"id": self.lines_written, "at": now(), "attempt": len(found.attempts), "error": None} | line)
+        self.change(request, events=[*found.events, event])
+        return event.id
+
+    def about_to(self, attempt: int, did: str, action: dict[str, JsonValue]) -> int:
+        self.reach("writing what is about to be done")
+        with self.writing:
+            request = self.open_attempts.get(attempt)
+            if request is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so it was not written and not done: {did}")
+            return self.written(request, self.cleaned(did=did, action=action))
+
+    def complete(self, attempt: int, line: int, outcome: dict[str, JsonValue], error: str | None = None) -> None:
+        self.reach("writing what came of a change")
+        with self.writing:
+            request = self.open_attempts.get(attempt)
+            events = [] if request is None else self.kept[request].events
+            if request is None or line not in {each.id for each in events}:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so what came of a change was not written.")
+            new = self.cleaned(outcome=outcome, error=error)
+            completed = [each if each.id != line else self.completed(each, new["outcome"], new["error"]) for each in events]
+            self.change(request, events=completed)
+
+    @staticmethod
+    def completed(event: Event, outcome: dict[str, Any], error: str | None) -> Event:
+        known = ({} if event.outcome is None else event.outcome.model_dump(mode="json", exclude_unset=True)) | outcome
+        return Event.model_validate(event.model_dump() | {"id": event.id, "outcome": known or None, "error": error or event.error})
 
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
@@ -211,7 +241,8 @@ class PretendRecord(Record):
             attempts = self.kept[request].attempts
             ended = attempts[-1].model_copy(update={"ended": stands.value, "ended_at": now()})
             kept = self.cleaned(answer=answer, error=error)
-            self.change(request, attempts=[*attempts[:-1], ended], stands=stands, ended_at=now(), **kept)
+            verdict = decided if found.work is Work.MOVE else None
+            self.change(request, attempts=[*attempts[:-1], ended], stands=stands, ended_at=now(), release_verdict=verdict, **kept)
             return True
 
     def give_up(self, request: int, last: int) -> Request | None:

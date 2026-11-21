@@ -8,8 +8,8 @@ from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import InstanceState, PartOfLane, Verdict
 from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
-from launchplane.record import ENDED, Kept, Request, Stands, how_cancelled, how_replaced
-from launchplane.steps import CANCEL_WON
+from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancelled, how_not_cancelled, how_replaced
+from launchplane.telling import Said
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -103,8 +103,25 @@ def taken_up(request: Kept) -> str:
     return f"Taken up {len(request.attempts)} times, and again by itself until it ends. The last attempt did not end it: {why} "
 
 
+HEARD = {Said.CHANGED: "done", Said.ALREADY: "found already as asked", Said.REFUSED: "refused"}
+
+
+# A change says how far it is known to have got: about to be sent, sent with no reply, or what the host answered, and
+# then what a later attempt read of the host. Any other line says what was looked at, and whether that was refused.
+def line_of(event: Event, attempt_is_open: bool) -> str:
+    if event.action is None:
+        return event.did if event.error is None else f"{event.did}, refused"
+    did = f"{event.did}, to put the lane back" if event.action.back else event.did
+    reply = event.outcome
+    if reply is None:
+        return f"about to {did}" if attempt_is_open and event.error is None else f"{did}: sent, no reply"
+    heard = "sent, no reply" if reply.said is None else HEARD[reply.said]
+    return f"{did}: {heard}" if reply.seen is None else f"{did}: {heard}, then read as {reply.seen}"
+
+
 def done_so_far(request: Kept) -> str:
-    lines = [event.did if event.error is None else f"{event.did}, refused" for event in request.events]
+    open_now = {attempt.number for attempt in request.attempts if attempt.ended is None}
+    lines = [line_of(event, event.attempt in open_now) for event in request.events]
     return f"{taken_up(request)}So far: {'; '.join(lines)}." if lines else f"{taken_up(request)}Nothing done so far."
 
 
@@ -133,10 +150,8 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
         return how_cancelled(request)
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
-    if request.stands is Stands.FAILED and (request.error or "").startswith(CANCEL_WON):
-        return request.error
     if request.stands in ENDED:
-        why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
+        why = how_not_cancelled(request) or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return f"{why} It ended as {request.stands}."
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
         return f"{done_so_far(request)}{being_cancelled(request, decided)}"

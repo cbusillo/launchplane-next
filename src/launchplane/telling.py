@@ -1,14 +1,36 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from launchplane import steps
+from launchplane.instance import LaneReading, LaneRoute, background_service_container_of
 from launchplane.steps import Action, Event
 
 type Tell = Callable[[str, str | None], None]
 
 
+# What the host answered a change sent to it. A change with no answer has none of these, whatever the host shows later.
+class Said(StrEnum):
+    CHANGED = "changed"
+    ALREADY = "already as asked"
+    REFUSED = "refused"
+
+
+# What a later reading of the host showed of a change that had no answer. Only its own mark puts it down to the request.
+class Seen(StrEnum):
+    OURS = "made by this request"
+    AS_ASKED = "as asked, by whom is not known"
+    NOT_AS_ASKED = "not as asked"
+
+
+# Told once a change was answered: what the host said, the real error, and what a refusal had already changed.
+type Answered = Callable[[Said | None, str | None, Sequence[str]], None]
+type Change = Mapping[str, str | bool | None]
+
+
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
+# `about_to` writes a change down before it is sent, and what it gives is told the answer. `look` is shown each reading.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
 @dataclass
 class Witness:
@@ -18,12 +40,11 @@ class Witness:
     refuse_cancel: Callable[[str], None] = lambda _why: None
     generation: str = ""
     attempt: int = 0
+    about_to: Callable[[str, Change], Answered] = lambda _did, _change: lambda _said, _error, _changed: None
+    look: Callable[[LaneRoute, LaneReading | None], None] = lambda _route, _lane: None
 
 
 NOBODY = Witness()
-
-# Ends the line written before a change that puts a lane back. What a cancel put back is told from these lines.
-TO_PUT_BACK = ", to put the lane back"
 
 
 NAMED: dict[type, Callable[[Any], str]] = {
@@ -52,12 +73,49 @@ NAMED: dict[type, Callable[[Any], str]] = {
 }
 
 
-# How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.
-LOOKS = ("wait for ", "check ", "watch ", "read the log ", "mark the release ")
-
-
 def named(action: Action) -> str:
     return NAMED[type(action)](action)
+
+
+def container_of(step: Any) -> str:  # noqa: ANN401 any step that names its container
+    return step.container
+
+
+def data_set_of(step: Any) -> str:  # noqa: ANN401 any step that names its data set
+    return step.data_set
+
+
+# The verb and the one subject of each step that changes the host. A step that reads, waits, checks or only asks the gate
+# is not here. `make` is of a thing that carries the generation of the request that made it, so a later reading of the
+# host can put it down to that request.
+CHANGES: dict[type, tuple[str, Callable[[Any], str]]] = {
+    steps.EditRoute: ("route", lambda step: step.web_address),
+    steps.Switch: ("route", lambda step: step.web_address),
+    steps.StartInstance: ("make", container_of),
+    steps.StartBackgroundService: ("make", lambda step: background_service_container_of(step.instance)),
+    steps.CreateDataSetNetwork: ("make", data_set_of),
+    steps.CreateDataSetVolume: ("make part of", data_set_of),
+    steps.CreateDatabase: ("make part of", data_set_of),
+    steps.StartDatabase: ("start", container_of),
+    steps.StartStopped: ("start", container_of),
+    steps.StartProxy: ("start", lambda _step: "the proxy"),
+    steps.StopPart: ("stop", container_of),
+    steps.StopDatabase: ("stop", container_of),
+    steps.Retire: ("remove", container_of),
+    steps.Discard: ("remove", container_of),
+    steps.DeleteDataSet: ("delete", lambda step: step.found.data_set),
+    steps.RemoveLogins: ("remove logins", lambda step: step.database),
+}
+
+
+def change_of(action: Action) -> dict[str, str | bool | None] | None:
+    if type(action) not in CHANGES:
+        return None
+    verb, subject = CHANGES[type(action)]
+    change: dict[str, str | bool | None] = {"verb": verb, "subject": subject(action)}
+    if isinstance(action, steps.EditRoute):
+        return change | {"to": action.to, "was": action.was}
+    return change | {"to": action.container} if isinstance(action, steps.Switch) else change
 
 
 # One line for a thing done, and the real error where it was refused.

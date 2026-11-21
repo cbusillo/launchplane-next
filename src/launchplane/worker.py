@@ -1,23 +1,25 @@
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from launchplane.account import accounted, seen_of, so_far, was_sent
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import LaneBuild, Verdict
+from launchplane.instance import LaneBuild, LaneReading, LaneRoute, Verdict
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
-from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
-from launchplane.telling import LOOKS, NOBODY, Witness
+from launchplane.record import Held, Interrupted, Record, RecordError, Request, Stands
+from launchplane.secret_boundary import JsonValue, Secrets
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, Result, RetireResult
+from launchplane.telling import NOBODY, Answered, Change, Said, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -72,7 +74,7 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
     match request.work:
         case Work.MOVE:
             if request.build is None:
-                raise Stopped("The request names no build to move to. Nothing was changed.")
+                raise Stopped("The request names no build to move to.")
             return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), request.generation, attempt, witness)
         case Work.RETIRE:
             return lanes.retire(product, lane, request.delete_data_set, witness)
@@ -82,13 +84,8 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
             return lanes.end_maintenance(product, lane, witness)
 
 
-# A request's answer says what every attempt of it did, as each told it. It is history: nothing is decided from it.
-def of_every_attempt(answer: MoveResult, kept: Kept | None) -> MoveResult:
-    if kept is None or len(kept.attempts) < 2:
-        return answer
-    did = [event.did for event in kept.events if event.error is None and not event.did.startswith(LOOKS)]
-    repaired = Outcome.REPAIRED if did and answer.outcome is Outcome.UNCHANGED else answer.outcome
-    return answer.model_copy(update={"did": did, "outcome": repaired})
+def now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 # Several threads each take the oldest request of a lane none of them is on, so a lane has one worker and its requests
@@ -169,16 +166,43 @@ class Worker:
                 taken = self.record.take_up(request.id)
                 if taken is not None:
                     witness = self.witness_of(request, taken.attempt, held)
+                    witness.look = self.reading_back(request, taken.attempt) if taken.again else witness.look
                     while not self.ended_or_left_open(request, taken.attempt, witness, taken.again):
                         pass
                 return True
         finally:
             self.let_go(lane)
 
+    # Each change an earlier attempt sent and had no answer to is looked for in what this attempt reads anyway, once,
+    # and what is seen is written to its line. Nothing the attempt does is chosen from it.
+    def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, LaneReading | None], None]:
+        kept = self.record.read(request.id)
+        events = [] if kept is None else kept.events
+        lines = [(each, each.action) for each in events if each.action is not None and each.outcome is None]
+        stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
+
+        def look(route: LaneRoute, lane: LaneReading | None) -> None:
+            for line, sent in list(lines):
+                seen = seen_of(sent, request.generation, stamps[line.attempt], route, lane)
+                if seen is not None:
+                    self.record.complete(attempt, line.id, {"seen": seen.value, "seen_at": now()})
+                    lines.remove((line, sent))
+
+        return look
+
     # What a call is given to say what it did, to ask before each action, and to ask between actions.
     def witness_of(self, request: Request, attempt: int, held: Held) -> Witness:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
+
+        def about_to(did: str, change: Change) -> Answered:
+            line = self.record.about_to(attempt, did, dict(change))
+
+            def answered(said: Said | None, error: str | None, changed: Sequence[str]) -> None:
+                outcome: dict[str, JsonValue] = {} if said is None else {"said": said.value, "at": now(), "changed": list(changed)}
+                self.record.complete(attempt, line, outcome, error)
+
+            return answered
 
         # Another Launchplane may hold the turn by now and have changed the lane, so what was decided is not acted on.
         def hold() -> None:
@@ -188,7 +212,8 @@ class Worker:
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
-        return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel, request.generation, attempt)
+        asked = lambda: self.record.cancel_asked(request.id)  # noqa: E731
+        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, about_to)
 
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made
@@ -239,6 +264,14 @@ class Worker:
         self.sleep(SECONDS_BEFORE_TAKING_UP_AGAIN)
         return True
 
+    def accounted[Told: Result](self, request: Request, answer: Told) -> Told:
+        kept = self.record.read(request.id)
+        return answer if kept is None else accounted(answer, kept)
+
+    def so_far(self, request: Request) -> str:
+        kept = self.record.read(request.id)
+        return "" if kept is None else so_far(kept)
+
     def ending_of(self, request: Request, attempt: int, witness: Witness, again: bool) -> Ending:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
@@ -248,16 +281,16 @@ class Worker:
                 self.lanes.fence(request.product, request.lane, request.generation, attempt - 1)
             answer = carried_out(self.lanes, request, attempt, witness)
         except Cancelled as cancelled:
-            kept = self.record.read(request.id)
-            told = [] if kept is None else put_back_told(kept)
-            return ending(Stands.CANCELLED, cancelled.put_back.model_copy(update={"put_back": told}), verdict=Verdict.ABANDONED)
+            return ending(Stands.CANCELLED, self.accounted(request, cancelled.put_back), verdict=Verdict.ABANDONED)
         except CouldNotPutBack as error:
             return Ending(Stands.FAILED, error=str(error), verdict=Verdict.ABANDONED)
         except STOPPED as error:
             # A call that could not reach the host, was told to wait, or ran out of steps has learned nothing to end on.
             # A refusal the host answered with is an answer.
             unsure = isinstance(error, (Waiting, *HOST_UNREAD)) and not isinstance(error, ContainerHostRefused)
-            why = str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error}"
+            why = (
+                str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error} {self.so_far(request)}"
+            )
             return Ending(Stands.FAILED, error=why, left_open=unsure, write_refused=isinstance(error, LoginRemovalRefused))
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
         except Interrupted, RecordError:
@@ -266,16 +299,14 @@ class Worker:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
             return Ending(Stands.FAILED, error=why)
-        if isinstance(answer, MoveResult):
-            answer = of_every_attempt(answer, self.record.read(request.id))
+        kept = self.record.read(request.id)
+        answer = answer if kept is None else accounted(answer, kept)
         named = request.delete_data_set
-        if isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets):
-            # The lane has no such data set. This request deleted it only if an attempt of it sent that: history, for the answer.
-            kept = self.record.read(request.id)
-            if not any(event.did == f"delete the data set {named}" for event in ([] if kept is None else kept.events)):
-                why = f"{request.attempted()} was done. It named the data set {named}, which the lane does not have, to delete."
-                return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
-            answer = answer.model_copy(update={"outcome": RetireOutcome.DELETED, "deleted_data_set": named})
+        gone = isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets)
+        # The lane has no such data set. Where no attempt sent its deletion, the request named one the lane never had.
+        if gone and (kept is None or not was_sent(kept, "delete", named or "")):
+            why = f"{request.attempted()} was done. It named the data set {named}, which the lane does not have, to delete."
+            return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED

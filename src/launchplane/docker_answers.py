@@ -52,7 +52,8 @@ INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
 
 
 class ContainerHostError(Exception):
-    pass
+    # What the action it ends had already changed on the host, where its adapter can say.
+    changed: tuple[str, ...] = ()
 
 
 class TornRead(Exception):

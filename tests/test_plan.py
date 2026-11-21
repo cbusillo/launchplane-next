@@ -116,7 +116,7 @@ class Case:
     gate: GateAnswer = NO_VERDICT
 
 
-def answer(outcome: Outcome, receiving: str | None, error: str | None = None, did: tuple[str, ...] = ()) -> Done[MoveResult]:
+def answer(outcome: Outcome, receiving: str | None, error: str | None = None) -> Done[MoveResult]:
     return Done(
         MoveResult(
             product="site",
@@ -125,7 +125,6 @@ def answer(outcome: Outcome, receiving: str | None, error: str | None = None, di
             web_address=WEB_ADDRESS,
             outcome=outcome,
             container_receiving_visitors=receiving,
-            did=list(did),
             error=error,
         )
     )
@@ -153,7 +152,7 @@ MOVES = {
         (NEW,),
         ("new", "new"),
         (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", kept=False)),
-        answer(Outcome.SWITCHED, "new", did=("started the instance new", "wrote the route to new", "retired old")),
+        answer(Outcome.SWITCHED, "new"),
         gate=COMMITTED_TO_NEW,
     ),
     "a switch found in the routes file answers switched, though this attempt did none of it": Case(
@@ -164,8 +163,8 @@ MOVES = {
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), gone("stray")),
-    "a finished cleanup answers repaired, with what it did": Case(
-        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
+    "a finished cleanup answers the lane as it is, and leaves what was changed to the request's account": Case(
+        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.UNCHANGED, "new")
     ),
     "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
         (OLD, NEW), ("old", "old"), (), gone("new")
@@ -186,7 +185,7 @@ MOVES = {
         (OLD,),
         ("old", "old"),
         (STARTED_NEW, REFUSED, Discarded("new", kept=False)),
-        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("started the instance new", "retired new")),
+        answer(Outcome.CHECK_FAILED, "old", "Connection refused"),
     ),
 }
 
@@ -341,7 +340,6 @@ def test_a_move_stops_and_says_so_when_the_loaded_route_is_not_enabled(status: R
     step = next_move_step(Case((NEW,), (LoadedRoute("new", status), "new"), (), None))
     assert isinstance(step, Stop)
     assert f"reports it {status}" in step.reason
-    assert "Nothing was changed." in step.reason
 
 
 def test_a_committed_release_whose_route_the_proxy_reports_not_enabled_is_waited_for_and_nothing_old_is_retired() -> None:
@@ -350,18 +348,17 @@ def test_a_committed_release_whose_route_the_proxy_reports_not_enabled_is_waited
     assert next_move_step(replace(disabled, gate=COMMITTED_TO_NEW)) == disabled.step
 
 
-def retired(route_removed_to: str | None, containers: list[str]) -> Done[RetireResult]:
-    outcome = RetireOutcome.RETIRED if route_removed_to or containers else RetireOutcome.UNCHANGED
-    return Done(
-        RetireResult(
-            product="site",
-            lane="testing",
-            web_address=WEB_ADDRESS,
-            outcome=outcome,
-            route_removed_to_container=route_removed_to,
-            retired_containers=containers,
-        )
+# What the planner answers once nothing is left: the lane as it is. What was removed is the request's account's to say.
+NOTHING_LEFT = Done(
+    RetireResult(
+        product="site",
+        lane="testing",
+        web_address=WEB_ADDRESS,
+        outcome=RetireOutcome.UNCHANGED,
+        route_removed_to_container=None,
+        retired_containers=[],
     )
+)
 
 
 RETIRES = {
@@ -374,11 +371,10 @@ RETIRES = {
     "instances retire once the route is gone": Case(
         (OLD, STRAY), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"),), Retire("old")
     ),
-    "a finished retirement answers what it removed": Case(
-        (), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"), Retire("old")), retired("old", ["old"])
+    "a finished retirement answers": Case(
+        (), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"), Retire("old")), NOTHING_LEFT
     ),
-    "a lane whose route was already gone answers no route removed": Case((), (None, None), (Retire("old"),), retired(None, ["old"])),
-    "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
+    "a retired lane answers": Case((), (None, None), (), NOTHING_LEFT),
     "a lane whose loaded route is disabled has it removed": Case(
         (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), EditRoute(WEB_ADDRESS, None, "old", "old")
     ),

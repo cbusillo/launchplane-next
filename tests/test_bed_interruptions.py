@@ -885,3 +885,42 @@ def test_beginning_maintenance_whose_route_change_is_made_and_its_reply_lost_goe
         {"stopped"},
     )
     assert ask_and_wait(f"{lane}/maintenance/end", {})[1]["outcome"] == "ended"
+
+
+def route_lines(request: dict[str, Any]) -> list[dict[str, Any]]:
+    return [each for each in request["events"] if each["action"] is not None and each["action"]["verb"] == "route"]
+
+
+def test_ending_maintenance_killed_with_its_route_change_on_the_host_and_no_reply_says_ended_and_the_end_after_it_claims_nothing() -> (
+    None
+):
+    let_go()
+    lane, untouched = f"/lanes/{LEDGER.product}/{LEDGER.lane}", LEDGER.beside(UNTOUCHED)
+    assert move_lane(LEDGER.product, LEDGER.lane, LEDGER.builds[0])[0] == 200
+    assert move_lane(untouched.product, untouched.lane, untouched.builds[0])[0] == 200
+    assert ask_and_wait(f"{lane}/maintenance/begin", {})[1]["outcome"] == "in maintenance"
+    hold("before.proxy.edit")
+    try:
+        with request_loop(lambda: answering(untouched)) as beside:
+            asked = ask(f"{lane}/maintenance/end", {})[1]["id"]
+            wait_until_stopped_at("before.proxy.edit")
+            [about_to], shown_before = route_lines(ask(f"/requests/{asked}")[1]), answering_or_back_soon(LEDGER)
+            hold("after.proxy.edit")
+            let_go("before.proxy.edit")
+            wait_until_stopped_at("after.proxy.edit")
+            kill_held_launchplane()
+            let_go()
+            ended = request_ended(asked)
+            again = ask_and_wait(f"{lane}/maintenance/end", {})[1]
+    finally:
+        let_go()
+    [published] = route_lines(ended)
+    assert (about_to["outcome"], shown_before) == (None, BACK_SOON)
+    assert (ended["stands"], ended["answer"]["outcome"], [each["ended"] for each in ended["attempts"]]) == (
+        "done",
+        "ended",
+        ["interrupted", "done"],
+    )
+    assert (published["outcome"]["said"], published["outcome"]["seen"]) == (None, "made by this request")
+    assert (answering(LEDGER), again["outcome"]) == (LEDGER.answers[0], "not in maintenance")
+    assert (beside.failures, beside.answers_in_order()) == ([], [untouched.answers[0]])

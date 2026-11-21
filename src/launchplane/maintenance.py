@@ -3,7 +3,6 @@ from launchplane.judge import Judgement, Kind
 from launchplane.plan import (
     Step,
     StepBack,
-    changes_so_far,
     failure_report,
     is_checked,
     is_turned_back,
@@ -80,15 +79,13 @@ def not_as_it_must_be(judged: Judgement, done: tuple[Event, ...]) -> Stop | None
     if not found:
         return None
     state = "is in maintenance" if judged.lane.route.in_maintenance else "is out of maintenance"
-    return Stop(
-        f"The lane {state} and is not as it must be, so the call does not answer success: {sentences(found)}. {changes_so_far(done)}"
-    )
+    return Stop(f"The lane {state} and is not as it must be, so the call does not answer success: {sentences(found)}.")
 
 
 def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | None = None) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
     route = lane.route
-    step = unread_route(lane, "put in maintenance", done) or route_step(judged, done)
+    step = unread_route(lane, "put in maintenance") or route_step(judged)
     if step is not None:
         return step
     if cancel is not None and is_turned_back(cancel):
@@ -97,7 +94,7 @@ def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | No
         if route.written is None and has_nothing(lane):
             return Stop(
                 f"{lane.lane} of {lane.product} has no route, no instance, no background service and no data set on the host, "
-                "so there is nothing to put in maintenance. Nothing was changed."
+                "so there is nothing to put in maintenance."
             )
         return EditRoute(lane.web_address, BACK_SOON, route.installed)
     if (stop := next_to_stop(lane)) is not None:
@@ -109,14 +106,14 @@ def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | No
     return not_as_it_must_be(judged, done) or Done(answer_for(lane.product, lane.lane, route, MaintenanceOutcome.IN_MAINTENANCE))
 
 
-def the_instance(lane: LaneReading, done: tuple[Event, ...]) -> RunningInstance | Stop:
+def the_instance(lane: LaneReading) -> RunningInstance | Stop:
     if len(lane.instances) == 1:
         return lane.instances[0]
     names = ", ".join(sorted(instance.container for instance in lane.instances)) or "none"
     return Stop(
         f"{lane.lane} of {lane.product} has {len(lane.instances)} instances ({names}) where ending maintenance needs one, "
         "so Launchplane cannot tell which to start. Retiring the lane and moving it to a build again brings it back on its "
-        f"data set. {changes_so_far(done)} The web address still shows the back soon page."
+        "data set. The web address still shows the back soon page."
     )
 
 
@@ -153,7 +150,7 @@ def background_service_step(judged: Judgement, done: tuple[Event, ...]) -> Actio
     first = findings[0]
     if first.kind not in STARTED_AGAIN:
         return Stop(
-            f"The background service is not one ending maintenance can start: {first.sentence}. {changes_so_far(done)} "
+            f"The background service is not one ending maintenance can start: {first.sentence}. "
             f"{STILL_BACK_SOON} Retiring the lane and moving it to a build again brings it back."
         )
     start = StartStopped(first.subject)
@@ -173,7 +170,7 @@ def rest_step(judged: Judgement, instance: RunningInstance, done: tuple[Event, .
         return None
     return Stop(
         f"The lane is not as it must be to switch back, so the web address still shows the back soon page: "
-        f"{sentences(left)}. {changes_so_far(done)} Beginning maintenance again stops what was started."
+        f"{sentences(left)}. Beginning maintenance again stops what was started."
     )
 
 
@@ -182,10 +179,10 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
     refused = next((event for event in done if isinstance(event, CheckRefused | StartRefused | BackgroundServiceRefused)), None)
     if refused is not None:
         return stop_again(lane, refused, answer, done)
-    instance = the_instance(lane, done)
+    instance = the_instance(lane)
     if isinstance(instance, Stop):
         return instance
-    use = prepared(judged, instance.data_set, None, product, done)
+    use = prepared(judged, instance.data_set, None, product)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     start = StartStopped(instance.container)
@@ -197,7 +194,7 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
     if problems:
         return Stop(
             f"The instance {instance.container} passed its check and the lane is not as it must be to switch back to it, so "
-            f"the web address still shows the back soon page: {'; '.join(problems)}. {changes_so_far(done)} "
+            f"the web address still shows the back soon page: {'; '.join(problems)}. "
             "Beginning maintenance again stops what was started."
         )
     step = background_service_step(judged, done) or rest_step(judged, instance, done)
@@ -208,7 +205,7 @@ def decide_end(
     judged: Judgement, product: Product, done: tuple[Event, ...], cancel: Cancel | None = None
 ) -> Step[MaintenanceResult] | StepBack:
     lane = judged.lane
-    step = unread_route(lane, "brought out of maintenance", done) or route_step(judged, done)
+    step = unread_route(lane, "brought out of maintenance") or route_step(judged)
     if step is not None:
         return step
     if cancel is not None and is_turned_back(cancel):

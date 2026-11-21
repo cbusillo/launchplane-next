@@ -59,7 +59,7 @@ class Held:
     record: Record
     pause: Pause
     interruption: str
-    forward: Callable[..., Event]
+    forward: Callable[..., Event | steps.Already]
     asked: int = 0
     interrupted: bool = False
     visitors_got: list[str] = field(default_factory=list[str])
@@ -89,7 +89,7 @@ class Held:
             raise LaunchplaneKilled
         self.proxy.holds_delivery = False
 
-    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
+    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event | steps.Already:
         here = not self.interrupted and self.pause.action is not None and isinstance(action, self.pause.action)
         self.look()
         if here and self.pause.when == "before":

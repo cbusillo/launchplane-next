@@ -1,20 +1,18 @@
 from collections.abc import Callable
-from typing import NoReturn
 
 import pytest
 from fastapi.testclient import TestClient
 
-from launchplane import plan, steps
+from launchplane import steps
 from launchplane.act import Lanes, Stopped, Waiting
 from launchplane.api import create_app
 from launchplane.instance import BACK_SOON, HostNetwork, Mount, Unread
 from launchplane.judge import Work
 from launchplane.record import Asked, Kept, Record, Stands
-from launchplane.telling import LOOKS, NAMED, named
+from launchplane.telling import NAMED, change_of
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import D1, EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
-from tests.pretend_record import PretendRecord
 from tests.test_act import BUILD_A, lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_worker import CALLER, MOVE_B, kept_of
 
@@ -225,20 +223,6 @@ def test_ending_maintenance_still_fails_over_another_finding_and_says_the_lookup
     assert "can reach out through bridge" in kept.error and "no container holds could not be read" in kept.error
 
 
-class RecordNotRead(PretendRecord):
-    def read(self, request: int) -> NoReturn:
-        raise AssertionError(f"the history of request {request} was read for an answer that does not use it")
-
-
-@pytest.mark.parametrize("asked", [RETIRE, BEGIN], ids=["a retire", "beginning maintenance"])
-def test_this_request_ends_without_reading_its_history(asked: Asked) -> None:
-    record = RecordNotRead()
-    request = record.write(asked, CALLER, None)
-    assert worker_on(lane_brought_up_with_a(), record).work_next() is True
-    kept = PretendRecord.read(record, request.id)
-    assert kept is not None and kept.stands is Stands.DONE
-
-
 NETWORKS = (HostNetwork(name="network-data-1", is_quiet=True), HostNetwork(name="network-beside-it", is_quiet=True))
 DOUBLED: dict[str, tuple[tuple[object, ...], str]] = {
     "volumes": (("volume-data-1", "volume-put-beside-it"), r"2 volumes \(volume-data-1, volume-put-beside-it\)"),
@@ -337,8 +321,7 @@ CHANGING = (
 )
 
 
-def test_every_step_is_told_as_a_change_or_as_a_look_and_a_request_s_account_of_what_it_did_takes_only_the_changes() -> None:
+def test_every_step_is_a_change_written_down_before_it_is_sent_or_a_look_that_is_not() -> None:
     assert {type(each) for each in (*LOOKING, *CHANGING)} == set(NAMED)
-    assert [named(each).startswith(LOOKS) for each in LOOKING] == [True] * len(LOOKING)
-    assert [named(each).startswith(LOOKS) for each in CHANGING] == [False] * len(CHANGING)
-    assert [plan.change_made_by(each) is None for each in LOOKING] == [True] * len(LOOKING)
+    assert [change_of(each) for each in LOOKING] == [None] * len(LOOKING)
+    assert [change_of(each) is None for each in CHANGING] == [False] * len(CHANGING)

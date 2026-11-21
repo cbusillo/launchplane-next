@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 
 from launchplane import record as record_module
+from launchplane.account import accounted
 from launchplane.instance import Verdict
 from launchplane.judge import Work
 from launchplane.record import (
@@ -23,7 +24,9 @@ from launchplane.record import (
     Refused,
     Stands,
     Unconfirmed,
+    how_not_cancelled,
 )
+from launchplane.steps import RetireOutcome, RetireResult
 from tests.conftest import ALEMBIC
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_record import PretendRecord, begun, lose_every_turn
@@ -404,6 +407,59 @@ def test_the_migration_to_generations_stops_while_a_move_begun_before_it_is_work
     assert settled is not None and (settled.stands, len(settled.generation)) == (Stands.FAILED, 36)
 
 
+RETIRED_NOTHING = RetireResult(
+    product="site",
+    lane="other",
+    web_address="other.site.test",
+    outcome=RetireOutcome.RETIRED,
+    route_removed_to_container="old",
+    retired_containers=[],
+)
+# noinspection SqlResolve
+OLD_ROWS = """
+insert into request (product, lane, work, build, asked_by, generation, stands, ended_at, error, cancel_asked_at, cancel_asked_by)
+values ('site', 'testing', 'moving', 'site:b', 'a test', 'g1', 'failed', now(), 'The cancel won, and new could not be removed.',
+        now(), 'a test'),
+       ('site', 'other', 'retiring', null, 'a test', 'g2', 'working', null, null, null, null);
+insert into attempt (request, ended_at, ended) values (1, now(), 'failed'), (2, now(), 'interrupted'), (2, null, null);
+insert into event (request, attempt, did, error)
+values (1, 1, 'retire new, to put the lane back', 'Docker refused'), (2, 2, 'remove the route of other.site.test', null);
+"""
+
+
+def test_the_migration_to_action_lines_leaves_an_ended_request_and_an_interrupted_attempt_reading_as_they_were_written(
+    postgres_record: PostgresRecord,
+) -> None:
+    command.downgrade(Config(ALEMBIC), "0008")
+    try:
+        with psycopg.connect(postgres_record.database) as connection:
+            connection.execute(OLD_ROWS)
+    finally:
+        command.upgrade(Config(ALEMBIC), "head")
+    ended, interrupted = postgres_record.read(1), postgres_record.read(2)
+    assert ended is not None and interrupted is not None
+    [refused], [sent] = ended.events, interrupted.events
+    assert (ended.release_verdict, refused.did, refused.error, refused.action, refused.outcome) == (
+        None,
+        "retire new, to put the lane back",
+        "Docker refused",
+        None,
+        None,
+    )
+    assert "What the gate answered for its cancel was not kept" in (how_not_cancelled(ended) or "")
+    assert (sent.did, sent.is_credited, sent.is_unanswered, accounted(RETIRED_NOTHING, interrupted).outcome) == (
+        "remove the route of other.site.test",
+        False,
+        False,
+        RetireOutcome.UNCHANGED,
+    )
+    attempt = begun(postgres_record, 2)
+    postgres_record.complete(attempt, postgres_record.about_to(attempt, "retire old", {"verb": "remove", "subject": "old"}), {})
+    taken_up = postgres_record.read(2)
+    assert taken_up is not None and [each.ended for each in taken_up.attempts] == ["interrupted", "interrupted", None]
+    assert [each.is_unanswered for each in taken_up.events] == [False, True]
+
+
 def test_the_migration_that_ends_the_limit_leaves_a_request_that_needed_a_person_to_be_taken_up_again(
     postgres_record: PostgresRecord,
 ) -> None:
@@ -465,6 +521,10 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
         return True
     if Verdict in kinds:
         return Verdict.COMMITTED
+    if parameter == "action":
+        return {"verb": f"said with {HELD}", "subject": HELD, "to": f"to {HELD}", "was": HELD}
+    if parameter == "outcome":
+        return {"changed": [HELD, f"within {HELD}"]}
     if str in kinds:
         return f"said with {HELD} in it"
     if any(get_origin(kind) is dict for kind in kinds):

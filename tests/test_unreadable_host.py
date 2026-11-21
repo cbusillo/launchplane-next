@@ -10,7 +10,7 @@ from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.gate import LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Asked, Kept, Record, Request, Stands
-from launchplane.telling import NOBODY
+from launchplane.telling import NOBODY, Seen
 from launchplane.worker import Worker, carried_out
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy, numbered_names
@@ -473,7 +473,7 @@ def test_a_cancel_accepted_after_a_give_up_has_read_the_lane_and_before_it_ends_
     )
 
 
-def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered_ends_saying_that_data_set_was_deleted(
+def test_a_retire_whose_deletion_of_the_named_data_set_had_no_reply_ends_naming_it_unanswered_and_claims_no_deletion(
     record: Record,
 ) -> None:
     proxy = lane_retired()
@@ -484,7 +484,13 @@ def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered
     assert worker.work_next() is True
     ended = kept_of(record, request.id)
     assert ended.stands is Stands.DONE and ended.answer is not None
-    assert (ended.answer["outcome"], ended.answer["deleted_data_set"]) == ("deleted", "data-1")
+    assert (ended.answer["outcome"], ended.answer["deleted_data_set"], ended.answer["unanswered"]) == (
+        "unchanged",
+        None,
+        ["delete the data set data-1"],
+    )
+    [line] = [each for each in ended.events if each.action is not None]
+    assert line.outcome is not None and (line.outcome.said, line.outcome.seen) == (None, Seen.AS_ASKED)
 
 
 @pytest.mark.parametrize("finished_meanwhile", [False, True], ids=["as it was before the request", "as the request would leave it"])

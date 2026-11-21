@@ -5,7 +5,7 @@ from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Record, Stands
 from launchplane.steps import MaintenanceOutcome
-from launchplane.telling import Witness
+from launchplane.telling import Answered, Change, Said, Seen, Witness
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
@@ -39,7 +39,7 @@ def accepted_and_not_answered(proxy: PretendProxy, *, has_run: bool) -> list[Sen
     return held
 
 
-ENDS_AS = {"a retire": "retired", "a maintenance begin": "in maintenance", "a maintenance end": "not in maintenance"}
+ENDS_AS = {"a retire": "retired", "a maintenance begin": "in maintenance", "a maintenance end": "ended"}
 
 
 @EDITING
@@ -57,10 +57,32 @@ def test_a_change_of_the_route_whose_reply_is_lost_never_fails_its_request_half_
     assert (left.stands, [each.ended for each in left.attempts]) == (Stands.WORKING, ["unfinished"])
     assert worker.work_next() is True
     ended = kept_of(record, request.id)
-    outcome = ENDS_AS[asked] if has_run or work is not END else "ended"
-    assert (ended.stands, (ended.answer or {})["outcome"], edit(*held[0]) != DONE) == (Stands.DONE, outcome, True)
+    assert (ended.stands, (ended.answer or {})["outcome"], edit(*held[0]) != DONE) == (Stands.DONE, ENDS_AS[asked], True)
     running = {part.state for part in (*proxy.host.instances.values(), *proxy.host.background_services.values())}
     assert work is not BEGIN or (proxy.written[WEB_ADDRESS], running) == (BACK_SOON, {InstanceState.STOPPED})
+
+
+def test_ending_maintenance_whose_route_change_was_made_and_never_answered_says_ended_and_an_end_asked_after_it_claims_nothing(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    worker = worker_on(proxy, record)
+    accepted_and_not_answered(proxy, has_run=True)
+    first = record.write(END, CALLER, None)
+    assert (worker.work_next(), worker.work_next()) == (True, True)
+    second = record.write(END, CALLER, None)
+    assert worker.work_next() is True
+    ended, after = kept_of(record, first.id), kept_of(record, second.id)
+    [published] = [each for each in ended.events if each.is_credited and each.action is not None and each.action.verb == "route"]
+    assert published.outcome is not None and published.action is not None
+    assert ((ended.answer or {})["outcome"], published.outcome.said, published.outcome.seen, published.action.to) == (
+        "ended",
+        None,
+        Seen.OURS,
+        proxy.written[WEB_ADDRESS],
+    )
+    assert "lost before the reply" in (published.error or "")
+    assert ((after.answer or {})["outcome"], [each for each in after.events if each.is_credited]) == ("not in maintenance", [])
 
 
 def test_a_request_whose_changes_of_the_route_were_all_answered_and_one_that_asked_for_none_ask_the_gate_for_no_fence(
@@ -138,18 +160,21 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
 def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_again_and_decided_again() -> None:
     proxy = lane_brought_up_with_a()
     edit = proxy.edit
-    told: list[tuple[str, str | None]] = []
+    told: list[tuple[str, Said | None, str | None]] = []
+
+    def about_to(did: str, _change: Change) -> Answered:
+        return lambda said, error, _changed: told.append((did, said, error))
 
     def not_the_route_read_once(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
         proxy.edit = edit
         return edit(web_address, generation, attempt, f"{read}, as it no longer is", container)
 
     proxy.edit = not_the_route_read_once
-    answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(tell=lambda did, error: told.append((did, error))))
+    answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(about_to=about_to))
     switch = f"send {WEB_ADDRESS} to {BACK_SOON}"
     assert (answer.outcome, told[:2]) == (
         MaintenanceOutcome.IN_MAINTENANCE,
-        [(switch, "The gate left the route: it was not the one read."), (switch, None)],
+        [(switch, Said.REFUSED, "The gate left the route: it was not the one read."), (switch, Said.CHANGED, None)],
     )
 
 

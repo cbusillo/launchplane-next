@@ -1,6 +1,5 @@
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from typing import Any
 
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -17,7 +16,6 @@ from launchplane.instance import (
 from launchplane.judge import LOGIN_KINDS, Finding, Judgement, Kind, subjects_of
 from launchplane.product import Product
 from launchplane.steps import (
-    CANCEL_WON,
     Abandon,
     Action,
     AwaitBackgroundService,
@@ -52,12 +50,8 @@ from launchplane.steps import (
     StartDatabase,
     StartInstance,
     StartProxy,
-    StartStopped,
     Stop,
-    StopDatabase,
-    StopPart,
     Switch,
-    Switched,
     TooLate,
     Wait,
 )
@@ -75,42 +69,6 @@ def failure_report(why: str, log_tail: str) -> str:
     return f"{why}\nIts last log lines:\n{log_tail}"
 
 
-CHANGES: dict[type, Callable[[Any], str]] = {
-    StartProxy: lambda _step: "started the proxy",
-    CreateDataSetNetwork: lambda step: f"made part of the data set {step.data_set}",
-    CreateDataSetVolume: lambda step: f"made part of the data set {step.data_set}",
-    CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
-    StartDatabase: lambda step: f"started the database {step.container}",
-    StartInstance: lambda step: f"started the instance {step.container}",
-    EditRoute: lambda step: f"sent {step.web_address} to {step.to}" if step.to else f"removed the route of {step.web_address}",
-    StartBackgroundService: lambda step: f"started the background service of {step.instance}",
-    Retire: lambda step: f"retired {step.container}",
-    RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
-    StopPart: lambda step: f"stopped {step.container}",
-    StopDatabase: lambda step: f"stopped {step.container}",
-    StartStopped: lambda step: f"started {step.container}",
-}
-
-
-# What a step that was taken changed. A switch the gate did not rename for, and an instance it kept, changed nothing.
-def change_made_by(event: Event) -> str | None:
-    if isinstance(event, Switched | Discarded):
-        changed = event.won if isinstance(event, Switched) else not event.kept
-        return f"{'wrote the route to' if isinstance(event, Switched) else 'retired'} {event.container}" if changed else None
-    return CHANGES[type(event)](event) if type(event) in CHANGES else None
-
-
-def changes_made(done: tuple[Event, ...]) -> list[str]:
-    return [change for change in map(change_made_by, done) if change is not None]
-
-
-def changes_so_far(done: tuple[Event, ...]) -> str:
-    changes = changes_made(done)
-    if not changes:
-        return "Nothing was changed."
-    return f"Before that, this call {', '.join(changes)}, and those changes stay."
-
-
 def sentences(findings: list[Finding]) -> str:
     return "; ".join(finding.sentence for finding in findings)
 
@@ -123,20 +81,20 @@ def loading_step(judged: Judgement) -> Action | None:
     return None
 
 
-def route_step(judged: Judgement, done: tuple[Event, ...]) -> Action | Stop | None:
+def route_step(judged: Judgement) -> Action | Stop | None:
     if (step := loading_step(judged)) is not None:
         return step
     disabled = judged.of_kind(Kind.ROUTE_DISABLED)
     if disabled:
-        return Stop(f"{sentences(disabled)}. {changes_so_far(done)} The proxy's log says why; retiring the lane removes the route.")
+        return Stop(f"{sentences(disabled)}. The proxy's log says why; retiring the lane removes the route.")
     return None
 
 
 # A routes file that is not the route Launchplane writes is never taken for no route: what it sends visitors to is not
 # known, so nothing of its lane is changed and no call on the lane answers success.
-def unread_route(lane: LaneReading, attempted: str, done: tuple[Event, ...]) -> Stop | None:
+def unread_route(lane: LaneReading, attempted: str) -> Stop | None:
     file = lane.route.file
-    return Stop(f"{file}, so the lane is not {attempted}. {changes_so_far(done)}") if isinstance(file, Unread) else None
+    return Stop(f"{file}, so the lane is not {attempted}.") if isinstance(file, Unread) else None
 
 
 def is_fit(judged: Judgement, instance: RunningInstance, target: LaneBuild) -> bool:
@@ -170,7 +128,7 @@ def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: s
     if len(names) > 1:
         return Stop(
             f"The lane has the data sets {', '.join(names)} and no instance receiving visitors that uses one, "
-            "so Launchplane cannot tell which one to start the instance on. Nothing was changed."
+            "so Launchplane cannot tell which one to start the instance on."
         )
     return names[0] if names else fresh
 
@@ -191,7 +149,6 @@ def prepared(
     data_set: str | None,
     fresh: str | None,
     product: Product,
-    done: tuple[Event, ...],
     generation: str | None = None,
 ) -> Action | Stop | DataSetUse | None:
     if data_set is None or product.database is None:
@@ -199,9 +156,7 @@ def prepared(
     lane = judged.lane
     found = lane.data_set(data_set)
     if found is None and data_set != fresh:
-        return Stop(
-            f"The instance receiving visitors uses the data set {data_set}, which is not on the host. {changes_so_far(done)}"
-        )
+        return Stop(f"The instance receiving visitors uses the data set {data_set}, which is not on the host.")
     if found is None:
         return CreateDataSetNetwork(lane.product, lane.lane, data_set, generation)
     findings = judged.about_data_set(found)
@@ -209,8 +164,7 @@ def prepared(
     # Nothing in a data set is made or started while it has a problem no step puts right.
     if beyond:
         return Stop(
-            f"The data set {found.data_set} is not as it must be, and fixing it is not Launchplane's to choose: "
-            f"{sentences(beyond)}. {changes_so_far(done)}"
+            f"The data set {found.data_set} is not as it must be, and fixing it is not Launchplane's to choose: {sentences(beyond)}."
         )
     if findings:
         return step_toward_ready(found, {finding.kind for finding in findings}, lane, product.database.image, generation)
@@ -284,18 +238,17 @@ class Move:
         started = {event.container for event in self.done if isinstance(event, StartInstance)}
         return next((instance for instance in self.lane.instances if instance.container in started), None)
 
+    # What the host shows now. What the request changed to get there is its account's to say, over every attempt.
     def answer(self, **update: object) -> MoveResult:
-        receiving, done = self.instance(self.lane.route.written), self.done
-        settled = Outcome.REPAIRED if changes_made(done) else Outcome.UNCHANGED
+        receiving = self.instance(self.lane.route.written)
         answer = MoveResult(
             product=self.target.product,
             lane=self.target.lane,
             build=self.target.build,
             web_address=self.lane.web_address,
-            outcome=Outcome.SWITCHED if self.gate.verdict is Verdict.COMMITTED else settled,
+            outcome=Outcome.SWITCHED if self.gate.verdict is Verdict.COMMITTED else Outcome.UNCHANGED,
             container_receiving_visitors=self.lane.route.written,
             data_set=None if receiving is None else receiving.data_set,
-            did=changes_made(done),
         )
         return answer.model_copy(update=update)
 
@@ -334,9 +287,9 @@ def discard(move: Move, instance: RunningInstance | RunningBackgroundService) ->
     container = instance.container
     refusal = removal_refused(move.done, container)
     if refusal is not None and move.gate.verdict is Verdict.ABANDONED:
-        return CannotPutBack(f"{CANCEL_WON}, and {container} could not be removed to put the lane back: {refusal}")
+        return CannotPutBack(f"The cancel won, and {container} could not be removed to put the lane back: {refusal}")
     if refusal is not None:
-        return Stop(f"{container} could not be removed: {refusal} {changes_so_far(move.done)}")
+        return Stop(f"{container} could not be removed: {refusal}")
     if (wait := unread_owner([instance])) is not None:
         return wait
     if container in move.lane.route.names:
@@ -373,10 +326,9 @@ def in_service(move: Move) -> Action | Stop | None:
     if lane.route.in_maintenance:
         return Stop(
             f"{target.lane} of {target.product} is in maintenance: the routes file of {lane.web_address} points at the back "
-            f"soon page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end. Nothing was "
-            "changed."
+            f"soon page. End maintenance first, with POST /lanes/{target.product}/{target.lane}/maintenance/end."
         )
-    return unread_route(lane, "moved", move.done) or route_step(move.judged, move.done)
+    return unread_route(lane, "moved") or route_step(move.judged)
 
 
 # The background service of the instance that serves: started where the product has one, watched while it comes up,
@@ -403,7 +355,7 @@ def finish(move: Move, serving: RunningInstance) -> Step[MoveResult] | CannotPut
     judged, done = move.judged, move.done
     if (step := old_part_step(move, serving.container, background_services_only=True)) is not None:
         return step
-    use = prepared(judged, serving.data_set, None, move.product, done)
+    use = prepared(judged, serving.data_set, None, move.product)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     refused = next((event for event in done if isinstance(event, BackgroundServiceRefused)), None)
@@ -416,7 +368,7 @@ def finish(move: Move, serving: RunningInstance) -> Step[MoveResult] | CannotPut
         return step
     left = left_for_a_move(judged, serving)
     if left:
-        return Stop(f"The lane is not as it must be, so the move does not answer success: {sentences(left)}. {changes_so_far(done)}")
+        return Stop(f"The lane is not as it must be, so the move does not answer success: {sentences(left)}.")
     return login_step(judged, done, move.lane.data_set(serving.data_set)) or Done(move.answer())
 
 
@@ -459,7 +411,7 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
     data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)
     if isinstance(data_set, Stop):
         return data_set
-    use = prepared(move.judged, data_set, move.fresh.data_set, move.product, done, move.generation)
+    use = prepared(move.judged, data_set, move.fresh.data_set, move.product, move.generation)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     return StartInstance(move.target, move.fresh.container, use, move.generation)
@@ -472,7 +424,7 @@ def switch_or_check(move: Move, candidate: RunningInstance) -> Action | Stop:
     if problems:
         return Stop(
             f"The instance {candidate.container} passed its check and the lane is not as it must be to switch to it, so the "
-            f"web address was not switched: {'; '.join(problems)}. {changes_so_far(move.done)} Asking again replaces the instance."
+            f"web address was not switched: {'; '.join(problems)}. Asking again replaces the instance."
         )
     return Switch(move.lane.web_address, candidate.container, move.generation, move.attempt)
 
@@ -530,7 +482,7 @@ def decide_move(move: Move, cancel: Cancel | None = None) -> Step[MoveResult] | 
 def decide_retire(
     judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...], cancel: Cancel | None = None
 ) -> Step[RetireResult] | StepBack:
-    if (unread := unread_route(judged.lane, "retired", done)) is not None:
+    if (unread := unread_route(judged.lane, "retired")) is not None:
         return unread
     if cancel is not None and is_turned_back(cancel):
         return retire_step_back(judged, delete_data_set)
@@ -569,24 +521,18 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     named = lane.data_set(delete_data_set)
     doubled = [finding for finding in judged.about(subjects_of(named)) if finding.kind == Kind.DOUBLED]
     if doubled:
-        return Stop(
-            f"{sentences(doubled)}, so nothing of the data set was deleted: which is its data is not known. {changes_so_far(done)}"
-        )
+        return Stop(f"{sentences(doubled)}, so nothing of the data set was deleted: which is its data is not known.")
     if named is not None:
         return DeleteDataSet(named)
-    route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)
-    retired = [event.container for event in done if isinstance(event, Retire)]
-    deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = any(isinstance(event, EditRoute | Retire | RemoveLogins) for event in done)
+    # What the lane has now. What this request removed and deleted is its account's to say, over every attempt.
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,
             lane=lane.lane,
             web_address=web_address,
-            outcome=RetireOutcome.DELETED if deleted else RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
-            route_removed_to_container=route_removed_to,
-            retired_containers=retired,
-            deleted_data_set=deleted,
+            outcome=RetireOutcome.UNCHANGED,
+            route_removed_to_container=None,
+            retired_containers=[],
             kept_data_sets=sorted(found.data_set for found in lane.data_sets),
         )
     )

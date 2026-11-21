@@ -402,7 +402,10 @@ def test_logins_whose_holders_could_not_be_listed_are_unread_and_never_a_server_
 
 
 def test_only_the_logins_no_container_holds_on_the_fresh_reading_are_removed() -> None:
-    assert removals_sent(RecordingDocker(), ROLES, ExecResult(0), ExecResult(0)) == (None, ["i_left", "i_left_too"])
+    assert removals_sent(RecordingDocker(), ROLES, ExecResult(0), ExecResult(0)) == (
+        ["i_left", "i_left_too"],
+        ["i_left", "i_left_too"],
+    )
 
 
 def test_a_removal_the_server_refuses_is_a_refused_write_with_its_error_and_says_which_login_went_before_it() -> None:

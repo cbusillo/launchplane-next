@@ -121,15 +121,22 @@ class PretendHost:
             of_lane(self.instances.values()), of_lane(self.background_services.values()), of_lane(self.data_sets.values()), networks
         )
 
-    def remove_unheld_logins(self, database: str) -> Unread | None:
+    def remove_unheld_logins(self, database: str) -> Unread | list[str]:
         self.record(f"remove logins from {database}")
         if database in self.holders_unread:
             return Unread(asked=f"Which logins of the database {database} no container holds", why="timed out")
         if database in self.removals_refused:
             raise LoginRemovalRefused(f"The database {database} did not remove the login i_left: it owns objects")
         self.logins_left_in.pop(database, None)
+        unheld = [
+            login
+            for found in self.data_sets.values()
+            for each in found.databases
+            if each.container == database
+            for login in (each.unheld_logins if isinstance(each.unheld_logins, tuple) else ())
+        ]
         self.change_database(database, unheld_logins=())
-        return None
+        return unheld
 
     def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
         self.place(target, container, use=use, generation=generation)
@@ -193,15 +200,17 @@ class PretendHost:
         self.change_data_set(product, lane, data_set, databases=(database,))
         self.record(f"database {data_set} on {network} and {volume} from {image}")
 
-    def start_database(self, container: str) -> None:
+    def start_database(self, container: str) -> bool:
         self.change_database(container, state=InstanceState.RUNNING, exit_code=None, accepts_connections=False)
         self.record(f"start database {container}")
+        return True
 
-    def stop_database(self, container: str) -> None:
+    def stop_database(self, container: str) -> bool:
         exit_code = 137 if container in self.databases_that_must_be_killed else 0
         stopped = {"state": InstanceState.STOPPED, "exit_code": exit_code, "accepts_connections": None, "unheld_logins": None}
         self.change_database(container, **stopped)
         self.record(f"stop database {container}")
+        return True
 
     def change_part(self, container: str, state: InstanceState) -> None:
         if container in self.background_services:
@@ -212,30 +221,33 @@ class PretendHost:
         else:
             self.instances[container] = self.instances[container].model_copy(update={"state": state})
 
-    def start_part(self, container: str) -> None:
+    def start_part(self, container: str) -> bool:
         if container in self.parts_that_will_not_start:
             raise ContainerHostRefused(f"Starting {container} on test was refused: no such image")
         self.change_part(container, InstanceState.RUNNING)
         self.record(f"start {container}")
+        return True
 
-    def stop_part(self, container: str) -> None:
+    def stop_part(self, container: str) -> bool:
         self.change_part(container, InstanceState.STOPPED)
         self.record(f"stop {container}")
+        return True
 
     def await_database(self, container: str) -> None:
         self.change_database(container, accepts_connections=True, unheld_logins=self.logins_left_in.get(container, ()))
         self.record(f"await {container}")
 
-    def delete_data_set(self, found: DataSet) -> None:
+    def delete_data_set(self, found: DataSet) -> list[str]:
         del self.data_sets[found.data_set]
         self.record(f"delete {found.data_set}")
+        return [*(each.container for each in found.databases), *found.volumes, *(each.name for each in found.networks)]
 
-    def retire_instance(self, container: str) -> None:
-        if container in self.background_services:
-            del self.background_services[container]
-        else:
-            del self.instances[container]
+    # As Docker: one that is not there is answered as nothing removed.
+    def retire_instance(self, container: str) -> bool:
+        parts = self.background_services if container in self.background_services else self.instances
+        removed = parts.pop(container, None) is not None
         self.record(f"retire {container}")
+        return removed
 
     def read_log_tail(self, container: str) -> str:
         part = self.background_services.get(container) or self.instances[container]
@@ -287,6 +299,7 @@ class PretendGate:
                 kept.revoke(kept.armed[1])
             kept.armed, kept.committed = (attempt, candidate), candidate
             self.proxy.written[web_address] = candidate
+            self.proxy.edited[web_address] = (candidate, f"{candidate} {generation} {attempt}")
             self.proxy.host.record(f"route {candidate}")
         return kept.answer()
 
@@ -366,15 +379,19 @@ class PretendProxy:
     def is_running(self) -> bool:
         return self.running
 
-    def start(self) -> None:
+    def start(self) -> bool:
         self.running = self.starts
         self.host.record("start proxy")
+        return True
 
     def read(self) -> ProxySeen:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={web_address: WrittenRoute(to, SINCE, self.installed(web_address)) for web_address, to in self.written.items()}
+            written={
+                web_address: WrittenRoute(to, SINCE, text := self.installed(web_address), text.removeprefix(to).strip())
+                for web_address, to in self.written.items()
+            }
             | self.unread,
             loaded=dict(self.loaded) if self.running else {},
         )

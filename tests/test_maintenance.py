@@ -323,14 +323,13 @@ BACK_SOON_ROUTES = {
 def test_a_move_refuses_a_lane_whose_route_points_at_the_back_soon_page_and_starts_nothing(route: tuple[str, str]) -> None:
     step = decide_move(a_move(Lane(route).given().judged(Work.MOVE), (), NO_VERDICT, WITH_DATA))
     assert isinstance(step, Stop)
-    assert "End maintenance first, with POST /lanes/site/testing/maintenance/end. Nothing was changed." in step.reason
+    assert "End maintenance first, with POST /lanes/site/testing/maintenance/end." in step.reason
 
 
 def test_a_move_refuses_a_lane_in_maintenance_before_it_starts_the_proxy() -> None:
     down = replace(Lane(IN_MAINTENANCE).given(), route=(None, BACK_SOON), proxy_runs=False)
     step = decide_move(a_move(down.judged(Work.MOVE), (), NO_VERDICT, WITH_DATA))
-    assert isinstance(step, Stop)
-    assert "Nothing was changed." in step.reason
+    assert isinstance(step, Stop) and "is in maintenance" in step.reason
 
 
 def test_a_lane_in_maintenance_is_retired_as_any_other_route_first_then_its_stopped_parts() -> None:

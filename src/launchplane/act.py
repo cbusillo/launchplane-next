@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from launchplane import maintenance, plan, steps
 from launchplane.container_host import PartStopped
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
-from launchplane.gate import LOST
+from launchplane.gate import ALREADY, LOST
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     BACK_SOON,
@@ -53,7 +53,7 @@ from launchplane.steps import (
     Stop,
     TooLate,
 )
-from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, told
+from launchplane.telling import NOBODY, Answered, Said, Witness, change_of, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -69,14 +69,14 @@ class InstanceHost(Protocol):
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None: ...
     def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
-    def start_database(self, container: str) -> None: ...
+    def start_database(self, container: str) -> bool: ...
     def await_database(self, container: str) -> None: ...
-    def start_part(self, container: str) -> None: ...
-    def stop_part(self, container: str) -> None: ...
-    def stop_database(self, container: str) -> None: ...
-    def delete_data_set(self, found: DataSet) -> None: ...
-    def retire_instance(self, container: str) -> None: ...
-    def remove_unheld_logins(self, database: str) -> Unread | None: ...
+    def start_part(self, container: str) -> bool: ...
+    def stop_part(self, container: str) -> bool: ...
+    def stop_database(self, container: str) -> bool: ...
+    def delete_data_set(self, found: DataSet) -> list[str]: ...
+    def retire_instance(self, container: str) -> bool: ...
+    def remove_unheld_logins(self, database: str) -> Unread | list[str]: ...
     def read_log_tail(self, container: str) -> str: ...
 
 
@@ -90,7 +90,7 @@ class AskedGate(Protocol):
 
 class Proxy(Protocol):
     def is_running(self) -> bool: ...
-    def start(self) -> None: ...
+    def start(self) -> bool: ...
     def read(self) -> ProxySeen: ...
     def await_route(self, web_address: str, container: str | None, *, enabled: bool = False) -> None: ...
     def edit(self, web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str: ...
@@ -180,20 +180,37 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any], object]] = {
 }
 
 
-# Nothing is told as done before it is done: a change that put a lane back is marked so once the host has made it.
+def told_once(action: Action, witness: Witness) -> Answered:
+    def answered(_said: Said | None, error: str | None, _changed: Sequence[str]) -> None:
+        witness.tell(named(action), error)
+
+    return answered
+
+
+# A change is written down before it is sent, and what the host answered is written to the same line after: changed,
+# already as asked, or refused with its error. An error that is no answer is kept as that, and so is no word at all.
+# A step that changes nothing on the host is told once, when it is taken.
 def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) -> Event:
     witness.hold()
+    change = change_of(action)
+    answered = told_once(action, witness) if change is None else witness.about_to(named(action), change | {"back": back})
     try:
         event = take(action, witness)
-    except (ContainerHostError, ProxyError) as error:
-        witness.tell(named(action), str(error))
+    except (ContainerHostRefused, Stopped) as error:
+        answered(Said.REFUSED, str(error), error.changed if isinstance(error, ContainerHostError) else ())
         raise
-    did, refusal = told(action, event)
-    witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
+    except (ContainerHostError, ProxyError) as error:
+        answered(None, str(error), ())
+        raise
+    if isinstance(event, steps.Already):
+        answered(Said.ALREADY, None, ())
+        return event.action
+    refusal = told(action, event)[1]
+    answered(Said.CHANGED if refusal is None else Said.REFUSED, refusal, ())
     return event
 
 
-type Take = Callable[[Action, Witness], Event]
+type Take = Callable[[Action, Witness], Event | steps.Already]
 type Decided[Answer] = Action | Done[Answer] | Done[PutBack] | Stop | TooLate | steps.CannotPutBack
 type Decide[Answer] = Callable[[Judgement, tuple[Event, ...], Cancel | None], Decided[Answer]]
 
@@ -212,6 +229,7 @@ def settle[Answer](
     cancel: Cancel | None = None
     while True:
         lane = read()
+        witness.look(lane.route, lane)
         # Two answers where a lane has room for one hold it: no winner is chosen, neither is touched, no call answers success.
         if isinstance(lane.route.loaded, Conflicting):
             raise Waiting(f"{lane.route.loaded}. The lane is held as it is until the proxy has one. Nothing more was done.")
@@ -385,6 +403,7 @@ class Lanes:
         # that is no answer is not taken for no mark.
         web_address = web_address_of(product, lane)
         route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
+        witness.look(route, None)
         if not (route.in_maintenance or isinstance(route.file, Unread) or isinstance(route.loaded, Conflicting)):
             if route.proxy_runs and not is_loaded_as_written(route):
                 self.proxy.await_route(web_address, route.written)
@@ -429,11 +448,10 @@ class Lanes:
             raise Waiting(f"Launchplane was about to {named(action)}. {why}. Nothing more was done.")
 
     # A part that fails behind the back soon page is stopped before its log is read, so its refusal carries no log yet.
-    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
+    def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event | steps.Already:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.EditRoute):
-            edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
-            return action if edit != LOST else steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
+            return self.edit_route(action, witness)
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path, with_log=not behind_back_soon)
         if isinstance(action, steps.AwaitBackgroundService):
@@ -441,26 +459,41 @@ class Lanes:
         if isinstance(action, steps.ReadLog):
             return self.read_log(action.container)
         if isinstance(action, steps.RemoveLogins):
-            unread = self.host.remove_unheld_logins(action.database)
-            return action if unread is None else steps.LoginsUnread(action.database, str(unread))
+            return self.remove_logins(action)
         if isinstance(action, steps.StartStopped):
-            try:
-                self.host.start_part(action.container)
-            except ContainerHostRefused as error:
-                return steps.StartRefused(action.container, str(error))
-            return action
+            return self.start_stopped(action)
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
             return self.discard(action)
-        TAKE[type(action)](self.host, self.proxy, action)
-        return action
+        # A host that answers it changed nothing found the thing as asked. One that answers nothing made it.
+        changed = TAKE[type(action)](self.host, self.proxy, action)
+        return action if changed is None or changed else steps.Already(action)
+
+    # The gate's own answer is kept apart: the route it left, the route it found as asked, and the route it changed.
+    def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event | steps.Already:
+        edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
+        if edit == LOST:
+            return steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
+        return steps.Already(action) if edit == ALREADY else action
+
+    def remove_logins(self, action: steps.RemoveLogins) -> Event | steps.Already:
+        removed = self.host.remove_unheld_logins(action.database)
+        if isinstance(removed, Unread):
+            return steps.LoginsUnread(action.database, str(removed))
+        return action if removed else steps.Already(action)
+
+    def start_stopped(self, action: steps.StartStopped) -> Event | steps.Already:
+        try:
+            return action if self.host.start_part(action.container) else steps.Already(action)
+        except ContainerHostRefused as error:
+            return steps.StartRefused(action.container, str(error))
 
     # The one removal of an instance of a release. The gate is asked about the generation that made it, and obeyed: one
     # it says was renamed to stays. Otherwise, the gate has taken away every permission to switch to it, and it goes. One
     # no release made has no rename that could be on its way to it.
-    def discard(self, action: steps.Discard) -> Event:
+    def discard(self, action: steps.Discard) -> Event | steps.Already:
         made_by, container = action.generation, action.container
         if made_by is not None:
             answer = self.proxy.gate.discard(action.web_address, made_by, action.attempt, container)
@@ -468,10 +501,10 @@ class Lanes:
                 return steps.Discarded(container, kept=True)
         self.refuse_to_take_from_visitors(steps.Retire(container))
         try:
-            self.host.retire_instance(container)
+            removed = self.host.retire_instance(container)
         except ContainerHostRefused as error:
             return steps.RemovalRefused(container, str(error))
-        return steps.Discarded(container, kept=False)
+        return steps.Discarded(container, kept=False) if removed else steps.Already(action)
 
     def read_log(self, container: str) -> Event:
         try:

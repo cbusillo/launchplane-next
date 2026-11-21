@@ -15,9 +15,11 @@ class Outcome(StrEnum):
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
-# Every answer says which servers did not tell their logins, so that none was looked for there.
+# Every answer says which servers did not tell their logins, so that none was looked for there, and each change the
+# request sent that was never answered and that the host does not show to be its own: it may have acted, or may yet.
 class Result(BaseModel):
     logins_not_read: list[str] = []
+    unanswered: list[str] = []
 
 
 class MoveResult(Result):
@@ -279,6 +281,12 @@ class LoginsUnread(Refused):
     pass
 
 
+# A change the host answered it already had as asked: sent, and no change of the request that sent it.
+@dataclass(frozen=True)
+class Already:
+    action: Action
+
+
 @dataclass(frozen=True)
 class Done[Answer]:
     answer: Answer
@@ -293,10 +301,6 @@ class Stop:
 # touched. Nothing is done, and the move is planned again from a later reading.
 class Wait(Stop):
     pass
-
-
-# How the error of such an ending begins, so a cancel asked again says that it won.
-CANCEL_WON = "The cancel won"
 
 
 # A cancel won at the gate and a part of its release could not be removed: the lane cannot be put back.

@@ -2,6 +2,7 @@ import threading
 import time
 from collections.abc import Callable
 from functools import partial
+from typing import NoReturn
 
 import pytest
 
@@ -174,7 +175,7 @@ def test_a_step_the_host_refuses_after_the_switch_leaves_the_request_working_wit
     worker, _, proxy = serving_a(record)
     retire = proxy.host.retire_instance
 
-    def refuse(container: str) -> None:
+    def refuse(container: str) -> NoReturn:
         raise ContainerHostError(f"Retiring {container} on test failed: the daemon is busy")
 
     proxy.host.retire_instance = refuse
@@ -265,7 +266,7 @@ def test_the_request_being_worked_shows_on_its_lanes_card_with_what_it_has_done_
     proxy.while_checking = read_the_card
     record.write(MOVE_B, CALLER, None)
     worker.work_next()
-    assert shown == [("moving to site:b", ["working"], "So far: start the instance site-testing-0 of site:b.")]
+    assert shown == [("moving to site:b", ["working"], "So far: start the instance site-testing-0 of site:b: done.")]
 
 
 def test_a_request_for_a_lane_with_nothing_on_the_host_still_shows_on_the_page(record: Record) -> None:

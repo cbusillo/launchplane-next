@@ -38,11 +38,12 @@ from launchplane.record import (
     Unconfirmed,
     database,
     how_cancelled,
+    how_not_cancelled,
     how_replaced,
 )
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
-from launchplane.steps import CANCEL_WON, MaintenanceResult, MoveResult, RetireResult
+from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker, carried_out
 
@@ -416,10 +417,9 @@ def is_cancel_settled(kept: Kept) -> bool:
 # One sentence for a request no cancel will end, or None while one has ended it or still may.
 def why_not_cancelled(kept: Kept) -> str | None:
     ended = f"Request {kept.id} ended as {kept.stands}"
-    if kept.cancel_refused is not None:
-        return f"{kept.cancel_refused} {ended}." if kept.stands in ENDED else kept.cancel_refused
-    if kept.stands is Stands.FAILED and kept.cancel_asked_at is not None and (kept.error or "").startswith(CANCEL_WON):
-        return f"{kept.error} {ended}."
+    why = how_not_cancelled(kept)
+    if why is not None:
+        return f"{why} {ended}." if kept.stands in ENDED else why
     if kept.stands in (Stands.DONE, Stands.FAILED, Stands.REPLACED):
         return f"{ended}, so it was not cancelled. Nothing was changed by this call."
     return None

@@ -78,7 +78,7 @@ class CheckFailed(Exception):
 
 
 class HelperHost(Protocol):
-    def ensure_helper(self, helper: HelperContainer) -> None: ...
+    def ensure_helper(self, helper: HelperContainer) -> bool: ...
     def is_running(self, container: str) -> bool: ...
     def run_in(self, container: str, command: list[str]) -> CommandResult: ...
     def read_folder(self, container: str, folder: PurePosixPath) -> dict[str, FileRead]: ...
@@ -174,7 +174,7 @@ def written_route_from_file(text: str, web_address: str, written_at: datetime) -
     found = INSTANCE_URL.search(body)
     if found is None or body != route_text(web_address, found["container"]):
         return Unread(asked=f"The routes file {route_file_of(web_address)}", why="it is not the route Launchplane writes")
-    return WrittenRoute(found["container"], written_at, text)
+    return WrittenRoute(found["container"], written_at, text, first.removeprefix("# ") if body is rest else "")
 
 
 def is_loaded(route: Loaded | None, container: str | None, *, enabled: bool) -> bool:
@@ -198,13 +198,14 @@ class TraefikProxy:
     def is_running(self) -> bool:
         return self.host.is_running(PROXY_NAME)
 
-    def start(self) -> None:
-        self.host.ensure_helper(PROXY)
+    def start(self) -> bool:
+        made = self.host.ensure_helper(PROXY)
         started = self.clock()
         while not (result := self.host.run_in(PROXY_NAME, ["wget", "-q", "-O", "/dev/null", LOADED_ROUTES_URL])).succeeded:
             if self.clock() - started >= self.load_deadline_seconds:
                 raise ProxyError(f"The proxy did not answer within {self.load_deadline_seconds:g} s of starting: {result.output}")
             self.sleep(POLL_SECONDS)
+        return made
 
     @observing()
     def read_routes(self) -> dict[str, Loaded]:

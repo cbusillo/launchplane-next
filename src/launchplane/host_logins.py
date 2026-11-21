@@ -108,7 +108,9 @@ class HostLogins:
             failure = LoginRemovalRefused if result.exit_code == PSQL_STATEMENT_REFUSED else ContainerHostError
             if not result.succeeded:
                 why = f"{result.output or 'no answer'}. Removed before it: {logins[:number]}."
-                raise failure(f"The database {database} did not remove the login {login}: {why}")
+                refused = failure(f"The database {database} did not remove the login {login}: {why}")
+                refused.changed = tuple(logins[:number])
+                raise refused
 
     def make(self, instance: str, use: DataSetUse) -> dict[str, str]:
         self.require_rules(use)
