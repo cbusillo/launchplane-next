@@ -14,7 +14,15 @@ from launchplane.record import Asked, Event, Interrupted, Kept, Record, Reply, S
 from launchplane.telling import Said, Seen
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import NOT_LAUNCHPLANES_ROUTE, WEB_ADDRESS, WITH_DATA, LaunchplaneKilled, PretendProxy, numbered_names
+from tests.pretend_host import (
+    NOT_LAUNCHPLANES_ROUTE,
+    WEB_ADDRESS,
+    WITH_DATA,
+    LaunchplaneKilled,
+    PretendHost,
+    PretendProxy,
+    numbered_names,
+)
 from tests.pretend_record import PretendRecord, begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance
 from tests.test_host_answers import (
@@ -144,21 +152,32 @@ def test_a_move_that_only_waited_and_checked_over_two_attempts_answers_unchanged
     )
 
 
-def test_a_clean_up_of_logins_that_removed_none_is_no_change_of_the_request(record: Record) -> None:
+# A move to the build a lane already serves, whose one change is the removal of the logins left in its server, made by
+# `remove`: how the request ended, and what its one line was answered.
+def moved_with_logins_removed_by(record: Record, remove: Callable[[PretendHost, str], list[str]], *left: str) -> tuple[Kept, Reply]:
     proxy = lane_brought_up_with_a()
-    proxy.host.change_database(DATABASE, unheld_logins=("i_left",))
+    proxy.host.change_database(DATABASE, unheld_logins=left)
 
-    def held_by_the_time_it_is_read_again(database: str) -> list[str]:
-        proxy.host.change_database(database, unheld_logins=())
-        return []
+    def removed(database: str) -> list[str]:
+        return remove(proxy.host, database)
 
-    proxy.host.remove_unheld_logins = held_by_the_time_it_is_read_again
+    proxy.host.remove_unheld_logins = removed
     request = record.write(MOVE_A, CALLER, None)
     assert worker_on(proxy, record).work_next() is True
     kept = kept_of(record, request.id)
     [line] = kept.events
-    assert kept.answer is not None and line.outcome is not None
-    assert (line.outcome.said, kept.answer["outcome"], kept.answer["did"]) == (Said.ALREADY, "unchanged", [])
+    assert line.outcome is not None
+    return kept, line.outcome
+
+
+def test_a_clean_up_of_logins_that_removed_none_is_no_change_of_the_request(record: Record) -> None:
+    def held_by_the_time_it_is_read_again(host: PretendHost, database: str) -> list[str]:
+        host.change_database(database, unheld_logins=())
+        return []
+
+    kept, said = moved_with_logins_removed_by(record, held_by_the_time_it_is_read_again, "i_left")
+    assert kept.answer is not None
+    assert (said.said, kept.answer["outcome"], kept.answer["did"]) == (Said.ALREADY, "unchanged", [])
 
 
 def test_a_cancel_that_won_and_whose_clean_up_was_refused_is_a_cancel_that_won_on_the_page_and_to_a_cancel_asked_again(
@@ -318,10 +337,10 @@ def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_completed_
         raise LaunchplaneKilled
 
     def read_and_then_it_lands() -> ProxySeen:
-        seen = read()
+        before_it_landed = read()
         proxy.read = read
         switch(*sent[0])
-        return seen
+        return before_it_landed
 
     proxy.switch = killed_once_sent
     request = record.write(MOVE_B, CALLER, None)
@@ -396,24 +415,12 @@ def test_a_route_as_asked_that_another_hand_installed_is_not_the_requests_own(re
 
 
 def test_a_removal_of_logins_refused_after_one_was_removed_is_a_change_of_the_request_and_says_which(record: Record) -> None:
-    proxy = lane_brought_up_with_a()
-    proxy.host.change_database(DATABASE, unheld_logins=("i_left", "i_owns_a_table"))
-
-    def refused_at_the_second(database: str) -> NoReturn:
+    def refused_at_the_second(_host: PretendHost, database: str) -> NoReturn:
         refused = LoginRemovalRefused(f"The database {database} did not remove the login i_owns_a_table: it owns objects")
         refused.changed = ("i_left",)
         raise refused
 
-    proxy.host.remove_unheld_logins = refused_at_the_second
-    request = record.write(MOVE_A, CALLER, None)
-    assert worker_on(proxy, record).work_next() is True
-    kept = kept_of(record, request.id)
-    [line] = kept.events
-    assert line.outcome is not None and kept.error is not None
-    assert (kept.stands, line.outcome.said, line.outcome.changed, line.is_credited) == (
-        Stands.FAILED,
-        Said.REFUSED,
-        ["i_left"],
-        True,
-    )
+    kept, said = moved_with_logins_removed_by(record, refused_at_the_second, "i_left", "i_owns_a_table")
+    assert kept.error is not None
+    assert (kept.stands, said.said, said.changed, kept.events[0].is_credited) == (Stands.FAILED, Said.REFUSED, ["i_left"], True)
     assert f"Before that, this request did: remove the logins no container holds from {DATABASE}." in kept.error
