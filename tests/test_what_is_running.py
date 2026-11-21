@@ -26,7 +26,7 @@ from launchplane.instance import (
 from launchplane.judge import Standing, judge, web_addresses_judged
 from launchplane.product import Product
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import SINCE, GateNeverAsked
+from tests.pretend_host import SINCE, LanesNeverAsked
 from tests.pretend_record import PretendRecord
 
 SAVED_CONTAINER_LIST = Path(__file__).parent / "answers" / "container-list.json"
@@ -91,7 +91,7 @@ def app_reading(
     def read_status() -> Status:
         return status_of(read(), proxy or proxy_sending(routes), failures)
 
-    return TestClient(create_app(read_status, PretendRecord(), no_wake, NO_SECRETS, GateNeverAsked()))
+    return TestClient(create_app(read_status, PretendRecord(), no_wake, NO_SECRETS, LanesNeverAsked()))
 
 
 def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:

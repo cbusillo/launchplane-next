@@ -18,7 +18,6 @@ class Witness:
     refuse_cancel: Callable[[str], None] = lambda _why: None
     generation: str = ""
     attempt: int = 0
-    edit_unanswered: bool = False
 
 
 NOBODY = Witness()

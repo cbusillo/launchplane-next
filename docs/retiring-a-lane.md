@@ -27,12 +27,12 @@ The web address goes first so that no new request reaches an instance that is st
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `retired` | 200 | Something was removed, and no data set was deleted. `route_removed_to_container` is the container the web address sent to, or `null`. `retired_containers` lists the background services and instances removed. `kept_data_sets` lists the lane's data sets still on the host. |
-| `deleted` | 200 | The data set named in the body was deleted, and `deleted_data_set` names it. Anything of the lane still running was retired first and is listed as for `retired`. |
+| `deleted` | 200 | The data set named in the body was deleted by this request, and `deleted_data_set` names it, also when the attempt that sent the deletion never had its reply. Anything of the lane still running was retired first and is listed as for `retired`. |
 | `unchanged` | 200 | The lane had no route, no background service and no instance, and no data set of it was named. |
 
 The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
 
-A `503` means the host or proxy could not be read or changed. Retiring stopped where it was, its request has failed, and it is safe to ask again. A removal of the route that was sent and not answered does not fail the request: it stays working, and its [next attempt](requests.md#the-workers) fences the removal, reads the route and finishes the retire. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
+A `503` means the host answered no, or the lane is not as it must be. It also answers a retire that named a data set the lane does not have and that no attempt of the request deleted: the rest of the retire was done, `error` names the data set, and nothing was deleted. Retiring stopped where it was, its request has failed, and it is safe to ask again. A host or proxy that could not be read, and a change that was sent and not answered, do not fail the request: it stays working, and its [next attempt](requests.md#the-workers) reads the host and finishes the retire. A removal of the route not answered is fenced first. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
 
 ## Known and not fixed
 

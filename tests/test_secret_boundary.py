@@ -15,7 +15,7 @@ from launchplane import api
 from launchplane.act import Lanes, Status, Stopped
 from launchplane.api import cleaned_log_config, create_app
 from launchplane.container_host import ContainerHost
-from launchplane.docker_answers import ContainerHostError
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.instance import (
     InstanceState,
     LaneBuild,
@@ -95,7 +95,7 @@ def retire_answering(product: str, lane: str, _delete_data_set: str | None, _wit
 
 
 def retire_stopped(product: str, lane: str, _delete_data_set: str | None, _witness: Witness) -> RetireResult:
-    raise ContainerHostError(f"Stopping {lane} of {product} failed: {SECRET}")
+    raise ContainerHostRefused(f"Stopping {lane} of {product} was refused: {SECRET}")
 
 
 def maintenance_answering(product: str, lane: str, _witness: Witness) -> MaintenanceResult:
@@ -110,7 +110,7 @@ def maintenance_answering(product: str, lane: str, _witness: Witness) -> Mainten
 
 
 def maintenance_stopped(product: str, lane: str, _witness: Witness) -> MaintenanceResult:
-    raise ContainerHostError(f"Stopping a part of {lane} of {product} failed: {SECRET}")
+    raise ContainerHostRefused(f"Stopping a part of {lane} of {product} was refused: {SECRET}")
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ class Asked(GateNeverAsked):
 # Each request is worked within the call that asked for it, so the call answers with how it ended.
 def app_working_at_once(read: Callable[[], Status], lanes: Carries, secrets: Secrets) -> FastAPI:
     record = PretendRecord()
-    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets, GateNeverAsked())
+    return create_app(read, record, Worker(record, lanes, secrets).worked_one, secrets, lanes)
 
 
 STOPPED = Asked("POST", "/", 503)

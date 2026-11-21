@@ -16,7 +16,7 @@ from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import AtLimit, Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
 from launchplane.telling import LOOKS, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -167,8 +167,9 @@ class Worker:
                 if held is None:
                     return False
                 attempt = self.taken_up(request, found := self.record.at_limit(request.id))
-                if attempt is not None:
-                    self.carry_through(request, attempt, held, found)
+                witness = None if attempt is None else self.witness_of(request, attempt, held)
+                while witness is not None and not self.ended_or_left_open(request, witness.attempt, witness, found):
+                    pass
                 return True
         finally:
             self.let_go(lane)
@@ -201,34 +202,14 @@ class Worker:
 
         return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel, request.generation, attempt)
 
-    def carry_through(self, request: Request, attempt: int, held: Held, found: AtLimit | None) -> None:
-        witness = self.witness_of(request, attempt, held)
-        while request.work is Work.MOVE and not self.move_ended_or_left_open(request, attempt, witness):
-            pass
-        if request.work is not Work.MOVE:
-            self.carry_fenced(request, witness, found)
-
-    # Earlier attempts are fenced before this one reads the lane, and an edit it got no answer for is left to the next one.
-    def carry_fenced(self, request: Request, witness: Witness, found: AtLimit | None) -> None:
-        try:
-            if found is not None:
-                self.lanes.fence(request.product, request.lane, request.generation, found.last)
-            came_to = self.ending_of(request, witness.attempt, witness)
-        except HOST_UNREAD as error:
-            came_to = Ending(Stands.FAILED, error=f"{request.attempted()} was not begun: {error}", left_open=True)
-        if came_to.left_open or witness.edit_unanswered:
-            self.left_open(witness.attempt, came_to.error or "")
-        else:
-            self.record.end(witness.attempt, came_to.stands, came_to.answer, came_to.error)
-
-    # One round of a move: the call, then the gate's word on its ending, then the record. An ending that is no release
-    # is written once the attempt is fenced with no verdict and, where it failed, what the release made is cleaned up and
-    # read to be gone. False is another round: the record holds a cancel the gate had not decided, and now has.
-    def move_ended_or_left_open(self, request: Request, attempt: int, witness: Witness) -> bool:
-        came_to = self.ending_of(request, attempt, witness)
+    # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
+    # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made
+    # is cleaned up and read to be gone. False is another round: the record holds a cancel the gate had not decided, and now has.
+    def ended_or_left_open(self, request: Request, attempt: int, witness: Witness, found: AtLimit | None) -> bool:
+        came_to = self.ending_of(request, attempt, witness, found)
         if came_to.left_open:
             return self.left_open(attempt, came_to.error or "")
-        if came_to.verdict is Verdict.NONE:
+        if came_to.verdict is Verdict.NONE and request.work is Work.MOVE:
             lane = (request.product, request.lane, request.generation, attempt)
             try:
                 fenced = self.lanes.fence(*lane).verdict
@@ -270,10 +251,13 @@ class Worker:
         self.sleep(SECONDS_BEFORE_TAKING_UP_AGAIN)
         return True
 
-    def ending_of(self, request: Request, attempt: int, witness: Witness) -> Ending:
+    def ending_of(self, request: Request, attempt: int, witness: Witness, found: AtLimit | None) -> Ending:
         try:
             # Every secret a container holds is known before the record is given anything about this request to clean.
             self.secrets.read_secrets()
+            # A change of the route an earlier attempt sent may still arrive: it is fenced before this one reads the lane.
+            if found is not None and request.work is not Work.MOVE:
+                self.lanes.fence(request.product, request.lane, request.generation, found.last)
             answer = carried_out(self.lanes, request, attempt, witness)
         except Cancelled as cancelled:
             kept = self.record.read(request.id)
@@ -282,10 +266,9 @@ class Worker:
         except CouldNotPutBack as error:
             return Ending(Stands.FAILED, error=str(error), verdict=Verdict.ABANDONED)
         except STOPPED as error:
-            # A move that could not reach the host, was told to wait, or ran out of steps has learned nothing to end on.
+            # A call that could not reach the host, was told to wait, or ran out of steps has learned nothing to end on.
             # A refusal the host answered with is an answer.
-            unanswered = isinstance(error, (Waiting, *HOST_UNREAD)) and not isinstance(error, ContainerHostRefused)
-            unsure = request.work is Work.MOVE and unanswered
+            unsure = isinstance(error, (Waiting, *HOST_UNREAD)) and not isinstance(error, ContainerHostRefused)
             why = str(error) if unsure else f"{request.attempted()} stopped, and is safe to ask again: {error}"
             return Ending(Stands.FAILED, error=why, left_open=unsure, write_refused=isinstance(error, LoginRemovalRefused))
         # Neither is the request's own failure: it stays working, and is taken up again as interrupted.
@@ -297,6 +280,14 @@ class Worker:
             return Ending(Stands.FAILED, error=why)
         if isinstance(answer, MoveResult):
             answer = of_every_attempt(answer, self.record.read(request.id))
+        named = request.delete_data_set
+        if isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets):
+            # The lane has no such data set. This request deleted it only if an attempt of it sent that: history, for the answer.
+            kept = self.record.read(request.id)
+            if not any(event.did == f"delete the data set {named}" for event in ([] if kept is None else kept.events)):
+                why = f"{request.attempted()} was done. It named the data set {named}, which the lane does not have, to delete."
+                return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
+            answer = answer.model_copy(update={"outcome": RetireOutcome.DELETED, "deleted_data_set": named})
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED

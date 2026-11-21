@@ -167,7 +167,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any], object]] = {
         step.product, step.lane, step.data_set, step.network, step.volume, step.image
     ),
     steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
-    steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),
+    steps.AwaitDatabase: observing()(lambda host, _proxy, step: host.await_database(step.container)),
     steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
     steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use, step.generation),
     steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
@@ -186,7 +186,6 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
     try:
         event = take(action, witness)
     except (ContainerHostError, ProxyError) as error:
-        witness.edit_unanswered &= not isinstance(error, ContainerHostRefused)  # what Docker refused never ran
         witness.tell(named(action), str(error))
         raise
     did, refusal = told(action, event)
@@ -357,7 +356,8 @@ class Lanes:
         ).logins_not_read
 
     # Before an ending that is no release is written: the gate confirms none, and no switch of this attempt or an earlier
-    # one can rename after it.
+    # one can rename after it. A host that refuses to run it has given no answer.
+    @observing()
     def fence(self, product: str, lane: str, generation: str, attempt: int) -> GateAnswer:
         return self.gate().fence(web_address_of(product, lane), generation, attempt)
 
@@ -431,9 +431,7 @@ class Lanes:
     def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.EditRoute):
-            witness.edit_unanswered = True  # from before it is sent: a change not answered may still be made
             edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
-            witness.edit_unanswered = False
             return action if edit != LOST else steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path, with_log=not behind_back_soon)
@@ -447,7 +445,7 @@ class Lanes:
         if isinstance(action, steps.StartStopped):
             try:
                 self.host.start_part(action.container)
-            except ContainerHostError as error:
+            except ContainerHostRefused as error:
                 return steps.StartRefused(action.container, str(error))
             return action
         if isinstance(action, steps.Switch):
