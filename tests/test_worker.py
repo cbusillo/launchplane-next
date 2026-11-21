@@ -9,14 +9,14 @@ from launchplane.act import Lanes
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.instance import DataSetUse, LaneBuild, OnHost
 from launchplane.judge import Condition, Work
-from launchplane.page import RECORD_UNREAD, cards
-from launchplane.record import ENDED, MOST_ATTEMPTS, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
+from launchplane.page import INTERRUPTED, RECORD_UNREAD, cards
+from launchplane.record import ENDED, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
 from launchplane.secret_boundary import SECRET_REMOVED
 from launchplane.telling import Witness
 from launchplane.worker import MOST_LANES_AT_ONCE, Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
-from tests.pretend_record import PretendRecord, lose_every_turn
+from tests.pretend_record import PretendRecord, begun, lose_every_turn
 
 BUILD_A = LaneBuild(product="site", lane="testing", build="site:a")
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
@@ -72,8 +72,7 @@ def killed_while_checking(record: Record, lanes: Lanes, proxy: PretendProxy) -> 
         raise LaunchplaneKilled
 
     request = record.write(MOVE_B, CALLER, None)
-    attempt = record.take_up(request.id)
-    assert attempt is not None
+    attempt = begun(record, request.id)
     proxy.while_checking = kill
     with pytest.raises(LaunchplaneKilled):
         lanes.move(TO_B, request.generation, attempt, Witness(tell=partial(record.note, attempt)))
@@ -123,20 +122,33 @@ def test_a_request_left_working_is_taken_up_and_finished_from_what_is_on_the_hos
     assert kept.answer is not None and kept.answer["outcome"] == "switched"
 
 
-def test_a_request_interrupted_three_times_is_not_taken_up_a_fourth_time_and_its_lane_shows_it_needs_a_person(
+def note_on_the_page(lanes: Lanes, request: int) -> str:
+    [card] = cards(lanes.read_status())
+    [row] = [row for row in card.rows if row.name == f"Request {request}"]
+    return row.note or ""
+
+
+def test_a_move_interrupted_five_times_is_taken_up_again_until_it_ends_and_the_page_says_how_often_and_why_the_last_attempt_ended(
     record: Record,
 ) -> None:
     worker, lanes, proxy = serving_a(record)
     request = record.write(MOVE_B, CALLER, None)
-    for _ in range(MOST_ATTEMPTS):
+    for _ in range(5):
         assert record.take_up(request.id) is not None
+    after_interruptions = note_on_the_page(lanes, request.id)
+    proxy.gate.unreadable = "The routes folder could not be read"
     assert worker.work_next() is True
-    assert (kept_of(record, request.id).stands, proxy.host.actions, worker.work_next()) == (Stands.NEEDS_A_PERSON, [], False)
-    status = lanes.read_status()
-    [card] = cards(status)
-    [row] = [row for row in card.rows if row.name == f"Request {request.id}"]
-    assert ([pill.text for pill in card.pills], [pill.tone for pill in row.pills]) == (["needs a person", "good"], ["wrong"])
-    assert row.note is not None and f"POST /requests/{request.id}/retry" in row.note
+    kept_from_ending = note_on_the_page(lanes, request.id)
+    proxy.gate.unreadable = None
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    assert (kept.stands, (kept.answer or {})["outcome"], [each.ended for each in kept.attempts]) == (
+        Stands.DONE,
+        "switched",
+        [*["interrupted"] * 5, "unfinished", "done"],
+    )
+    assert ("Taken up 5 times" in after_interruptions, INTERRUPTED in after_interruptions) == (True, True)
+    assert ("Taken up 6 times" in kept_from_ending, "The routes folder could not be read" in kept_from_ending) == (True, True)
 
 
 def test_a_step_the_host_refuses_before_the_switch_fails_the_request_with_the_real_error_and_it_is_not_run_again(

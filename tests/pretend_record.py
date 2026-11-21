@@ -8,13 +8,10 @@ from typing import Any
 from launchplane.instance import Verdict, new_generation
 from launchplane.judge import Work
 from launchplane.record import (
-    ASKED_AGAIN,
     ENDED,
     GIVEN_UP,
     MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN,
-    MOST_ATTEMPTS,
     Asked,
-    AtLimit,
     Attempt,
     Event,
     Gate,
@@ -26,18 +23,17 @@ from launchplane.record import (
     RecordError,
     Request,
     Stands,
+    Taken,
     Unconfirmed,
     key_digest,
     key_reused,
-    lane_waits_on_a_person,
-    needs_a_person,
     said,
 )
 from launchplane.secret_boundary import JsonValue
 from launchplane.steps import PutBack
 from tests.given_secrets import GivenSecrets
 
-UNFINISHED = (Stands.WAITING, Stands.WORKING, Stands.NEEDS_A_PERSON)
+UNFINISHED = (Stands.WAITING, Stands.WORKING)
 
 
 def now() -> datetime:
@@ -50,7 +46,6 @@ class PretendRecord(Record):
     open_attempts: dict[int, int] = field(default_factory=dict[int, int])
     turns: dict[tuple[str, str], object] = field(default_factory=dict[tuple[str, str], object])
     attempts_begun: int = 0
-    last_attempt: dict[int, int] = field(default_factory=dict[int, int])
     reachable: bool = True
     gate: Gate = field(default_factory=lambda: Gate(GivenSecrets()))
     confirms_writes: bool = True
@@ -79,7 +74,7 @@ class PretendRecord(Record):
         same_key = self.kept.get(self.keys.get(key_digest(idempotency_key) or "", 0))
         if same_key is not None and same_key.asked() != asked:
             raise key_reused(same_key)
-        unfinished = (each for each in self.every() if each.stands in UNFINISHED[:2] and each.cancel_asked_at is None)
+        unfinished = (each for each in self.every() if each.stands in UNFINISHED and each.cancel_asked_at is None)
         same = same_key or next((each for each in unfinished if each.asked() == asked), None)
         if same is not None and idempotency_key is not None:
             self.keys[key_digest(idempotency_key) or ""] = same.id
@@ -116,13 +111,7 @@ class PretendRecord(Record):
         self.gate.refuse(*said(asked), asked_by)
         with self.writing:
             same = self.same_as_written(asked, idempotency_key)
-            if same is not None:
-                return same
-            of_lane = [each for each in self.every() if (each.product, each.lane) == (asked.product, asked.lane)]
-            stuck = next((each.id for each in of_lane if each.stands is Stands.NEEDS_A_PERSON), None)
-            if stuck is not None:
-                raise lane_waits_on_a_person(asked, stuck)
-            return self.write_new(asked, asked_by, idempotency_key)
+            return same or self.write_new(asked, asked_by, idempotency_key)
 
     def read(self, request: int) -> Kept | None:
         self.reach("reading a request")
@@ -145,12 +134,11 @@ class PretendRecord(Record):
 
     def next_up(self) -> list[Request]:
         self.reach("looking for the next requests")
-        stuck = {(each.product, each.lane) for each in self.every() if each.stands is Stands.NEEDS_A_PERSON}
         oldest: dict[tuple[str, str], Request] = {}
         for each in self.every():
-            if each.stands in UNFINISHED[:2] and (each.product, each.lane) not in stuck:
+            if each.stands in UNFINISHED:
                 oldest.setdefault((each.product, each.lane), each)
-        return sorted(oldest.values(), key=lambda each: each.id)
+        return sorted(oldest.values(), key=lambda request: request.id)
 
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
         return self.turn_held(product, lane)
@@ -170,51 +158,22 @@ class PretendRecord(Record):
             if self.turns.get((product, lane)) is holder:
                 del self.turns[product, lane]
 
-    def take_up(self, request: int, *, exempt: bool = False) -> int | None:
+    def take_up(self, request: int) -> Taken | None:
         self.reach("taking up a request")
         with self.writing:
             found = self.kept.get(request)
-            if found is None or found.stands not in UNFINISHED[:2]:
+            if found is None or found.stands not in UNFINISHED:
                 return None
-            interrupted = self.interrupted(request)
+            interrupted = [
+                each if each.ended is not None else each.model_copy(update={"ended": "interrupted", "ended_at": now()})
+                for each in found.attempts
+            ]
             self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
-            if sum(each.ended == "interrupted" for each in interrupted) >= MOST_ATTEMPTS and not exempt:
-                self.change(request, attempts=interrupted, stands=Stands.NEEDS_A_PERSON, **self.cleaned(error=needs_a_person(found)))
-                return None
-            began = Attempt(number=len(interrupted) + 1, began_at=now(), ended_at=None, ended=None)
-            self.change(request, attempts=[*interrupted, began], stands=Stands.WORKING)
             self.attempts_begun += 1
+            began = Attempt(id=self.attempts_begun, number=len(interrupted) + 1, began_at=now(), ended_at=None, ended=None)
+            self.change(request, attempts=[*interrupted, began], stands=Stands.WORKING)
             self.open_attempts[self.attempts_begun] = request
-            self.last_attempt[request] = self.attempts_begun
-            return self.attempts_begun
-
-    def interrupted(self, request: int) -> list[Attempt]:
-        return [
-            each if each.ended is not None else each.model_copy(update={"ended": "interrupted", "ended_at": now()})
-            for each in self.kept[request].attempts
-        ]
-
-    def at_limit(self, request: int) -> AtLimit | None:
-        self.reach("counting how often a request was interrupted")
-        with self.writing:
-            found = self.kept.get(request)
-            if found is None or found.stands is not Stands.WORKING:
-                return None
-            interrupted = self.interrupted(request)
-            self.open_attempts = {attempt: of for attempt, of in self.open_attempts.items() if of != request}
-            self.change(request, attempts=interrupted)
-            at_limit = sum(each.ended == "interrupted" for each in interrupted) >= MOST_ATTEMPTS
-            return AtLimit(self.last_attempt[request], at_limit)
-
-    def stop_for_a_person(self, request: int, last: int) -> bool:
-        self.reach("leaving a request to a person")
-        with self.writing:
-            found = self.kept.get(request)
-            still = found is not None and (found.stands, found.cancel_asked_at) == (Stands.WORKING, None)
-            if found is None or not still or self.last_attempt[request] != last:
-                return False
-            self.change(request, stands=Stands.NEEDS_A_PERSON, **self.cleaned(error=needs_a_person(found)))
-            return True
+            return Taken(self.attempts_begun, again=found.stands is Stands.WORKING)
 
     def leave_open(self, attempt: int, why: str) -> None:
         self.reach("writing why a request is not finished")
@@ -225,12 +184,6 @@ class PretendRecord(Record):
             attempts = self.kept[request].attempts
             left = attempts[-1].model_copy(update={"ended": "unfinished", "ended_at": now()})
             self.change(request, attempts=[*attempts[:-1], left], **self.cleaned(error=why))
-
-    def resume(self, request: int, why: str) -> None:
-        self.reach("taking a request up again")
-        with self.writing:
-            if request in self.kept and self.kept[request].stands is Stands.NEEDS_A_PERSON:
-                self.change(request, stands=Stands.WORKING, **self.cleaned(error=why))
 
     def note(self, attempt: int, did: str, error: str | None) -> None:
         self.reach("writing what was done")
@@ -261,33 +214,21 @@ class PretendRecord(Record):
             self.change(request, attempts=[*attempts[:-1], ended], stands=stands, ended_at=now(), **kept)
             return True
 
-    def answered_by_a_person(self, request: int, how: str) -> Request | None:
-        found = self.kept.get(request)
-        if found is None or found.stands is not Stands.NEEDS_A_PERSON:
-            return None
-        return self.change(request, stands=Stands.FAILED, ended_at=now(), error=f"{found.error}{how}")
-
-    def give_up(self, request: int) -> Request | None:
+    def give_up(self, request: int, last: int) -> Request | None:
         self.reach("giving a request up")
         with self.writing:
-            return self.answered_by_a_person(request, GIVEN_UP)
-
-    def retry(self, request: int, asked_by: str) -> Request | None:
-        self.reach("asking for a request again")
-        with self.writing:
             found = self.kept.get(request)
-            if found is None or found.stands is not Stands.NEEDS_A_PERSON:
+            resting = found is not None and found.stands is Stands.WORKING and request not in self.open_attempts.values()
+            if found is None or not resting or found.cancel_asked_at is not None or found.attempts[-1].id != last:
                 return None
-            again = self.write_new(found.asked(), asked_by, None)
-            self.answered_by_a_person(request, ASKED_AGAIN.format(again=again.id))
-            return again
+            return self.change(request, stands=Stands.FAILED, ended_at=now(), error=" ".join(filter(None, [found.error, GIVEN_UP])))
 
     def cancel(self, request: int, by: str) -> Request | None:
         self.reach("cancelling a request")
         self.gate.refuse(by)
         with self.writing:
             found = self.kept.get(request)
-            if found is None or found.stands not in UNFINISHED[:2] or found.cancel_asked_at is not None:
+            if found is None or found.stands not in UNFINISHED or found.cancel_asked_at is not None:
                 return found
             mark = {"cancel_asked_at": now(), "cancel_asked_by": by}
             if found.stands is Stands.WAITING:
@@ -304,6 +245,13 @@ class PretendRecord(Record):
         with self.writing:
             if request in self.kept and self.kept[request].cancel_refused is None:
                 self.change(request, **self.cleaned(cancel_refused=why))
+
+
+# The attempt a request is given when it is taken up, for a test that goes on as its worker.
+def begun(record: Record, request: int) -> int:
+    taken = record.take_up(request)
+    assert taken is not None
+    return taken.attempt
 
 
 # What a lost connection does: every turn is free, and its holder has not been told.

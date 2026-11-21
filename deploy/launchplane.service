@@ -2,6 +2,9 @@
 Description=Launchplane
 After=network-online.target postgresql.service
 Wants=network-online.target postgresql.service
+# A healthy start answers within 1 s. Ten starts in five minutes is a Launchplane that keeps dying, and it is left failed.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 User=launchplane

@@ -36,7 +36,7 @@ from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.steps import FreshNames, MaintenanceResult, MoveResult, RetireResult
-from launchplane.telling import Witness
+from launchplane.telling import NOBODY, Witness
 
 WEB_ADDRESS = "testing.site.test"
 # The generations of a release under test and of one before it.
@@ -320,8 +320,8 @@ class GateNeverAsked:
     def abandon(self, product: str, lane: str, generation: str, /) -> str | None:
         raise AssertionError(f"the gate was asked to abandon {generation} of {lane} of {product}, where it answers {self.answers}")
 
-    def fence(self, product: str, lane: str, generation: str, attempt: int, /) -> GateAnswer:
-        assert product and lane and generation and attempt
+    def fence(self, product: str, lane: str, generation: str, attempt: int, by: Witness = NOBODY, /) -> GateAnswer:
+        assert product and lane and generation and attempt and by
         return self.answers
 
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
