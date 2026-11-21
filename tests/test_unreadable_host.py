@@ -474,7 +474,7 @@ def test_a_cancel_accepted_after_a_give_up_has_read_the_lane_and_before_it_ends_
     )
 
 
-def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered_says_not_known_and_never_nothing_was_deleted(
+def test_a_retire_taken_up_again_that_finds_its_named_data_set_gone_is_refused_saying_not_known_and_never_nothing_was_deleted(
     record: Record,
 ) -> None:
     proxy = lane_retired()
@@ -484,8 +484,8 @@ def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered
     assert (worker.work_next(), left_working(record, request.id).answer, list(proxy.host.data_sets)) == (True, None, [])
     assert worker.work_next() is True
     ended = kept_of(record, request.id)
-    assert ended.stands is Stands.DONE and ended.answer is not None
-    assert (ended.answer["outcome"], ended.answer["deleted_data_set"], ended.answer["not_known"]) == ("not known", None, NOT_KNOWN)
+    assert ended.error is not None
+    assert (ended.stands, NOT_KNOWN in ended.error, "Nothing was deleted" in ended.error) == (Stands.FAILED, True, False)
 
 
 @pytest.mark.parametrize("finished_meanwhile", [False, True], ids=["as it was before the request", "as the request would leave it"])

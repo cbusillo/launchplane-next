@@ -47,7 +47,7 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
 
-`did` lists every change made by the attempt that ended the request, whatever the outcome, in the words of its `events`. A request taken up more than once has `not_known` in its answer: what its earlier attempts changed is not in `did`.
+`did` lists every change made by the attempt that ended the request, whatever the outcome, in the words of its `events`. A switch that an earlier attempt sent, and that the routes file shows to be the request's own, is listed too. A request taken up more than once has `not_known` in its answer: what else its earlier attempts changed is not in `did`.
 
 A `503` means the move stopped where it was with nothing switched, the gate has confirmed that, and what the move made is gone. Its request has failed, and it is safe to ask again. A build Docker answers it does not have ends this way; a host that does not answer leaves the request working. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
 
@@ -225,52 +225,53 @@ Another is ending maintenance's, on the lane with a database and a background se
 
 ### The maintenance watch
 
-Ending maintenance, killed after its change of the route is on the host and before Launchplane has the reply. From a plain shell; the lane is the one `tests/test_bed_interruptions.py` uses, whose images and description are on the bed once that file has run.
+Ending maintenance, killed after its change of the route is on the host and before Launchplane has the reply. Every block can be pasted as it stands into zsh or sh. The lane is the one `tests/test_bed_interruptions.py` uses, whose images and description are on the bed once that file has run.
 
 ```
 L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
 P=/lanes/test-bed-gate-ledger; V=http://docker-lp-scratch.shiny/
 ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
+until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
 curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
 curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
 curl -s -X POST "$L$P/held/maintenance/begin?wait=110"
-curl -X PUT $H/holds/before.proxy.edit
-curl -s -X POST "$L$P/held/maintenance/end"
+curl -s -X PUT "$H/holds/before.proxy.edit"
+R=$(curl -s -X POST "$L$P/held/maintenance/end" | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
+until curl -s "$H/holds" | grep -q '"stopped_at": \["before.proxy.edit"\]'; do sleep 1; done
 ```
 
-1. **Held before the edit.** The last call answers `202` with the request's `id`. On the page, `http://launchplane.shiny:8700/`, the card of `test-bed-gate-ledger · held` has the request as `working`, and its note ends `about to send held.test-bed-gate-ledger.test to <instance>`. A visitor still gets the back soon page, and the lane beside it answers:
+1. **Held before the edit.** The fourth line waits until the held Launchplane is listening, and the last until the end is stopped at its hold. On the page, `http://launchplane.shiny:8700/`, the card of `test-bed-gate-ledger · held` has the request as `working`, and its note ends `about to send held.test-bed-gate-ledger.test to` and the instance's name. A visitor still gets the back soon page, `503`, and the lane beside it answers `pretend product a`:
 
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: held.test-bed-gate-ledger.test' $V        # 503
-curl -s -H 'Host: untouched.test-bed-gate-ledger.test' $V                                    # pretend product a
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: held.test-bed-gate-ledger.test' "$V"
+curl -s -H 'Host: untouched.test-bed-gate-ledger.test' "$V"
 ```
 
-2. **Held after the edit has taken effect.** The second hold is set before the first is let go:
+2. **Held after the edit has taken effect.** The second hold is set before the first is let go, and the loop waits until the end is stopped at it:
 
 ```
-curl -X PUT $H/holds/after.proxy.edit; curl -X DELETE $H/holds/before.proxy.edit
-curl $H/holds                                                                                # stopped_at: after.proxy.edit
+curl -s -X PUT "$H/holds/after.proxy.edit"; curl -s -X DELETE "$H/holds/before.proxy.edit"
+until curl -s "$H/holds" | grep -q '"stopped_at": \["after.proxy.edit"\]'; do sleep 1; done
 ssh root@docker-lp-scratch.shiny 'docker exec launchplane-proxy head -1 /etc/traefik/launchplane/routes/held.test-bed-gate-ledger.test.yml'
+curl -s "$L/requests/$R"
 ```
 
-   The last command is run on the scratch container. The routes file's first line is the request's `generation` and the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply.
+   The `ssh` is to the scratch container. The routes file's first line is the request's `generation`, as the last command shows it, and the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply.
 
 3. **Killed, and let go.**
 
 ```
-curl -X POST $H/kill; curl -X DELETE $H/holds
+curl -s -X POST "$H/kill"; until curl -sf -X DELETE "$H/holds" >/dev/null; do sleep 1; done
+sleep 10; curl -s "$L/requests/$R"
+curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"
+curl -s -X POST "$L$P/held/maintenance/end?wait=60"
 ```
 
-   Within a few seconds the request's row on the card turns `done` and stays for 10 minutes. Its note says it ended as done, that it was interrupted and what its earlier attempts changed on the lane's parts, its data set and its logins is not known, and then its lines, the last of them `send held.test-bed-gate-ledger.test to <instance>: may have been sent, no answer, then read as made by this request`.
+   Within a few seconds the request's row on the card turns `done` and stays for 10 minutes. Its note says it ended as done, that it was interrupted and what its earlier attempts changed on the lane's parts, its data set and its logins is not known, and then its lines, the last of them `send held.test-bed-gate-ledger.test to` the instance, `: may have been sent, no answer, then read as made by this request`. The second line answers the request as `done`, with `outcome` `ended` and attempts `interrupted` then `done`; the third answers `pretend product a`; the fourth, a new end, answers `not in maintenance`.
+
+4. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
 
 ```
-curl -s $L/requests/<id>                                   # stands done, answer.outcome ended, attempts interrupted then done
-curl -s -H 'Host: held.test-bed-gate-ledger.test' $V       # pretend product a
-curl -s -X POST "$L$P/held/maintenance/end?wait=60"        # outcome not in maintenance
-```
-
-4. **Put the bed back.** Retire both lanes with the data set each lists in `kept_data_sets`, then:
-
-```
+for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
 ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
 ```

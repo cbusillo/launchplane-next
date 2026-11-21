@@ -479,7 +479,7 @@ class Lanes:
     def route_sent(self, action: steps.EditRoute | steps.Switch, witness: Witness) -> Event:
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
-            return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
+            return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container), action.web_address)
         edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
         if edit == ALREADY:
             return steps.RouteAsAsked(action.web_address, "The gate found the route already as asked.")

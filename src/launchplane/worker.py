@@ -19,7 +19,7 @@ from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import Held, Interrupted, Record, RecordError, Reply, Request, Sent, Stands
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
+from launchplane.steps import NOT_KNOWN, MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
 from launchplane.telling import NOBODY, Answered, Said, Seen, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -289,11 +289,10 @@ class Worker:
             return Ending(Stands.FAILED, error=why)
         answer = accounted(answer, self.record.read(request.id))
         named = request.delete_data_set
-        gone = isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets)
-        # The lane has no such data set. Only a first attempt knows it deleted nothing: an earlier one may have deleted it.
-        if gone and not again:
+        # The lane has no such data set, so the request is refused. Only a first attempt knows that it deleted nothing.
+        if isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets):
             why = f"{request.attempted()} was done. It named the data set {named}, which the lane does not have, to delete."
-            return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
+            return Ending(Stands.FAILED, error=f"{why} {NOT_KNOWN if again else 'Nothing was deleted.'}")
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED

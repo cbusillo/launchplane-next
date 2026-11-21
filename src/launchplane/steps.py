@@ -181,6 +181,7 @@ class Switch:
 class Switched:
     container: str
     won: bool
+    web_address: str
 
 
 # An instance taken through the gate and then removed: either the gate says its rename won, and it is kept, or it can

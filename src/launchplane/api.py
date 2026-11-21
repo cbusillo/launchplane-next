@@ -87,7 +87,7 @@ class RunningAnswer(BaseModel):
     web_addresses: list[WebAddressJudged]
     lanes: list[LaneAnswer]
     requests: list[Kept]
-    cancels: list[Kept]
+    cancels: list[KeptRequest]
     record_error: str | None
     cards: list[Card]
 
@@ -162,7 +162,7 @@ def running_answer(status: Status) -> RunningAnswer:
         web_addresses=status.web_addresses,
         lanes=[lane_answer(judged) for judged in status.lanes],
         requests=status.requests,
-        cancels=status.cancels,
+        cancels=[each for each in status.cancels if each.cancel_asked_at is not None or each.stands is Stands.REPLACED],
         record_error=status.record_error,
         cards=cards(status),
     )

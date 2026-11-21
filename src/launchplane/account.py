@@ -49,6 +49,9 @@ def accounted[Answer: Result](answer: Answer, kept: Kept | None) -> Answer:
         removed = next((was for to, was in routes if to is None), None)
         update["route_removed_to_container"] = answer.route_removed_to_container or removed
         update["outcome"] = RetireOutcome.NOT_KNOWN if again and answer.outcome is RetireOutcome.UNCHANGED else answer.outcome
-    if isinstance(answer, MoveResult) and again and answer.outcome is Outcome.UNCHANGED:
-        update["outcome"] = Outcome.NOT_KNOWN
+    if isinstance(answer, MoveResult):
+        # A switch an earlier attempt sent, and that is the request's own, is among what the request did.
+        earlier = [event.did for event in kept.events if event.is_credited and event.attempt < len(kept.attempts)]
+        update["did"] = [*earlier, *answer.did]
+        update["outcome"] = Outcome.NOT_KNOWN if again and answer.outcome is Outcome.UNCHANGED else answer.outcome
     return answer.model_copy(update=update)

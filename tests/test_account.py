@@ -6,7 +6,7 @@ from typing import Any, NoReturn
 import pytest
 
 from launchplane.act import Lanes
-from launchplane.api import why_not_cancelled
+from launchplane.api import running_answer, why_not_cancelled
 from launchplane.docker_answers import ContainerHostError
 from launchplane.instance import BACK_SOON, DataSet, ProxySeen, Verdict
 from launchplane.page import cards, line_of, request_note
@@ -270,6 +270,24 @@ def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_completed_
     assert worker.work_next() is True
     kept, answer, line, seen = ended_with_its_route_line(record, request.id)
     assert (kept.stands, answer["outcome"], seen, line.is_credited) == (Stands.DONE, "switched", Seen.OURS, True)
+    assert answer["did"] == [f"switch {WEB_ADDRESS} to {proxy.written[WEB_ADDRESS]}", "retire a"]
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["on its first attempt", "interrupted before its first action"])
+def test_a_retire_that_names_a_data_set_the_lane_never_had_is_refused_however_many_attempts_it_took(
+    record: Record, interrupted: bool
+) -> None:
+    proxy = lane_brought_up_with_a()
+    request = record.write(RETIRE.model_copy(update={"delete_data_set": "no-such-set"}), CALLER, None)
+    if interrupted:
+        assert begun(record, request.id) > 0
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    assert (kept.stands, kept.answer, "no-such-set, which the lane does not have" in (kept.error or "")) == (
+        Stands.FAILED,
+        None,
+        True,
+    )
 
 
 def test_a_route_as_asked_that_another_hand_installed_is_not_the_requests_own(record: Record) -> None:
@@ -342,6 +360,7 @@ def test_a_request_that_has_just_ended_stays_on_its_lanes_card_with_its_last_lin
     assert (first.id < second.id, row.name, [pill.text for pill in row.pills]) == (True, f"Request {second.id}", ["done"])
     assert row.note is not None and row.note.startswith("It ended as done. Its lines: ")
     assert f"switch {WEB_ADDRESS} to {new}: done" in row.note
+    assert running_answer(lanes.read_status()).cancels == []
 
 
 def test_a_route_already_as_asked_when_the_gate_is_sent_the_change_is_no_change_of_the_request(record: Record) -> None:

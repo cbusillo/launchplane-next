@@ -85,9 +85,10 @@ CHANGES = (
 
 # What a step that was taken changed. A switch the gate did not rename for, and an instance it kept, changed nothing.
 def change_made_by(event: Event) -> str | None:
-    if isinstance(event, Switched | Discarded):
-        changed = event.won if isinstance(event, Switched) else not event.kept
-        return f"{'switch the route to' if isinstance(event, Switched) else 'retire'} {event.container}" if changed else None
+    if isinstance(event, Switched):
+        return f"switch {event.web_address} to {event.container}" if event.won else None
+    if isinstance(event, Discarded):
+        return None if event.kept else f"retire {event.container}"
     return telling.named(event) if isinstance(event, CHANGES) else None
 
 

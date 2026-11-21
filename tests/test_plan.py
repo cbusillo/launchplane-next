@@ -102,7 +102,7 @@ def gone(container: str, made_by: str | None = None) -> Discard:
     return Discard(WEB_ADDRESS, container, made_by, ATTEMPT)
 
 
-SWITCHED_TO_NEW = Switched("new", won=True)
+SWITCHED_TO_NEW = Switched("new", won=True, web_address=WEB_ADDRESS)
 REFUSED = CheckRefused("new", "Connection refused")
 
 
@@ -153,7 +153,7 @@ MOVES = {
         (NEW,),
         ("new", "new"),
         (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", kept=False)),
-        answer(Outcome.SWITCHED, "new", did=("start the instance new of b", "switch the route to new", "retire old")),
+        answer(Outcome.SWITCHED, "new", did=("start the instance new of b", "switch testing.site.test to new", "retire old")),
         gate=COMMITTED_TO_NEW,
     ),
     "a switch found in the routes file answers switched, though this attempt did none of it": Case(
