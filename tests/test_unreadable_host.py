@@ -107,13 +107,16 @@ def unread_after_the_first_change(proxy: PretendProxy, changes: int = 1) -> Call
     return read_again
 
 
+PARTS_OF_DATA_1 = ("database server database-data-1", "volume volume-data-1", "network network-data-1")
+
+
 # The change is made on the host, and its caller gets the error of a lost reply once.
 def lose_the_first_reply_to(host: object, change: str) -> None:
     made = getattr(host, change)
 
-    def made_and_not_answered(changed: object) -> None:
+    def made_and_not_answered(*changed: object) -> None:
         setattr(host, change, made)
-        made(changed)
+        made(*changed)
         raise ContainerHostError(f"{change} on test failed: the connection was lost before the reply")
 
     setattr(host, change, made_and_not_answered)
@@ -473,23 +476,25 @@ def test_a_cancel_accepted_after_a_give_up_has_read_the_lane_and_before_it_ends_
     )
 
 
-def test_a_retire_whose_deletion_of_the_named_data_set_had_no_reply_ends_naming_it_unanswered_and_claims_no_deletion(
+def test_a_retire_whose_deletion_of_one_part_had_no_reply_says_the_parts_it_deleted_and_names_that_one_unanswered(
     record: Record,
 ) -> None:
     proxy = lane_retired()
     worker = worker_on(proxy, record)
-    lose_the_first_reply_to(proxy.host, "delete_data_set")
+    lose_the_first_reply_to(proxy.host, "delete_part")
     request = record.write(RETIRE.model_copy(update={"delete_data_set": "data-1"}), CALLER, None)
-    assert (worker.work_next(), left_working(record, request.id).answer, list(proxy.host.data_sets)) == (True, None, [])
+    assert (worker.work_next(), left_working(record, request.id).answer, list(proxy.host.data_sets)) == (True, None, ["data-1"])
     assert worker.work_next() is True
     ended = kept_of(record, request.id)
     assert ended.stands is Stands.DONE and ended.answer is not None
-    assert (ended.answer["outcome"], ended.answer["deleted_data_set"], ended.answer["unanswered"]) == (
-        "unchanged",
-        None,
-        ["delete the data set data-1"],
+    server, volume, network = (f"delete the {part} of the data set data-1" for part in PARTS_OF_DATA_1)
+    assert (ended.answer["outcome"], ended.answer["deleted_data_set"], ended.answer["deleted"], ended.answer["unanswered"]) == (
+        "deleted",
+        "data-1",
+        [volume, network],
+        [server],
     )
-    [line] = [each for each in ended.events if each.action is not None]
+    line = next(each for each in ended.events if each.did == server)
     assert line.outcome is not None and (line.outcome.said, line.outcome.seen) == (None, Seen.AS_ASKED)
 
 

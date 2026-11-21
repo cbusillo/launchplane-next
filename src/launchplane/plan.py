@@ -29,7 +29,7 @@ from launchplane.steps import (
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
-    DeleteDataSet,
+    DeletePart,
     Discard,
     Discarded,
     Done,
@@ -58,7 +58,8 @@ from launchplane.steps import (
 
 type Step[Answer] = Action | Done[Answer] | Stop
 type StepBack = Step[PutBack] | TooLate
-MADE_READY = {Kind.NO_NETWORK, Kind.NO_VOLUME, Kind.NO_DATABASE, Kind.STOPPED, Kind.NOT_ACCEPTING}
+PARTS_GONE = {Kind.NO_NETWORK, Kind.NO_VOLUME, Kind.NO_DATABASE}
+MADE_READY = {*PARTS_GONE, Kind.STOPPED, Kind.NOT_ACCEPTING}
 LOGINS_UNKNOWN = {Kind.LOGINS_UNREAD, Kind.NOT_ACCEPTING, Kind.NOT_ASKED}
 WATCHED = {Kind.STOPPED, Kind.NOT_RUNNING, Kind.UNSTEADY}
 
@@ -496,15 +497,35 @@ def retire_step_back(judged: Judgement, delete_data_set: str | None) -> StepBack
         return step
     if lane.route.written is not None:
         return put_back_or_what_is_left(judged, None)
-    kept = lane.data_set(delete_data_set)
-    saved = (
-        "" if kept is None else f" The data set {kept.data_set}, named for deleting, is kept: the cancel came before it was deleted."
-    )
     return TooLate(
         f"{lane.web_address} has no route, so retiring {lane.lane} of {lane.product} could not be cancelled and is finished "
-        "as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself. "
-        f"Moving the lane to a build brings it back on its data set.{saved}"
+        "as asked: a retire removes the route first, and Launchplane does not make a removed instance again by itself."
+        f"{what_is_left_of(judged, delete_data_set)}"
     )
+
+
+# What the host shows of the data set a cancelled retire named: whole and kept, or with parts already gone.
+def what_is_left_of(judged: Judgement, delete_data_set: str | None) -> str:
+    back = " Moving the lane to a build brings it back on its data set."
+    left = judged.lane.data_set(delete_data_set)
+    if left is None:
+        return back
+    gone = [finding for finding in judged.about_data_set(left) if finding.kind in PARTS_GONE]
+    if gone:
+        return (
+            f" Of the data set {left.data_set}, named for deleting, what is left is kept, and it is not whole: {sentences(gone)}. "
+            "The lane cannot be moved back onto it as it is."
+        )
+    return f"{back} The data set {left.data_set}, named for deleting, is kept: the cancel came before any of it was deleted."
+
+
+# In the order a whole data set went before: its database servers, then its volumes, then its networks.
+def next_to_delete(found: DataSet) -> DeletePart:
+    if found.databases:
+        return DeletePart(found.data_set, "database server", found.databases[0].container)
+    if found.volumes:
+        return DeletePart(found.data_set, "volume", found.volumes[0])
+    return DeletePart(found.data_set, "network", found.networks[0].name)
 
 
 def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Event, ...]) -> Step[RetireResult]:
@@ -523,7 +544,7 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     if doubled:
         return Stop(f"{sentences(doubled)}, so nothing of the data set was deleted: which is its data is not known.")
     if named is not None:
-        return DeleteDataSet(named)
+        return next_to_delete(named)
     # What the lane has now. What this request removed and deleted is its account's to say, over every attempt.
     return login_step(judged, done) or Done(
         RetireResult(

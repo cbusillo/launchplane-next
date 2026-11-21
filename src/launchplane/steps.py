@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel
 
-from launchplane.instance import DataSet, DataSetUse, LaneBuild
+from launchplane.instance import DataSetUse, LaneBuild
 
 
 class Outcome(StrEnum):
@@ -47,6 +48,8 @@ class RetireResult(Result):
     outcome: RetireOutcome
     route_removed_to_container: str | None
     retired_containers: list[str]
+    # Each part of a data set this request deleted, and the data set itself once the lane has nothing left of it.
+    deleted: list[str] = []
     deleted_data_set: str | None = None
     kept_data_sets: list[str] = []
 
@@ -215,9 +218,19 @@ class Retire:
     container: str
 
 
+# One part of a data set named for deleting. Each is its own change: a set is whole only until the first is gone.
 @dataclass(frozen=True)
-class DeleteDataSet:
-    found: DataSet
+class DeletePart:
+    data_set: str
+    part: Literal["database server", "volume", "network"]
+    name: str
+
+
+# The login an instance is given, made before its container is: the server has it from here on, whatever comes after.
+@dataclass(frozen=True)
+class MakeLogin:
+    instance: str
+    database: str
 
 
 @dataclass(frozen=True)
@@ -333,7 +346,8 @@ type Action = (
     | CreateDatabase
     | StartDatabase
     | AwaitDatabase
-    | DeleteDataSet
+    | DeletePart
+    | MakeLogin
     | StartInstance
     | StartBackgroundService
     | Retire

@@ -12,7 +12,7 @@ from launchplane.record import Asked, Kept, Record, Stands
 from launchplane.telling import NAMED, change_of
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import D1, EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
+from tests.pretend_host import EARLIER, GENERATION, WEB_ADDRESS, PretendProxy
 from tests.test_act import BUILD_A, lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_worker import CALLER, MOVE_B, kept_of
 
@@ -308,7 +308,8 @@ CHANGING = (
     steps.CreateDataSetVolume("site", "testing", "d1"),
     steps.CreateDatabase("site", "testing", "d1", "network", "volume", "image"),
     steps.StartDatabase("database"),
-    steps.DeleteDataSet(D1),
+    steps.DeletePart("d1", "volume", "volume-d1"),
+    steps.MakeLogin("a", "database"),
     steps.StartInstance(BUILD_A, "a"),
     steps.StartBackgroundService(BUILD_A, "a", None, ()),
     steps.Retire("a"),

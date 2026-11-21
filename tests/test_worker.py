@@ -1,6 +1,6 @@
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from typing import NoReturn
 
@@ -157,8 +157,8 @@ def test_a_step_the_host_refuses_before_the_switch_fails_the_request_with_the_re
 ) -> None:
     worker, _, proxy = serving_a(record)
 
-    def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
-        assert use is None and generation is not None
+    def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, login: Mapping[str, str]) -> None:
+        assert use is None and generation is not None and not login
         raise ContainerHostRefused(f"Starting the instance {container} from build {target.build} on test failed: no such image")
 
     proxy.host.start_instance = refuse

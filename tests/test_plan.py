@@ -34,7 +34,7 @@ from launchplane.steps import (
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
-    DeleteDataSet,
+    DeletePart,
     Discard,
     Discarded,
     Done,
@@ -613,7 +613,16 @@ def test_a_move_neither_waits_nor_stops_over_unread_logins_of_a_data_set_it_does
 
 
 def test_a_data_set_named_for_deleting_is_deleted_without_its_logins_being_removed_first() -> None:
-    assert retire_step_with(LEFT_ON_D1, delete="d1") == DeleteDataSet(LEFT_ON_D1)
+    assert retire_step_with(LEFT_ON_D1, delete="d1") == DeletePart("d1", "database server", "database-d1")
+
+
+def test_a_data_set_is_deleted_one_part_at_a_time_its_database_server_then_its_volume_then_its_network() -> None:
+    without_server = data_set_named("d1", None)
+    only_network = data_set_named("d1", None, volume=False)
+    assert [retire_step_with(left, delete="d1") for left in (without_server, only_network)] == [
+        DeletePart("d1", "volume", "volume-d1"),
+        DeletePart("d1", "network", "network-d1"),
+    ]
 
 
 def test_a_lane_that_is_as_it_must_be_answers_unchanged() -> None:
@@ -720,7 +729,7 @@ def test_a_retire_stops_background_services_first_and_deletes_the_named_data_set
         return cast("Action | Done[RetireResult] | Stop", decide_retire(judged, delete, ()))
 
     assert step((OLD_ON_D1,), (background_service_of(OLD_ON_D1),), "d1") == Retire("old-background-service")
-    assert step((), (), "d1") == DeleteDataSet(D1)
+    assert step((), (), "d1") == DeletePart("d1", "database server", "database-d1")
     refused = step((), (), "d2")
     assert isinstance(refused, Stop) and "2 database servers (database-a, database-b)" in refused.reason
     kept = step((), (), None)

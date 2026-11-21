@@ -60,7 +60,8 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.CreateDatabase: lambda step: f"make the database server of the data set {step.data_set}",
     steps.StartDatabase: lambda step: f"start the database {step.container}",
     steps.AwaitDatabase: lambda step: f"wait for the database {step.container} to accept connections",
-    steps.DeleteDataSet: lambda step: f"delete the data set {step.found.data_set}",
+    steps.DeletePart: lambda step: f"delete the {step.part} {step.name} of the data set {step.data_set}",
+    steps.MakeLogin: lambda step: f"make the login of {step.instance} in the database {step.database}",
     steps.StartInstance: lambda step: f"start the instance {step.container} of {step.target.build}",
     steps.StartBackgroundService: lambda step: f"start the background service of {step.instance}",
     steps.Retire: lambda step: f"retire {step.container}",
@@ -98,7 +99,8 @@ CHANGES: dict[type, tuple[str, Callable[[Any], str]]] = {
     steps.StopDatabase: ("stop", container_of),
     steps.Retire: ("remove", container_of),
     steps.Discard: ("remove", container_of),
-    steps.DeleteDataSet: ("delete", lambda step: step.found.data_set),
+    steps.DeletePart: ("delete", data_set_of),
+    steps.MakeLogin: ("make login", lambda step: step.database),
     steps.RemoveLogins: ("remove logins", lambda step: step.database),
 }
 
@@ -113,16 +115,16 @@ def change_of(action: Action) -> dict[str, str | bool | None] | None:
     return change | {"to": action.container} if isinstance(action, steps.Switch) else change
 
 
-# One line for a thing done, and the real error where it was refused.
-def told(action: Action, event: Event) -> tuple[str, str | None]:
+# The real error where a thing was refused, and None where it was done.
+def refusal_of(event: Event) -> str | None:
     match event:
         case steps.Refused(report=report):
-            return named(action), report
+            return report
         case steps.LogRead(unreadable=unreadable):
-            return named(action), unreadable
+            return unreadable
         case steps.Discarded(kept=True):
-            return named(action), "The gate answered that the routes file was renamed to it, so it was kept."
+            return "The gate answered that the routes file was renamed to it, so it was kept."
         case steps.Switched(won=False):
-            return named(action), "The gate did not rename the routes file to it."
+            return "The gate did not rename the routes file to it."
         case _:
-            return named(action), None
+            return None

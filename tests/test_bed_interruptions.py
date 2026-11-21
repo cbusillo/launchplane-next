@@ -659,6 +659,11 @@ def test_case_1_a_rename_that_lands_between_recoverys_reading_of_the_routes_file
     case.visitors_get(A, B)
     assert ended_as(switch_in_flight.asked["id"]) == ("done", "switched")
     assert (verdict_of(SITE, generation), case.renames_of(generation)) == (Answer(Verdict.COMMITTED, switch_in_flight.left), 1)
+    answer = request_ended(switch_in_flight.asked["id"])["answer"]
+    assert (answer["unanswered"], [each for each in answer["did"] if each.startswith("switch ")]) == (
+        [],
+        [f"switch {SITE.web_address} to {switch_in_flight.left}"],
+    )
     assert [each["container"] for each in instances_of(SITE)] == [switch_in_flight.left]
 
 

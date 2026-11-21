@@ -27,10 +27,12 @@ The web address goes first so that no new request reaches an instance that is st
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `retired` | 200 | This request removed something, in any of its attempts, and deleted no data set. `route_removed_to_container` is the container the web address sent to, or `null`. `retired_containers` lists the background services and instances removed. `kept_data_sets` lists the lane's data sets still on the host. |
-| `deleted` | 200 | The data set named in the body was deleted by this request, and `deleted_data_set` names it. Anything of the lane still running was retired first and is listed as for `retired`. |
+| `deleted` | 200 | This request deleted a part of the data set named in the body, and the lane has nothing left of that set: `deleted_data_set` names it. Anything of the lane still running was retired first and is listed as for `retired`. |
 | `unchanged` | 200 | No removal is [the request's own](requests.md#what-a-request-did). The lane had no route, no background service and no instance, and no data set of it was named; or a removal was sent and never answered, and `unanswered` lists it. |
 
-What a retire removed and deleted counts only changes the host answered for. A removal sent with no reply, such as a deletion made just before Launchplane was killed, is in `unanswered` and not in `deleted_data_set`: the data set is gone, and who deleted it is not known.
+`deleted` lists each part of a data set this request deleted, whatever the outcome: a database server, a volume or a network, each its own change. A retire that stopped, or was cancelled, after it deleted a volume and before the network went answers with that volume in `deleted` and the data set still in `kept_data_sets`, since the host still shows what is left of it. `cancel_refused` then says the set is not whole and that the lane cannot be moved back onto it as it is.
+
+What a retire removed and deleted counts only changes the host answered for. A deletion with no answer, such as one made just before Launchplane was killed, is in `unanswered` and not in `deleted`: who deleted that part is not known.
 
 The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
 

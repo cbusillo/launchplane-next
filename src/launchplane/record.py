@@ -24,7 +24,7 @@ DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
 MOST_CONNECTIONS = 10
 MOST_READINGS_AT_ONCE = 4
-MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN = 10
+MINUTES_AN_ENDED_REQUEST_IS_SHOWN = 10
 
 # Asked before each action on the host: whether the lane's turn is still held.
 type Held = Callable[[], bool]
@@ -215,7 +215,7 @@ class Record(Protocol):
     def read(self, request: int) -> Kept | None: ...
     def unfinished(self) -> list[Kept]: ...
     def recently_ended(self) -> list[Request]: ...
-    def cancels_answered(self) -> list[Request]: ...
+    def ended_lately(self) -> list[Kept]: ...
     def next_up(self) -> list[Request]: ...
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
     def take_up(self, request: int) -> Taken | None: ...
@@ -243,9 +243,13 @@ def key_digest(idempotency_key: str | None) -> str | None:
 
 def how_cancelled(request: Request) -> str:
     answer = PutBack.model_validate(request.answer or {})
-    did = (
-        f"Done to put the lane back: {'; '.join(answer.put_back)}." if answer.put_back else "Nothing on the host had to be put back."
-    )
+    did = "Nothing on the host had to be put back."
+    if answer.put_back:
+        did = f"Done to put the lane back: {'; '.join(answer.put_back)}."
+    elif answer.unanswered:
+        did = "Nothing is known to have been put back."
+    if answer.unanswered:
+        did += f" No answer was had to: {'; '.join(answer.unanswered)}. Each may have been sent."
     kept = f" It made the data set {', '.join(answer.data_sets_kept)}, which is kept." if answer.data_sets_kept else ""
     return f"{request.attempted()} was cancelled by {request.cancel_asked_by}. {did}{kept}"
 
@@ -293,10 +297,16 @@ class Sql:
     RECENTLY_ENDED: Final = """
     select * from request where stands in ('done', 'failed', 'cancelled', 'replaced') order by ended_at desc, id desc limit 20
     """
-    CANCELS_ANSWERED: Final = """
-    select * from request
-    where (cancel_asked_at is not null and stands in ('done', 'failed', 'cancelled') or stands = 'replaced')
-        and ended_at > now() - make_interval(mins => %s)
+    # Each lane's request that ended last, and every one that was replaced or had a cancel asked of it.
+    ENDED_LATELY: Final = """
+    with lately as (
+        select * from request
+        where stands in ('done', 'failed', 'cancelled', 'replaced') and ended_at > now() - make_interval(mins => %s)
+    ), last_of_each_lane as (
+        select distinct on (product, lane) id from lately where stands <> 'replaced' order by product, lane, ended_at desc, id desc
+    )
+    select * from lately
+    where cancel_asked_at is not null or stands = 'replaced' or id in (select id from last_of_each_lane)
     order by id
     """
     ATTEMPTS: Final = "select id, request, began_at, ended_at, ended from attempt where request = any(%s) order by id"
@@ -527,12 +537,13 @@ class PostgresRecord(Record):
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()],
         )
 
-    # Every request that ended a short while ago and was replaced or had a cancel asked of it, however it ended.
-    def cancels_answered(self) -> list[Request]:
-        shown = self.gate.made(MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
+    # Of the requests that ended a short while ago, with their lines: the one each lane ended last, and every one that
+    # was replaced or had a cancel asked of it, however it ended.
+    def ended_lately(self) -> list[Kept]:
+        shown = self.gate.made(MINUTES_AN_ENDED_REQUEST_IS_SHOWN)
         return self.reading(
-            "reading the requests that were replaced or asked to cancel",
-            lambda session: [Request.model_validate(row) for row in session.execute(Sql.CANCELS_ANSWERED, shown).fetchall()],
+            "reading the requests that ended a short while ago",
+            lambda session: with_history(session, self.gate, session.execute(Sql.ENDED_LATELY, shown).fetchall()),
         )
 
     # The oldest request of each lane that takes one, oldest first.

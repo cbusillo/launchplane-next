@@ -104,25 +104,37 @@ def taken_up(request: Kept) -> str:
 
 
 HEARD = {Said.CHANGED: "done", Said.ALREADY: "found already as asked", Said.REFUSED: "refused"}
+NO_ANSWER = "may have been sent, no answer"
 
 
-# A change says how far it is known to have got: about to be sent, sent with no reply, or what the host answered, and
-# then what a later attempt read of the host. Any other line says what was looked at, and whether that was refused.
+# A change says how far it is known to have got: about to be sent, no answer, or what the host answered, and then what
+# a later attempt read of the host. With no answer, nothing says it was sent. Any other line says what was looked at,
+# and whether that was refused.
 def line_of(event: Event, attempt_is_open: bool) -> str:
     if event.action is None:
         return event.did if event.error is None else f"{event.did}, refused"
     did = f"{event.did}, to put the lane back" if event.action.back else event.did
     reply = event.outcome
     if reply is None:
-        return f"about to {did}" if attempt_is_open and event.error is None else f"{did}: sent, no reply"
-    heard = "sent, no reply" if reply.said is None else HEARD[reply.said]
+        return f"about to {did}" if attempt_is_open and event.error is None else f"{did}: {NO_ANSWER}"
+    heard = NO_ANSWER if reply.said is None else HEARD[reply.said]
     return f"{did}: {heard}" if reply.seen is None else f"{did}: {heard}, then read as {reply.seen}"
 
 
-def done_so_far(request: Kept) -> str:
+def lines_of(request: Kept) -> list[str]:
     open_now = {attempt.number for attempt in request.attempts if attempt.ended is None}
-    lines = [line_of(event, event.attempt in open_now) for event in request.events]
+    return [line_of(event, event.attempt in open_now) for event in request.events]
+
+
+def done_so_far(request: Kept) -> str:
+    lines = lines_of(request)
     return f"{taken_up(request)}So far: {'; '.join(lines)}." if lines else f"{taken_up(request)}Nothing done so far."
+
+
+# A request that has just ended keeps its lines on the page, so the last of them can be read after it has ended.
+def how_it_ended(request: Kept) -> str:
+    lines = "; ".join(lines_of(request)) or "none"
+    return f"{request.error or f'It ended as {request.stands}.'} Its lines: {lines}."
 
 
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.
@@ -150,6 +162,8 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
         return how_cancelled(request)
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
+    if isinstance(request, Kept) and request.stands in ENDED and request.cancel_asked_at is None:
+        return how_it_ended(request)
     if request.stands in ENDED:
         why = how_not_cancelled(request) or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return f"{why} It ended as {request.stands}."
@@ -254,7 +268,7 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
-# Every request that has not ended, then those replaced or asked to cancel that ended a short while ago.
+# Every request that has not ended, then those that ended a short while ago and are still shown.
 def shown_requests(status: Status) -> list[Request]:
     return [*status.requests, *status.cancels]
 

@@ -19,7 +19,7 @@ from launchplane.proxy import ProxyError
 from launchplane.record import Held, Interrupted, Record, RecordError, Reply, Request, Sent, Stands
 from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, Result, RetireResult
-from launchplane.telling import NOBODY, Answered, Change, Said, Witness
+from launchplane.telling import NOBODY, Answered, Change, Said, Seen, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -168,19 +168,24 @@ class Worker:
         finally:
             self.let_go(lane)
 
-    # Each change an earlier attempt sent and had no answer to is looked for in what this attempt reads anyway, once,
-    # and what is seen is written to its line. Nothing the attempt does is chosen from it.
+    # Each change an earlier attempt may have sent and had no answer to is looked for in every reading this attempt
+    # makes anyway, until one shows it as the request's own: a change still on its way can land after the first reading.
+    # What is seen is written to its line when it differs from what was seen before. Nothing the attempt does is chosen from it.
     def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, LaneReading | None], None]:
         kept = self.record.read(request.id)
-        lines = [] if kept is None else [each for each in kept.events if each.action is not None and each.outcome is None]
+        lines = {} if kept is None else {each.id: each for each in kept.events if each.is_unanswered}
+        last = {each.id: None if each.outcome is None else each.outcome.seen for each in lines.values()}
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
         def look(route: LaneRoute, lane: LaneReading | None) -> None:
-            for line in list(lines):
-                seen = seen_of(line, request.generation, stamps[line.attempt], route, lane)
-                if seen is not None:
+            for line in list(lines.values()):
+                sent = line.action
+                seen = None if sent is None else seen_of(sent, request.generation, stamps[line.attempt], route, lane)
+                if seen not in (None, last[line.id]):
                     self.record.complete(attempt, line.id, Reply(seen=seen, seen_at=datetime.now(UTC)))
-                    lines.remove(line)
+                    last[line.id] = seen
+                if seen is Seen.OURS:
+                    del lines[line.id]
 
         return look
 

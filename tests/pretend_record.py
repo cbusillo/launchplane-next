@@ -10,7 +10,7 @@ from launchplane.judge import Work
 from launchplane.record import (
     ENDED,
     GIVEN_UP,
-    MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN,
+    MINUTES_AN_ENDED_REQUEST_IS_SHOWN,
     Asked,
     Attempt,
     Event,
@@ -129,11 +129,16 @@ class PretendRecord(Record):
         ended = list[Request](each for each in self.every() if each.stands in ENDED)
         return sorted(ended, key=lambda each: each.id, reverse=True)[:20]
 
-    def cancels_answered(self) -> list[Request]:
-        self.reach("reading the requests a cancel was asked of")
-        since = now() - timedelta(minutes=MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
-        ended = (each for each in self.every() if each.stands in ENDED and each.ended_at and each.ended_at > since)
-        return list[Request](each for each in ended if each.cancel_asked_at is not None or each.stands is Stands.REPLACED)
+    def ended_lately(self) -> list[Kept]:
+        self.reach("reading the requests that ended a short while ago")
+        since = now() - timedelta(minutes=MINUTES_AN_ENDED_REQUEST_IS_SHOWN)
+        ended = [each for each in self.every() if each.stands in ENDED and each.ended_at and each.ended_at > since]
+        last: dict[tuple[str, str], Kept] = {}
+        for each in sorted(ended, key=lambda each: (each.ended_at, each.id)):
+            if each.stands is not Stands.REPLACED:
+                last[each.product, each.lane] = each
+        shown = (each.cancel_asked_at is not None or each.stands is Stands.REPLACED or each in last.values() for each in ended)
+        return [each for each, is_shown in zip(ended, shown, strict=True) if is_shown]
 
     def next_up(self) -> list[Request]:
         self.reach("looking for the next requests")

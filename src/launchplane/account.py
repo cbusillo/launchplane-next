@@ -41,10 +41,12 @@ def of_a_move(answer: MoveResult, made: list[Event]) -> dict[str, object]:
 
 
 # A data set is deleted by this request when a deletion of its own removed something and the lane no longer has the set.
-def of_a_retire(answer: RetireResult, sent: list[Sent]) -> dict[str, object]:
+# Until then each part it deleted is said, beside a set the host still shows.
+def of_a_retire(answer: RetireResult, made: list[Event], sent: list[Sent]) -> dict[str, object]:
     deleted = next((each.subject for each in sent if each.verb == "delete" and each.subject not in answer.kept_data_sets), None)
     retired = any(each.verb in RETIRES for each in sent)
     return {
+        "deleted": [event.did for event in made if event.action is not None and event.action.verb == "delete"],
         "route_removed_to_container": next((each.was for each in sent if each.verb == "route"), None),
         "retired_containers": [each.subject for each in sent if each.verb == "remove"],
         "deleted_data_set": deleted,
@@ -68,7 +70,7 @@ def accounted[Answer: Result](answer: Answer, kept: Kept) -> Answer:
     if isinstance(answer, MoveResult):
         update |= of_a_move(answer, made)
     elif isinstance(answer, RetireResult):
-        update |= of_a_retire(answer, sent)
+        update |= of_a_retire(answer, made, sent)
     elif isinstance(answer, MaintenanceResult):
         update |= of_maintenance(answer, sent)
     elif isinstance(answer, PutBack):
@@ -81,15 +83,12 @@ def so_far(kept: Kept) -> str:
     made = [event.did for event in kept.events if event.is_credited]
     changed = f"Before that, this request did: {'; '.join(made)}. Those changes stay." if made else "Nothing was changed."
     waiting = unanswered(kept)
-    return f"{changed} No reply was had to: {'; '.join(waiting)}. Each may have acted, or may yet." if waiting else changed
+    return f"{changed} No answer was had to: {'; '.join(waiting)}. Each may have been sent, and may yet act." if waiting else changed
 
 
 # What a reading shows of a change that had no answer. `stamp` is how the routes file names the attempt that sent it.
-# None is a line the reading cannot show either way, or one that needs no reading: no change, or one with an answer.
-def seen_of(line: Event, generation: str, stamp: str, route: LaneRoute, lane: LaneReading | None) -> Seen | None:
-    sent = line.action
-    if sent is None or line.outcome is not None:
-        return None
+# None is a change the reading cannot show either way.
+def seen_of(sent: Sent, generation: str, stamp: str, route: LaneRoute, lane: LaneReading | None) -> Seen | None:
     if sent.verb == "route":
         if isinstance(route.file, Unread):
             return None
@@ -101,6 +100,9 @@ def seen_of(line: Event, generation: str, stamp: str, route: LaneRoute, lane: La
     made_by = {part.container: part.generation for part in (*lane.instances, *lane.background_services)}
     made_by |= {found.data_set: found.generation for found in lane.data_sets}
     there = sent.subject in made_by
-    if sent.verb != "make":
+    # A data set still there says nothing of the one part of it that was to go.
+    if sent.verb == "delete":
+        return None if there else Seen.AS_ASKED
+    if sent.verb == "remove":
         return Seen.NOT_AS_ASKED if there else Seen.AS_ASKED
     return Seen.NOT_AS_ASKED if not there else Seen.OURS if made_by[sent.subject] == generation else Seen.AS_ASKED

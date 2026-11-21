@@ -1,8 +1,7 @@
 import os
 import threading
 import time
-from collections.abc import Callable, Set
-from contextlib import suppress
+from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -343,13 +342,17 @@ class ContainerHost:
         ready = options if use is None else on_data_set(options, use, login_on(use))
         self.create(ready).start()
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+    def make_login(self, instance: str, use: DataSetUse) -> dict[str, str]:
+        with attempting(f"Making the login of {instance} in the database {use.database_container}", self.address):
+            return self.logins.make(instance, use)
+
+    def start_instance(
+        self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, login: Mapping[str, str]
+    ) -> None:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
-            self.run_part(
-                replace(options, labels=options.labels | stamp_of(generation)), use, lambda on: self.logins.make(container, on)
-            )
+            self.run_part(replace(options, labels=options.labels | stamp_of(generation)), use, lambda _on: dict(login))
 
     def start_background_service(
         self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
@@ -431,26 +434,16 @@ class ContainerHost:
                 )
             self.sleep(POLL_SECONDS)
 
-    # Answers each part it removed, and none where nothing of the data set was there. A removal that fails says in its
-    # error which parts were removed before it.
-    def delete_data_set(self, found: DataSet) -> list[str]:
-        removed: list[str] = []
-        try:
-            with attempting(f"Deleting the data set {found.data_set}", self.address):
-                for database in found.databases:
-                    removed += [database.container] if self.retire_container(database.container) else []
-                for volume in found.volumes:
-                    with suppress(NotFound):
-                        self.client.volumes.get(volume).remove()
-                        removed.append(volume)
-                for network in found.networks:
-                    with suppress(NotFound):
-                        self.client.networks.get(network.name).remove()
-                        removed.append(network.name)
-        except ContainerHostError as error:
-            error.changed = tuple(removed)
-            raise
-        return removed
+    # False is a part that was not there to delete.
+    def delete_part(self, part: str, name: str) -> bool:
+        with attempting(f"Deleting the {part} {name}", self.address):
+            if part == "database server":
+                return self.retire_container(name)
+            try:
+                (self.client.volumes if part == "volume" else self.client.networks).get(name).remove()
+            except NotFound:
+                return False
+            return True
 
     # False is a container that was not there to remove.
     def retire_container(self, container: str) -> bool:

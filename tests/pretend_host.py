@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -76,6 +76,7 @@ class PretendHost:
         self.logins_left_in: dict[str, tuple[str, ...]] = {}
         self.holders_unread: set[str] = set()
         self.removals_refused: set[str] = set()
+        self.logins_made: list[str] = []
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -138,7 +139,15 @@ class PretendHost:
         self.change_database(database, unheld_logins=())
         return unheld
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+    # A login is made on the server before any container holds it.
+    def make_login(self, instance: str, use: DataSetUse) -> dict[str, str]:
+        self.logins_made.append(f"{instance} in {use.database_container}")
+        return {"PGUSER": instance}
+
+    def start_instance(
+        self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, login: Mapping[str, str]
+    ) -> None:
+        assert (use is None) == (not login), f"{container} was started on {use} with the login {login}"
         self.place(target, container, use=use, generation=generation)
         self.record(f"start {container}")
 
@@ -237,10 +246,21 @@ class PretendHost:
         self.change_database(container, accepts_connections=True, unheld_logins=self.logins_left_in.get(container, ()))
         self.record(f"await {container}")
 
-    def delete_data_set(self, found: DataSet) -> list[str]:
-        del self.data_sets[found.data_set]
-        self.record(f"delete {found.data_set}")
-        return [*(each.container for each in found.databases), *found.volumes, *(each.name for each in found.networks)]
+    # As on the host, a data set is there for as long as any part of it is.
+    def delete_part(self, part: str, name: str) -> bool:
+        self.record(f"delete {part} {name}")
+        for found in list(self.data_sets.values()):
+            left = found.model_copy(
+                update={
+                    "databases": tuple(each for each in found.databases if each.container != name),
+                    "volumes": tuple(each for each in found.volumes if each != name),
+                    "networks": tuple(each for each in found.networks if each.name != name),
+                }
+            )
+            self.data_sets[found.data_set] = left
+            if not (left.databases or left.volumes or left.networks):
+                del self.data_sets[found.data_set]
+        return True
 
     # As Docker: one that is not there is answered as nothing removed.
     def retire_instance(self, container: str) -> bool:

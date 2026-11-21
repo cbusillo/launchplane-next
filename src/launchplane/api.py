@@ -87,7 +87,7 @@ class RunningAnswer(BaseModel):
     web_addresses: list[WebAddressJudged]
     lanes: list[LaneAnswer]
     requests: list[Kept]
-    cancels: list[KeptRequest]
+    cancels: list[Kept]
     record_error: str | None
     cards: list[Card]
 
@@ -536,7 +536,7 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     record = PostgresRecord(database(), host)
-    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_cancels=record.cancels_answered)
+    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_ended=record.ended_lately)
     worker = Worker(record, lanes, host)
     worker.start()
     app = create_app(lanes.read_status, record, worker.wake, host, lanes)
