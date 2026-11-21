@@ -1,6 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from operator import attrgetter
 from typing import Any
 
 from launchplane import steps
@@ -77,13 +78,7 @@ def named(action: Action) -> str:
     return NAMED[type(action)](action)
 
 
-def container_of(step: Any) -> str:  # noqa: ANN401 any step that names its container
-    return step.container
-
-
-def data_set_of(step: Any) -> str:  # noqa: ANN401 any step that names its data set
-    return step.data_set
-
+container_of, data_set_of = attrgetter("container"), attrgetter("data_set")
 
 # The verb and the one subject of each step that changes the host. A step that reads, waits, checks or only asks the gate
 # is not here. `make` is of a thing that carries the generation of the request that made it, so a later reading of the

@@ -262,7 +262,7 @@ def how_replaced(request: Request) -> str:
 def how_not_cancelled(request: Request) -> str | None:
     if request.cancel_refused is not None:
         return request.cancel_refused
-    if request.stands is not Stands.FAILED or request.work is not Work.MOVE:
+    if request.cancel_asked_at is None or request.stands is not Stands.FAILED or request.work is not Work.MOVE:
         return None
     if request.release_verdict is Verdict.ABANDONED:
         return f"The cancel won at the gate, and its lane was not put back whole: {request.error}"

@@ -165,8 +165,7 @@ class Worker:
                     return False
                 taken = self.record.take_up(request.id)
                 if taken is not None:
-                    witness = self.witness_of(request, taken.attempt, held)
-                    witness.look = self.reading_back(request, taken.attempt) if taken.again else witness.look
+                    witness = self.witness_of(request, taken.attempt, held, again=taken.again)
                     while not self.ended_or_left_open(request, taken.attempt, witness, taken.again):
                         pass
                 return True
@@ -191,7 +190,7 @@ class Worker:
         return look
 
     # What a call is given to say what it did, to ask before each action, and to ask between actions.
-    def witness_of(self, request: Request, attempt: int, held: Held) -> Witness:
+    def witness_of(self, request: Request, attempt: int, held: Held, *, again: bool) -> Witness:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
 
@@ -212,8 +211,11 @@ class Worker:
         def refuse_cancel(why: str) -> None:
             self.record.refuse_cancel(request.id, why)
 
-        asked = lambda: self.record.cancel_asked(request.id)  # noqa: E731
-        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, about_to)
+        def cancel_asked() -> bool:
+            return self.record.cancel_asked(request.id)
+
+        look = self.reading_back(request, attempt) if again else NOBODY.look
+        return Witness(tell, hold, cancel_asked, refuse_cancel, request.generation, attempt, about_to, look)
 
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made

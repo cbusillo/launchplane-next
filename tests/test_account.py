@@ -167,6 +167,11 @@ def test_a_cancel_that_won_and_whose_clean_up_was_refused_is_a_cancel_that_won_o
     said = "The cancel won at the gate, and its lane was not put back whole"
     assert (kept.stands, kept.release_verdict, REFUSED in (kept.error or "")) == (Stands.FAILED, Verdict.ABANDONED, True)
     assert [(text or "").startswith(said) for text in (request_note(kept, {}), why_not_cancelled(kept))] == [True, True]
+    never_asked = kept.model_copy(update={"cancel_asked_at": None, "release_verdict": None})
+    assert (
+        why_not_cancelled(never_asked)
+        == f"Request {kept.id} ended as failed, so it was not cancelled. Nothing was changed by this call."
+    )
 
 
 def test_a_request_that_stops_says_what_every_attempt_of_it_changed_before_that(record: Record) -> None:
