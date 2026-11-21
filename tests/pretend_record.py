@@ -219,7 +219,7 @@ class PretendRecord(Record):
         with self.writing:
             found = self.kept.get(request)
             resting = found is not None and found.stands is Stands.WORKING and request not in self.open_attempts.values()
-            if found is None or not resting or found.attempts[-1].id != last:
+            if found is None or not resting or found.cancel_asked_at is not None or found.attempts[-1].id != last:
                 return None
             return self.change(request, stands=Stands.FAILED, ended_at=now(), error=" ".join(filter(None, [found.error, GIVEN_UP])))
 

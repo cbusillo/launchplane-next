@@ -541,13 +541,15 @@ class PostgresRecord(Record):
             return True
 
     # Only a request at work that no attempt is open for, and that was given no attempt after `last`: so nothing was
-    # done for it since whoever asks read `last`, and its row is locked against being taken up until it is ended.
+    # done for it since whoever asks read `last`. Its row is locked until it is ended, against being taken up and
+    # against a cancel: one a cancel was asked of is the cancel's to end.
     def give_up(self, request: int, last: int) -> Request | None:
         with self.session("giving a request up") as session:
             given_up = self.gate.made(request)
             row = session.execute(Sql.READ_TO_TAKE_UP, given_up).fetchone()
-            resting = asked_once(session, "reading the attempts of a request", Sql.RESTING, given_up)
-            if row is None or (row["stands"], resting["open"], resting["last"]) != (Stands.WORKING, 0, last):
+            attempts = asked_once(session, "reading the attempts of a request", Sql.RESTING, given_up)
+            resting = row is not None and (row["stands"], row["cancel_asked_at"]) == (Stands.WORKING, None)
+            if not resting or (attempts["open"], attempts["last"]) != (0, last):
                 return None
             return Request.model_validate(session.execute(Sql.GIVE_UP, self.gate.made(GIVEN_UP, request)).fetchone())
 

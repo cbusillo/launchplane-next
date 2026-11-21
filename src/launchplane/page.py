@@ -185,7 +185,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests, status.cancels_decided),
+            *request_rows(requests, status.gate_answers),
             *([] if judged is None else finding_rows(judged)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])
@@ -251,9 +251,7 @@ def request_cards(status: Status) -> list[Card]:
     requests = shown_requests(status)
     lanes = sorted({(each.product, each.lane) for each in requests} - on_host)
     of = {lane: [each for each in requests if (each.product, each.lane) == lane] for lane in lanes}
-    return [
-        Card(title=f"{product} · {lane}", rows=request_rows(of[product, lane], status.cancels_decided)) for product, lane in lanes
-    ]
+    return [Card(title=f"{product} · {lane}", rows=request_rows(of[product, lane], status.gate_answers)) for product, lane in lanes]
 
 
 def record_card(status: Status) -> list[Card]:

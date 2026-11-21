@@ -159,9 +159,8 @@ def test_a_replaced_request_says_by_which_to_the_call_that_waited_in_the_list_an
 
 
 def test_giving_up_a_request_that_waits_or_is_being_worked_at_that_moment_or_has_ended_is_refused_and_changes_nothing(
-    idle: Bed, monkeypatch: pytest.MonkeyPatch
+    idle: Bed,
 ) -> None:
-    monkeypatch.setattr("launchplane.api.SECONDS_WAITED_TO_GIVE_UP", 0)
     asked = idle.client.post(MOVE, json=TO_B).json()["id"]
     waiting = idle.client.post(f"/requests/{asked}/give-up")
     attempt = begun(idle.record, asked)
@@ -171,7 +170,7 @@ def test_giving_up_a_request_that_waits_or_is_being_worked_at_that_moment_or_has
     ended = idle.client.post(f"/requests/{asked}/give-up")
     assert [each.status_code for each in (waiting, being_worked, ended)] == [409, 503, 409]
     assert (
-        "one that waits is cancelled" in waiting.json()["error"],
+        "it is waiting" in waiting.json()["error"],
         "being worked at this moment" in being_worked.json()["error"],
     ) == (
         True,

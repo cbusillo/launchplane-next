@@ -7,13 +7,22 @@ from fastapi.testclient import TestClient
 from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
-from launchplane.record import Asked, Kept, Record, Stands
+from launchplane.record import Asked, Kept, Record, Request, Stands
 from launchplane.telling import NOBODY
 from launchplane.worker import Worker, carried_out
 from tests.given_secrets import NO_SECRETS
-from tests.pretend_host import WEB_ADDRESS, PretendProxy
+from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
-from tests.test_host_answers import BEGIN, END, MOVE_A, RETIRE, worker_on
+from tests.test_host_answers import (
+    BEGIN,
+    DATABASE,
+    END,
+    MOVE_A,
+    NOT_TOLD,
+    RETIRE,
+    lane_whose_background_service_is_gone,
+    worker_on,
+)
 from tests.test_worker import CALLER, MOVE_B, kept_of, serving_a
 
 
@@ -212,6 +221,7 @@ def test_a_request_whose_work_the_host_shows_done_ends_as_done_and_changes_nothi
 def cut_short(record: Record, asked: Asked, lane: Lane, changes: int = 1) -> tuple[TestClient, PretendProxy, Worker, int]:
     proxy = lane()
     lanes = lanes_on(proxy)
+    lanes.read_unfinished = record.unfinished
     worker, read_again = Worker(record, lanes, NO_SECRETS), unread_after_the_first_change(proxy, changes)
     request = record.write(asked, CALLER, None)
     assert worker.work_next() is True
@@ -287,7 +297,12 @@ def test_giving_up_a_move_that_started_its_instance_and_has_not_switched_is_refu
     assert (worker.work_next(), (kept_of(record, request).answer or {}).get("outcome")) == (True, "switched")
 
 
-def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_changes_nothing_and_its_late_switch_can_no_longer_rename(
+# The attempts the gate was told to fence, of any release. The pretend gate lists a release once it is asked about.
+def fenced_at_the_gate(proxy: PretendProxy) -> set[int]:
+    return {kept.fenced for kept in proxy.gate.kept.values()} - {-1}
+
+
+def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_and_changes_nothing_on_the_host_or_at_the_gate(
     record: Record,
 ) -> None:
     worker, lanes, proxy = serving_a(record)
@@ -298,13 +313,93 @@ def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_changes_nothin
     given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(
         f"/requests/{request.id}/give-up"
     )
-    late = proxy.gate.switch(WEB_ADDRESS, request.generation, 1, "a-late-candidate")
     assert (given_up.status_code, given_up.json()["stands"], "A person gave it up" in given_up.json()["error"]) == (
         200,
         "failed",
         True,
     )
-    assert (proxy.host.actions, late.verdict.value, proxy.written, worker.work_next()) == ([], "none", {WEB_ADDRESS: "a"}, False)
+    assert (proxy.host.actions, fenced_at_the_gate(proxy), proxy.written, worker.work_next()) == (
+        [],
+        set(),
+        {WEB_ADDRESS: "a"},
+        False,
+    )
+
+
+def test_giving_up_the_first_move_of_a_lane_that_made_only_the_network_of_its_data_set_is_refused_and_the_move_finishes_it(
+    record: Record,
+) -> None:
+    client, proxy, worker, request = cut_short(record, MOVE_A, lambda: PretendProxy(PretendHost()))
+    made = list(proxy.host.actions)
+    given_up = client.post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, kept_of(record, request).stands, proxy.host.actions, len(made)) == (503, Stands.WORKING, made, 1)
+    assert (worker.work_next(), (kept_of(record, request).answer or {}).get("outcome")) == (True, "switched")
+
+
+def test_giving_up_a_move_that_repaired_a_background_service_while_the_logins_cannot_be_read_is_refused_and_the_service_stays(
+    record: Record,
+) -> None:
+    proxy = lane_whose_background_service_is_gone()
+    client, _, _, request = cut_short(record, MOVE_A, lambda: proxy, changes=2)
+    proxy.host.change_database(DATABASE, unheld_logins=NOT_TOLD)
+    given_up = client.post(f"/requests/{request}/give-up")
+    [service] = proxy.host.background_services.values()
+    assert (given_up.status_code, kept_of(record, request).stands, service.generation) == (
+        503,
+        Stands.WORKING,
+        kept_of(record, request).generation,
+    )
+
+
+def test_giving_up_a_move_that_made_nothing_on_a_lane_whose_database_has_a_login_no_container_holds_is_refused(
+    record: Record,
+) -> None:
+    client, proxy, _, request = cut_short(record, MOVE_B, lane_brought_up_with_a, changes=0)
+    proxy.host.change_database(DATABASE, unheld_logins=("i_left",))
+    given_up = client.post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, kept_of(record, request).stands, proxy.host.actions) == (503, Stands.WORKING, [])
+
+
+def test_a_give_up_refused_while_the_proxy_is_stopped_does_not_start_the_proxy_and_changes_nothing(record: Record) -> None:
+    worker, lanes, proxy = serving_a(record)
+    read_again = unread_after_the_first_change(proxy)
+    request = record.write(MOVE_B, CALLER, None).id
+    assert worker.work_next() is True
+    read_again()
+    proxy.running, made = False, list(proxy.host.actions)
+    given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, proxy.running, proxy.host.actions, fenced_at_the_gate(proxy)) == (503, False, made, set())
+
+
+def test_a_cancel_accepted_after_a_give_up_has_read_the_lane_and_before_it_ends_the_request_wins_and_the_give_up_changes_nothing(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, lanes, proxy = serving_a(record)
+    read_again = unread_after_the_first_change(proxy, changes=0)
+    request = record.write(MOVE_B, CALLER, None).id
+    assert worker.work_next() is True
+    read_again()
+    client, end = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)), record.give_up
+    cancelled: list[int] = []
+
+    def end_after_a_cancel(given_up: int, last: int) -> Request | None:
+        cancelled.append(client.post(f"/requests/{given_up}/cancel").status_code)
+        return end(given_up, last)
+
+    monkeypatch.setattr(record, "give_up", end_after_a_cancel)
+    given_up = client.post(f"/requests/{request}/give-up")
+    again = client.post(f"/requests/{request}/give-up")
+    assert (cancelled[0], given_up.status_code, again.status_code, kept_of(record, request).stands) == (
+        202,
+        503,
+        409,
+        Stands.WORKING,
+    )
+    assert (worker.work_next(), kept_of(record, request).stands, client.post(f"/requests/{request}/cancel").status_code) == (
+        True,
+        Stands.CANCELLED,
+        200,
+    )
 
 
 def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered_ends_saying_that_data_set_was_deleted(

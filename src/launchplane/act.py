@@ -148,8 +148,8 @@ class Status:
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
     cancels: list[Request] = field(default_factory=list[Request])
-    # What the gate answers for each move being worked that a cancel was asked of. None is a gate that gave no answer.
-    cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
+    # What the gate answers for each move being worked. None is a gate that gave no answer.
+    gate_answers: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -310,8 +310,8 @@ class Lanes:
             judge(reading.lane(product, lane), descriptions[product], unread or at_work.get((product, lane)))
             for product, lane in reading.lanes()
         ]
-        marked = [each for each in requests if (each.work, each.stands) == (Work.MOVE, Stands.WORKING) and each.cancel_asked_at]
-        decided = {each.id: self.cancel_decided(each) for each in marked}
+        moving = [each for each in requests if (each.work, each.stands) == (Work.MOVE, Stands.WORKING)]
+        decided = {each.id: self.cancel_decided(each) for each in moving}
         return Status(reading, judgements, web_addresses_judged(reading), requests, record_error, cancels, decided)
 
     # Asked as the gate is, and nothing is started to ask it: a status call changes nothing.

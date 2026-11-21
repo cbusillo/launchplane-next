@@ -1,19 +1,16 @@
 import pytest
-from fastapi.testclient import TestClient
 
-from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError
 from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Record, Stands
 from launchplane.steps import MaintenanceOutcome
 from launchplane.telling import Witness
-from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_host_answers import BEGIN, END, RETIRE, worker_on
-from tests.test_worker import CALLER, kept_of, serving_a
+from tests.test_worker import CALLER, kept_of
 
 # Every change of a lane's route that is no release: what asks for it, and the lane it is asked of.
 EDITS = {
@@ -136,23 +133,6 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
     record.cancel(request.id, CALLER)
     assert worker.work_next() is True
     assert (set(arrived), kept_of(record, request.id).stands, proxy.written[WEB_ADDRESS]) == ({LOST}, Stands.CANCELLED, BACK_SOON)
-
-
-def test_giving_up_a_retire_fences_its_last_attempt_first_so_a_removal_of_the_route_it_sent_and_that_runs_late_removes_nothing(
-    record: Record,
-) -> None:
-    worker, lanes, proxy = serving_a(record)
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
-    asked = client.post("/lanes/site/testing/retire", json={}).json()
-    sent_by = begun(record, asked["id"])
-    record.leave_open(sent_by, "The removal of the route got no answer.")
-    proxy.gate.unreadable = "The proxy's container did not answer"
-    unasked = client.post(f"/requests/{asked['id']}/give-up").status_code
-    proxy.gate.unreadable = None
-    assert (unasked, kept_of(record, asked["id"]).stands) == (503, Stands.WORKING)
-    assert client.post(f"/requests/{asked['id']}/give-up").status_code == 200
-    late = proxy.edit(WEB_ADDRESS, asked["generation"], sent_by, "a", None)
-    assert (late, proxy.written[WEB_ADDRESS], kept_of(record, asked["id"]).stands) == (LOST, "a", Stands.FAILED)
 
 
 def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_again_and_decided_again() -> None:
