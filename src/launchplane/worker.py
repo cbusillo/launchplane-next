@@ -16,7 +16,7 @@ from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import AtLimit, Held, Interrupted, Kept, Record, RecordError, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireResult
+from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
 from launchplane.telling import LOOKS, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -167,8 +167,9 @@ class Worker:
                 if held is None:
                     return False
                 attempt = self.taken_up(request, found := self.record.at_limit(request.id))
-                if attempt is not None:
-                    self.carry_through(request, attempt, held, found)
+                witness = None if attempt is None else self.witness_of(request, attempt, held)
+                while witness is not None and not self.ended_or_left_open(request, witness.attempt, witness, found):
+                    pass
                 return True
         finally:
             self.let_go(lane)
@@ -200,11 +201,6 @@ class Worker:
             self.record.refuse_cancel(request.id, why)
 
         return Witness(tell, hold, lambda: self.record.cancel_asked(request.id), refuse_cancel, request.generation, attempt)
-
-    def carry_through(self, request: Request, attempt: int, held: Held, found: AtLimit | None) -> None:
-        witness = self.witness_of(request, attempt, held)
-        while not self.ended_or_left_open(request, attempt, witness, found):
-            pass
 
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made
@@ -284,6 +280,14 @@ class Worker:
             return Ending(Stands.FAILED, error=why)
         if isinstance(answer, MoveResult):
             answer = of_every_attempt(answer, self.record.read(request.id))
+        named = request.delete_data_set
+        if isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets):
+            # The lane has no such data set. This request deleted it only if an attempt of it sent that: history, for the answer.
+            kept = self.record.read(request.id)
+            if not any(event.did == f"delete the data set {named}" for event in ([] if kept is None else kept.events)):
+                why = f"{request.attempted()} was done. It named the data set {named}, which the lane does not have, to delete."
+                return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
+            answer = answer.model_copy(update={"outcome": RetireOutcome.DELETED, "deleted_data_set": named})
         failed = answer.outcome in NOT_A_SUCCESS
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED

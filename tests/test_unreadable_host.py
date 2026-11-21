@@ -297,3 +297,31 @@ def test_giving_up_a_request_whose_lane_was_read_and_is_not_part_way_ends_it_and
     client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
     given_up = client.post(f"/requests/{request.id}/give-up")
     assert (given_up.status_code, given_up.json()["stands"], proxy.host.actions) == (200, "failed", [])
+
+
+def test_a_retire_that_names_a_data_set_the_lane_does_not_have_and_no_attempt_deleted_fails_naming_it_and_never_says_deleted(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+    request = record.write(RETIRE.model_copy(update={"delete_data_set": "data-l"}), CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    ended = kept_of(record, request.id)
+    assert (ended.stands, ended.answer, list(proxy.host.data_sets), is_retired(proxy)) == (Stands.FAILED, None, ["data-1"], True)
+    assert "named the data set data-l, which the lane does not have, to delete. Nothing was deleted." in (ended.error or "")
+
+
+def test_a_readiness_check_docker_would_not_run_while_maintenance_ends_leaves_the_request_working_and_it_ends_once_it_runs(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    worker, check = worker_on(proxy, record), proxy.host.await_database
+
+    def restarting_once(container: str) -> None:
+        proxy.host.await_database = check
+        raise ContainerHostRefused(f"Running pg_isready in {container} on test was refused: the container is restarting")
+
+    proxy.host.await_database = restarting_once
+    request = record.write(END, CALLER, None)
+    assert worker.work_next() is True
+    assert "the container is restarting" in (left_working(record, request.id).error or "")
+    assert (worker.work_next(), kept_of(record, request.id).stands, is_back_with_everything_up(proxy)) == (True, Stands.DONE, True)

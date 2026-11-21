@@ -49,7 +49,6 @@ from launchplane.steps import (
     MaintenanceResult,
     MoveResult,
     PutBack,
-    RetireOutcome,
     RetireResult,
     Stop,
     TooLate,
@@ -168,7 +167,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any], object]] = {
         step.product, step.lane, step.data_set, step.network, step.volume, step.image
     ),
     steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
-    steps.AwaitDatabase: lambda host, _proxy, step: host.await_database(step.container),
+    steps.AwaitDatabase: observing()(lambda host, _proxy, step: host.await_database(step.container)),
     steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
     steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use, step.generation),
     steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
@@ -369,16 +368,12 @@ class Lanes:
         return plan.too_late_to_cancel(web_address) if answer.verdict is Verdict.COMMITTED else None
 
     def retire(self, product: str, lane: str, delete_data_set: str | None = None, witness: Witness = NOBODY) -> RetireResult:
-        answer: RetireResult = settle(
+        return settle(
             *self.judging(product, lane, self.description_of(product), Work.RETIRE),
             lambda judged, done, cancel: plan.decide_retire(judged, delete_data_set, done, cancel),
             self.take,
             witness,
         )
-        # A data set named for deleting that no lane on the host has is deleted, whichever attempt's removal it was.
-        on_host = {each.data_set for each in self.read(Scope()).parts.data_sets} if delete_data_set else set[str]()
-        gone = delete_data_set not in {None, answer.deleted_data_set, *on_host}
-        return answer.model_copy(update={"outcome": RetireOutcome.DELETED, "deleted_data_set": delete_data_set}) if gone else answer
 
     def begin_maintenance(self, product: str, lane: str, witness: Witness = NOBODY) -> MaintenanceResult:
         judging = self.judging(product, lane, self.read_product(product), Work.BEGIN_MAINTENANCE)
