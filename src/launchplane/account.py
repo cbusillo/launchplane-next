@@ -33,7 +33,7 @@ def unanswered(kept: Kept) -> list[str]:
 
 # Each change that has a line and nothing known of what came of it.
 def unseen(kept: Kept) -> list[tuple[Event, Sent]]:
-    return [(event, event.action) for event in kept.events if event.action is not None and event.outcome is None]
+    return [(event, sent) for event in kept.events if (sent := event.action) is not None and event.outcome is None]
 
 
 def was_sent(kept: Kept, verb: str, subject: str) -> bool:
