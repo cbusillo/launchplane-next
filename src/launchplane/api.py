@@ -147,6 +147,11 @@ def lane_answer(judged: Judgement) -> LaneAnswer:
     )
 
 
+# What `cancels` lists. A request that only ended is on its lane's card for a while, and not in that list.
+def is_cancel_or_replaced(request: KeptRequest) -> bool:
+    return request.cancel_asked_at is not None or request.stands is Stands.REPLACED
+
+
 def running_answer(status: Status) -> RunningAnswer:
     on_host = status.reading.parts
     receives = {entry.sends_to_container: entry.web_address for entry in status.web_addresses}
@@ -162,7 +167,7 @@ def running_answer(status: Status) -> RunningAnswer:
         web_addresses=status.web_addresses,
         lanes=[lane_answer(judged) for judged in status.lanes],
         requests=status.requests,
-        cancels=[each for each in status.cancels if each.cancel_asked_at is not None or each.stands is Stands.REPLACED],
+        cancels=list[KeptRequest](each for each in status.cancels if is_cancel_or_replaced(each)),
         record_error=status.record_error,
         cards=cards(status),
     )
