@@ -39,14 +39,15 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `switched` | 200 | The gate says the routes file was renamed for this request's generation, and the web address points at a running instance of this build. A request taken up again after a kill answers this too, though another attempt did the rename. |
-| `unchanged` | 200 | It already did, and no change is [the request's own](requests.md#what-a-request-did): a move that only waited and checked, over however many attempts, answers this. |
-| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. A repair made by an attempt that was interrupted is reported when a later attempt ends the request. |
+| `unchanged` | 200 | It already did, and nothing was done. Only a request on its first attempt answers this. |
+| `repaired` | 200 | It already did, and the attempt that ended the request put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. |
+| `not known` | 200 | It already did, the request was taken up more than once, and its last attempt found nothing left to do. What its earlier attempts changed is [not known](requests.md#what-a-request-did), so it does not say `unchanged`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
 
-`did` lists every change that is the request's own, over all its attempts and whatever the outcome, in the words of its `events`. `unanswered` lists each change it sent and never had a reply to.
+`did` lists every change made by the attempt that ended the request, whatever the outcome, in the words of its `events`. A request taken up more than once has `not_known` in its answer: what its earlier attempts changed is not in `did`.
 
 A `503` means the move stopped where it was with nothing switched, the gate has confirmed that, and what the move made is gone. Its request has failed, and it is safe to ask again. A build Docker answers it does not have ends this way; a host that does not answer leaves the request working. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
 
@@ -216,8 +217,60 @@ Case 3 holds the release after the rename and kills Launchplane. It does not kil
 
 One more case is a retire's. Its removal of the route is accepted by Docker and frozen before it has the gate's lock, and Launchplane is killed. A cancel is asked, recovery ends the retire as `cancelled` and fences it, and the lane is put in maintenance. The frozen command is then let go: the routes file keeps its bytes and its inode, the instance stays, and every probe from outside is answered by the back soon page.
 
-Another is ending maintenance's, on the lane with a database and a background service. The end is held before its change of the route, where the request's line reads `about to` and a visitor still gets the back soon page. It is then held after the change has taken effect on the host and before the worker has the reply, and Launchplane is killed there. The same request ends `done` and `ended` in a second attempt, its line with no answer and read back as `made by this request`; the instance serves, the lane beside it answers every probe, and an end asked straight after answers `not in maintenance`.
+Another is ending maintenance's, on the lane with a database and a background service: [the maintenance watch](#the-maintenance-watch) by hand. The end is held before its change of the route, where the request's line reads `about to` and a visitor still gets the back soon page. It is then held after the change has taken effect on the host and before the worker has the reply, and Launchplane is killed there. The same request ends `done` and `ended` in a second attempt, its line with no answer and read back as `made by this request`; the instance serves, the lane beside it answers every probe, and an end asked straight after answers `not in maintenance`.
 
 `tests/test_bed_gate.py` proves the gate alone on the real host, with no worker: it sends the gate's own commands to the proxy's container and counts the renames by the inode of the routes file. Its five cases are a command killed just after the rename, a reply lost after the rename, a switch held before the lock whose candidate is discarded meanwhile, a cancel and a switch each sent again after the cancel won, and two generations on one lane. They take 13 s. `tests/test_gate.py` runs the gate's command against a folder on the machine that tests.
 
 `tests/test_interruptions.py` runs the same rows against the pretend host, whose proxy can hold a written route unloaded, and against the pretend record and PostgreSQL. It needs no test bed and takes seconds.
+
+### The maintenance watch
+
+Ending maintenance, killed after its change of the route is on the host and before Launchplane has the reply. From a plain shell; the lane is the one `tests/test_bed_interruptions.py` uses, whose images and description are on the bed once that file has run.
+
+```
+L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
+P=/lanes/test-bed-gate-ledger; V=http://docker-lp-scratch.shiny/
+ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
+curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+curl -s -X POST "$L$P/held/maintenance/begin?wait=110"
+curl -X PUT $H/holds/before.proxy.edit
+curl -s -X POST "$L$P/held/maintenance/end"
+```
+
+1. **Held before the edit.** The last call answers `202` with the request's `id`. On the page, `http://launchplane.shiny:8700/`, the card of `test-bed-gate-ledger · held` has the request as `working`, and its note ends `about to send held.test-bed-gate-ledger.test to <instance>`. A visitor still gets the back soon page, and the lane beside it answers:
+
+```
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: held.test-bed-gate-ledger.test' $V        # 503
+curl -s -H 'Host: untouched.test-bed-gate-ledger.test' $V                                    # pretend product a
+```
+
+2. **Held after the edit has taken effect.** The second hold is set before the first is let go:
+
+```
+curl -X PUT $H/holds/after.proxy.edit; curl -X DELETE $H/holds/before.proxy.edit
+curl $H/holds                                                                                # stopped_at: after.proxy.edit
+ssh root@launchplane.shiny 'docker -H tcp://docker-lp-scratch.shiny:2376 exec launchplane-proxy head -1 /etc/traefik/launchplane/routes/held.test-bed-gate-ledger.test.yml'
+```
+
+   The routes file's first line is the request's `generation` and the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply.
+
+3. **Killed, and let go.**
+
+```
+curl -X POST $H/kill; curl -X DELETE $H/holds
+```
+
+   Within a few seconds the request's row on the card turns `done` and stays for 10 minutes. Its note says it ended as done, that it was taken up more than once and what its earlier attempts changed on the lane's parts is not known, and then its lines, the last of them `send held.test-bed-gate-ledger.test to <instance>: may have been sent, no answer, then read as made by this request`.
+
+```
+curl -s $L/requests/<id>                                   # stands done, answer.outcome ended, attempts interrupted then done
+curl -s -H 'Host: held.test-bed-gate-ledger.test' $V       # pretend product a
+curl -s -X POST "$L$P/held/maintenance/end?wait=60"        # outcome not in maintenance
+```
+
+4. **Put the bed back.** Retire both lanes with the data set each lists in `kept_data_sets`, then:
+
+```
+ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
+```
