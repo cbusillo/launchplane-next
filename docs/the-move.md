@@ -39,14 +39,14 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
 | `switched` | 200 | The gate says the routes file was renamed for this request's generation, and the web address points at a running instance of this build. A request taken up again after a kill answers this too, though another attempt did the rename. |
-| `unchanged` | 200 | It already did, and nothing was done. |
-| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
+| `unchanged` | 200 | It already did, and no change is [the request's own](requests.md#what-a-request-did): a move that only waited and checked, over however many attempts, answers this. |
+| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. A repair made by an attempt that was interrupted is reported when a later attempt ends the request. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
 
-`did` lists every change the move made, whatever the outcome.
+`did` lists every change that is the request's own, over all its attempts and whatever the outcome, in the words of its `events`. `unanswered` lists each change it sent and never had a reply to.
 
 A `503` means the move stopped where it was with nothing switched, the gate has confirmed that, and what the move made is gone. Its request has failed, and it is safe to ask again. A build Docker answers it does not have ends this way; a host that does not answer leaves the request working. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
 
@@ -114,7 +114,6 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **Asking for the old build while its instance is still stopping answers `check failed` for a good build.** Confirmed once, after a kill during retirement. Asking again works, and the web address never moves.
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
-- **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A removal of logins that found none left to remove is listed as one.
 - **Two routers on another lane's web address can stop a retire after its route is removed.** The retire removes its lane's route first, and the guard then refuses to remove any container while any web address has two routers. That lane has lost its visitors, and its retire stays `working` until the other lane has one router.
 - **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
 - **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
@@ -216,6 +215,8 @@ The same file has the eight held cases of the rule the move is built to. Each pr
 Case 3 holds the release after the rename and kills Launchplane. It does not kill the host command itself: `tests/test_bed_gate.py` does that, at the gate.
 
 One more case is a retire's. Its removal of the route is accepted by Docker and frozen before it has the gate's lock, and Launchplane is killed. A cancel is asked, recovery ends the retire as `cancelled` and fences it, and the lane is put in maintenance. The frozen command is then let go: the routes file keeps its bytes and its inode, the instance stays, and every probe from outside is answered by the back soon page.
+
+Another is ending maintenance's, on the lane with a database and a background service. The end is held before its change of the route, where the request's line reads `about to` and a visitor still gets the back soon page. It is then held after the change has taken effect on the host and before the worker has the reply, and Launchplane is killed there. The same request ends `done` and `ended` in a second attempt, its line with no answer and read back as `made by this request`; the instance serves, the lane beside it answers every probe, and an end asked straight after answers `not in maintenance`.
 
 `tests/test_bed_gate.py` proves the gate alone on the real host, with no worker: it sends the gate's own commands to the proxy's container and counts the renames by the inode of the routes file. Its five cases are a command killed just after the rename, a reply lost after the rename, a switch held before the lock whose candidate is discarded meanwhile, a cancel and a switch each sent again after the cancel won, and two generations on one lane. They take 13 s. `tests/test_gate.py` runs the gate's command against a folder on the machine that tests.
 

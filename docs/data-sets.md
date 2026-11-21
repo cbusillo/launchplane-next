@@ -125,7 +125,7 @@ curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/retire \
   -H 'Content-Type: application/json' -d '{"delete_data_set": "<data set>"}'
 ```
 
-The data set is deleted once the lane has no background service and no instance left: its database servers, then its volumes, then its networks. The answer's `outcome` is `deleted` and its `deleted_data_set` names it. A name that is not one of this lane's data sets deletes nothing, and the request ends `failed` naming it once the rest of the retire is done. The one exception is a name an earlier attempt of the same request sent the deletion for: that answers `deleted`. This is read from the request's own events, for the answer only.
+The data set is deleted once the lane has no background service and no instance left: its database servers, then its volumes, then its networks. The answer's `outcome` is `deleted` and its `deleted_data_set` names it. A name that is not one of this lane's data sets deletes nothing, and the request ends `failed` naming it once the rest of the retire is done. The one exception is a name an attempt of the same request sent the deletion for. Where the host answered that deletion, the request answers `deleted`; where no reply was had, it ends `done` with the deletion in `unanswered`. This is read from the request's own events, for the answer only.
 
 A data set with two networks, two volumes or two database servers carrying its labels is never deleted: which of them is its data is not known. The rest of the retire is done, then the call answers `503` naming both and deletes nothing of the set. Remove by hand the one that is not its data, then ask again.
 
