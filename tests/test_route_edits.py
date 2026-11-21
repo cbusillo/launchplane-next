@@ -5,11 +5,12 @@ from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError
 from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
-from launchplane.record import MOST_ATTEMPTS, Record, Stands
+from launchplane.record import Record, Stands
 from launchplane.steps import MaintenanceOutcome
 from launchplane.telling import Witness
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendProxy
+from tests.pretend_record import begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_host_answers import BEGIN, END, RETIRE, worker_on
 from tests.test_worker import CALLER, kept_of, serving_a
@@ -103,21 +104,12 @@ def test_a_request_listed_as_waiting_and_since_taken_up_by_a_worker_that_died_is
     proxy = lane_brought_up_with_a()
     request = record.write(BEGIN, CALLER, None)
     [listed_before] = record.next_up()
-    died_in = record.take_up(request.id)
-    assert (listed_before.stands, died_in is not None) == (Stands.WAITING, True)
+    died_in = begun(record, request.id)
+    assert listed_before.stands is Stands.WAITING
     record.cancel(request.id, CALLER)
     worker_on(proxy, record).worked(listed_before)
-    late = proxy.edit(WEB_ADDRESS, request.generation, died_in or 0, proxy.installed(WEB_ADDRESS), BACK_SOON)
+    late = proxy.edit(WEB_ADDRESS, request.generation, died_in, proxy.installed(WEB_ADDRESS), BACK_SOON)
     assert (kept_of(record, request.id).stands, late, proxy.written[WEB_ADDRESS] != BACK_SOON) == (Stands.CANCELLED, LOST, True)
-
-
-def test_a_request_left_to_a_person_at_the_limit_of_interruptions_is_fenced_through_its_last_attempt_first(record: Record) -> None:
-    proxy = lane_brought_up_with_a()
-    request = record.write(BEGIN, CALLER, None)
-    attempts = [record.take_up(request.id) for _ in range(MOST_ATTEMPTS)]
-    assert worker_on(proxy, record).work_next() is True
-    late = proxy.edit(WEB_ADDRESS, request.generation, attempts[-1] or 0, proxy.installed(WEB_ADDRESS), BACK_SOON)
-    assert (kept_of(record, request.id).stands, late, proxy.written[WEB_ADDRESS] != BACK_SOON) == (Stands.NEEDS_A_PERSON, LOST, True)
 
 
 def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its_lane_so_no_change_of_theirs_lands_under_it(
@@ -146,21 +138,21 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
     assert (set(arrived), kept_of(record, request.id).stands, proxy.written[WEB_ADDRESS]) == ({LOST}, Stands.CANCELLED, BACK_SOON)
 
 
-def test_giving_up_a_retire_that_needs_a_person_fences_every_attempt_of_it_before_its_lane_takes_another_request(
+def test_giving_up_a_retire_fences_its_last_attempt_first_so_a_removal_of_the_route_it_sent_and_that_runs_late_removes_nothing(
     record: Record,
 ) -> None:
     worker, lanes, proxy = serving_a(record)
     client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
     asked = client.post("/lanes/site/testing/retire", json={}).json()
-    attempts = [record.take_up(asked["id"]) for _ in range(MOST_ATTEMPTS)]
-    assert (worker.work_next(), kept_of(record, asked["id"]).stands) == (True, Stands.NEEDS_A_PERSON)
+    sent_by = begun(record, asked["id"])
+    record.leave_open(sent_by, "The removal of the route got no answer.")
     proxy.gate.unreadable = "The proxy's container did not answer"
-    unasked = [client.post(f"/requests/{asked['id']}/{call}").status_code for call in ("retry", "give-up")]
+    unasked = client.post(f"/requests/{asked['id']}/give-up").status_code
     proxy.gate.unreadable = None
-    assert (unasked, kept_of(record, asked["id"]).stands) == ([503, 503], Stands.NEEDS_A_PERSON)
+    assert (unasked, kept_of(record, asked["id"]).stands) == (503, Stands.WORKING)
     assert client.post(f"/requests/{asked['id']}/give-up").status_code == 200
-    late = [proxy.edit(WEB_ADDRESS, asked["generation"], attempt or 0, "a", None) for attempt in attempts]
-    assert (late, proxy.written[WEB_ADDRESS]) == ([LOST] * MOST_ATTEMPTS, "a")
+    late = proxy.edit(WEB_ADDRESS, asked["generation"], sent_by, "a", None)
+    assert (late, proxy.written[WEB_ADDRESS], kept_of(record, asked["id"]).stands) == (LOST, "a", Stands.FAILED)
 
 
 def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_again_and_decided_again() -> None:

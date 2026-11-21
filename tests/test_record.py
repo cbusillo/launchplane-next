@@ -14,7 +14,6 @@ from launchplane import record as record_module
 from launchplane.instance import Verdict
 from launchplane.judge import Work
 from launchplane.record import (
-    MOST_ATTEMPTS,
     Asked,
     CarriesASecret,
     Interrupted,
@@ -27,7 +26,7 @@ from launchplane.record import (
 )
 from tests.conftest import ALEMBIC
 from tests.given_secrets import NO_SECRETS, GivenSecrets
-from tests.pretend_record import PretendRecord, lose_every_turn
+from tests.pretend_record import PretendRecord, begun, lose_every_turn
 
 MOVE_B = Asked(product="site", lane="testing", work=Work.MOVE, build="site:b")
 MOVE_C = Asked(product="site", lane="testing", work=Work.MOVE, build="site:c")
@@ -36,10 +35,11 @@ RETIRE_OTHER = Asked(product="site", lane="other", work=Work.RETIRE)
 CALLER = "the address 192.0.2.1"
 
 
-def taken_up_until_it_needs_a_person(record: Record, request: int) -> None:
-    for _ in range(MOST_ATTEMPTS):
-        assert record.take_up(request) is not None
-    assert record.take_up(request) is None
+# Taken up and left open: at work, with no attempt of it open. The last attempt it was given.
+def resting(record: Record, request: int) -> int:
+    attempt = begun(record, request)
+    record.leave_open(attempt, "The host could not be read.")
+    return attempt
 
 
 def test_asking_the_same_of_a_lane_while_one_is_unfinished_writes_no_second_request(record: Record) -> None:
@@ -121,25 +121,6 @@ def test_the_record_itself_refuses_a_lane_a_second_request_that_waits(
     assert [each.id for each in postgres_record.unfinished()] == [waiting.id]
 
 
-def test_a_lane_with_a_request_that_needs_a_person_refuses_a_new_request_and_writes_nothing(record: Record) -> None:
-    stuck = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, stuck.id)
-    with pytest.raises(Refused, match=f"POST /requests/{stuck.id}/retry"):
-        record.write(MOVE_C, CALLER, None)
-    assert [(each.id, each.stands) for each in record.unfinished()] == [(stuck.id, Stands.NEEDS_A_PERSON)]
-
-
-def test_asking_again_for_a_request_that_needs_a_person_replaces_the_one_that_waited_behind_it(record: Record) -> None:
-    stuck = at_work_on_b(record)
-    waited = record.write(MOVE_C, CALLER, None)
-    for _ in range(MOST_ATTEMPTS):
-        record.take_up(stuck)
-    again = record.retry(stuck, CALLER)
-    replaced = record.read(waited.id)
-    assert again is not None and replaced is not None
-    assert (replaced.stands, replaced.replaced_by, [each.id for each in record.next_up()]) == (Stands.REPLACED, again.id, [again.id])
-
-
 # Held at the moment its row is locked to be taken up, as a worker holds it, while a newer request arrives. PostgreSQL
 # ends one of the two, and whichever it is, a request is never both replaced and worked.
 # noinspection SqlResolve
@@ -164,16 +145,14 @@ def test_a_request_being_taken_up_as_a_newer_one_arrives_is_worked_or_replaced_a
 
 def test_asking_the_same_again_once_the_first_has_ended_writes_a_new_request(record: Record) -> None:
     first = record.write(MOVE_B, CALLER, None)
-    attempt = record.take_up(first.id)
-    assert attempt is not None
+    attempt = begun(record, first.id)
     record.end(attempt, Stands.DONE, {"outcome": "switched"}, None)
     assert record.write(MOVE_B, CALLER, None).id != first.id
 
 
 def test_the_same_key_and_body_answers_with_the_request_already_written_even_after_it_ended(record: Record) -> None:
     first = record.write(MOVE_B, CALLER, "key-1")
-    attempt = record.take_up(first.id)
-    assert attempt is not None
+    attempt = begun(record, first.id)
     record.end(attempt, Stands.DONE, {"outcome": "switched"}, None)
     again = record.write(MOVE_B, CALLER, "key-1")
     assert (again.id, again.stands, again.answer) == (first.id, Stands.DONE, {"outcome": "switched"})
@@ -199,31 +178,31 @@ def test_the_oldest_request_of_each_lane_is_next_up_and_a_later_one_of_a_lane_on
     record: Record,
 ) -> None:
     first, other = record.write(MOVE_B, CALLER, None), record.write(RETIRE_OTHER, CALLER, None)
-    attempt = record.take_up(first.id)
+    attempt = begun(record, first.id)
     later = record.write(MOVE_C, CALLER, None)
     while_the_first_is_worked = [each.id for each in record.next_up()]
-    assert attempt is not None
     record.end(attempt, Stands.FAILED, None, "stopped", decided=Verdict.ABANDONED)
     assert (while_the_first_is_worked, [each.id for each in record.next_up()]) == ([first.id, other.id], [other.id, later.id])
 
 
-def test_a_request_found_working_is_taken_up_as_interrupted_and_the_attempt_is_counted(record: Record) -> None:
+def test_a_request_interrupted_five_times_is_taken_up_a_sixth_time_and_a_newer_request_waits_behind_it(record: Record) -> None:
     request = record.write(MOVE_B, CALLER, None)
-    first = record.take_up(request.id)
-    second = record.take_up(request.id)
+    taken = [record.take_up(request.id) for _ in range(6)]
+    behind = record.write(MOVE_C, CALLER, None)
     kept = record.read(request.id)
-    assert kept is not None and first is not None and second is not None
-    assert (kept.stands, [(each.number, each.ended) for each in kept.attempts]) == (
+    assert kept is not None and None not in taken
+    assert [each.again for each in taken if each is not None] == [False, True, True, True, True, True]
+    assert (kept.stands, [(each.number, each.ended) for each in kept.attempts], behind.stands) == (
         Stands.WORKING,
-        [(1, "interrupted"), (2, None)],
+        [*((number, "interrupted") for number in range(1, 6)), (6, None)],
+        Stands.WAITING,
     )
+    assert [each.id for each in record.next_up()] == [request.id]
 
 
 def test_an_attempt_that_was_interrupted_writes_nothing_more(record: Record) -> None:
     request = record.write(MOVE_B, CALLER, None)
-    first = record.take_up(request.id)
-    second = record.take_up(request.id)
-    assert first is not None and second is not None
+    first, second = begun(record, request.id), begun(record, request.id)
     with pytest.raises(Interrupted):
         record.note(first, "start the instance site-testing-1", None)
     with pytest.raises(Interrupted):
@@ -237,54 +216,32 @@ def test_an_attempt_that_was_interrupted_writes_nothing_more(record: Record) -> 
     )
 
 
-def test_a_request_taken_up_three_times_without_ending_needs_a_person_and_says_what_to_do(record: Record) -> None:
+def test_giving_up_a_request_at_work_with_no_attempt_open_ends_it_as_failed_and_its_lane_works_the_next(record: Record) -> None:
     request = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, request.id)
-    kept = record.read(request.id)
-    assert kept is not None and kept.error is not None
-    assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.NEEDS_A_PERSON, ["interrupted"] * MOST_ATTEMPTS)
-    assert f"POST /requests/{request.id}/retry" in kept.error and f"POST /requests/{request.id}/give-up" in kept.error
-
-
-def test_a_lane_whose_request_needs_a_person_takes_no_other_request_and_another_lane_still_does(record: Record) -> None:
-    request = record.write(MOVE_B, CALLER, None)
-    assert record.take_up(request.id) is not None
-    waiting_behind = record.write(MOVE_C, CALLER, None)
-    assert [record.take_up(request.id) is None for _ in range(MOST_ATTEMPTS)] == [False] * (MOST_ATTEMPTS - 1) + [True]
-    with pytest.raises(Refused, match="needs a person"):
-        record.write(Asked(product="site", lane="testing", work=Work.RETIRE), CALLER, None)
-    assert record.next_up() == []
-    other = record.write(RETIRE_OTHER, CALLER, None)
-    behind = record.read(waiting_behind.id)
-    assert behind is not None
-    assert ([each.id for each in record.next_up()], behind.stands) == ([other.id], Stands.WAITING)
-
-
-def test_giving_a_request_up_ends_it_as_failed_and_frees_its_lane(record: Record) -> None:
-    request = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, request.id)
-    given_up = record.give_up(request.id)
+    last = resting(record, request.id)
+    behind = record.write(MOVE_C, CALLER, None)
+    given_up = record.give_up(request.id, last)
     assert given_up is not None and given_up.error is not None
-    assert (given_up.stands, given_up.error.endswith("A person gave it up.")) == (Stands.FAILED, True)
-    assert record.write(MOVE_C, CALLER, None).stands == Stands.WAITING
+    assert (given_up.stands, given_up.error.startswith("The host could not be read. A person gave it up"), given_up.answer) == (
+        Stands.FAILED,
+        True,
+        None,
+    )
+    assert [each.id for each in record.next_up()] == [behind.id]
 
 
-def test_asking_for_a_request_again_writes_a_new_request_for_the_same_thing_and_ends_the_old(record: Record) -> None:
+def test_a_request_being_worked_or_taken_up_since_its_lane_was_read_or_waiting_is_not_given_up(record: Record) -> None:
+    waiting = record.write(RETIRE_OTHER, CALLER, None)
     request = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, request.id)
-    again = record.retry(request.id, "the address 192.0.2.9")
-    old = record.read(request.id)
-    assert again is not None and old is not None and old.error is not None
-    assert (again.asked(), again.stands, again.asked_by) == (MOVE_B, Stands.WAITING, "the address 192.0.2.9")
-    assert (old.stands, f"as request {again.id}" in old.error) == (Stands.FAILED, True)
-    assert [each.id for each in record.next_up()] == [again.id]
-
-
-def test_only_a_request_that_needs_a_person_is_given_up_or_asked_for_again(record: Record) -> None:
-    request = record.write(MOVE_B, CALLER, None)
-    assert (record.give_up(request.id), record.retry(request.id, CALLER), record.give_up(999)) == (None, None, None)
-    kept = record.read(request.id)
-    assert kept is not None and kept.stands == Stands.WAITING
+    read_before = resting(record, request.id)
+    being_worked = begun(record, request.id)
+    while_an_attempt_is_open = record.give_up(request.id, being_worked)
+    record.leave_open(being_worked, "The host could not be read.")
+    taken_up_since = record.give_up(request.id, read_before)
+    refused = [while_an_attempt_is_open, taken_up_since, record.give_up(waiting.id, 0), record.give_up(999, 0)]
+    kept, still_waiting = record.read(request.id), record.read(waiting.id)
+    assert kept is not None and still_waiting is not None
+    assert (refused, kept.stands, still_waiting.stands) == ([None] * 4, Stands.WORKING, Stands.WAITING)
 
 
 def test_a_lanes_turn_has_one_holder_and_is_free_again_when_the_holder_lets_go(record: Record) -> None:
@@ -374,8 +331,7 @@ def test_an_attempt_and_its_event_written_while_a_request_is_being_read_do_not_b
     ) -> psycopg.Cursor[Any]:
         if query == record_module.Sql.EVENTS and not written_meanwhile:
             written_meanwhile.append(request.id)
-            attempt = worker.take_up(request.id)
-            assert attempt is not None
+            attempt = begun(worker, request.id)
             worker.note(attempt, "start the instance site-testing-1", None)
         return execute(cursor, query, values, **options)
 
@@ -400,8 +356,7 @@ def test_the_migration_to_key_digests_refuses_to_be_undone_and_leaves_a_repeated
 def test_a_key_answered_with_another_calls_request_answers_with_it_ever_after_and_writes_nothing(record: Record) -> None:
     asked = record.write(MOVE_B, CALLER, None)
     answered = record.write(MOVE_B, CALLER, "lost-reply")
-    attempt = record.take_up(asked.id)
-    assert attempt is not None
+    attempt = begun(record, asked.id)
     record.end(attempt, Stands.DONE, {"outcome": "switched"}, None)
     later = record.write(MOVE_C, CALLER, None)
     again = record.write(MOVE_B, CALLER, "lost-reply")
@@ -447,6 +402,24 @@ def test_the_migration_to_generations_stops_while_a_move_begun_before_it_is_work
         command.upgrade(Config(ALEMBIC), "head")
     settled = postgres_record.read(begun.id)
     assert settled is not None and (settled.stands, len(settled.generation)) == (Stands.FAILED, 36)
+
+
+def test_the_migration_that_ends_the_limit_leaves_a_request_that_needed_a_person_to_be_taken_up_again(
+    postgres_record: PostgresRecord,
+) -> None:
+    parked = postgres_record.write(MOVE_B, CALLER, None)
+    assert postgres_record.take_up(parked.id) is not None
+    command.downgrade(Config(ALEMBIC), "0007")
+    try:
+        with psycopg.connect(postgres_record.database) as connection:
+            # noinspection SqlResolve
+            connection.execute("update request set stands = 'needs a person', error = 'Ask again.' where id = %s", [parked.id])
+    finally:
+        command.upgrade(Config(ALEMBIC), "head")
+    taken_up_again = postgres_record.take_up(postgres_record.next_up()[0].id)
+    kept = postgres_record.read(parked.id)
+    assert kept is not None and taken_up_again is not None
+    assert (kept.stands, kept.error, [each.ended for each in kept.attempts]) == (Stands.WORKING, None, ["interrupted", None])
 
 
 HELD = "Zx3-a-secret-a-container-holds-0123456789"
@@ -501,8 +474,7 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
 
 def called_with_the_secret_everywhere(record: Record, method: str) -> None:
     emptied(record)
-    stuck = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, stuck.id)
+    resting(record, record.write(MOVE_B, CALLER, None).id)
     assert record.take_up(record.write(RETIRE_OTHER, CALLER, None).id) is not None
     hints = get_type_hints(getattr(Record, method))
     for number in range(1, 5):
@@ -532,7 +504,7 @@ def test_no_call_of_the_record_keeps_a_secret_a_container_holds_in_any_table_wha
     while_nobody_holds_it = calls_that_keep_the_secret(record)
     secrets.seen = frozenset({HELD})
     while_a_container_holds_it = calls_that_keep_the_secret(record)
-    assert while_nobody_holds_it >= {"write", "retry", "note", "end"}
+    assert while_nobody_holds_it >= {"write", "note", "end"}
     assert while_a_container_holds_it == set()
 
 
@@ -560,19 +532,8 @@ def test_a_repeated_call_whose_lookup_was_lost_is_said_to_be_unconfirmed_since_i
         postgres_record.write(MOVE_B, CALLER, repeated)
 
 
-def test_a_write_lost_after_the_record_said_it_holds_nothing_like_it_is_said_to_be_unwritten(
-    postgres_record: PostgresRecord, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def lose_the_connection(*_given: object) -> None:
-        raise psycopg.OperationalError("server closed the connection unexpectedly")
-
-    monkeypatch.setattr(record_module, "refuse_while_a_person_is_awaited", lose_the_connection)
-    with pytest.raises(RecordError, match="server closed the connection") as lost:
-        postgres_record.write(MOVE_B, CALLER, None)
-    assert not isinstance(lost.value, Unconfirmed)
-
-
-def test_a_reading_the_record_does_not_answer_in_time_is_given_up_on_and_said_as_such(migrated_database: str) -> None:
+def test_a_reading_the_record_does_not_answer_in_time_is_given_up_on_and_said_as_such(postgres_record: PostgresRecord) -> None:
+    migrated_database = postgres_record.database
     record = PostgresRecord(migrated_database, NO_SECRETS, seconds_to_reach=0.3)
     began = time.monotonic()
     try:

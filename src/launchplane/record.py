@@ -12,7 +12,7 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from launchplane.instance import Verdict, new_generation
 from launchplane.judge import Work
@@ -20,7 +20,6 @@ from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cl
 from launchplane.steps import PutBack
 from launchplane.telling import TO_PUT_BACK
 
-MOST_ATTEMPTS = 3
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
 MOST_CONNECTIONS = 10
@@ -98,7 +97,6 @@ class Stands(StrEnum):
     WORKING = "working"
     DONE = "done"
     FAILED = "failed"
-    NEEDS_A_PERSON = "needs a person"
     CANCELLED = "cancelled"
     REPLACED = "replaced"
 
@@ -148,6 +146,8 @@ class Request(Asked):
 
 
 class Attempt(BaseModel):
+    # What the gate knows the attempt by. It is no part of an answer, which counts a request's attempts from one.
+    id: int = Field(exclude=True)
     number: int
     began_at: datetime
     ended_at: datetime | None
@@ -166,11 +166,11 @@ class Kept(Request):
     events: list[Event]
 
 
-# A request found working. `last` is the last attempt it was given, and `reached` whether it was interrupted as often as one may be.
+# An attempt begun. `again` says the request had one before it, which may have sent the host a change that has not run yet.
 @dataclass(frozen=True)
-class AtLimit:
-    last: int
-    reached: bool = True
+class Taken:
+    attempt: int
+    again: bool
 
 
 class Record(Protocol):
@@ -181,17 +181,13 @@ class Record(Protocol):
     def cancels_answered(self) -> list[Request]: ...
     def next_up(self) -> list[Request]: ...
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
-    def take_up(self, request: int, *, exempt: bool = False) -> int | None: ...
-    def at_limit(self, request: int) -> AtLimit | None: ...
-    def stop_for_a_person(self, request: int, last: int) -> bool: ...
+    def take_up(self, request: int) -> Taken | None: ...
     def leave_open(self, attempt: int, why: str) -> None: ...
-    def resume(self, request: int, why: str) -> None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool: ...
-    def give_up(self, request: int) -> Request | None: ...
-    def retry(self, request: int, asked_by: str) -> Request | None: ...
+    def give_up(self, request: int, last: int) -> Request | None: ...
     def cancel(self, request: int, by: str) -> Request | None: ...
     def cancel_asked(self, request: int) -> bool: ...
     def refuse_cancel(self, request: int, why: str) -> None: ...
@@ -204,15 +200,6 @@ def database() -> str:
 # A caller never needs its key shown back, so only this is kept: a key that is a secret cannot be read from the record.
 def key_digest(idempotency_key: str | None) -> str | None:
     return None if idempotency_key is None else hashlib.sha256(idempotency_key.encode()).hexdigest()
-
-
-def needs_a_person(request: Request) -> str:
-    return (
-        f"{request.attempted()} was taken up {MOST_ATTEMPTS} times and never ended: each time Launchplane stopped, or lost its "
-        f"record, while working on it. Launchplane does not take it up again by itself. Look at the lane, then ask for it again "
-        f"with POST /requests/{request.id}/retry or give it up with POST /requests/{request.id}/give-up. Until then "
-        f"{request.lane} of {request.product} takes no other request."
-    )
 
 
 def how_cancelled(request: Request) -> str:
@@ -237,8 +224,7 @@ def put_back_told(kept: Kept) -> list[str]:
     return list(dict.fromkeys(told))
 
 
-GIVEN_UP = " A person gave it up."
-ASKED_AGAIN = " A person asked for it again, as request {again}."
+GIVEN_UP = "A person gave it up, with its lane read as it was before the request or as the request would leave it."
 
 
 # PyCharm has no schema to resolve these against. The tests run every statement against PostgreSQL.
@@ -246,9 +232,6 @@ ASKED_AGAIN = " A person asked for it again, as request {again}."
 class Sql:
     SAME_KEY: Final = "select request.* from request, request_key answered where (digest, request) = (%s, request.id)"
     KEEP_KEY: Final = "insert into request_key (digest, request) values (%s, %s)"
-    WAITS_ON_A_PERSON: Final = """
-    select id from request where (product, lane) = (%s, %s) and stands = 'needs a person' order by id limit 1
-    """
     SAME_UNFINISHED: Final = """
     select * from request
     where (product, lane, work) = (%s, %s, %s) and build is not distinct from %s and delete_data_set is not distinct from %s
@@ -259,7 +242,7 @@ class Sql:
     insert into request (product, lane, work, build, delete_data_set, asked_by, generation)
     values (%s, %s, %s, %s, %s, %s, %s) returning *
     """
-    UNFINISHED: Final = "select * from request where stands in ('waiting', 'working', 'needs a person') order by id"
+    UNFINISHED: Final = "select * from request where stands in ('waiting', 'working') order by id"
     RECENTLY_ENDED: Final = """
     select * from request where stands in ('done', 'failed', 'cancelled', 'replaced') order by ended_at desc, id desc limit 20
     """
@@ -273,12 +256,7 @@ class Sql:
     EVENTS: Final = "select request, attempt, at, did, error from event where request = any(%s) order by id"
     NEXT_UP: Final = """
     select * from (
-        select distinct on (product, lane) * from request asked
-        where stands in ('waiting', 'working') and not exists (
-            select from request stuck
-            where (stuck.product, stuck.lane) = (asked.product, asked.lane) and stuck.stands = 'needs a person'
-        )
-        order by product, lane, id
+        select distinct on (product, lane) * from request where stands in ('waiting', 'working') order by product, lane, id
     ) oldest_of_each_lane order by id
     """
     # One statement, so a request taken up at that moment is left to be worked: only one that still waits is replaced.
@@ -310,17 +288,13 @@ class Sql:
     TURN_HELD: Final = "select count(*) as held from pg_locks where locktype = 'advisory' and pid = pg_backend_pid() and granted"
     TAKE_TURN: Final = "select pg_try_advisory_lock(hashtextextended(%s, 0)) as ours"
     INTERRUPT: Final = "update attempt set ended_at = now(), ended = 'interrupted' where request = %s and ended is null"
-    COUNT_ATTEMPTS: Final = """
-    select count(*) filter (where ended = 'interrupted') as interrupted, max(id) as last from attempt where request = %s
-    """
+    RESTING: Final = "select max(id) as last, count(*) filter (where ended is null) as open from attempt where request = %s"
     LEAVE_OPEN: Final = """
     with open_still as (
         update attempt set ended_at = now(), ended = 'unfinished' where id = %s and ended is null returning request
     )
     update request set error = %s from open_still where request.id = open_still.request returning request.id
     """
-    RESUME: Final = "update request set stands = 'working', error = %s where id = %s and stands = 'needs a person'"
-    STOP_FOR_A_PERSON: Final = "update request set stands = 'needs a person', error = %s where id = %s"
     BEGIN_ATTEMPT: Final = """
     with taken as (update request set stands = 'working' where id = %s)
     insert into attempt (request) values (%s) returning id
@@ -335,10 +309,8 @@ class Sql:
     returning request.id
     """
     GIVE_UP: Final = """
-    update request set stands = 'failed', ended_at = now(), error = error || %s
-    where id = %s and stands = 'needs a person' returning *
+    update request set stands = 'failed', ended_at = now(), error = concat_ws(' ', error, %s::text) where id = %s returning *
     """
-    STUCK: Final = "select * from request where id = %s and stands = 'needs a person' for update"
     LOCK_WRITERS: Final = "lock table request in share row exclusive mode"
     READ: Final = "select * from request where id = %s"
     READ_TO_TAKE_UP: Final = "select * from request where id = %s for update"
@@ -348,14 +320,6 @@ def key_reused(written: Request) -> Refused:
     return Refused(
         f"The Idempotency-Key was given with request {written.id}, which asked something else: "
         f"{written.attempted()}. Nothing was written. Ask with a new key, or with none."
-    )
-
-
-def lane_waits_on_a_person(asked: Asked, stuck: int) -> Refused:
-    return Refused(
-        f"{asked.lane} of {asked.product} takes no request while request {stuck} needs a person. Nothing was written. "
-        f"Read it with GET /requests/{stuck}, then ask for it again with POST /requests/{stuck}/retry or give "
-        f"it up with POST /requests/{stuck}/give-up."
     )
 
 
@@ -380,12 +344,6 @@ def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key:
         return same_key
     row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
     return None if row is None else keep_key(session, gate, idempotency_key, Request.model_validate(row))
-
-
-def refuse_while_a_person_is_awaited(session: Session, gate: Gate, asked: Asked) -> None:
-    stuck = session.execute(Sql.WAITS_ON_A_PERSON, gate.sent(asked.product, asked.lane)).fetchone()
-    if stuck is not None:
-        raise lane_waits_on_a_person(asked, stuck["id"])
 
 
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
@@ -480,23 +438,15 @@ class PostgresRecord(Record):
             raise RecordError(f"Launchplane's record did not answer within {self.seconds_to_answer:g} s while {doing}.") from None
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-        # Until the record has been asked, the call may be a repeat of one it holds, so it is not known unwritten.
-        may_be_written = True
+        # A record that fails may hold the request all the same: the call may repeat one it holds, or the write may have landed.
         try:
             with self.session("writing a request") as session:
                 # Two calls asking the same thing at once write one request: the second waits here and finds the first.
                 session.execute(Sql.LOCK_WRITERS)
                 same = same_as_written(session, self.gate, asked, idempotency_key)
-                if same is not None:
-                    return same
-                may_be_written = False
-                refuse_while_a_person_is_awaited(session, self.gate, asked)
-                may_be_written = True
-                return write_new(session, self.gate, asked, asked_by, idempotency_key)
+                return same or write_new(session, self.gate, asked, asked_by, idempotency_key)
         except RecordError as error:
-            if may_be_written:
-                raise Unconfirmed(str(error)) from error
-            raise
+            raise Unconfirmed(str(error)) from error
 
     def read(self, request: int) -> Kept | None:
         def one(session: Session) -> Kept | None:
@@ -553,9 +503,8 @@ class PostgresRecord(Record):
             ours = asked_once(session, "taking a lane's turn", Sql.TAKE_TURN, self.gate.made(f"{product}/{lane}"))["ours"]
             yield held if ours else None
 
-    # A request found working with nobody holding its lane was interrupted. That is counted, never taken for waiting.
-    # One that is exempt is taken up however often it was interrupted.
-    def take_up(self, request: int, *, exempt: bool = False) -> int | None:
+    # A request found working with nobody holding its lane was interrupted, and is taken up again however often that was.
+    def take_up(self, request: int) -> Taken | None:
         with self.session("taking up a request") as session:
             taken = self.gate.made(request)
             row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
@@ -563,46 +512,14 @@ class PostgresRecord(Record):
             if found is None or found.stands not in (Stands.WAITING, Stands.WORKING):
                 return None
             session.execute(Sql.INTERRUPT, taken)
-            attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
-            if attempts["interrupted"] >= MOST_ATTEMPTS and not exempt:
-                session.execute(Sql.STOP_FOR_A_PERSON, self.gate.made(needs_a_person(found), request))
-                return None
-            return asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, self.gate.made(request, request))["id"]
-
-    # Asked before a request is taken up, under its lane's turn. The gate is asked after, and never inside a transaction.
-    def at_limit(self, request: int) -> AtLimit | None:
-        with self.session("counting how often a request was interrupted") as session:
-            taken = self.gate.made(request)
-            row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
-            if row is None or Request.model_validate(row).stands is not Stands.WORKING:
-                return None
-            session.execute(Sql.INTERRUPT, taken)
-            attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
-            return AtLimit(attempts["last"], attempts["interrupted"] >= MOST_ATTEMPTS)
-
-    # Whether the move now needs a person: only if, with its row locked, it is still working, was given no attempt
-    # after the one the gate was fenced through, and no cancel is on record for it.
-    def stop_for_a_person(self, request: int, last: int) -> bool:
-        with self.session("leaving a request to a person") as session:
-            taken = self.gate.made(request)
-            row = session.execute(Sql.READ_TO_TAKE_UP, taken).fetchone()
-            found = None if row is None else Request.model_validate(row)
-            attempts = asked_once(session, "counting attempts", Sql.COUNT_ATTEMPTS, taken)
-            if found is None or (found.stands, found.cancel_asked_at, attempts["last"]) != (Stands.WORKING, None, last):
-                return False
-            session.execute(Sql.STOP_FOR_A_PERSON, self.gate.made(needs_a_person(found), request))
-            return True
+            attempt = asked_once(session, "beginning an attempt", Sql.BEGIN_ATTEMPT, self.gate.made(request, request))["id"]
+            return Taken(attempt, again=found.stands is Stands.WORKING)
 
     # The attempt is over and the request is not: it stays working, with why it is not finished, and is taken up again.
     def leave_open(self, attempt: int, why: str) -> None:
         with self.session("writing why a request is not finished") as session:
             if session.execute(Sql.LEAVE_OPEN, self.gate.made(attempt, why)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so why it is not finished was not written.")
-
-    # A request that waited on a person and whose release the gate says is committed is worked again.
-    def resume(self, request: int, why: str) -> None:
-        with self.session("taking a request up again") as session:
-            session.execute(Sql.RESUME, self.gate.made(why, request))
 
     def note(self, attempt: int, did: str, error: str | None) -> None:
         with self.session("writing what was done") as session:
@@ -623,19 +540,16 @@ class PostgresRecord(Record):
             session.execute(Sql.END, self.gate.made(stands.value, attempt, stands.value, answer, error))
             return True
 
-    def give_up(self, request: int) -> Request | None:
+    # Only a request at work that no attempt is open for, and that was given no attempt after `last`: so nothing was
+    # done for it since whoever asks read `last`, and its row is locked against being taken up until it is ended.
+    def give_up(self, request: int, last: int) -> Request | None:
         with self.session("giving a request up") as session:
-            row = session.execute(Sql.GIVE_UP, self.gate.made(GIVEN_UP, request)).fetchone()
-            return None if row is None else Request.model_validate(row)
-
-    def retry(self, request: int, asked_by: str) -> Request | None:
-        with self.session("asking for a request again") as session:
-            row = session.execute(Sql.STUCK, self.gate.made(request)).fetchone()
-            if row is None:
+            given_up = self.gate.made(request)
+            row = session.execute(Sql.READ_TO_TAKE_UP, given_up).fetchone()
+            resting = asked_once(session, "reading the attempts of a request", Sql.RESTING, given_up)
+            if row is None or (row["stands"], resting["open"], resting["last"]) != (Stands.WORKING, 0, last):
                 return None
-            again = write_new(session, self.gate, Request.model_validate(row).asked(), asked_by, None)
-            session.execute(Sql.GIVE_UP, self.gate.made(ASKED_AGAIN.format(again=again.id), request))
-            return again
+            return Request.model_validate(session.execute(Sql.GIVE_UP, self.gate.made(GIVEN_UP, request)).fetchone())
 
     def cancel(self, request: int, by: str) -> Request | None:
         with self.session("cancelling a request") as session:

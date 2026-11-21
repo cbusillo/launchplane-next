@@ -7,13 +7,14 @@ from fastapi.testclient import TestClient
 from launchplane.api import create_app
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
-from launchplane.record import MOST_ATTEMPTS, Asked, Kept, Record, Stands
-from launchplane.worker import Worker
+from launchplane.record import Asked, Kept, Record, Stands
+from launchplane.telling import NOBODY
+from launchplane.worker import Worker, carried_out
 from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import WEB_ADDRESS, PretendProxy
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
 from tests.test_host_answers import BEGIN, END, MOVE_A, RETIRE, worker_on
-from tests.test_worker import CALLER, kept_of
+from tests.test_worker import CALLER, MOVE_B, kept_of, serving_a
 
 
 def lane_retired() -> PretendProxy:
@@ -132,10 +133,10 @@ def test_a_read_that_fails_after_the_first_change_leaves_the_request_working_wit
     request = record.write(asked, CALLER, None)
     assert worker.work_next() is True
     behind = record.write(MOVE_A, CALLER, None)
-    for _ in range(MOST_ATTEMPTS):
+    for _ in range(5):
         assert worker.work_next() is True
     left = left_working(record, request.id)
-    assert (left.error, len(left.attempts), kept_of(record, behind.id).stands) == (UNREAD, MOST_ATTEMPTS + 1, Stands.WAITING)
+    assert (left.error, len(left.attempts), kept_of(record, behind.id).stands) == (UNREAD, 6, Stands.WAITING)
     assert not is_as_asked(proxy)
     read_again()
     assert worker.work_next() is True
@@ -206,33 +207,26 @@ def test_a_request_whose_work_the_host_shows_done_ends_as_done_and_changes_nothi
     assert (kept_of(record, request.id).stands, proxy.host.actions, is_as_asked(proxy)) == (Stands.DONE, [], True)
 
 
-# The lane as this request leaves it when it is cut short after so many changes, with the request needing a person.
-def cut_short_and_left_to_a_person(
-    record: Record, asked: Asked, lane: Lane, changes: int = 1
-) -> tuple[TestClient, PretendProxy, Worker, int]:
+# The lane as this request leaves it when the host stops being read after so many changes: the request is at work, with
+# no attempt of it open, and the host is read again.
+def cut_short(record: Record, asked: Asked, lane: Lane, changes: int = 1) -> tuple[TestClient, PretendProxy, Worker, int]:
     proxy = lane()
     lanes = lanes_on(proxy)
     worker, read_again = Worker(record, lanes, NO_SECRETS), unread_after_the_first_change(proxy, changes)
     request = record.write(asked, CALLER, None)
     assert worker.work_next() is True
     read_again()
-    for _ in range(MOST_ATTEMPTS):
-        assert record.take_up(request.id) is not None
-    assert (worker.work_next(), kept_of(record, request.id).stands) == (True, Stands.NEEDS_A_PERSON)
+    left_working(record, request.id)
     return TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)), proxy, worker, request.id
 
 
-def test_giving_up_a_request_whose_lane_cannot_be_read_answers_503_and_the_request_still_needs_a_person(
+def test_giving_up_a_request_whose_lane_cannot_be_read_answers_503_and_the_request_is_still_at_work(
     record: Record, kind: str
 ) -> None:
-    client, proxy, _, request = cut_short_and_left_to_a_person(record, *KINDS[kind][:2])
+    client, proxy, _, request = cut_short(record, *KINDS[kind][:2])
     unread_after_the_first_change(proxy)
     given_up = client.post(f"/requests/{request}/give-up")
-    assert (given_up.status_code, UNREAD in given_up.json()["error"], kept_of(record, request).stands) == (
-        503,
-        True,
-        Stands.NEEDS_A_PERSON,
-    )
+    assert (given_up.status_code, UNREAD in given_up.json()["error"], kept_of(record, request).stands) == (503, True, Stands.WORKING)
 
 
 # What was asked, of which lane, how many changes it made before it was cut short, and the lane once it is finished.
@@ -256,19 +250,61 @@ PART_WAY: dict[str, tuple[Asked, Lane, int, Callable[[PretendProxy], bool]]] = {
 }
 
 
-@pytest.mark.parametrize("cut_short", PART_WAY.values(), ids=PART_WAY.keys())
-def test_giving_up_a_request_whose_lane_is_neither_finished_nor_as_it_was_answers_503_changes_nothing_and_a_retry_finishes_it(
-    record: Record, cut_short: tuple[Asked, Lane, int, Callable[[PretendProxy], bool]]
+@pytest.mark.parametrize("part_way", PART_WAY.values(), ids=PART_WAY.keys())
+def test_giving_up_a_request_whose_lane_is_part_way_answers_503_changes_nothing_and_the_request_goes_on_and_finishes_it(
+    record: Record, part_way: tuple[Asked, Lane, int, Callable[[PretendProxy], bool]]
 ) -> None:
-    asked, lane, changes, is_as_asked = cut_short
-    client, proxy, worker, request = cut_short_and_left_to_a_person(record, asked, lane, changes)
+    asked, lane, changes, is_as_asked = part_way
+    client, proxy, worker, request = cut_short(record, asked, lane, changes)
     left = (dict(proxy.written), parts_up(proxy), databases_up(proxy), list(proxy.host.actions))
     given_up = client.post(f"/requests/{request}/give-up")
-    assert (given_up.status_code, kept_of(record, request).stands, is_as_asked(proxy)) == (503, Stands.NEEDS_A_PERSON, False)
-    assert "is neither finished nor as it was before" in given_up.json()["error"]
+    assert (given_up.status_code, kept_of(record, request).stands, is_as_asked(proxy)) == (503, Stands.WORKING, False)
+    assert "is part way, neither as it was before the request nor as the request would leave it" in given_up.json()["error"]
     assert (dict(proxy.written), parts_up(proxy), databases_up(proxy), list(proxy.host.actions)) == left
-    again = client.post(f"/requests/{request}/retry").json()["id"]
-    assert (worker.work_next(), kept_of(record, again).stands, is_as_asked(proxy)) == (True, Stands.DONE, True)
+    assert (worker.work_next(), kept_of(record, request).stands, is_as_asked(proxy)) == (True, Stands.DONE, True)
+
+
+def test_giving_up_a_retire_that_has_removed_the_route_and_not_yet_deleted_the_data_set_it_named_is_refused_and_it_deletes_it(
+    record: Record,
+) -> None:
+    deleting = RETIRE.model_copy(update={"delete_data_set": "data-1"})
+    client, proxy, worker, request = cut_short(record, deleting, lane_retired, changes=0)
+    given_up = client.post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, kept_of(record, request).stands, list(proxy.host.data_sets)) == (503, Stands.WORKING, ["data-1"])
+    assert (worker.work_next(), kept_of(record, request).stands, list(proxy.host.data_sets)) == (True, Stands.DONE, [])
+
+
+def test_giving_up_a_move_that_started_its_instance_and_has_not_switched_is_refused_and_the_move_goes_on_and_switches(
+    record: Record,
+) -> None:
+    worker, lanes, proxy = serving_a(record)
+    read_again = unread_after_the_first_change(proxy)
+    request = record.write(MOVE_B, CALLER, None).id
+    assert worker.work_next() is True
+    read_again()
+    given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, kept_of(record, request).stands, len(proxy.host.instances)) == (503, Stands.WORKING, 2)
+    assert (worker.work_next(), (kept_of(record, request).answer or {}).get("outcome")) == (True, "switched")
+
+
+def test_giving_up_a_move_that_has_made_nothing_ends_it_as_failed_changes_nothing_and_its_late_switch_can_no_longer_rename(
+    record: Record,
+) -> None:
+    worker, lanes, proxy = serving_a(record)
+    read_again = unread_after_the_first_change(proxy, changes=0)
+    request = record.write(MOVE_B, CALLER, None)
+    assert worker.work_next() is True
+    read_again()
+    given_up = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)).post(
+        f"/requests/{request.id}/give-up"
+    )
+    late = proxy.gate.switch(WEB_ADDRESS, request.generation, 1, "a-late-candidate")
+    assert (given_up.status_code, given_up.json()["stands"], "A person gave it up" in given_up.json()["error"]) == (
+        200,
+        "failed",
+        True,
+    )
+    assert (proxy.host.actions, late.verdict.value, proxy.written, worker.work_next()) == ([], "none", {WEB_ADDRESS: "a"}, False)
 
 
 def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered_ends_saying_that_data_set_was_deleted(
@@ -285,18 +321,17 @@ def test_a_retire_whose_deletion_of_the_named_data_set_was_made_and_not_answered
     assert (ended.answer["outcome"], ended.answer["deleted_data_set"]) == ("deleted", "data-1")
 
 
-def test_giving_up_a_request_whose_lane_was_read_and_is_not_part_way_ends_it_and_changes_nothing(record: Record, kind: str) -> None:
-    asked, lane, _, _, _, _, _ = KINDS[kind]
-    proxy = lane()
-    lanes = lanes_on(proxy)
-    worker = Worker(record, lanes, NO_SECRETS)
-    request = record.write(asked, CALLER, None)
-    for _ in range(MOST_ATTEMPTS):
-        assert record.take_up(request.id) is not None
-    assert worker.work_next() is True
-    client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
-    given_up = client.post(f"/requests/{request.id}/give-up")
-    assert (given_up.status_code, given_up.json()["stands"], proxy.host.actions) == (200, "failed", [])
+@pytest.mark.parametrize("finished_meanwhile", [False, True], ids=["as it was before the request", "as the request would leave it"])
+def test_giving_up_a_request_whose_lane_was_read_and_is_not_part_way_ends_it_as_failed_and_changes_nothing(
+    record: Record, kind: str, finished_meanwhile: bool
+) -> None:
+    client, proxy, worker, request = cut_short(record, *KINDS[kind][:2], changes=0)
+    if finished_meanwhile:
+        carried_out(lanes_on(proxy), kept_of(record, request), 0, NOBODY)
+    left = list(proxy.host.actions)
+    given_up = client.post(f"/requests/{request}/give-up")
+    assert (given_up.status_code, given_up.json()["stands"], proxy.host.actions) == (200, "failed", left)
+    assert (KINDS[kind][5](proxy), worker.work_next()) == (finished_meanwhile, False)
 
 
 def test_a_retire_that_names_a_data_set_the_lane_does_not_have_and_no_attempt_deleted_fails_naming_it_and_never_says_deleted(

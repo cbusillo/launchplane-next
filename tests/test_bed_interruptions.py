@@ -696,6 +696,29 @@ def test_case_3_a_release_renamed_and_held_from_loading_across_four_kills_stays_
     assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
 
 
+def test_a_move_held_before_its_switch_and_killed_four_times_is_still_at_work_and_finishes_as_asked_once_the_hold_is_let_go(
+    case: Case,
+) -> None:
+    hold("before.proxy.switch")
+    asked = asked_to_move(B)
+    for _ in range(4):
+        wait_until_stopped_at("before.proxy.switch", seconds=120)
+        kill_held_launchplane()
+    wait_until_stopped_at("before.proxy.switch", seconds=120)
+    at_work = ask(f"/requests/{asked['id']}")[1]
+    pills, note = request_row_of(SITE, asked["id"])
+    assert (at_work["stands"], [attempt["ended"] for attempt in at_work["attempts"]], case.now_serves(A)) == (
+        "working",
+        [*["interrupted"] * 4, None],
+        True,
+    )
+    assert (pills, "Taken up 5 times" in note, "Launchplane stopped" in note) == (["working"], True, True), note
+    let_go()
+    case.visitors_get(A, B)
+    assert ended_as(asked["id"]) == ("done", "switched")
+    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
+
+
 def test_case_4_a_stale_rename_resumed_after_recovery_discarded_its_candidate_renames_nothing_and_a_fresh_one_switches_once(
     case: Case, switch_in_flight: InFlight
 ) -> None:

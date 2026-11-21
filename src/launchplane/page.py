@@ -25,7 +25,6 @@ TONE = {
 STANDS_TONE = {
     Stands.WAITING: Standing.ON_PURPOSE,
     Stands.WORKING: Standing.ON_PURPOSE,
-    Stands.NEEDS_A_PERSON: Standing.WRONG,
     Stands.CANCELLED: Standing.ON_PURPOSE,
     Stands.REPLACED: Standing.ON_PURPOSE,
     Stands.DONE: Standing.GOOD,
@@ -92,10 +91,22 @@ def asked_for(request: Request) -> str:
     return f"{request.work}{deleting}"
 
 
+INTERRUPTED = "Launchplane stopped, or lost its record, while it was at work on it."
+
+
+# How often a request was taken up, and why the last attempt of it that is over did not end it. It is taken up again by
+# itself however often, so one that can never end says here what keeps it.
+def taken_up(request: Kept) -> str:
+    over = [attempt for attempt in request.attempts if attempt.ended is not None]
+    if not over:
+        return ""
+    why = INTERRUPTED if over[-1].ended == "interrupted" else request.error
+    return f"Taken up {len(request.attempts)} times, and again by itself until it ends. The last attempt did not end it: {why} "
+
+
 def done_so_far(request: Kept) -> str:
     lines = [event.did if event.error is None else f"{event.did}, refused" for event in request.events]
-    taken_up = "" if len(request.attempts) < 2 else f"Taken up {len(request.attempts)} times. "
-    return f"{taken_up}So far: {'; '.join(lines)}." if lines else f"{taken_up}Nothing done so far."
+    return f"{taken_up(request)}So far: {'; '.join(lines)}." if lines else f"{taken_up(request)}Nothing done so far."
 
 
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.
@@ -119,8 +130,6 @@ def being_cancelled(request: Kept, decided: Mapping[int, GateAnswer | None]) -> 
 
 
 def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> str | None:
-    if request.stands is Stands.NEEDS_A_PERSON:
-        return request.error
     if request.stands is Stands.CANCELLED:
         return how_cancelled(request)
     if request.stands is Stands.REPLACED:
@@ -131,8 +140,7 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
         why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return f"{why} It ended as {request.stands}."
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
-        unfinished = "" if request.error is None else f" Not finished yet, and taken up again by itself: {request.error}"
-        return f"{done_so_far(request)}{being_cancelled(request, decided)}{unfinished}"
+        return f"{done_so_far(request)}{being_cancelled(request, decided)}"
     return None
 
 
@@ -146,11 +154,6 @@ def request_rows(requests: Sequence[Request], decided: Mapping[int, GateAnswer |
         )
         for request in sorted(requests, key=lambda each: each.id)
     ]
-
-
-def person_pills(requests: Sequence[Request]) -> list[Pill]:
-    needs = any(request.stands is Stands.NEEDS_A_PERSON for request in requests)
-    return [Pill(text=Stands.NEEDS_A_PERSON, tone=Standing.WRONG)] if needs else []
 
 
 def part_row(name: str, made_from: str, build: str | None, container: str, pills: list[Pill]) -> Row:
@@ -173,7 +176,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
     requests = [each for each in shown_requests(status) if (each.product, each.lane) == (entry.product, entry.lane)]
     return Card(
         title=f"{entry.product} · {entry.lane or 'no lane'}" if entry.product else "A web address with no instance on the host",
-        pills=[*person_pills(requests), *([] if judged is None else lane_pills(judged))],
+        pills=[] if judged is None else lane_pills(judged),
         in_maintenance_since=None if judged is None else judged.lane.route.back_soon_since,
         rows=[
             Row(
@@ -249,12 +252,7 @@ def request_cards(status: Status) -> list[Card]:
     lanes = sorted({(each.product, each.lane) for each in requests} - on_host)
     of = {lane: [each for each in requests if (each.product, each.lane) == lane] for lane in lanes}
     return [
-        Card(
-            title=f"{product} · {lane}",
-            pills=person_pills(of[product, lane]),
-            rows=request_rows(of[product, lane], status.cancels_decided),
-        )
-        for product, lane in lanes
+        Card(title=f"{product} · {lane}", rows=request_rows(of[product, lane], status.cancels_decided)) for product, lane in lanes
     ]
 
 

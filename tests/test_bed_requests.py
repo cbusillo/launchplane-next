@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from tests.bed import ask, move_lane, needs_test_bed, on_control, retire, wait_for
+from tests.bed import FORGET_STARTS, START_AGAIN, ask, launchplane_answers, move_lane, needs_test_bed, on_control, retire, wait_for
 
 pytestmark = needs_test_bed
 
@@ -76,3 +76,27 @@ def test_the_same_key_asked_twice_moves_the_lane_once_and_answers_with_the_one_r
     other = ask(f"/lanes/{PRODUCT}/{LANE}/move?wait=60", {"build": BUILD_A}, headers=key)
     assert (first[0], first[1]["outcome"], again) == (200, "switched", first)
     assert (other[0], builds_of_the_lane()) == (409, [BUILD_B]), other
+
+
+def how_systemd_has_launchplane() -> list[str]:
+    return on_control("systemctl show launchplane --property=ActiveState,Result --value").split()
+
+
+def test_a_launchplane_that_keeps_dying_is_left_failed_by_systemd_at_its_limit_and_the_documented_command_starts_it_again() -> None:
+    def is_left_failed() -> bool:
+        return how_systemd_has_launchplane() == ["failed", "start-limit-hit"]
+
+    limit = int(on_control("systemctl show launchplane --property=StartLimitBurst --value"))
+    on_control(FORGET_STARTS)
+    try:
+        for _ in range(limit):
+            on_control("systemctl kill --signal=KILL launchplane")
+            wait_for(launchplane_answers, seconds=30)
+        on_control("systemctl kill --signal=KILL launchplane")
+        wait_for(is_left_failed, seconds=30)
+        time.sleep(3)
+        left_failed = (how_systemd_has_launchplane(), launchplane_answers())
+    finally:
+        on_control(START_AGAIN)
+    wait_for(launchplane_answers, seconds=30)
+    assert (limit, left_failed) == (10, (["failed", "start-limit-hit"], False))

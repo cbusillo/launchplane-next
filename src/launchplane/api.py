@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
+from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
 from launchplane.product import ProductError, ProductFolder
@@ -53,8 +53,6 @@ class WouldAct(Exception):
     pass
 
 
-# Past every attempt a request can have: fenced through it, a generation with no verdict can never be renamed for.
-EVERY_ATTEMPT = 2**62
 log = logging.getLogger(__name__)
 
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -62,6 +60,8 @@ UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
 PRODUCTS_FOLDER = "/var/lib/launchplane/products"
 MOST_SECONDS_WAITED = 3600
 SECONDS_BETWEEN_READS = 0.1
+# A request the host keeps from ending is between two attempts for 5 s at a time. A give-up waits this long for that.
+SECONDS_WAITED_TO_GIVE_UP = 10
 
 
 class InstanceAnswer(RunningInstance):
@@ -280,34 +280,56 @@ class Calls:
             if too_late is not None:
                 self.record.refuse_cancel(request.id, too_late)
 
-    # Why a request that needs a person is not ended by this call. While the gate has a verdict for its release it is
-    # worked again: committed is finished and a cancel that won is put back. The gate is asked for good, so a release it
-    # has no verdict for can no longer be renamed for once it is ended. A lane read as left part way is not given up.
-    def not_to_be_ended(self, request: int, response: Response, *, giving_up: bool) -> NotFinished | None:
-        kept = self.record.read(request)
-        if kept is None or kept.stands is not Stands.NEEDS_A_PERSON:
-            return None
-        verdict = self.gate.fence(kept.product, kept.lane, kept.generation, EVERY_ATTEMPT).verdict
-        if verdict is Verdict.NONE:
-            whole = not giving_up or kept.work is Work.MOVE or any(self.has_nothing_to_do(kept, back) for back in (False, True))
-            why = f"Request {request} was not given up: {kept.lane} of {kept.product} is neither finished nor as it was before."
-            return None if whole else not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{why} A retry finishes it.")
-        decided = "The routes file" if verdict is Verdict.COMMITTED else "A cancel won before the routes file"
-        why = f"{decided} of {kept.lane} of {kept.product} was renamed for request {request}, so it is not given up."
-        self.record.resume(request, why)
+    # Giving up is no force. It ends a request at work only while no attempt of it is open, so nothing is being done for
+    # it, and only on a lane read as the request would leave it or as it was before the request. A change of the route
+    # its last attempt sent may still arrive, so that attempt is fenced before the lane is read.
+    def give_up(self, request: int, response: Response) -> KeptRequest | NotFinished:
+        try:
+            kept = read_until(self.record, request, SECONDS_WAITED_TO_GIVE_UP, is_resting)
+            if kept is None:
+                return self.none_such(request, response)
+            unchanged = f"Request {request} was not given up and nothing was changed"
+            if kept.stands is not Stands.WORKING:
+                why = f"{unchanged}: it is {kept.stands}. Only a request at work is given up, and one that waits is cancelled."
+                return not_finished(response, HTTPStatus.CONFLICT, why)
+            if not is_resting(kept):
+                why = f"{unchanged}: it is being worked at this moment, so its lane cannot be read as it will be left. Ask again."
+                return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
+            last = kept.attempts[-1].id
+            self.gate.fence(kept.product, kept.lane, kept.generation, last)
+            if not (self.would_act_on_nothing(kept, turned_back=False) or self.would_act_on_nothing(kept, turned_back=True)):
+                why = (
+                    f"{unchanged}: {kept.lane} of {kept.product} is part way, neither as it was before the request nor as the "
+                    "request would leave it. The request is still at work, and is taken up again by itself."
+                )
+                return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
+            given_up = self.record.give_up(request, last)
+        except RecordError as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, self.not_known(request, error))
+        except UNREADABLE as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Request {request} was not given up.")
+        if given_up is None:
+            why = f"Request {request} was not given up: it was taken up again, or ended, while its lane was read. Ask again."
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
         self.wake()
-        return not_finished(response, HTTPStatus.CONFLICT, f"{why} It is being worked again and will be finished.")
+        return given_up
 
-    # The request's own call, on what the host shows now and stopped before it acts: whether it would answer with nothing
-    # done or, with a cancel asked, nothing put back. So the one check of a finished maintenance or retire is its planner's.
-    def has_nothing_to_do(self, kept: Kept, cancelled: bool) -> bool:
-        def stop_before_acting() -> None:
+    # The request's own planner, on what the host shows now and stopped before it acts or refuses a cancel: whether it
+    # would do nothing, or turned back put nothing back. A move is turned back as one that failed is cleaned up after.
+    def would_act_on_nothing(self, kept: Kept, *, turned_back: bool) -> bool:
+        def stop_before_acting(*_why: str) -> None:
             raise WouldAct
 
+        witness = Witness(hold=stop_before_acting, cancel_asked=lambda: turned_back, refuse_cancel=stop_before_acting)
         try:
-            carried_out(self.gate, kept, 0, Witness(hold=stop_before_acting, cancel_asked=lambda: cancelled))
-        except (WouldAct, Cancelled) as stopped:
-            return isinstance(stopped, Cancelled)
+            if turned_back and kept.work is Work.MOVE:
+                self.gate.clean_up(kept.product, kept.lane, kept.generation, 0, witness, logins=True)
+            else:
+                carried_out(self.gate, kept, 0, witness)
+        except WouldAct, Stopped:
+            return False
+        except Cancelled:
+            return True
         return True
 
     def keep[Answer: BaseModel](
@@ -321,9 +343,6 @@ class Calls:
             return not_finished(response, HTTPStatus.CONFLICT, str(error))
         except Unconfirmed as error:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} {NOT_CONFIRMED}")
-        except RecordError as error:
-            why = f"{error} The request was not written and nothing was changed, and asking again is safe."
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, why)
         self.wake()
         response.headers["Location"] = f"/requests/{request.id}"
         try:
@@ -353,29 +372,6 @@ class Calls:
         except RecordError as error:
             return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, str(error))
         return kept or self.none_such(request, response)
-
-    # Only a request that needs a person is asked for again or given up, so any other is refused, saying how it stands.
-    def answered_by_a_person(
-        self, request: int, response: Response, answer: Callable[[], KeptRequest | None], *, giving_up: bool = False
-    ) -> KeptRequest | NotFinished:
-        try:
-            if (not_ended := self.not_to_be_ended(request, response, giving_up=giving_up)) is not None:
-                return not_ended
-            answered = answer()
-        except CarriesASecret as error:
-            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
-        except RecordError as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, self.not_known(request, error))
-        except UNREADABLE as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, f"{error} Nothing was changed.")
-        self.wake()
-        if answered is not None:
-            return answered
-        kept = self.read(request, response)
-        if isinstance(kept, NotFinished):
-            return kept
-        why = f"Request {request} is {kept.stands}. Only a request that needs a person is asked for again or given up."
-        return not_finished(response, HTTPStatus.CONFLICT, f"{why} Nothing was changed.")
 
     def cancel(self, request: int, by: str, wait: float, response: Response) -> Kept | NotFinished:
         try:
@@ -409,6 +405,11 @@ class Calls:
         return kept
 
 
+# No attempt of it is open: nothing is being done for it, until it is taken up again.
+def is_resting(kept: Kept) -> bool:
+    return kept.stands is not Stands.WORKING or (bool(kept.attempts) and kept.attempts[-1].ended is not None)
+
+
 # The answer to a cancel is known once it has ended the request, or once it is known that it will not.
 def is_cancel_settled(kept: Kept) -> bool:
     return kept.stands is Stands.CANCELLED or why_not_cancelled(kept) is not None
@@ -419,11 +420,6 @@ def why_not_cancelled(kept: Kept) -> str | None:
     ended = f"Request {kept.id} ended as {kept.stands}"
     if kept.cancel_refused is not None:
         return f"{kept.cancel_refused} {ended}." if kept.stands in ENDED else kept.cancel_refused
-    if kept.stands is Stands.NEEDS_A_PERSON:
-        return (
-            f"Request {kept.id} needs a person, so it was not cancelled and nothing was changed. Look at the lane, then ask "
-            f"for it again with POST /requests/{kept.id}/retry or give it up with POST /requests/{kept.id}/give-up."
-        )
     if kept.stands is Stands.FAILED and kept.cancel_asked_at is not None and (kept.error or "").startswith(CANCEL_WON):
         return f"{kept.error} {ended}."
     if kept.stands in (Stands.DONE, Stands.FAILED, Stands.REPLACED):
@@ -492,16 +488,9 @@ def add_request_calls(app: FastAPI, calls: Calls) -> None:
     def request_kept(request: int, response: Response) -> Kept | NotFinished:
         return calls.read(request, response)
 
-    @app.post("/requests/{request}/retry", status_code=HTTPStatus.ACCEPTED, responses=responses(NOT_FOUND, *NOT_KEPT))
-    def retry_request(request: int, http: Request, response: Response) -> KeptRequest | NotFinished:
-        again = calls.answered_by_a_person(request, response, lambda: calls.record.retry(request, asker(http)))
-        if isinstance(again, KeptRequest):
-            response.headers["Location"] = f"/requests/{again.id}"
-        return again
-
     @app.post("/requests/{request}/give-up", responses=responses(NOT_FOUND, *NOT_KEPT))
     def give_up_request(request: int, response: Response) -> KeptRequest | NotFinished:
-        return calls.answered_by_a_person(request, response, lambda: calls.record.give_up(request), giving_up=True)
+        return calls.give_up(request, response)
 
 
 def add_cancel_call(app: FastAPI, calls: Calls) -> None:

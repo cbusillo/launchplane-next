@@ -18,6 +18,9 @@ runuser -u launchplane -- .venv/bin/alembic upgrade head
 install -m 644 deploy/launchplane.service /etc/systemd/system/launchplane.service
 systemctl daemon-reload
 systemctl enable --quiet launchplane
+# A deploy is a person's start: it is not refused for the starts before it, and it starts a Launchplane systemd left
+# failed. On a first install the unit is not loaded yet, and there is nothing to forget.
+systemctl reset-failed launchplane 2>/dev/null || true
 systemctl restart launchplane
 sleep 1
 systemctl is-active launchplane

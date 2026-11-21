@@ -12,12 +12,12 @@ from fastapi.testclient import TestClient
 
 from launchplane.act import Lanes
 from launchplane.api import create_app, server_config
-from launchplane.instance import LaneBuild
-from launchplane.record import MOST_ATTEMPTS, Record
+from launchplane.instance import LaneBuild, Verdict
+from launchplane.record import Record, Stands
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, PretendHost, PretendProxy, numbered_names
-from tests.pretend_record import PretendRecord
+from tests.pretend_record import PretendRecord, begun
 from tests.test_worker import wait_until
 
 MOVE = "/lanes/site/testing/move"
@@ -82,6 +82,7 @@ def test_a_call_is_answered_at_once_with_where_to_read_its_request_and_the_reque
         ["start the instance site-testing-0 of site:b"],
     )
     assert (ended["answer"]["outcome"], ended["asked_by"], len(ended["attempts"])) == ("switched", "the address testclient", 1)
+    assert set(ended["attempts"][0]) == {"number", "began_at", "ended_at", "ended"}
 
 
 def test_a_call_that_waits_answers_as_it_did_before_requests_were_kept(bed: Bed) -> None:
@@ -119,23 +120,18 @@ def test_the_same_key_answers_with_the_request_already_written_and_with_another_
     assert ([each["id"] for each in listed["ended"]], listed["unfinished"], bed.proxy.host.actions.count("retire a")) == ([1], [], 1)
 
 
-def test_a_request_that_needs_a_person_stops_its_lane_until_it_is_asked_for_again_or_given_up(idle: Bed) -> None:
-    stuck = idle.client.post(MOVE, json=TO_B).json()["id"]
-    for _ in range(MOST_ATTEMPTS):
-        idle.record.take_up(stuck)
-    assert idle.worker.worked_one() is True
-    refused = idle.client.post("/lanes/site/testing/retire", json={})
-    again = idle.client.post(f"/requests/{stuck}/retry")
-    twice = idle.client.post(f"/requests/{stuck}/retry")
-    assert (refused.status_code, f"POST /requests/{stuck}/retry" in refused.json()["error"]) == (409, True)
-    assert (again.status_code, again.headers["location"], again.json()["stands"]) == (
-        202,
-        f"/requests/{again.json()['id']}",
-        "waiting",
-    )
-    assert (twice.status_code, "is failed" in twice.json()["error"]) == (409, True)
-    assert idle.worker.worked_one() is True
-    assert idle.client.get(again.headers["location"]).json()["answer"]["outcome"] == "switched"
+def test_a_lane_whose_request_was_interrupted_four_times_is_not_locked_and_a_new_request_waits_behind_it_and_is_worked_next(
+    idle: Bed,
+) -> None:
+    interrupted = idle.client.post(MOVE, json=TO_B).json()["id"]
+    for _ in range(4):
+        assert idle.record.take_up(interrupted) is not None
+    behind = idle.client.post("/lanes/site/testing/retire", json={})
+    assert (behind.status_code, behind.json()["stands"]) == (202, "waiting")
+    assert (idle.worker.worked_one(), idle.worker.worked_one()) == (True, True)
+    ended = [idle.client.get(f"/requests/{each}").json() for each in (interrupted, behind.json()["id"])]
+    assert [(each["stands"], each["answer"]["outcome"]) for each in ended] == [("done", "switched"), ("done", "retired")]
+    assert [attempt["ended"] for attempt in ended[0]["attempts"]] == [*["interrupted"] * 4, "done"]
 
 
 def test_a_replaced_request_says_by_which_to_the_call_that_waited_in_the_list_and_on_the_page_and_is_not_shown_as_wrong(
@@ -162,18 +158,30 @@ def test_a_replaced_request_says_by_which_to_the_call_that_waited_in_the_list_an
     assert (asked_and_waited.status_code, asked_and_waited.json()["error"].startswith(told)) == (409, True)
 
 
-def test_giving_up_a_request_that_needs_a_person_ends_it_and_changes_nothing_on_the_host(idle: Bed) -> None:
-    stuck = idle.client.post(MOVE, json=TO_B).json()["id"]
-    for _ in range(MOST_ATTEMPTS):
-        idle.record.take_up(stuck)
-    idle.worker.worked_one()
-    given_up = idle.client.post(f"/requests/{stuck}/give-up")
-    assert (given_up.status_code, given_up.json()["stands"], idle.proxy.host.actions) == (200, "failed", [])
-    assert idle.client.post("/lanes/site/testing/retire", json={}).status_code == 202
+def test_giving_up_a_request_that_waits_or_is_being_worked_at_that_moment_or_has_ended_is_refused_and_changes_nothing(
+    idle: Bed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("launchplane.api.SECONDS_WAITED_TO_GIVE_UP", 0)
+    asked = idle.client.post(MOVE, json=TO_B).json()["id"]
+    waiting = idle.client.post(f"/requests/{asked}/give-up")
+    attempt = begun(idle.record, asked)
+    being_worked = idle.client.post(f"/requests/{asked}/give-up")
+    how_it_stood = idle.client.get(f"/requests/{asked}").json()["stands"]
+    idle.record.end(attempt, Stands.DONE, {"outcome": "switched"}, None, decided=Verdict.COMMITTED)
+    ended = idle.client.post(f"/requests/{asked}/give-up")
+    assert [each.status_code for each in (waiting, being_worked, ended)] == [409, 503, 409]
+    assert (
+        "one that waits is cancelled" in waiting.json()["error"],
+        "being worked at this moment" in being_worked.json()["error"],
+    ) == (
+        True,
+        True,
+    )
+    assert (how_it_stood, idle.client.get(f"/requests/{asked}").json()["stands"], idle.proxy.host.actions) == ("working", "done", [])
 
 
 def test_a_request_that_is_not_there_is_said_not_to_be(idle: Bed) -> None:
-    answers = [idle.client.get("/requests/7"), idle.client.post("/requests/7/retry"), idle.client.post("/requests/7/give-up")]
+    answers = [idle.client.get("/requests/7"), idle.client.post("/requests/7/give-up"), idle.client.post("/requests/7/cancel")]
     assert [each.status_code for each in answers] == [404, 404, 404]
 
 
@@ -184,7 +192,6 @@ def test_with_the_record_unreachable_a_call_that_changes_something_is_refused_an
         bed.client.post("/lanes/site/testing/retire", json={}),
         bed.client.post("/lanes/site/testing/maintenance/begin"),
         bed.client.post("/lanes/site/testing/maintenance/end"),
-        bed.client.post("/requests/1/retry"),
         bed.client.post("/requests/1/give-up"),
         bed.client.get("/requests"),
         bed.client.get("/requests/1"),

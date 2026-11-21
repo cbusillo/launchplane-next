@@ -86,8 +86,14 @@ def launchplane_answers() -> bool:
         return False
 
 
+# What docs/requests.md gives to put back a Launchplane systemd has stopped restarting. It forgets the starts counted so far.
+START_AGAIN = "systemctl reset-failed launchplane && systemctl start launchplane"
+FORGET_STARTS = "systemctl reset-failed launchplane"
+
+
+# The starts before it are forgotten first, so no test is refused a restart for the kills of the tests before it.
 def kill_launchplane() -> None:
-    on_control("systemctl kill --signal=KILL launchplane")
+    on_control(f"{FORGET_STARTS}; systemctl kill --signal=KILL launchplane")
     wait_for(launchplane_answers, seconds=30)
 
 
@@ -105,7 +111,7 @@ def kill_launchplane_and_end(request: int) -> None:
     on_control(
         "systemctl kill --signal=KILL launchplane; systemctl stop launchplane; "
         f"runuser -u postgres -- psql --quiet --set ON_ERROR_STOP=1 --set request={request:d} --dbname launchplane; ended=$?; "
-        "systemctl start launchplane; exit $ended",
+        f"{START_AGAIN}; exit $ended",
         given=END_THE_REQUEST,
     )
     wait_for(launchplane_answers, seconds=30)
@@ -260,5 +266,5 @@ def launchplane_held() -> Generator[None]:
         yield
     finally:
         let_go()
-        on_control("systemctl stop launchplane-held && systemctl start launchplane")
+        on_control(f"systemctl stop launchplane-held && {START_AGAIN}")
         wait_for(plain_launchplane_answers, seconds=30)

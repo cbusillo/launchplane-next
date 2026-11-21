@@ -1,5 +1,4 @@
 import threading
-import time
 from collections.abc import Callable
 from typing import Any, NoReturn
 
@@ -14,7 +13,7 @@ from launchplane.gate import GateError
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
 from launchplane.page import request_note
-from launchplane.record import MOST_ATTEMPTS, Asked, Record, RecordError, Request, Stands
+from launchplane.record import Asked, Record, RecordError, Request, Stands
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import (
@@ -28,9 +27,8 @@ from tests.pretend_host import (
     PretendProxy,
     numbered_names,
 )
-from tests.pretend_record import PretendRecord
+from tests.pretend_record import PretendRecord, begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
-from tests.test_record import taken_up_until_it_needs_a_person
 from tests.test_requests import MOVE, TO_B, Bed, bed_on
 from tests.test_worker import CALLER, MOVE_B, delete_every_event, kept_of, killed_while_checking, serving_a, stopped, wait_until
 
@@ -148,18 +146,9 @@ def test_asking_for_what_a_request_being_cancelled_asks_writes_a_new_request_and
     assert record.write(MOVE_B, CALLER, None).id != being_cancelled
 
 
-def test_a_request_that_needs_a_person_is_not_cancelled_by_the_call(record: Record) -> None:
-    stuck = record.write(MOVE_B, CALLER, None)
-    taken_up_until_it_needs_a_person(record, stuck.id)
-    after = record.cancel(stuck.id, BY_HAND)
-    assert after is not None and (after.stands, after.cancel_asked_by) == (Stands.NEEDS_A_PERSON, None)
-
-
 def test_cancelling_a_request_that_has_ended_changes_nothing_of_it(record: Record) -> None:
     request = record.write(MOVE_B, CALLER, None)
-    attempt = record.take_up(request.id)
-    assert attempt is not None
-    record.end(attempt, Stands.DONE, {"outcome": "switched"}, None)
+    record.end(begun(record, request.id), Stands.DONE, {"outcome": "switched"}, None)
     before = kept_of(record, request.id)
     record.cancel(request.id, BY_HAND)
     assert (kept_of(record, request.id), record.cancel(999, BY_HAND)) == (before, None)
@@ -454,15 +443,6 @@ def test_a_retire_cancelled_before_it_deleted_the_named_data_set_keeps_it_and_fi
     assert (list(proxy.host.data_sets), proxy.host.instances) == (["data-1"], {})
 
 
-def test_a_cancel_that_waits_is_answered_at_once_for_a_request_that_needs_a_person(record: Record) -> None:
-    bed = bed_on(record)
-    stuck = bed.client.post(MOVE, json=TO_B).json()["id"]
-    taken_up_until_it_needs_a_person(record, stuck)
-    began = time.monotonic()
-    answer = bed.client.post(f"/requests/{stuck}/cancel?wait=5")
-    assert (answer.status_code, time.monotonic() - began < 1) == (409, True)
-
-
 def test_a_cancel_that_carries_a_secret_a_container_holds_is_refused_and_marks_nothing(
     record: Record, secrets: GivenSecrets
 ) -> None:
@@ -582,7 +562,7 @@ def test_a_call_that_waits_for_a_request_that_is_then_cancelled_answers_conflict
     assert f"was cancelled by {BY_HAND}. Done to put the lane back: retire {NEW}." in waited.json()["error"]
 
 
-def test_the_cancel_call_says_so_when_it_is_too_late_or_the_request_had_ended_or_needs_a_person(record: Record) -> None:
+def test_the_cancel_call_says_so_when_it_is_too_late_or_the_request_had_ended(record: Record) -> None:
     bed = bed_on(record)
     switched, go_on = threading.Event(), threading.Event()
 
@@ -608,13 +588,9 @@ def test_the_cancel_call_says_so_when_it_is_too_late_or_the_request_had_ended_or
     wait_until(lambda: kept_of(record, asked).stands is Stands.DONE)
     stopped(bed.worker, threads)
     ended = bed.client.post(f"/requests/{asked}/cancel")
-    stuck = bed.client.post(MOVE, json={"build": "site:c"}).json()["id"]
-    taken_up_until_it_needs_a_person(record, stuck)
-    needs_a_person = bed.client.post(f"/requests/{stuck}/cancel")
-    assert [too_late[0][0], ended.status_code, needs_a_person.status_code] == [409, 409, 409]
+    assert [too_late[0][0], ended.status_code] == [409, 409]
     assert "already renamed for this release" in too_late[0][1]["error"]
     assert f"Request {asked} ended as done" in ended.json()["error"]
-    assert f"POST /requests/{stuck}/give-up" in needs_a_person.json()["error"]
 
 
 def test_a_cancel_recorded_while_the_host_is_read_for_the_switch_is_seen_before_the_switch_is_decided(record: Record) -> None:
@@ -641,7 +617,7 @@ def test_a_proxy_that_does_not_load_a_renamed_route_leaves_the_release_working_h
     worker, _, proxy = serving_a(record)
     request = record.write(MOVE_B, CALLER, None)
     proxy.holds_delivery = True
-    assert [worker.work_next() for _ in range(2 * MOST_ATTEMPTS)] == [True] * 2 * MOST_ATTEMPTS
+    assert [worker.work_next() for _ in range(6)] == [True] * 6
     held = kept_of(record, request.id)
     assert held.error is not None and "did not load the routes file" in held.error
     assert (
@@ -783,10 +759,10 @@ def test_a_cancel_on_record_with_a_host_that_cannot_be_read_wins_at_the_gate_and
 
     proxy.host.read = unreadable
     record.cancel(request, BY_HAND)
-    assert [worker.work_next() for _ in range(2 * MOST_ATTEMPTS)] == [True] * 2 * MOST_ATTEMPTS
+    assert [worker.work_next() for _ in range(6)] == [True] * 6
     during = kept_of(record, request)
     assert during.error is not None and "connection refused" in during.error
-    assert (during.stands, len(readings) <= 4 * MOST_ATTEMPTS, sorted(proxy.host.instances)) == (Stands.WORKING, True, ["a", NEW])
+    assert (during.stands, len(readings) <= 12, sorted(proxy.host.instances)) == (Stands.WORKING, True, ["a", NEW])
     proxy.host.read = read
     assert (worker.work_next(), worker.work_next()) == (True, False)
     assert (kept_of(record, request).stands, list(proxy.host.instances)) == (Stands.CANCELLED, ["a"])
@@ -828,73 +804,24 @@ DECIDED = pytest.mark.parametrize(("decide", "stands", "instances"), DECIDED_AT_
 
 
 @DECIDED
-def test_giving_up_or_retrying_a_request_that_needs_a_person_and_whose_release_the_gate_has_decided_is_refused_and_it_is_worked(
+def test_giving_up_a_move_whose_release_the_gate_has_decided_and_that_is_not_finished_is_refused_and_the_move_is_finished(
     record: Record, decide: Callable[[PretendGate, str], object], stands: Stands, instances: list[str]
 ) -> None:
     worker, lanes, proxy = serving_a(record)
     client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
     asked = client.post(MOVE, json=TO_B).json()["id"]
-    taken_up_until_it_needs_a_person(record, asked)
+    record.leave_open(begun(record, asked), "The host could not be read.")
     proxy.host.place(TO_BUILD_B, NEW, generation=kept_of(record, asked).generation)
     decide(proxy.gate, kept_of(record, asked).generation)
-    refused = [client.post(f"/requests/{asked}/give-up"), client.post(f"/requests/{asked}/retry")]
-    assert ([each.status_code for each in refused], kept_of(record, asked).stands) == ([409, 409], Stands.WORKING)
+    refused = client.post(f"/requests/{asked}/give-up")
+    assert (refused.status_code, "is part way" in refused.json()["error"], kept_of(record, asked).stands) == (
+        503,
+        True,
+        Stands.WORKING,
+    )
     while worker.work_next():
         pass
     assert (kept_of(record, asked).stands, list(proxy.host.instances)) == (stands, instances)
-
-
-def interrupted_as_often_as_a_request_may_be(record: Record) -> Request:
-    request = record.write(MOVE_B, CALLER, None)
-    for _ in range(MOST_ATTEMPTS):
-        assert record.take_up(request.id) is not None
-    return request
-
-
-def test_a_move_at_the_limit_needs_a_person_only_once_its_last_attempt_is_fenced_so_its_switch_can_no_longer_rename(
-    record: Record,
-) -> None:
-    worker, _, proxy = serving_a(record)
-    request = interrupted_as_often_as_a_request_may_be(record)
-    proxy.host.place(TO_BUILD_B, NEW, generation=request.generation)
-    assert worker.work_next() is True
-    late = proxy.gate.switch(WEB_ADDRESS, request.generation, MOST_ATTEMPTS, NEW)
-    assert (kept_of(record, request.id).stands, late, proxy.written) == (Stands.NEEDS_A_PERSON, NO_VERDICT, {WEB_ADDRESS: "a"})
-
-
-@DECIDED
-def test_a_move_at_the_limit_whose_release_the_gate_has_decided_is_taken_up_however_often_it_was_interrupted(
-    record: Record, decide: Callable[[PretendGate, str], object], stands: Stands, instances: list[str]
-) -> None:
-    worker, _, proxy = serving_a(record)
-    request = interrupted_as_often_as_a_request_may_be(record)
-    proxy.host.place(TO_BUILD_B, NEW, generation=request.generation)
-    decide(proxy.gate, request.generation)
-    while worker.work_next():
-        pass
-    assert (kept_of(record, request.id).stands, list(proxy.host.instances)) == (stands, instances)
-
-
-def test_a_move_at_the_limit_with_a_cancel_on_record_is_not_left_to_a_person_and_the_cancel_is_carried_out(record: Record) -> None:
-    worker, _, proxy = serving_a(record)
-    request = interrupted_as_often_as_a_request_may_be(record)
-    record.cancel(request.id, BY_HAND)
-    while worker.work_next():
-        pass
-    assert (kept_of(record, request.id).stands, list(proxy.host.instances)) == (Stands.CANCELLED, ["a"])
-
-
-def test_a_move_at_the_limit_while_the_gate_cannot_be_asked_is_not_left_to_a_person(record: Record) -> None:
-    worker, _, proxy = serving_a(record)
-    request = interrupted_as_often_as_a_request_may_be(record)
-    proxy.gate.unreadable = "The routes folder could not be read"
-    assert [worker.work_next() for _ in range(3)] == [True] * 3
-    during = kept_of(record, request.id)
-    assert (during.stands, [each.ended for each in during.attempts][MOST_ATTEMPTS:]) == (Stands.WORKING, ["unfinished"] * 3)
-    proxy.gate.unreadable = None
-    while worker.work_next():
-        pass
-    assert kept_of(record, request.id).stands is Stands.NEEDS_A_PERSON
 
 
 def test_a_call_to_the_host_that_got_no_answer_before_the_switch_leaves_the_move_working_and_it_is_finished_when_it_does(
