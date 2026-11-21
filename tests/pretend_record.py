@@ -138,7 +138,7 @@ class PretendRecord(Record):
         for each in self.every():
             if each.stands in UNFINISHED:
                 oldest.setdefault((each.product, each.lane), each)
-        return sorted(oldest.values(), key=lambda each: each.id)
+        return sorted(oldest.values(), key=lambda request: request.id)
 
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
         return self.turn_held(product, lane)

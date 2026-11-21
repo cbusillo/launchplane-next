@@ -677,6 +677,13 @@ def test_case_2_a_rename_whose_reply_alone_is_lost_ends_done_and_switched_on_the
     assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
 
 
+def is_finished_as_asked_once_let_go(case: Case, asked: dict[str, Any]) -> None:
+    let_go()
+    case.visitors_get(A, B)
+    assert ended_as(asked["id"]) == ("done", "switched")
+    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
+
+
 def test_case_3_a_release_renamed_and_held_from_loading_across_four_kills_stays_working_and_is_finished_once_it_loads(
     case: Case,
 ) -> None:
@@ -690,10 +697,7 @@ def test_case_3_a_release_renamed_and_held_from_loading_across_four_kills_stays_
     too_late = cancel(asked["id"])
     assert (too_late[0], TOO_LATE in too_late[1]["error"], how_it_stands(asked["id"])) == (409, True, "working")
     assert (case.now_serves(A), sorted(builds_of(SITE))) == (True, sorted([A, B]))
-    let_go()
-    case.visitors_get(A, B)
-    assert ended_as(asked["id"]) == ("done", "switched")
-    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
+    is_finished_as_asked_once_let_go(case, asked)
 
 
 def test_a_move_held_before_its_switch_and_killed_four_times_is_still_at_work_and_finishes_as_asked_once_the_hold_is_let_go(
@@ -713,10 +717,7 @@ def test_a_move_held_before_its_switch_and_killed_four_times_is_still_at_work_an
         True,
     )
     assert (pills, "Taken up 5 times" in note, "Launchplane stopped" in note) == (["working"], True, True), note
-    let_go()
-    case.visitors_get(A, B)
-    assert ended_as(asked["id"]) == ("done", "switched")
-    assert (committed_to_the_one_instance_of(SITE, asked["generation"], B), case.renames_of(asked["generation"])) == (True, 1)
+    is_finished_as_asked_once_let_go(case, asked)
 
 
 def test_case_4_a_stale_rename_resumed_after_recovery_discarded_its_candidate_renames_nothing_and_a_fresh_one_switches_once(

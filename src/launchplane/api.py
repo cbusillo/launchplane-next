@@ -281,7 +281,7 @@ class Calls:
                 self.record.refuse_cancel(request.id, too_late)
 
     # Giving up is no force. It ends a request at work only while no attempt of it is open, so nothing is being done for
-    # it, and only on a lane read as the request would leave it or as it was before the request. A change of the route
+    # it. The lane must be read as the request would leave it, or as it was before the request. A change of the route
     # its last attempt sent may still arrive, so that attempt is fenced before the lane is read. A release the gate has
     # decided ends as the gate decided, by itself.
     def give_up(self, request: int, response: Response) -> KeptRequest | NotFinished:

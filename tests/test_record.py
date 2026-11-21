@@ -389,18 +389,18 @@ def test_the_migration_to_one_waiting_request_a_lane_leaves_the_newest_waiting_a
 def test_the_migration_to_generations_stops_while_a_move_begun_before_it_is_working_and_goes_on_once_it_is_settled(
     postgres_record: PostgresRecord,
 ) -> None:
-    begun = postgres_record.write(MOVE_B, CALLER, None)
-    assert postgres_record.take_up(begun.id) is not None
+    before = postgres_record.write(MOVE_B, CALLER, None)
+    assert postgres_record.take_up(before.id) is not None
     command.downgrade(Config(ALEMBIC), "0003")
     try:
         with pytest.raises(RuntimeError, match="are working or need a person"):
             command.upgrade(Config(ALEMBIC), "head")
         with psycopg.connect(postgres_record.database) as connection:
             # noinspection SqlResolve
-            connection.execute("update request set stands = 'failed', ended_at = now() where id = %s", [begun.id])
+            connection.execute("update request set stands = 'failed', ended_at = now() where id = %s", [before.id])
     finally:
         command.upgrade(Config(ALEMBIC), "head")
-    settled = postgres_record.read(begun.id)
+    settled = postgres_record.read(before.id)
     assert settled is not None and (settled.stands, len(settled.generation)) == (Stands.FAILED, 36)
 
 
