@@ -181,7 +181,7 @@ def test_a_move_that_failed_before_the_switch_is_repaired_by_asking_for_the_serv
     with request_loop() as loop:
         kill_launchplane_once_build_b_has_started()
         status, body = move(BUILD_A)
-    assert (status, body["outcome"], len(body["did"])) == (200, "repaired", 1), body
+    assert (status, body["outcome"], [each.split()[0] for each in body["did"]]) == (200, "repaired", ["stopped", "removed"]), body
     assert loop.failures == []
     assert loop.answers_in_order() == [ANSWER_A]
     assert list(lane_copies()) == [BUILD_A]

@@ -97,7 +97,11 @@ def test_a_move_cancelled_by_hand_before_the_switch_leaves_the_lane_as_it_was() 
         request = asked_to_move(LANE, BUILD_B)
         wait_for(build_b_is_being_checked, seconds=30)
         status, cancelled = ask(f"/requests/{request}/cancel?wait=60", {})
-    assert (status, cancelled["stands"], len(cancelled["answer"]["put_back"])) == (200, "cancelled", 1), cancelled
+    assert (status, cancelled["stands"], [each.split()[0] for each in cancelled["answer"]["put_back"]]) == (
+        200,
+        "cancelled",
+        ["stop", "remove"],
+    ), cancelled
     assert (loop.failures, loop.answers_in_order(), builds_of(LANE)) == ([], [ANSWER_A], [BUILD_A])
     judged = next(each for each in running()["lanes"] if (each["product"], each["lane"]) == (PRODUCT, LANE))
     assert (judged["condition"], ask(f"/requests/{request}/cancel", {})[0]) == ("good", 200), judged
