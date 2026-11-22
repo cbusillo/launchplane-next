@@ -125,7 +125,7 @@ def test_a_part_is_made_started_stopped_and_removed_by_these_docker_calls_in_thi
         return look_up_image(image)
 
     def created(_image: str, _command: list[str] | None = None, **options: object) -> RecordingContainer:
-        asked.append(f"create {options['name']}")
+        asked.append(f"create {cast('str', options['name'])}")
         made = create(_image, _command, **options)
         made.calls = asked
         return made

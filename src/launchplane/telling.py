@@ -90,7 +90,7 @@ NAMED: dict[type, Callable[[Any], str]] = {
 }
 
 
-# A step whose every command for a part has its own line. It is told itself only where it failed or was refused.
+# The steps for a part. Each command of one has its own line, so the step is told only where it failed or was refused.
 OF_A_PART = (steps.StartInstance, steps.StartBackgroundService, steps.Retire, steps.Discard, steps.StopPart, steps.StartStopped)
 
 # How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.

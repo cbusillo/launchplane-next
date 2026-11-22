@@ -940,13 +940,13 @@ A_START = quote("verb='start'")
 
 def test_a_move_killed_with_the_start_of_its_background_service_written_and_not_sent_starts_it_once_and_says_so() -> None:
     let_go()
-    lane, untouched = f"/lanes/{LEDGER.product}/{LEDGER.lane}", LEDGER.beside(UNTOUCHED)
-    assert move_lane(LEDGER.product, LEDGER.lane, LEDGER.builds[0])[0] == 200
-    assert move_lane(untouched.product, untouched.lane, untouched.builds[0])[0] == 200
+    untouched = LEDGER.beside(UNTOUCHED)
+    for each in (LEDGER, untouched):
+        assert move_lane(each.product, each.lane, each.builds[0])[0] == 200
     hold("before.host.start_background_service")
     try:
         with request_loop(lambda: answering(untouched)) as beside:
-            asked = ask(f"{lane}/move", {"build": LEDGER.builds[1]})[1]["id"]
+            asked = ask(f"/lanes/{LEDGER.product}/{LEDGER.lane}/move", {"build": LEDGER.builds[1]})[1]["id"]
             wait_until_stopped_at("before.host.start_background_service")
             hold(f"after.record.about_to?only={A_START}")
             let_go("before.host.start_background_service")

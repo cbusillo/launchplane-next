@@ -254,12 +254,16 @@ class LogRead:
 
 
 type Verb = Literal["make", "start", "stop", "remove"]
+DONE: dict[Verb, str] = {"make": "made", "start": "started", "stop": "stopped", "remove": "removed"}
 
 
 # One command sent to Docker for one named container. Among what a call has done, it is one Docker answered as done.
 class Command(BaseModel, frozen=True):
     verb: Verb
     container: str
+
+    def as_done(self) -> str:
+        return f"{DONE[self.verb]} {self.container}"
 
 
 # What a part answered when it would not do as asked, with the real error.

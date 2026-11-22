@@ -40,13 +40,13 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | --- | --- | --- |
 | `switched` | 200 | The gate says the routes file was renamed for this request's generation, and the web address points at a running instance of this build. A request taken up again after a kill answers this too, though another attempt did the rename. |
 | `unchanged` | 200 | It already did, and nothing was done. |
-| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, retired. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
+| `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, stopped and removed. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
 
-`did` lists every change the move made, whatever the outcome. A switch an earlier attempt sent with no reply, and that the routes file then showed to be that attempt's, [is listed too](requests.md#a-change-of-the-route).
+`did` lists every change the move made, whatever the outcome. What it did to an instance or a background service is listed command by command, each one Docker answered as done: `made`, `started`, `stopped`, `removed` and the container, or `make`, `start`, `stop`, `remove` in a request taken up more than once. [A command found already as asked, refused or not answered is left out](requests.md#a-command-for-a-part). A switch an earlier attempt sent with no reply, and that the routes file then showed to be that attempt's, [is listed too](requests.md#a-change-of-the-route).
 
 A `503` means the move stopped where it was with nothing switched, the gate has confirmed that, and what the move made is gone. Its request has failed, and it is safe to ask again. A build Docker answers it does not have ends this way; a host that does not answer leaves the request working. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
 
@@ -114,7 +114,7 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **Asking for the old build while its instance is still stopping answers `check failed` for a good build.** Confirmed once, after a kill during retirement. Asking again works, and the web address never moves.
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
-- **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A change of the route is the exception: its own line says whether the request made it. A removal of logins that found none left to remove is listed as one.
+- **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A change of the route and a command for an instance or a background service are the exceptions: each has its own line, which says whether the request made it. A removal of logins that found none left to remove is listed as one.
 - **Two routers on another lane's web address can stop a retire after its route is removed.** The retire removes its lane's route first, and the guard then refuses to remove any container while any web address has two routers. That lane has lost its visitors, and its retire stays `working` until the other lane has one router.
 - **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
 - **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
@@ -219,6 +219,8 @@ One more case is a retire's. Its removal of the route is accepted by Docker and 
 
 Another is ending maintenance's, on the lane with a database and a background service: [the maintenance watch](#the-maintenance-watch) by hand. The end is held before its change of the route, where the request's line reads `about to` and a visitor still gets the back soon page. It is then held after the change has taken effect on the host and before the worker has the reply, and Launchplane is killed there. The same request ends `done` and `ended` in a second attempt, its line with no answer and read back; the instance serves, the lane beside it answers every probe, and an end asked after it answers `not in maintenance`. Case 1 also asserts that its switch, which landed after recovery's first reading, is read back and is in the move's `did`.
 
+The last is a move's, on the same lane: [the start watch](#the-start-watch) by hand. The move is held before it starts the new background service, then held again once the line of that start is in the record and before the command is sent, and Launchplane is killed there. The same request ends `done` and `switched` in a second attempt. Its first line of the start has no answer and stays so, its second is done, `did` has that start once, and the lane beside it answers every probe.
+
 `tests/test_bed_gate.py` proves the gate alone on the real host, with no worker: it sends the gate's own commands to the proxy's container and counts the renames by the inode of the routes file. Its five cases are a command killed just after the rename, a reply lost after the rename, a switch held before the lock whose candidate is discarded meanwhile, a cancel and a switch each sent again after the cancel won, and two generations on one lane. They take 13 s. `tests/test_gate.py` runs the gate's command against a folder on the machine that tests.
 
 `tests/test_interruptions.py` runs the same rows against the pretend host, whose proxy can hold a written route unloaded, and against the pretend record and PostgreSQL. It needs no test bed and takes seconds.
@@ -275,6 +277,56 @@ curl -s -X POST "$L$P/held/maintenance/end?wait=60"
 ```
 
 5. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
+
+```
+for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
+ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
+```
+
+### The start watch
+
+A move, killed once the line for the start of its new background service is written and before the command is sent. Every block pastes into zsh as it stands. The lane, the page and the holding mode are those of [the maintenance watch](#the-maintenance-watch).
+
+```
+L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
+P=/lanes/test-bed-gate-ledger; V=http://docker-lp-scratch.shiny/
+ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
+until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
+curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+curl -s -X PUT "$H/holds/before.host.start_background_service"
+R=$(curl -s -X POST "$L$P/held/move" -H "$J" -d '{"build":"launchplane-test-ledger:b"}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
+until curl -s "$H/holds" | grep -q '"stopped_at": \["before.host.start_background_service"\]'; do sleep 1; done
+```
+
+1. **Held before the new background service is made.** The block ends once the move is stopped at its hold. It has switched: a visitor gets `pretend product b`. On the page, the card of `test-bed-gate-ledger · held` has the request as `working`. Its note has one line for each command so far, each ending `: done`: `make` and `start` of the new instance, and, after the switch, `stop` and `remove` of the old background service.
+
+```
+curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"
+```
+
+2. **Held with the line of the start written, and nothing sent.** The second hold stops the record once it has written the line of a start. It is set before the first is let go, and the block ends once the move is stopped at it:
+
+```
+curl -s -X PUT "$H/holds/after.record.about_to?only=verb=%27start%27"; curl -s -X DELETE "$H/holds/before.host.start_background_service"
+until curl -s "$H/holds" | grep -q '"stopped_at": \["after.record.about_to"\]'; do sleep 1; done
+ssh root@docker-lp-scratch.shiny 'docker ps --all --filter label=launchplane.lane=held --filter label=launchplane.part=background-service --format "{{.Names}} {{.Status}}"'
+```
+
+   The `ssh` is to the scratch container. It shows the new background service as `Created`: Docker made it and nothing started it. The page's note now ends with its `make`, `: done`, and then `about to start` and its name.
+
+3. **Killed, and let go.**
+
+```
+curl -s -X POST "$H/kill"; until curl -sf -X DELETE "$H/holds" >/dev/null; do sleep 1; done
+until curl -s "$L/requests/$R" | grep -q '"stands":"done"'; do sleep 1; done
+curl -s "$L/requests/$R" | python3 -c 'import sys, json; r = json.load(sys.stdin); print([a["ended"] for a in r["attempts"]], r["answer"]["outcome"]); print(*r["answer"]["did"], sep="\n")'
+curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouched.test-bed-gate-ledger.test' "$V"
+```
+
+   The third command prints the attempts, `interrupted` then `done`, the outcome `switched`, and the request's account. In it `start` and the background service's name is there once. The last answers `pretend product b` and `pretend product a`. Look at the page now: the request's row is `done` and stays for 10 minutes, and among its lines are, in this order, the start as `: may have been sent, no answer`; a `stop` of the same container, `: found already as asked`, and its `remove`, `: done`, which is the second attempt clearing away the container that was made and never started; then its `make` and its `start` again, each `: done`.
+
+4. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
 
 ```
 for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done

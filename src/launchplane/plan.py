@@ -83,9 +83,8 @@ CHANGES: dict[type, Callable[[Any], str | None]] = {
     RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
     StopDatabase: lambda step: f"stopped {step.container}",
     Switched: lambda step: f"wrote the route to {step.container}" if step.won else None,
-    Command: lambda sent: f"{DONE[sent.verb]} {sent.container}",
+    Command: lambda sent: sent.as_done(),
 }
-DONE = {"make": "made", "start": "started", "stop": "stopped", "remove": "removed"}
 
 
 # What a step that was taken changed. Of a step for a part, only the commands Docker answered as done are changes.
@@ -568,9 +567,10 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     if named is not None:
         return DeleteDataSet(named)
     route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)
-    retired = [event.container for event in done if isinstance(event, Command) and event.verb == "remove"]
+    sent = [event for event in done if isinstance(event, Command)]
+    retired = [each.container for each in sent if each.verb == "remove"]
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = any(isinstance(event, EditRoute | Command | RemoveLogins) for event in done)
+    changed = bool(sent) or any(isinstance(event, EditRoute | RemoveLogins) for event in done)
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,
