@@ -319,12 +319,12 @@ ssh root@docker-lp-scratch.shiny 'docker ps --all --filter label=launchplane.lan
 
 ```
 curl -s -X POST "$H/kill"; until curl -sf -X DELETE "$H/holds" >/dev/null; do sleep 1; done
-until curl -s "$L/requests/$R" | grep -q '"stands":"done"'; do sleep 1; done
+until curl -s "$L/requests/$R" | grep -q '"stands": "done"'; do sleep 1; done
 curl -s "$L/requests/$R" | python3 -c 'import sys, json; r = json.load(sys.stdin); print([a["ended"] for a in r["attempts"]], r["answer"]["outcome"]); print(*r["answer"]["did"], sep="\n")'
 curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouched.test-bed-gate-ledger.test' "$V"
 ```
 
-   The third command prints the attempts, `interrupted` then `done`, the outcome `switched`, and the request's account. In it `start` and the background service's name is there once. The last answers `pretend product b` and `pretend product a`. Look at the page now: the request's row is `done` and stays for 10 minutes, and among its lines are, in this order, the start as `: may have been sent, no answer`; a `stop` of the same container, `: found already as asked`, and its `remove`, `: done`, which is the second attempt clearing away the container that was made and never started; then its `make` and its `start` again, each `: done`.
+   The third command prints the attempts, `interrupted` then `done`, the outcome `switched`, and the request's account. In it `start` and the background service's name is there once. The last answers `pretend product b` and `pretend product a`. Look at the page now: the request's row is `done` and stays for 10 minutes, and among its lines are, in this order, the start as `: may have been sent, no answer`; a `stop` of the same container, `: found already as asked`, and its `remove`, `: done`, which is the second attempt clearing away the container that was made and never started; then its `make` and its `start` again, each `: done`. After them `retire` and the old instance's name, `, refused`, is the gate keeping that instance until visitors are on the new one, as before this step; its `stop` and `remove` follow, each `: done`.
 
 4. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
 
