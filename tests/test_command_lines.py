@@ -376,9 +376,9 @@ def test_a_cancel_that_won_and_could_not_remove_what_it_stopped_keeps_both_comma
 def test_a_move_lists_its_commands_in_the_words_of_their_lines_whether_it_took_one_attempt_or_two(
     record: Record, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def commands_listed(kept: Kept) -> list[str]:
-        assert kept.answer is not None
-        return [each for each in kept.answer["did"] if each.split()[0] in ("make", "start", "stop", "remove")]
+    def commands_listed(ended: Kept) -> list[str]:
+        assert ended.answer is not None
+        return [each for each in ended.answer["did"] if each.split()[0] in ("make", "start", "stop", "remove")]
 
     worker = serving_a(record)[0]
     once = record.write(MOVE_B, CALLER, None)

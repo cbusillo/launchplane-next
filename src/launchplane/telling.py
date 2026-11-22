@@ -106,8 +106,7 @@ NAMED: dict[type, Callable[[Any], str]] = {
 }
 
 
-# The steps for a part. Each command of one has its own line, so the step is told only where it failed or was refused
-# before a command, or by the gate.
+# The steps for a part. Each command has its own line, so the step is told only where no command's line says why.
 OF_A_PART = (steps.StartInstance, steps.StartBackgroundService, steps.Retire, steps.Discard, steps.StopPart, steps.StartStopped)
 
 # How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.

@@ -155,8 +155,7 @@ class Attempt(BaseModel):
 
 
 # What came of a change that was sent. With no answer `made` is None. `read_back_at` is when a later attempt read what
-# only this request can have made: a routes file that names the request and the attempt that sent the change, or a
-# container made under the request's generation.
+# only this request can have made: a routes file that names it and the attempt, or a container under its generation.
 class Reply(BaseModel):
     made: bool | None = None
     already: bool = False
@@ -220,7 +219,10 @@ class Kept(Request):
     # The lines with no answer that a later reading can show to be the request's own. Of the makes of one container only
     # the last can be, and none where a make of it was answered: the container shows one make, and not which line sent it.
     def lines_to_read_back(self) -> list[Event]:
-        makes = {each.command.container: each for each in self.events if each.command is not None and each.command.verb == "make"}
+        makes: dict[str, Event] = {}
+        for each in self.events:
+            if each.command is not None and each.command.verb == "make":
+                makes[each.command.container] = each
         unanswered = [each for each in self.events if each.has_no_answer]
         return [each for each in unanswered if each.command is None or makes.get(each.command.container) is each]
 
