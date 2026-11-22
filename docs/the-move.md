@@ -256,7 +256,7 @@ ssh root@docker-lp-scratch.shiny 'docker exec launchplane-proxy head -1 /etc/tra
 curl -s "$L/requests/$R"
 ```
 
-   The second `ssh` is to the scratch container. The routes file's first line is the request's `generation`, as the last command shows it, and the number of the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply. A visitor already gets `pretend product a`.
+   The second `ssh` is to the scratch container. The routes file's first line is the request's `generation`, as the last command shows it, and the number of the attempt that sent the edit. The page still says `about to`: Launchplane has not had the reply. The proxy loads the file within a few seconds, and a visitor then gets `pretend product a`.
 
 3. **Killed, and let go.**
 

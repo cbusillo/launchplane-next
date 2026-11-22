@@ -319,7 +319,9 @@ class Lanes:
         reading = self.read(EVERY_LANE if only is None else Scope(lane=only, web_addresses=True))
         requests, unread_after = self.kept_or_why_not(self.read_unfinished, unread_before)
         cancels, record_error = self.kept_or_why_not(self.read_ended, unread_after)
-        requests = [] if record_error else requests
+        # A request that ended between the two readings is shown once, as ended.
+        ended = {each.id for each in cancels}
+        requests = [] if record_error else [each for each in requests if each.id not in ended]
         at_work = {(each.product, each.lane): each.work for each in (*before, *requests) if each.stands is Stands.WORKING}
         # With either reading of the record missing, which lane a request is at work on is not known for any lane.
         unread = None if record_error is None else WorkUnread(record_error)

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from launchplane.act import Lanes
 from launchplane.api import create_app, why_not_cancelled
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import ProxySeen, Verdict
+from launchplane.instance import BACK_SOON, ProxySeen, Verdict
 from launchplane.page import cards, line_of, request_note
 from launchplane.record import Event, Interrupted, Kept, Record, Reply, Sent, Stands
 from launchplane.worker import Worker
@@ -81,6 +81,7 @@ def test_an_edit_of_the_route_reaches_the_gate_only_once_its_line_is_in_the_reco
     assert worker_on(proxy, record).work_next() is True
     [[before]], [after] = at_the_gate, route_lines(kept_of(record, request.id))
     assert (before.did, before.outcome, before.id) == (after.did, None, after.id)
+    assert before.action == Sent(web_address=WEB_ADDRESS, to=BACK_SOON)
     assert after.outcome is not None and (after.outcome.made, after.error, after.is_credited) == (True, None, True)
 
 
@@ -99,6 +100,7 @@ def test_a_switch_reaches_the_gate_only_once_its_line_is_in_the_record_and_the_g
     assert worker.work_next() is True
     [[before]], [after] = at_the_gate, route_lines(kept_of(record, request.id))
     assert (before.did, before.outcome) == (f"switch {WEB_ADDRESS} to {proxy.written[WEB_ADDRESS]}", None)
+    assert before.action == Sent(web_address=WEB_ADDRESS, to=proxy.written[WEB_ADDRESS])
     assert after.outcome is not None and (after.id, after.outcome.made, after.is_credited) == (before.id, True, True)
 
 
@@ -123,6 +125,58 @@ def test_ending_maintenance_whose_route_change_was_made_and_never_answered_says_
     )
     assert published.outcome.read_back_at is not None and "lost before the reply" in (published.error or "")
     assert ((after.answer or {})["outcome"], after.events) == ("not in maintenance", [])
+
+
+def test_a_route_one_attempt_installed_is_not_put_down_to_the_line_of_an_earlier_attempt_that_sent_the_same_change(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    worker = worker_on(proxy, record)
+    accepted_and_not_answered(proxy, has_run=False)
+    request = record.write(END, CALLER, None)
+    assert worker.work_next() is True
+    accepted_and_not_answered(proxy, has_run=True)
+    assert (worker.work_next(), worker.work_next()) == (True, True)
+    kept = kept_of(record, request.id)
+    never_ran, installed = route_lines(kept)
+    assert (never_ran.did, never_ran.attempt, installed.attempt) == (installed.did, 1, 2)
+    assert (kept.stands, never_ran.is_unanswered, installed.is_credited, credited(kept)) == (
+        Stands.DONE,
+        True,
+        True,
+        [installed.did],
+    )
+
+
+def test_a_request_that_ended_between_the_two_readings_of_a_status_shows_once_on_its_card_as_ended(record: Record) -> None:
+    worker, lanes, _ = serving_a(record)
+    request = record.write(MOVE_B, CALLER, None)
+    read_before_it_ended = record.unfinished()
+    assert worker.work_next() is True
+    lanes.read_unfinished, lanes.read_ended = lambda: read_before_it_ended, record.ended_lately
+    status = lanes.read_status()
+    [row] = [row for card in cards(status) for row in card.rows if row.name == f"Request {request.id}"]
+    assert ([pill.text for pill in row.pills], status.requests) == (["done"], [])
+
+
+def test_a_retire_killed_with_its_removal_of_the_route_sent_and_then_cancelled_keeps_the_unanswered_line_on_its_card(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+
+    def killed_once_sent(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> NoReturn:
+        raise LaunchplaneKilled(web_address, generation, attempt, read, container)
+
+    edit, proxy.edit = proxy.edit, killed_once_sent
+    request = record.write(RETIRE, CALLER, None)
+    with pytest.raises(LaunchplaneKilled):
+        worker_on(proxy, record).work_next()
+    proxy.edit = edit
+    record.cancel(request.id, CALLER)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    assert (kept.stands, WEB_ADDRESS in proxy.written) == (Stands.CANCELLED, True)
+    assert (request_note(kept, {}) or "").endswith(f"Its lines: remove the route of {WEB_ADDRESS}: may have been sent, no answer.")
 
 
 def test_a_route_as_asked_that_another_hand_installed_is_not_put_down_to_the_request_whose_change_had_no_answer(

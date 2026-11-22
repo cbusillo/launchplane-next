@@ -117,9 +117,10 @@ def line_of(event: Event, attempt_is_open: bool) -> str:
     return f"{event.did}: {heard}{'' if reply.read_back_at is None else ', then read as made by this request'}"
 
 
-def lines_of(request: Kept) -> list[str]:
+def lines_of(request: Kept, *, of_the_route: bool = False) -> list[str]:
     open_now = {attempt.number for attempt in request.attempts if attempt.ended is None}
-    return [line_of(event, event.attempt in open_now) for event in request.events]
+    shown = [event for event in request.events if event.action is not None or not of_the_route]
+    return [line_of(event, event.attempt in open_now) for event in shown]
 
 
 def done_so_far(request: Kept) -> str:
@@ -127,9 +128,10 @@ def done_so_far(request: Kept) -> str:
     return f"{taken_up(request)}So far: {'; '.join(lines)}." if lines else f"{taken_up(request)}Nothing done so far."
 
 
-# A request that has just ended keeps its lines on the page, so the last of them can be read after it has ended.
-def how_it_ended(request: Kept) -> str:
-    return f"{request.error or f'It ended as {request.stands}.'} Its lines: {'; '.join(lines_of(request)) or 'none'}."
+# A request that has ended keeps its lines on the page, so the last of them can be read after it has ended.
+def with_lines(note: str, request: Request, *, of_the_route: bool = False) -> str:
+    lines = lines_of(request, of_the_route=of_the_route) if isinstance(request, Kept) else []
+    return f"{note} Its lines: {'; '.join(lines)}." if lines else note
 
 
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.
@@ -154,17 +156,17 @@ def being_cancelled(request: Kept, decided: Mapping[int, GateAnswer | None]) -> 
 
 def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> str | None:
     if request.stands is Stands.CANCELLED:
-        return how_cancelled(request)
+        # What a cancel put back is in its own note, so only its changes of the route are added.
+        return with_lines(how_cancelled(request), request, of_the_route=True)
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
     if isinstance(request, Kept) and (won := how_cancel_won(request)) is not None:
         return won
-    if isinstance(request, Kept) and request.stands in ENDED and request.cancel_asked_at is None:
-        return how_it_ended(request)
+    if request.stands in ENDED and request.cancel_asked_at is None:
+        return with_lines(request.error or f"It ended as {request.stands}.", request)
     if request.stands in ENDED:
         why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
-        lines = lines_of(request) if isinstance(request, Kept) else []
-        return f"{why} It ended as {request.stands}.{f' Its lines: {"; ".join(lines)}.' if lines else ''}"
+        return with_lines(f"{why} It ended as {request.stands}.", request)
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
         return f"{done_so_far(request)}{being_cancelled(request, decided)}"
     return None
