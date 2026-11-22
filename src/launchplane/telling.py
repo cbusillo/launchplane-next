@@ -1,15 +1,30 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from launchplane import steps
+from launchplane.instance import LaneRoute
 from launchplane.steps import Action, Event
 
 type Tell = Callable[[str, str | None], None]
 
 
+# What the gate answered a change of the route. Only `changed` is a change the sender made.
+class Said(StrEnum):
+    CHANGED = "changed"
+    ALREADY = "already as asked"
+    REFUSED = "refused"
+
+
+# Told once a change of the route was sent: what the gate answered, None for no answer, and the real error.
+type Answered = Callable[[Said | None, str | None], None]
+
+
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
+# `about_to` writes a change of the route down before it is sent, with the web address and where it sends visitors, and
+# what it gives is told the answer. `look` is shown the route of each reading, and nothing is decided from what it does.
 @dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
@@ -18,6 +33,8 @@ class Witness:
     refuse_cancel: Callable[[str], None] = lambda _why: None
     generation: str = ""
     attempt: int = 0
+    about_to: Callable[[str, str, str | None], Answered] = lambda _did, _web_address, _to: lambda _made, _error: None
+    look: Callable[[LaneRoute], None] = lambda _route: None
 
 
 NOBODY = Witness()

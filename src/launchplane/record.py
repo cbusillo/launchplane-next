@@ -24,7 +24,7 @@ DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
 SECONDS_TO_REACH_THE_DATABASE = 3.0
 MOST_CONNECTIONS = 10
 MOST_READINGS_AT_ONCE = 4
-MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN = 10
+MINUTES_AN_ENDED_REQUEST_IS_SHOWN = 10
 
 # Asked before each action on the host: whether the lane's turn is still held.
 type Held = Callable[[], bool]
@@ -154,14 +154,45 @@ class Attempt(BaseModel):
     ended: str | None
 
 
+class Sent(BaseModel):
+    web_address: str
+    to: str | None
+
+
+# What came of a change of the route that was sent. With no answer from the gate `made` is None. `read_back_at` is when
+# a later attempt read a routes file that names the request and the attempt that sent the change.
+class Reply(BaseModel):
+    made: bool | None = None
+    already: bool = False
+    at: datetime | None = None
+    read_back_at: datetime | None = None
+
+
+# One line of what a request did. A change of the route has `action`, written before it was sent, and `outcome` once
+# anything is known of it. Every other line is written once the thing was done or refused.
 class Event(BaseModel):
+    id: int = Field(exclude=True)
     at: datetime
     attempt: int
     did: str
     error: str | None
+    action: Sent | None = None
+    outcome: Reply | None = None
+
+    # Whether this is a change of the route the request made: the gate said so, or the routes file named it.
+    @property
+    def is_credited(self) -> bool:
+        reply = self.outcome
+        return self.action is not None and reply is not None and (reply.made is True or reply.read_back_at is not None)
+
+    @property
+    def is_unanswered(self) -> bool:
+        return self.action is not None and not self.is_credited and (self.outcome is None or self.outcome.made is None)
 
 
 class Kept(Request):
+    # What the gate answered for a move's release when the move ended. None is no move, or one ended before this was kept.
+    release_verdict: Verdict | None = None
     attempts: list[Attempt]
     events: list[Event]
 
@@ -177,12 +208,14 @@ class Record(Protocol):
     def read(self, request: int) -> Kept | None: ...
     def unfinished(self) -> list[Kept]: ...
     def recently_ended(self) -> list[Request]: ...
-    def cancels_answered(self) -> list[Request]: ...
+    def ended_lately(self) -> list[Kept]: ...
     def next_up(self) -> list[Request]: ...
     def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]: ...
     def take_up(self, request: int) -> Taken | None: ...
     def leave_open(self, attempt: int, why: str) -> None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
+    def about_to(self, attempt: int, did: str, action: Sent) -> int: ...
+    def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None: ...
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
     ) -> bool: ...
@@ -223,6 +256,16 @@ def put_back_told(kept: Kept) -> list[str]:
     return list(dict.fromkeys(told))
 
 
+# What is said of a move that failed with a cancel asked of it, from the gate's verdict kept when it ended.
+def how_cancel_won(request: Kept) -> str | None:
+    asked = request.cancel_asked_at is not None and request.cancel_refused is None
+    if not asked or (request.stands, request.work) != (Stands.FAILED, Work.MOVE):
+        return None
+    if request.release_verdict is None:
+        return f"{request.error} What the gate answered for its cancel was not kept."
+    return request.error if request.release_verdict is Verdict.ABANDONED else None
+
+
 GIVEN_UP = "A person gave it up, with its lane read as it was before the request or as the request would leave it."
 
 
@@ -245,14 +288,20 @@ class Sql:
     RECENTLY_ENDED: Final = """
     select * from request where stands in ('done', 'failed', 'cancelled', 'replaced') order by ended_at desc, id desc limit 20
     """
-    CANCELS_ANSWERED: Final = """
-    select * from request
-    where (cancel_asked_at is not null and stands in ('done', 'failed', 'cancelled') or stands = 'replaced')
-        and ended_at > now() - make_interval(mins => %s)
+    # Each lane's request that ended last, and every one that was replaced or had a cancel asked of it.
+    ENDED_LATELY: Final = """
+    with lately as (
+        select * from request
+        where stands in ('done', 'failed', 'cancelled', 'replaced') and ended_at > now() - make_interval(mins => %s)
+    ), last_of_each_lane as (
+        select distinct on (product, lane) id from lately where stands <> 'replaced' order by product, lane, ended_at desc, id desc
+    )
+    select * from lately
+    where cancel_asked_at is not null or stands = 'replaced' or id in (select id from last_of_each_lane)
     order by id
     """
     ATTEMPTS: Final = "select id, request, began_at, ended_at, ended from attempt where request = any(%s) order by id"
-    EVENTS: Final = "select request, attempt, at, did, error from event where request = any(%s) order by id"
+    EVENTS: Final = "select id, request, attempt, at, did, error, action, outcome from event where request = any(%s) order by id"
     NEXT_UP: Final = """
     select * from (
         select distinct on (product, lane) * from request where stands in ('waiting', 'working') order by product, lane, id
@@ -302,9 +351,22 @@ class Sql:
     insert into event (request, attempt, did, error)
     select request, id, %s, %s from attempt where id = %s and ended is null returning id
     """
+    # Committed before the change is sent. A change is never sent on a line that was not written.
+    ABOUT_TO: Final = """
+    insert into event (request, attempt, did, action)
+    select request, id, %s, %s from attempt where id = %s and ended is null returning id
+    """
+    # Only the attempt that is open writes, and what is known of a line is added to, never replaced.
+    COMPLETE: Final = """
+    update event set outcome = coalesce(event.outcome, '{}') || %s, error = coalesce(%s, event.error)
+    from attempt
+    where event.id = %s and attempt.id = %s and attempt.ended is null and attempt.request = event.request returning event.id
+    """
     END: Final = """
     with ended as (update attempt set ended_at = now(), ended = %s where id = %s and ended is null returning request)
-    update request set stands = %s, ended_at = now(), answer = %s, error = %s from ended where request.id = ended.request
+    update request set stands = %s, ended_at = now(), answer = %s, error = %s,
+        release_verdict = case when work = 'moving' then %s end
+    from ended where request.id = ended.request
     returning request.id
     """
     GIVE_UP: Final = """
@@ -466,12 +528,11 @@ class PostgresRecord(Record):
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()],
         )
 
-    # Every request that ended a short while ago and was replaced or had a cancel asked of it, however it ended.
-    def cancels_answered(self) -> list[Request]:
-        shown = self.gate.made(MINUTES_AN_ANSWERED_CANCEL_IS_SHOWN)
+    def ended_lately(self) -> list[Kept]:
+        shown = self.gate.made(MINUTES_AN_ENDED_REQUEST_IS_SHOWN)
         return self.reading(
-            "reading the requests that were replaced or asked to cancel",
-            lambda session: [Request.model_validate(row) for row in session.execute(Sql.CANCELS_ANSWERED, shown).fetchall()],
+            "reading the requests that ended a short while ago",
+            lambda session: with_history(session, self.gate, session.execute(Sql.ENDED_LATELY, shown).fetchall()),
         )
 
     # The oldest request of each lane that takes one, oldest first.
@@ -525,6 +586,19 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
+    def about_to(self, attempt: int, did: str, action: Sent) -> int:
+        with self.session("writing what is about to be done") as session:
+            row = session.execute(Sql.ABOUT_TO, self.gate.made(did, action.model_dump(), attempt)).fetchone()
+            if row is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so it was not written and not done: {did}")
+            return row["id"]
+
+    def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None:
+        with self.session("writing what came of a change of the route") as session:
+            known = outcome.model_dump(mode="json", exclude_unset=True)
+            if session.execute(Sql.COMPLETE, self.gate.made(known, error, line, attempt)).fetchone() is None:
+                raise Interrupted(f"Attempt {attempt} has ended in the record, so what came of a change was not written.")
+
     # A move with a cancel on record ends only on what the gate decided of that cancel: abandoned, or committed. With
     # neither, nothing is written, and the worker carries the cancel to the gate and plans again.
     def end(
@@ -536,7 +610,8 @@ class PostgresRecord(Record):
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so its answer was not written.")
             if open_attempt["move_with_a_cancel"] and decided not in (Verdict.ABANDONED, Verdict.COMMITTED):
                 return False
-            session.execute(Sql.END, self.gate.made(stands.value, attempt, stands.value, answer, error))
+            verdict = None if decided is None else decided.value
+            session.execute(Sql.END, self.gate.made(stands.value, attempt, stands.value, answer, error, verdict))
             return True
 
     # Only a request at work with no attempt open and none after `last`, so nothing was done for it since `last` was

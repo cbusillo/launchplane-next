@@ -287,6 +287,7 @@ class PretendGate:
                 kept.revoke(kept.armed[1])
             kept.armed, kept.committed = (attempt, candidate), candidate
             self.proxy.written[web_address] = candidate
+            self.proxy.edited[web_address] = (candidate, f"{candidate} {generation} {attempt}")
             self.proxy.host.record(f"route {candidate}")
         return kept.answer()
 
@@ -374,7 +375,10 @@ class PretendProxy:
         return ProxySeen(
             runs=self.running,
             back_soon_runs=self.back_soon_runs,
-            written={web_address: WrittenRoute(to, SINCE, self.installed(web_address)) for web_address, to in self.written.items()}
+            written={
+                web_address: WrittenRoute(to, SINCE, text := self.installed(web_address), text.removeprefix(to).strip())
+                for web_address, to in self.written.items()
+            }
             | self.unread,
             loaded=dict(self.loaded) if self.running else {},
         )
