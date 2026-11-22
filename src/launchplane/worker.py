@@ -96,7 +96,7 @@ def of_every_attempt(answer: MoveResult, kept: Kept | None) -> MoveResult:
         return answer
     did = [event.did for event in kept.events if is_change(event)]
     repaired = Outcome.REPAIRED if did and answer.outcome is Outcome.UNCHANGED else answer.outcome
-    return answer.model_copy(update={"did": did, "outcome": repaired})
+    return answer.model_copy(update={"did": did, "outcome": repaired, "not_answered": kept.commands_not_answered()})
 
 
 # A lane found out of maintenance was brought out by this request where a change of the route it made sends visitors to

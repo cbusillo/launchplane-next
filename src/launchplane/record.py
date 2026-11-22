@@ -216,6 +216,10 @@ class Kept(Request):
     attempts: list[Attempt]
     events: list[Event]
 
+    def commands_not_answered(self) -> list[str]:
+        lost = [each for each in self.events if each.command is not None and each.has_no_answer]
+        return [f"{each.did} may have been sent, and Docker did not answer" for each in lost]
+
     # The lines with no answer that a later reading can show to be the request's own. Of the makes of one container only
     # the last can be, and none where a make of it was answered: the container shows one make, and not which line sent it.
     def lines_to_read_back(self) -> list[Event]:

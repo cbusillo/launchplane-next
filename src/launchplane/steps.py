@@ -30,6 +30,8 @@ class MoveResult(Result):
     container_receiving_visitors: str | None
     data_set: str | None = None
     did: list[str] = []
+    # Each command for a part that may have been sent and had no answer, so `did` cannot say whether it was done.
+    not_answered: list[str] = []
     error: str | None = None
 
 

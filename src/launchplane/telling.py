@@ -1,5 +1,5 @@
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -31,7 +31,7 @@ def not_written(_did: str, _web_address: str, _to: str | None) -> Answered:
 # told the answer. `about_to` does so for a change of the route, from the web address and where it sends visitors.
 # `look` is shown the route of each reading and the containers read as made under `generation`, and nothing is decided
 # from what it does. `credit` is given each command Docker answered as done, which a call puts among what it has done.
-# `purpose` ends the line of a command sent to put a lane back. `unmade` has the step's commands not answered as done.
+# `purpose` ends the line of a command sent to put a lane back. `unmade` is whether a command of the step was not answered as done.
 @dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
@@ -45,7 +45,7 @@ class Witness:
     write: Callable[[str, Sent | Command], Answered] = lambda _did, _sent: lambda _made, _error: None
     credit: Callable[[Command], None] = lambda _command: None
     purpose: str = ""
-    unmade: list[Command] = field(default_factory=list[Command])
+    unmade: bool = False
 
     def __post_init__(self) -> None:
         if self.about_to is not_written:
@@ -64,7 +64,7 @@ class Witness:
             if said is Said.CHANGED:
                 self.credit(command)
             elif said is not Said.ALREADY:
-                self.unmade.append(command)
+                self.unmade = True
 
         return heard
 

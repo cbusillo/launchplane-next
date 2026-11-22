@@ -11,12 +11,12 @@ from requests import ReadTimeout, Request, Response
 from launchplane.container_host import ContainerHost
 from launchplane.data_set import RULES_AS_READ
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
-from launchplane.instance import Verdict
+from launchplane.instance import InstanceState, Verdict
 from launchplane.page import line_of, lines_of, request_note
-from launchplane.record import Event, Interrupted, Kept, Record, Reply, Sent, Stands
+from launchplane.record import Event, Interrupted, Kept, Record, RecordError, Reply, Sent, Stands
 from launchplane.steps import Command
 from launchplane.telling import Answered, Said, Witness
-from tests.pretend_host import GENERATION, LaunchplaneKilled, PretendProxy
+from tests.pretend_host import EARLIER, GENERATION, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import PretendRecord
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 from tests.test_act import lane_brought_up_with_a
@@ -153,6 +153,26 @@ def test_a_make_docker_answers_and_a_start_it_then_refuses_leave_the_make_done()
         ContainerHost(told.docker.as_client(), "test").start_instance(TARGET, WEB, None, GENERATION, told.witness())
     assert told.lines == [(f"make {WEB}", Said.CHANGED), (f"start {WEB}", Said.REFUSED)]
     assert told.credited == [Command(verb="make", container=WEB)]
+    assert told.errors == {f"make {WEB}": None, f"start {WEB}": f"409 Conflict: cannot start {WEB}"}
+
+
+def test_a_start_is_not_sent_when_the_answer_to_its_make_could_not_be_written() -> None:
+    told = Told()
+    witness = told.witness()
+    write = witness.write
+
+    def written_and_never_answered(did: str, command: Sent | Command) -> Answered:
+        write(did, command)
+
+        def answer_lost(said: Said | None, _error: str | None) -> None:
+            raise RecordError(f"Launchplane's record could not be reached while writing what came of a change: {did} {said}")
+
+        return answer_lost
+
+    witness.write = written_and_never_answered
+    with pytest.raises(RecordError):
+        ContainerHost(told.docker.as_client(), "test").start_instance(TARGET, WEB, None, GENERATION, witness)
+    assert (told.lines, told.docker.containers.by_name[WEB].calls) == ([(f"make {WEB}", "not answered")], [])
 
 
 def test_each_command_for_a_part_reaches_docker_only_once_its_line_is_written_and_the_line_before_it_is_answered() -> None:
@@ -313,6 +333,44 @@ def test_a_make_with_no_answer_is_the_requests_own_once_a_reading_shows_its_cont
     )
     assert line_of(stopped, attempt_is_open=False) == "stop site-testing-0: found already as asked"
     assert kept.answer["did"][:2] == ["make site-testing-0", "remove site-testing-0"]
+
+
+def test_a_make_with_no_answer_is_not_the_requests_own_where_the_container_of_that_name_carries_another_generation(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, _, proxy = serving_a(record)
+    killed_before_it_answered(monkeypatch, record, lambda did: did.startswith("make "))
+    request = record.write(MOVE_B, CALLER, None)
+    with pytest.raises(LaunchplaneKilled):
+        worker.work_next()
+    proxy.host.instances["site-testing-0"] = proxy.host.instances["site-testing-0"].model_copy(update={"generation": EARLIER})
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    unanswered = kept.events[0]
+    assert kept.answer is not None and kept.stands is Stands.DONE
+    assert (unanswered.did, unanswered.is_own, unanswered.has_no_answer) == ("make site-testing-0", False, True)
+    assert "make site-testing-0" not in kept.answer["did"]
+
+
+def test_a_removal_whose_reply_was_lost_is_not_credited_and_the_answer_and_the_card_say_it_may_have_been_sent(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    proxy.host.place(BUILD_A, "stray", InstanceState.STOPPED)
+    proxy.host.replies_lost = {"remove stray"}
+    request = record.write(MOVE_A, CALLER, None)
+    assert (worker.work_next(), worker.work_next()) == (True, True)
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None and sorted(proxy.host.instances) == ["a"]
+    assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.DONE, ["unfinished", "done"])
+    assert (kept.answer["outcome"], kept.answer["did"], kept.answer["not_answered"]) == (
+        "unchanged",
+        [],
+        ["remove stray may have been sent, and Docker did not answer"],
+    )
+    assert (request_note(kept, {}) or "").endswith(
+        "stop stray: found already as asked; remove stray: may have been sent, no answer."
+    )
 
 
 def is_the_make_of_a_background_service(did: str) -> bool:

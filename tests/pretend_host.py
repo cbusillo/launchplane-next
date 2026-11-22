@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from docker.errors import APIError
+from requests import ReadTimeout
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
@@ -80,6 +81,8 @@ class PretendHost:
         self.holders_unread: set[str] = set()
         self.removals_refused: set[str] = set()
         self.commands_refused: set[str] = set()
+        # The commands Docker does, once, and whose reply never comes.
+        self.replies_lost: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -143,6 +146,9 @@ class PretendHost:
             if f"{verb} {container}" in self.commands_refused:
                 raise APIError("409 Conflict")
             yield
+            if f"{verb} {container}" in self.replies_lost:
+                self.replies_lost.remove(f"{verb} {container}")
+                raise ReadTimeout("the connection was lost before the reply")
 
     def start_instance(
         self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY

@@ -186,7 +186,7 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
     witness.hold()
     if isinstance(action, steps.EditRoute | steps.Switch):
         return route_changed(action, take, witness)
-    by = replace(witness, purpose=TO_PUT_BACK if back else "", unmade=[])
+    by = replace(witness, purpose=TO_PUT_BACK if back else "")
     try:
         event = take(action, by)
     except (ContainerHostError, ProxyError) as error:
