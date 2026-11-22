@@ -31,6 +31,7 @@ from launchplane.steps import (
     CannotPutBack,
     Check,
     CheckRefused,
+    Command,
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
@@ -57,6 +58,7 @@ from launchplane.steps import (
     Switch,
     Switched,
     TooLate,
+    Verb,
     Wait,
 )
 from tests.pretend_host import (
@@ -103,6 +105,15 @@ def gone(container: str, made_by: str | None = None) -> Discard:
 
 
 SWITCHED_TO_NEW = Switched("new", won=True)
+
+
+# The commands Docker answered as done, as a call is given them before the step that sent them.
+def answered(container: str, *verbs: Verb) -> tuple[Command, ...]:
+    return tuple(Command(verb=verb, container=container) for verb in verbs)
+
+
+NEW_MADE_AND_STARTED = answered("new", "make", "start")
+
 REFUSED = CheckRefused("new", "Connection refused")
 
 
@@ -152,8 +163,15 @@ MOVES = {
     "a finished switch answers switched": Case(
         (NEW,),
         ("new", "new"),
-        (STARTED_NEW, Check("new"), SWITCHED_TO_NEW, Discarded("old", kept=False)),
-        answer(Outcome.SWITCHED, "new", did=("started the instance new", "wrote the route to new", "retired old")),
+        (
+            *NEW_MADE_AND_STARTED,
+            STARTED_NEW,
+            Check("new"),
+            SWITCHED_TO_NEW,
+            *answered("old", "stop", "remove"),
+            Discarded("old", kept=False),
+        ),
+        answer(Outcome.SWITCHED, "new", did=("made new", "started new", "wrote the route to new", "stopped old", "removed old")),
         gate=COMMITTED_TO_NEW,
     ),
     "a switch found in the routes file answers switched, though this attempt did none of it": Case(
@@ -165,7 +183,13 @@ MOVES = {
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), gone("stray")),
     "a finished cleanup answers repaired, with what it did": Case(
-        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.REPAIRED, "new", did=("retired stray",))
+        (NEW,),
+        ("new", "new"),
+        (*answered("stray", "remove"), Discarded("stray", kept=False)),
+        answer(Outcome.REPAIRED, "new", did=("removed stray",)),
+    ),
+    "a cleanup that found the instance it would remove already gone answers unchanged": Case(
+        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.UNCHANGED, "new")
     ),
     "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
         (OLD, NEW), ("old", "old"), (), gone("new")
@@ -185,8 +209,8 @@ MOVES = {
     "a failed check answers check failed, never switched": Case(
         (OLD,),
         ("old", "old"),
-        (STARTED_NEW, REFUSED, Discarded("new", kept=False)),
-        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("started the instance new", "retired new")),
+        (*NEW_MADE_AND_STARTED, STARTED_NEW, REFUSED, *answered("new", "stop", "remove"), Discarded("new", kept=False)),
+        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("made new", "started new", "stopped new", "removed new")),
     ),
 }
 
@@ -375,9 +399,17 @@ RETIRES = {
         (OLD, STRAY), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"),), Retire("old")
     ),
     "a finished retirement answers what it removed": Case(
-        (), (None, None), (EditRoute(WEB_ADDRESS, None, "old", "old"), Retire("old")), retired("old", ["old"])
+        (),
+        (None, None),
+        (EditRoute(WEB_ADDRESS, None, "old", "old"), *answered("old", "remove"), Retire("old")),
+        retired("old", ["old"]),
     ),
-    "a lane whose route was already gone answers no route removed": Case((), (None, None), (Retire("old"),), retired(None, ["old"])),
+    "a lane whose route was already gone answers no route removed": Case(
+        (), (None, None), (*answered("old", "stop", "remove"), Retire("old")), retired(None, ["old"])
+    ),
+    "a retire that found its instance already gone answers that it removed none": Case(
+        (), (None, None), (Retire("old"),), retired(None, [])
+    ),
     "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
     "a lane whose loaded route is disabled has it removed": Case(
         (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), EditRoute(WEB_ADDRESS, None, "old", "old")

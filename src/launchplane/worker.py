@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -18,7 +18,7 @@ from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import Event, Held, Interrupted, Kept, Record, RecordError, Reply, Request, Sent, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
+from launchplane.steps import Command, MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
 from launchplane.telling import LOOKS, NOBODY, Answered, Said, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -84,11 +84,10 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
             return lanes.end_maintenance(product, lane, witness)
 
 
-# Whether a line says the request changed something. A change of the route says so by its own line, and nothing else does.
+# Whether a line says the request changed something. A change of the route or a command for a part says so by its own line.
 def is_change(event: Event) -> bool:
-    if event.action is not None:
-        return event.is_credited
-    return event.error is None and not event.did.startswith(LOOKS)
+    sent = (event.action or event.command) is not None
+    return event.is_own if sent else event.error is None and not event.did.startswith(LOOKS)
 
 
 # A request's answer says what every attempt of it did, as each told it. It is history: nothing is decided from it.
@@ -200,16 +199,16 @@ class Worker:
         finally:
             self.let_go(lane)
 
-    # Each change of the route an earlier attempt sent with no answer is looked for in every reading this attempt makes
-    # anyway, until the routes file names the request and the attempt that sent it: it may land after the first reading.
-    def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute], None]:
+    # Each change an earlier attempt sent with no answer is looked for in every reading this attempt makes anyway, until
+    # what is read can only be that change: it may land after the first reading.
+    def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, Collection[str]], None]:
         kept = self.record.read(request.id)
-        lines = [] if kept is None else [each for each in kept.events if each.is_unanswered]
+        lines = [] if kept is None else [each for each in kept.events if each.has_no_answer]
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
-        def look(route: LaneRoute) -> None:
+        def look(route: LaneRoute, made: Collection[str]) -> None:
             for line in list(lines):
-                if line.action is not None and (line.action.to, stamps[line.attempt]) == (route.written, route.installed_by):
+                if line.is_seen_in(route, stamps[line.attempt], made):
                     self.record.complete(attempt, line.id, Reply(read_back_at=datetime.now(UTC)))
                     lines.remove(line)
 
@@ -220,14 +219,17 @@ class Worker:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)
 
-        def about_to(did: str, web_address: str, to: str | None) -> Answered:
-            line = self.record.about_to(attempt, did, Sent(web_address=web_address, to=to))
+        def written(did: str, sent: Sent | Command) -> Answered:
+            line = self.record.about_to(attempt, did, sent)
 
             def answered(said: Said | None, error: str | None) -> None:
                 heard = Reply(made=said is Said.CHANGED, already=said is Said.ALREADY, at=datetime.now(UTC))
                 self.record.complete(attempt, line, Reply() if said is None else heard, error)
 
             return answered
+
+        def about_to(did: str, web_address: str, to: str | None) -> Answered:
+            return written(did, Sent(web_address=web_address, to=to))
 
         # Another Launchplane may hold the turn by now and have changed the lane, so what was decided is not acted on.
         def hold() -> None:
@@ -239,7 +241,7 @@ class Worker:
 
         look = self.reading_back(request, attempt) if again else NOBODY.look
         asked = partial(self.record.cancel_asked, request.id)
-        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, about_to, look)
+        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, about_to, look, written)
 
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made

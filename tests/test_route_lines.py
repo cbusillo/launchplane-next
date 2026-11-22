@@ -228,7 +228,7 @@ def test_a_switch_that_lands_after_the_next_attempts_first_reading_is_put_down_t
     [line] = route_lines(kept)
     assert kept.answer is not None and line.outcome is not None
     assert (kept.stands, kept.answer["outcome"], line.outcome.made, line.is_credited) == (Stands.DONE, "switched", None, True)
-    assert kept.answer["did"] == [f"start the instance {sent[0][3]} of site:b", line.did, "retire a"]
+    assert kept.answer["did"] == [f"make {sent[0][3]}", f"start {sent[0][3]}", line.did, "stop a", "remove a"]
 
 
 # Every call made on a part of the pretend host, in order and with what it was given.

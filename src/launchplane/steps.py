@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -252,6 +253,15 @@ class LogRead:
     unreadable: str | None = None
 
 
+type Verb = Literal["make", "start", "stop", "remove"]
+
+
+# One command sent to Docker for one named container. Among what a call has done, it is one Docker answered as done.
+class Command(BaseModel, frozen=True):
+    verb: Verb
+    container: str
+
+
 # What a part answered when it would not do as asked, with the real error.
 @dataclass(frozen=True)
 class Refused:
@@ -339,4 +349,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | Refused | LogRead | Switched | Discarded
+type Event = Action | Refused | LogRead | Switched | Discarded | Command

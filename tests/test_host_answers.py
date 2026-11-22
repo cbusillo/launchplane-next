@@ -61,7 +61,7 @@ def test_a_repair_whose_last_login_read_fails_stays_working_with_the_background_
     assert worker.work_next() is True
     done = kept_of(record, request.id)
     assert done.stands is Stands.DONE and done.answer is not None
-    assert (done.answer["outcome"], done.answer["did"]) == ("repaired", [f"start the background service of {service.instance}"])
+    assert (done.answer["outcome"], done.answer["did"]) == ("repaired", [f"make {service.container}", f"start {service.container}"])
     assert [action.split()[0] for action in host.actions] == ["start", "await"]
 
 

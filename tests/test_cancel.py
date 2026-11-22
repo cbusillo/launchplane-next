@@ -14,6 +14,7 @@ from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild
 from launchplane.judge import Work
 from launchplane.page import request_note
 from launchplane.record import Asked, Record, RecordError, Request, Stands
+from launchplane.telling import NOBODY, Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import (
@@ -39,6 +40,7 @@ BEGIN = Asked(product="site", lane="testing", work=Work.BEGIN_MAINTENANCE)
 END = Asked(product="site", lane="testing", work=Work.END_MAINTENANCE)
 TO_BUILD_B = LaneBuild(product="site", lane="testing", build="site:b")
 NEW = "site-testing-0"
+REMOVED_NEW = [f"stop {NEW}", f"remove {NEW}"]
 NO_VERDICT = GateAnswer(Verdict.NONE)
 
 
@@ -81,12 +83,12 @@ def test_a_move_cancelled_before_the_switch_removes_the_instance_it_started_and_
     kept = kept_of(record, request.id)
     assert (kept.stands, put_back_by(kept), kept.cancel_asked_by, kept.error) == (
         Stands.CANCELLED,
-        [f"retire {NEW}"],
+        REMOVED_NEW,
         BY_HAND,
         None,
     )
     assert (proxy.written, list(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a"])
-    assert ([each.ended for each in kept.attempts], kept.events[-1].did) == (["cancelled"], f"retire {NEW}, to put the lane back")
+    assert ([each.ended for each in kept.attempts], kept.events[-1].did) == (["cancelled"], f"remove {NEW}, to put the lane back")
 
 
 def test_a_move_cancelled_after_the_switch_is_finished_as_asked_and_says_the_cancel_came_too_late(record: Record) -> None:
@@ -119,7 +121,7 @@ def test_after_a_restart_a_request_that_was_being_cancelled_is_put_back_from_wha
     assert (kept.stands, [each.ended for each in kept.attempts]) == (Stands.CANCELLED, ["interrupted", "cancelled"])
     assert (proxy.host.actions, put_back_by(kept), proxy.written) == (
         [f"retire {NEW}"],
-        [f"retire {NEW}"],
+        REMOVED_NEW,
         {WEB_ADDRESS: "a"},
     )
 
@@ -313,7 +315,7 @@ def test_a_background_service_the_cancelled_request_started_is_retired_and_the_i
     kept = kept_of(record, request.id)
     assert (kept.stands, put_back_by(kept), proxy.host.background_services, len(proxy.host.instances)) == (
         Stands.CANCELLED,
-        [f"retire {missing}"],
+        [f"stop {missing}", f"remove {missing}"],
         {},
         1,
     )
@@ -327,9 +329,14 @@ def test_a_release_whose_new_background_service_does_not_stay_up_stays_working_a
     start = proxy.host.start_background_service
 
     def start_one_that_stops_at_once(
-        target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
+        target: LaneBuild,
+        instance: str,
+        use: DataSetUse | None,
+        command: list[str],
+        generation: str | None = None,
+        by: Witness = NOBODY,
     ) -> None:
-        start(target, instance, use, command, generation)
+        start(target, instance, use, command, generation, by)
         proxy.host.change_part(f"{instance}-background-service", InstanceState.RESTARTING)
 
     proxy.host.start_background_service = start_one_that_stops_at_once
@@ -408,7 +415,7 @@ def test_what_was_put_back_is_told_from_every_attempt_when_the_record_was_lost_a
     assert (kept.stands, [each.ended for each in kept.attempts], put_back_by(kept)) == (
         Stands.CANCELLED,
         ["interrupted", "cancelled"],
-        [f"retire {NEW}"],
+        REMOVED_NEW,
     )
 
 
@@ -515,9 +522,11 @@ def test_a_cancelled_request_shows_on_its_lanes_card_and_among_the_ended_with_wh
     )
     assert row_of(bed, asked) == (
         ["cancelled"],
-        f"The move of testing of site to site:b was cancelled by {by}. Done to put the lane back: retire {NEW}.",
+        f"The move of testing of site to site:b was cancelled by {by}. Done to put the lane back: stop {NEW}; remove {NEW}. "
+        f"Its lines: make {NEW}: done; start {NEW}: done; stop {NEW}, to put the lane back: done; "
+        f"remove {NEW}, to put the lane back: done.",
     )
-    assert (ended["stands"], ended["answer"]["put_back"], ended["cancel_asked_by"]) == ("cancelled", [f"retire {NEW}"], by)
+    assert (ended["stands"], ended["answer"]["put_back"], ended["cancel_asked_by"]) == ("cancelled", REMOVED_NEW, by)
     assert bed.client.get("/running").json()["cancels"][0]["id"] == asked
 
 
@@ -559,7 +568,7 @@ def test_a_call_that_waits_for_a_request_that_is_then_cancelled_answers_conflict
     waited = bed.client.post(f"{MOVE}?wait=5", json=TO_B)
     stopped(bed.worker, threads)
     assert (waited.status_code, waited.headers["location"]) == (409, f"/requests/{the_first_request}")
-    assert f"was cancelled by {BY_HAND}. Done to put the lane back: retire {NEW}." in waited.json()["error"]
+    assert f"was cancelled by {BY_HAND}. Done to put the lane back: stop {NEW}; remove {NEW}." in waited.json()["error"]
 
 
 def test_the_cancel_call_says_so_when_it_is_too_late_or_the_request_had_ended(record: Record) -> None:
@@ -775,8 +784,8 @@ def test_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_as_
     client = TestClient(create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes))
     asked = client.post(MOVE, json=TO_B).json()["id"]
 
-    def refuse(container: str) -> NoReturn:
-        raise ContainerHostRefused(f"Stopping and removing {container} on test was refused: 409 Conflict")
+    def refuse(container: str, by: Witness = NOBODY) -> NoReturn:
+        raise ContainerHostRefused(f"Stopping and removing {container} on test was refused: 409 Conflict, as {by} was told")
 
     def cancel_while_checking(_container: str) -> None:
         proxy.host.retire_instance = refuse

@@ -508,7 +508,7 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
         return True
     if Verdict in kinds:
         return Verdict.COMMITTED
-    if hint is Sent:
+    if Sent in kinds:
         return Sent(web_address=HELD, to=f"to {HELD}")
     if hint is Reply:
         return Reply(made=True)

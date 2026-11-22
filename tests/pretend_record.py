@@ -32,7 +32,7 @@ from launchplane.record import (
     said,
 )
 from launchplane.secret_boundary import JsonValue
-from launchplane.steps import PutBack
+from launchplane.steps import Command, PutBack
 from tests.given_secrets import GivenSecrets
 
 UNFINISHED = (Stands.WAITING, Stands.WORKING)
@@ -208,7 +208,7 @@ class PretendRecord(Record):
         self.change(request, events=[*found.events, event])
         return event.id
 
-    def about_to(self, attempt: int, did: str, action: Sent) -> int:
+    def about_to(self, attempt: int, did: str, action: Sent | Command) -> int:
         self.reach("writing what is about to be done")
         with self.writing:
             request = self.open_attempts.get(attempt)

@@ -111,9 +111,9 @@ def unread_after_the_first_change(proxy: PretendProxy, changes: int = 1) -> Call
 def lose_the_first_reply_to(host: object, change: str) -> None:
     made = getattr(host, change)
 
-    def made_and_not_answered(changed: object) -> None:
+    def made_and_not_answered(*sent: object) -> None:
         setattr(host, change, made)
-        made(changed)
+        made(*sent)
         raise ContainerHostError(f"{change} on test failed: the connection was lost before the reply")
 
     setattr(host, change, made_and_not_answered)

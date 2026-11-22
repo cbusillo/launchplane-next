@@ -1,6 +1,6 @@
 import hashlib
 import os
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Collection, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
@@ -12,12 +12,12 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from launchplane.instance import Verdict, new_generation
+from launchplane.instance import LaneRoute, Verdict, new_generation
 from launchplane.judge import Work
 from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
-from launchplane.steps import PutBack
+from launchplane.steps import Command, PutBack
 from launchplane.telling import TO_PUT_BACK
 
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
@@ -159,8 +159,9 @@ class Sent(BaseModel):
     to: str | None
 
 
-# What came of a change of the route that was sent. With no answer from the gate `made` is None. `read_back_at` is when
-# a later attempt read a routes file that names the request and the attempt that sent the change.
+# What came of a change that was sent. With no answer `made` is None. `read_back_at` is when a later attempt read what
+# only this request can have made: a routes file that names the request and the attempt that sent the change, or a
+# container made under the request's generation.
 class Reply(BaseModel):
     made: bool | None = None
     already: bool = False
@@ -168,8 +169,9 @@ class Reply(BaseModel):
     read_back_at: datetime | None = None
 
 
-# One line of what a request did. A change of the route has `action`, written before it was sent, and `outcome` once
-# anything is known of it. Every other line is written once the thing was done or refused.
+# One line of what a request did. A change of the route has `action` and a command for a part has `command`, written
+# before it was sent, and `outcome` once anything is known of it. Every other line is written once the thing was done or
+# refused.
 class Event(BaseModel):
     id: int = Field(exclude=True)
     at: datetime
@@ -177,17 +179,43 @@ class Event(BaseModel):
     did: str
     error: str | None
     action: Sent | None = None
+    command: Command | None = None
     outcome: Reply | None = None
+
+    # Both are kept as what was sent, and a command is told from a change of the route by its verb.
+    @model_validator(mode="before")
+    @classmethod
+    def command_apart(cls, line: dict[str, Any]) -> dict[str, Any]:
+        sent = line.get("action")
+        return line | {"action": None, "command": sent} if isinstance(sent, dict) and "verb" in sent else line
+
+    # Whether what was sent is the request's own: the gate or Docker said so, or a later reading can only be of it.
+    @property
+    def is_own(self) -> bool:
+        reply = self.outcome
+        return reply is not None and (reply.made is True or reply.read_back_at is not None)
+
+    @property
+    def has_no_answer(self) -> bool:
+        sent = self.action or self.command
+        return sent is not None and not self.is_own and (self.outcome is None or self.outcome.made is None)
 
     # Whether this is a change of the route the request made: the gate said so, or the routes file named it.
     @property
     def is_credited(self) -> bool:
-        reply = self.outcome
-        return self.action is not None and reply is not None and (reply.made is True or reply.read_back_at is not None)
+        return self.action is not None and self.is_own
 
     @property
     def is_unanswered(self) -> bool:
-        return self.action is not None and not self.is_credited and (self.outcome is None or self.outcome.made is None)
+        return self.action is not None and self.has_no_answer
+
+    # Whether a reading shows what only this line can have sent: a routes file stamped with the request and attempt that
+    # sent it, or a container made under the request's generation. Nothing on a container shows which sending started,
+    # stopped or removed it, so no such command is seen.
+    def is_seen_in(self, route: LaneRoute, stamp: str, made: Collection[str]) -> bool:
+        if self.command is not None:
+            return self.command.verb == "make" and self.command.container in made
+        return self.action is not None and (self.action.to, stamp) == (route.written, route.installed_by)
 
 
 class Kept(Request):
@@ -214,7 +242,7 @@ class Record(Protocol):
     def take_up(self, request: int) -> Taken | None: ...
     def leave_open(self, attempt: int, why: str) -> None: ...
     def note(self, attempt: int, did: str, error: str | None) -> None: ...
-    def about_to(self, attempt: int, did: str, action: Sent) -> int: ...
+    def about_to(self, attempt: int, did: str, action: Sent | Command) -> int: ...
     def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None: ...
     def end(
         self, attempt: int, stands: Stands, answer: dict[str, Any] | None, error: str | None, *, decided: Verdict | None = None
@@ -250,9 +278,11 @@ def how_replaced(request: Request) -> str:
     )
 
 
-# What every attempt said it was about to do to put the lane back. It is history: nothing is decided from it.
+# What every attempt did to put the lane back: a command only where it is the request's own. It is history: nothing is
+# decided from it.
 def put_back_told(kept: Kept) -> list[str]:
-    told = [event.did.removesuffix(TO_PUT_BACK) for event in kept.events if event.did.endswith(TO_PUT_BACK)]
+    back = [event for event in kept.events if event.did.endswith(TO_PUT_BACK) and (event.command is None or event.is_own)]
+    told = [event.did.removesuffix(TO_PUT_BACK) for event in back]
     return list(dict.fromkeys(told))
 
 
@@ -586,7 +616,7 @@ class PostgresRecord(Record):
             if session.execute(Sql.NOTE, self.gate.made(did, error, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what it did next was not written: {did}")
 
-    def about_to(self, attempt: int, did: str, action: Sent) -> int:
+    def about_to(self, attempt: int, did: str, action: Sent | Command) -> int:
         with self.session("writing what is about to be done") as session:
             row = session.execute(Sql.ABOUT_TO, self.gate.made(did, action.model_dump(), attempt)).fetchone()
             if row is None:
@@ -594,7 +624,7 @@ class PostgresRecord(Record):
             return row["id"]
 
     def complete(self, attempt: int, line: int, outcome: Reply, error: str | None = None) -> None:
-        with self.session("writing what came of a change of the route") as session:
+        with self.session("writing what came of a change") as session:
             known = outcome.model_dump(mode="json", exclude_unset=True)
             if session.execute(Sql.COMPLETE, self.gate.made(known, error, line, attempt)).fetchone() is None:
                 raise Interrupted(f"Attempt {attempt} has ended in the record, so what came of a change was not written.")

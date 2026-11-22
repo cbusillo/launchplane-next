@@ -53,7 +53,7 @@ from launchplane.steps import (
     Stop,
     TooLate,
 )
-from launchplane.telling import NOBODY, TO_PUT_BACK, Said, Witness, named, told
+from launchplane.telling import NOBODY, OF_A_PART, TO_PUT_BACK, Said, Witness, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -61,9 +61,9 @@ type Lane = tuple[str, str]
 
 class InstanceHost(Protocol):
     def read(self, lane: Lane | None = None) -> OnHost: ...
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None: ...
+    def start_instance(self, to: LaneBuild, named: str, use: DataSetUse | None, generation: str | None, by: Witness, /) -> None: ...
     def start_background_service(
-        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
+        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None, by: Witness
     ) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None: ...
@@ -71,11 +71,11 @@ class InstanceHost(Protocol):
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
-    def start_part(self, container: str) -> None: ...
-    def stop_part(self, container: str) -> None: ...
+    def start_part(self, container: str, by: Witness) -> None: ...
+    def stop_part(self, container: str, by: Witness) -> None: ...
     def stop_database(self, container: str) -> None: ...
     def delete_data_set(self, found: DataSet) -> None: ...
-    def retire_instance(self, container: str) -> None: ...
+    def retire_instance(self, container: str, by: Witness) -> None: ...
     def remove_unheld_logins(self, database: str) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
 
@@ -155,27 +155,29 @@ def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
 
-TAKE: dict[type, Callable[[InstanceHost, Proxy, Any], object]] = {
-    steps.StartProxy: lambda _host, proxy, _step: proxy.start(),
-    steps.AwaitRoute: lambda _host, proxy, step: proxy.await_route(step.web_address, step.container, enabled=step.enabled),
-    steps.CreateDataSetNetwork: lambda host, _proxy, step: host.create_data_set_network(
+TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
+    steps.StartProxy: lambda _host, proxy, _step, _by: proxy.start(),
+    steps.AwaitRoute: lambda _host, proxy, step, _by: proxy.await_route(step.web_address, step.container, enabled=step.enabled),
+    steps.CreateDataSetNetwork: lambda host, _proxy, step, _by: host.create_data_set_network(
         step.product, step.lane, step.data_set, step.generation
     ),
-    steps.CreateDataSetVolume: lambda host, _proxy, step: host.create_data_set_volume(step.product, step.lane, step.data_set),
-    steps.CreateDatabase: lambda host, _proxy, step: host.create_database(
+    steps.CreateDataSetVolume: lambda host, _proxy, step, _by: host.create_data_set_volume(step.product, step.lane, step.data_set),
+    steps.CreateDatabase: lambda host, _proxy, step, _by: host.create_database(
         step.product, step.lane, step.data_set, step.network, step.volume, step.image
     ),
-    steps.StartDatabase: lambda host, _proxy, step: host.start_database(step.container),
-    steps.AwaitDatabase: observing()(lambda host, _proxy, step: host.await_database(step.container)),
-    steps.DeleteDataSet: lambda host, _proxy, step: host.delete_data_set(step.found),
-    steps.StartInstance: lambda host, _proxy, step: host.start_instance(step.target, step.container, step.use, step.generation),
-    steps.StartBackgroundService: lambda host, _proxy, step: host.start_background_service(
-        step.target, step.instance, step.use, list(step.command), step.generation
+    steps.StartDatabase: lambda host, _proxy, step, _by: host.start_database(step.container),
+    steps.AwaitDatabase: observing()(lambda host, _proxy, step, _by: host.await_database(step.container)),
+    steps.DeleteDataSet: lambda host, _proxy, step, _by: host.delete_data_set(step.found),
+    steps.StartInstance: lambda host, _proxy, step, by: host.start_instance(
+        step.target, step.container, step.use, step.generation, by
     ),
-    steps.Retire: lambda host, _proxy, step: host.retire_instance(step.container),
-    steps.Abandon: lambda _host, proxy, step: proxy.gate.abandon(step.web_address, step.generation),
-    steps.StopPart: lambda host, _proxy, step: host.stop_part(step.container),
-    steps.StopDatabase: lambda host, _proxy, step: host.stop_database(step.container),
+    steps.StartBackgroundService: lambda host, _proxy, step, by: host.start_background_service(
+        step.target, step.instance, step.use, list(step.command), step.generation, by
+    ),
+    steps.Retire: lambda host, _proxy, step, by: host.retire_instance(step.container, by),
+    steps.Abandon: lambda _host, proxy, step, _by: proxy.gate.abandon(step.web_address, step.generation),
+    steps.StopPart: lambda host, _proxy, step, by: host.stop_part(step.container, by),
+    steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
 }
 
 
@@ -185,12 +187,13 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
     if isinstance(action, steps.EditRoute | steps.Switch):
         return route_changed(action, take, witness)
     try:
-        event = take(action, witness)
+        event = take(action, replace(witness, purpose=TO_PUT_BACK) if back else witness)
     except (ContainerHostError, ProxyError) as error:
         witness.tell(named(action), str(error))
         raise
     did, refusal = told(action, event)
-    witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
+    if refusal is not None or not isinstance(action, OF_A_PART):
+        witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
     return event
 
 
@@ -226,10 +229,11 @@ def settle[Answer](
     witness: Witness,
 ) -> Answer:
     done: list[Event] = []
+    witness = replace(witness, credit=done.append)
     cancel: Cancel | None = None
     while True:
         lane = read()
-        witness.look(lane.route)
+        witness.look(lane.route, lane.made_by(witness.generation))
         # Two answers where a lane has room for one hold it: no winner is chosen, neither is touched, no call answers success.
         if isinstance(lane.route.loaded, Conflicting):
             raise Waiting(f"{lane.route.loaded}. The lane is held as it is until the proxy has one. Nothing more was done.")
@@ -252,7 +256,7 @@ def settle[Answer](
             raise (Waiting if isinstance(step, steps.Wait) else Stopped)(" ".join([step.reason, *unread]))
         if isinstance(step, steps.CannotPutBack):
             raise CouldNotPutBack(step.reason)
-        if len(done) == MOST_STEPS:
+        if sum(not isinstance(each, steps.Command) for each in done) == MOST_STEPS:
             raise Waiting(
                 f"{lane.lane} of {lane.product} was not finished after {MOST_STEPS} steps, so Launchplane "
                 f"stopped before {step}. What was done stays done, and asking again goes on from there."
@@ -405,7 +409,7 @@ class Lanes:
         # that is no answer is not taken for no mark.
         web_address = web_address_of(product, lane)
         route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
-        witness.look(route)
+        witness.look(route, ())
         if not (route.in_maintenance or isinstance(route.file, Unread) or isinstance(route.loaded, Conflicting)):
             if route.proxy_runs and not is_loaded_as_written(route):
                 self.proxy.await_route(web_address, route.written)
@@ -465,7 +469,7 @@ class Lanes:
             return action if unread is None else steps.LoginsUnread(action.database, str(unread))
         if isinstance(action, steps.StartStopped):
             try:
-                self.host.start_part(action.container)
+                self.host.start_part(action.container, witness)
             except ContainerHostRefused as error:
                 return steps.StartRefused(action.container, str(error))
             return action
@@ -473,8 +477,8 @@ class Lanes:
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
-            return self.discard(action)
-        TAKE[type(action)](self.host, self.proxy, action)
+            return self.discard(action, witness)
+        TAKE[type(action)](self.host, self.proxy, action, witness)
         return action
 
     def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:
@@ -486,7 +490,7 @@ class Lanes:
     # The one removal of an instance of a release. The gate is asked about the generation that made it, and obeyed: one
     # it says was renamed to stays. Otherwise, the gate has taken away every permission to switch to it, and it goes. One
     # no release made has no rename that could be on its way to it.
-    def discard(self, action: steps.Discard) -> Event:
+    def discard(self, action: steps.Discard, by: Witness) -> Event:
         made_by, container = action.generation, action.container
         if made_by is not None:
             answer = self.proxy.gate.discard(action.web_address, made_by, action.attempt, container)
@@ -494,7 +498,7 @@ class Lanes:
                 return steps.Discarded(container, kept=True)
         self.refuse_to_take_from_visitors(steps.Retire(container))
         try:
-            self.host.retire_instance(container)
+            self.host.retire_instance(container, by)
         except ContainerHostRefused as error:
             return steps.RemovalRefused(container, str(error))
         return steps.Discarded(container, kept=False)
