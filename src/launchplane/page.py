@@ -162,7 +162,7 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
     if isinstance(request, Kept) and (won := how_cancel_won(request)) is not None:
-        return won
+        return with_lines(won, request)
     if request.stands in ENDED and request.cancel_asked_at is None:
         return with_lines(request.error or f"It ended as {request.stands}.", request)
     if request.stands in ENDED:

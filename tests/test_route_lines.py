@@ -355,7 +355,8 @@ def test_a_cancel_that_won_and_could_not_be_put_back_is_said_so_from_the_verdict
     kept = cancelled_while_checking(record, lane_with_a_login_the_server_will_not_remove())
     assert (kept.stands, kept.release_verdict, REFUSED in (kept.error or "")) == (Stands.FAILED, Verdict.ABANDONED, True)
     assert not (kept.error or "").startswith("The cancel won")
-    assert (request_note(kept, {}), why_not_cancelled(kept)) == (kept.error, f"{kept.error} Request {kept.id} ended as failed.")
+    assert (request_note(kept, {}) or "").startswith(f"{kept.error} Its lines: ")
+    assert why_not_cancelled(kept) == f"{kept.error} Request {kept.id} ended as failed."
     never_asked = kept.model_copy(update={"cancel_asked_at": None})
     assert (
         why_not_cancelled(never_asked)

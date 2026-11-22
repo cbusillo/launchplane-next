@@ -5,11 +5,14 @@ from itertools import count
 from typing import Any
 
 import pytest
+from docker.errors import APIError
+from requests import ReadTimeout, Request, Response
 
 from launchplane.container_host import ContainerHost
 from launchplane.data_set import RULES_AS_READ
-from launchplane.docker_answers import ContainerHostRefused
-from launchplane.page import line_of, lines_of
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.instance import Verdict
+from launchplane.page import line_of, lines_of, request_note
 from launchplane.record import Event, Interrupted, Kept, Record, Reply, Sent, Stands
 from launchplane.steps import Command
 from launchplane.telling import Answered, Said, Witness
@@ -17,6 +20,7 @@ from tests.pretend_host import GENERATION, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import PretendRecord
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 from tests.test_act import lane_brought_up_with_a
+from tests.test_cancel import cancelling
 from tests.test_container_host import DATABASE, LINK, TARGET, WEB, database_made, given_to
 from tests.test_host_answers import MOVE_A, worker_on
 from tests.test_route_lines import INTERRUPTED, carried_on
@@ -29,22 +33,25 @@ class Told:
     docker: RecordingDocker = field(default_factory=RecordingDocker)
     lines: list[tuple[str, Said | str | None]] = field(default_factory=list[tuple[str, Said | str | None]])
     credited: list[Command] = field(default_factory=list[Command])
-    # What Docker had been sent for each container when each line was written.
+    # What Docker had been sent for the container when its line was last written.
     sent_before: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
+    # The real error written to each line Docker did not answer as done.
+    errors: dict[str, str | None] = field(default_factory=dict[str, str | None])
 
     def witness(self) -> Witness:
-        def about_to_send(did: str, command: Command) -> Answered:
+        def write(did: str, command: Sent | Command) -> Answered:
+            assert isinstance(command, Command)
             place = len(self.lines)
             self.lines.append((did, "not answered"))
             made = self.docker.containers.by_name.get(command.container)
             self.sent_before[did] = ["not made"] if made is None else list(made.calls)
 
-            def answered(said: Said | None, _error: str | None) -> None:
-                self.lines[place] = (did, said)
+            def answered(said: Said | None, error: str | None) -> None:
+                self.lines[place], self.errors[did] = (did, said), error
 
             return answered
 
-        return Witness(about_to_send=about_to_send, credit=self.credited.append)
+        return Witness(write=write, credit=self.credited.append)
 
 
 def a_part_running(told: Told) -> tuple[ContainerHost, RecordingContainer]:
@@ -61,6 +68,47 @@ def test_a_retire_whose_stop_docker_answers_and_whose_removal_it_refuses_leaves_
         host.retire_instance(WEB, told.witness())
     assert told.lines == [(f"stop {WEB}", Said.CHANGED), (f"remove {WEB}", Said.REFUSED)]
     assert (told.credited, part.status, part.removed) == ([Command(verb="stop", container=WEB)], "exited", False)
+    assert told.errors == {f"stop {WEB}": None, f"remove {WEB}": f"409 Conflict: cannot remove {WEB}"}
+
+
+def test_a_command_docker_does_not_answer_keeps_the_real_error_on_its_line_and_is_not_called_refused() -> None:
+    told = Told()
+    host, part = a_part_running(told)
+
+    def time_out(timeout: int) -> None:
+        raise ReadTimeout(f"no answer within {timeout} s")
+
+    part.stop = time_out
+    with pytest.raises(ContainerHostError) as failed:
+        host.stop_part(WEB, told.witness())
+    assert not isinstance(failed.value, ContainerHostRefused)
+    assert (told.lines, told.errors, told.credited) == ([(f"stop {WEB}", None)], {f"stop {WEB}": "no answer within 30 s"}, [])
+
+
+# Docker's client makes a container and then reads it back, and gives its caller the error of whichever failed.
+def refusal_of(method: str) -> APIError:
+    response = Response()
+    response.status_code, response.request = 500, Request(method, "http://test/containers").prepare()
+    return APIError("500 Server Error", response=response)
+
+
+@pytest.mark.parametrize(("refused", "said"), [("GET", None), ("POST", Said.REFUSED)], ids=["the read after it", "the make"])
+def test_a_make_is_called_refused_only_where_docker_refused_the_make_and_not_the_read_of_what_it_made(
+    refused: str, said: Said | None
+) -> None:
+    told = Told()
+    create = told.docker.containers.create
+
+    def create_and_fail(_image: str, _command: list[str] | None = None, **options: object) -> RecordingContainer:
+        if refused == "GET":
+            create(_image, _command, **options)
+        raise refusal_of(refused)
+
+    told.docker.containers.create = create_and_fail
+    with pytest.raises(ContainerHostError) as failed:
+        ContainerHost(told.docker.as_client(), "test").start_instance(TARGET, WEB, None, GENERATION, told.witness())
+    assert (told.lines, isinstance(failed.value, ContainerHostRefused)) == ([(f"make {WEB}", said)], refused == "POST")
+    assert (list(told.docker.containers.by_name), told.credited) == ([WEB] if refused == "GET" else [], [])
 
 
 def test_a_stop_of_a_part_read_as_already_stopped_is_sent_all_the_same_and_is_recorded_as_found_so_with_no_credit() -> None:
@@ -88,6 +136,7 @@ def test_a_start_of_a_part_read_as_already_running_earns_no_credit_and_one_of_a_
     host.start_part(WEB, told.witness())
     assert told.lines == [(f"start {WEB}", Said.ALREADY), (f"start {WEB}", Said.CHANGED)]
     assert told.credited == [Command(verb="start", container=WEB)]
+    assert told.sent_before[f"start {WEB}"] == ["start", "start", "stop within 30 s"]
 
 
 def test_a_make_docker_answers_and_a_start_it_then_refuses_leave_the_make_done() -> None:
@@ -116,13 +165,13 @@ def test_each_command_for_a_part_reaches_docker_only_once_its_line_is_written_an
     ]
     answered_when_written: list[list[tuple[str, Said | str | None]]] = []
     witness = told.witness()
-    write = witness.about_to_send
+    write = witness.write
 
-    def written_after_the_last_was_answered(did: str, command: Command) -> Answered:
+    def written_after_the_last_was_answered(did: str, command: Sent | Command) -> Answered:
         answered_when_written.append(list(told.lines))
         return write(did, command)
 
-    witness.about_to_send = written_after_the_last_was_answered
+    witness.write = written_after_the_last_was_answered
     host.start_instance(TARGET, WEB, LINK, GENERATION, witness)
     host.retire_instance(WEB, witness)
     dids = [f"make {WEB}", f"start {WEB}", f"stop {WEB}", f"remove {WEB}"]
@@ -137,14 +186,17 @@ def test_a_command_whose_line_cannot_be_written_is_not_sent() -> None:
     told = Told()
     host, part = a_part_running(told)
 
-    def not_written(did: str, _command: Command) -> Answered:
+    def not_written(did: str, _command: Sent | Command) -> Answered:
         raise Interrupted(f"The attempt has ended in the record, so it was not written and not done: {did}")
 
     with pytest.raises(Interrupted):
-        host.retire_instance(WEB, Witness(about_to_send=not_written))
+        host.retire_instance(WEB, Witness(write=not_written))
     with pytest.raises(Interrupted):
-        host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None, GENERATION, Witness(about_to_send=not_written))
-    assert (part.calls, list(told.docker.containers.by_name)) == (["start"], [WEB])
+        host.start_instance(TARGET, "shop-testing-bbbbbbbbbbbb", None, GENERATION, Witness(write=not_written))
+    host.stop_part(WEB)
+    with pytest.raises(Interrupted):
+        host.start_part(WEB, Witness(write=not_written))
+    assert (part.calls, list(told.docker.containers.by_name)) == (["start", "stop within 30 s"], [WEB])
 
 
 def commands(kept: Kept, verb: str | None = None) -> list[Event]:
@@ -180,7 +232,8 @@ def test_a_removal_docker_refuses_after_a_stop_it_answered_shows_both_lines_and_
     assert worker.work_next() is True
     kept = kept_of(record, request.id)
     assert (kept.stands, sorted(proxy.host.instances)) == (Stands.FAILED, ["a", "stray"])
-    assert lines_of(kept) == ["stop stray: done", "remove stray: refused", "retire stray, refused"]
+    assert lines_of(kept) == ["stop stray: done", "remove stray: refused"]
+    assert "409 Conflict" in (kept.events[-1].error or "")
     assert kept.error is not None and "Nothing was changed" not in kept.error
     assert "409 Conflict Before that, this call stopped stray, and those changes stay." in kept.error
 
@@ -222,17 +275,31 @@ def test_a_start_whose_line_was_written_and_that_was_never_sent_is_not_credited_
     assert line_of(sent, attempt_is_open=False) == f"{sent.did}: done"
 
 
+# Docker is sent the command of a line, and Launchplane dies before the answer is written to it.
+def killed_before_it_answered(monkeypatch: pytest.MonkeyPatch, record: Record, is_the_line: Callable[[str], bool]) -> None:
+    about_to, complete, lines = record.about_to, record.complete, list[int]()
+
+    def write_and_remember(attempt: int, did: str, action: Sent | Command) -> int:
+        line = about_to(attempt, did, action)
+        lines.extend([line] if is_the_line(did) else [])
+        return line
+
+    def die_before_the_answer(attempt: int, line: int, outcome: Reply, error: str | None = None) -> None:
+        if line in lines:
+            monkeypatch.setattr(record, "about_to", about_to)
+            monkeypatch.setattr(record, "complete", complete)
+            raise LaunchplaneKilled(attempt, line, outcome, error)
+        complete(attempt, line, outcome, error)
+
+    monkeypatch.setattr(record, "about_to", write_and_remember)
+    monkeypatch.setattr(record, "complete", die_before_the_answer)
+
+
 def test_a_make_with_no_answer_is_the_requests_own_once_a_reading_shows_its_container_under_the_requests_generation(
     record: Record, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     worker = serving_a(record)[0]
-    complete = record.complete
-
-    def killed_before_the_answer_is_written(attempt: int, line: int, outcome: Reply, error: str | None = None) -> None:
-        monkeypatch.setattr(record, "complete", complete)
-        raise LaunchplaneKilled(attempt, line, outcome, error)
-
-    monkeypatch.setattr(record, "complete", killed_before_the_answer_is_written)
+    killed_before_it_answered(monkeypatch, record, lambda did: did.startswith("make "))
     request = record.write(MOVE_B, CALLER, None)
     with pytest.raises(LaunchplaneKilled):
         worker.work_next()
@@ -246,6 +313,86 @@ def test_a_make_with_no_answer_is_the_requests_own_once_a_reading_shows_its_cont
     )
     assert line_of(stopped, attempt_is_open=False) == "stop site-testing-0: found already as asked"
     assert kept.answer["did"][:2] == ["make site-testing-0", "remove site-testing-0"]
+
+
+def is_the_make_of_a_background_service(did: str) -> bool:
+    return did.startswith("make ") and did.endswith("-background-service")
+
+
+# The lines of the makes of the background service a move to B made, and how often its account lists that make.
+def makes_of_the_background_service(record: Record, proxy: PretendProxy, request: int) -> tuple[list[Event], int]:
+    with pytest.raises(LaunchplaneKilled):
+        worker_on(proxy, record).work_next()
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request)
+    makes = [each for each in commands(kept, "make") if is_the_make_of_a_background_service(each.did)]
+    assert kept.stands is Stands.DONE and kept.answer is not None and len({each.did for each in makes}) == 1
+    return makes, kept.answer["did"].count(makes[0].did)
+
+
+def test_a_make_whose_line_was_written_and_that_was_never_sent_is_not_credited_by_the_container_the_next_attempt_makes(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = lane_brought_up_with_a()
+    request = record.write(MOVE_B, CALLER, None)
+    killed_once_it_wrote(monkeypatch, record, is_the_make_of_a_background_service)
+    (never_sent, sent), listed = makes_of_the_background_service(record, proxy, request.id)
+    assert (never_sent.attempt, never_sent.is_own, sent.attempt, sent.is_own, listed) == (1, False, 2, True, 1)
+    assert line_of(never_sent, attempt_is_open=False) == f"{sent.did}: may have been sent, no answer"
+
+
+def test_a_background_service_made_with_no_answer_and_made_again_by_the_next_attempt_is_two_makes_each_credited_once(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = lane_brought_up_with_a()
+    request = record.write(MOVE_B, CALLER, None)
+    killed_before_it_answered(monkeypatch, record, is_the_make_of_a_background_service)
+    (read_back, answered), listed = makes_of_the_background_service(record, proxy, request.id)
+    assert read_back.outcome is not None and answered.outcome is not None
+    assert (read_back.outcome.made, read_back.outcome.read_back_at is not None, answered.outcome.made, listed) == (
+        None,
+        True,
+        True,
+        2,
+    )
+
+
+def test_a_cancel_that_won_and_could_not_remove_what_it_stopped_keeps_both_commands_on_its_card(record: Record) -> None:
+    worker, _, proxy = serving_a(record)
+    proxy.host.commands_refused = {"remove site-testing-0"}
+    request = record.write(MOVE_B, CALLER, None)
+    proxy.while_checking = cancelling(record, request.id)
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    note = request_note(kept, {}) or ""
+    assert (kept.stands, kept.release_verdict, note.startswith(f"{kept.error} Its lines: ")) == (
+        Stands.FAILED,
+        Verdict.ABANDONED,
+        True,
+    )
+    assert note.endswith("stop site-testing-0, to put the lane back: done; remove site-testing-0, to put the lane back: refused.")
+
+
+def test_a_move_lists_its_commands_in_the_words_of_their_lines_whether_it_took_one_attempt_or_two(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def commands_listed(kept: Kept) -> list[str]:
+        assert kept.answer is not None
+        return [each for each in kept.answer["did"] if each.split()[0] in ("make", "start", "stop", "remove")]
+
+    worker = serving_a(record)[0]
+    once = record.write(MOVE_B, CALLER, None)
+    assert worker.work_next() is True
+    worker = serving_a(record)[0]
+    twice = record.write(MOVE_B, CALLER, None)
+    killed_once_it_wrote(monkeypatch, record, lambda did: did.startswith("stop "))
+    with pytest.raises(LaunchplaneKilled):
+        worker.work_next()
+    assert worker.work_next() is True
+    for request, attempts in ((once, 1), (twice, 2)):
+        kept = kept_of(record, request.id)
+        own = [each.did for each in commands(kept) if each.is_own]
+        assert (len(kept.attempts), kept.stands, commands_listed(kept), len(own)) == (attempts, Stands.DONE, own, 4)
 
 
 def killed_between_a_make_and_its_start(record: Record, monkeypatch: pytest.MonkeyPatch) -> tuple[PretendProxy, int]:

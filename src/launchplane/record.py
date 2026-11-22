@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from launchplane.instance import LaneRoute, Verdict, new_generation
 from launchplane.judge import Work
 from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
-from launchplane.steps import Command, PutBack
+from launchplane.steps import Command, PutBack, Sent
 from launchplane.telling import TO_PUT_BACK
 
 DATABASE = "postgresql:///launchplane?host=/var/run/postgresql"
@@ -154,11 +154,6 @@ class Attempt(BaseModel):
     ended: str | None
 
 
-class Sent(BaseModel):
-    web_address: str
-    to: str | None
-
-
 # What came of a change that was sent. With no answer `made` is None. `read_back_at` is when a later attempt read what
 # only this request can have made: a routes file that names the request and the attempt that sent the change, or a
 # container made under the request's generation.
@@ -170,8 +165,7 @@ class Reply(BaseModel):
 
 
 # One line of what a request did. A change of the route has `action` and a command for a part has `command`, written
-# before it was sent, and `outcome` once anything is known of it. Every other line is written once the thing was done or
-# refused.
+# before it was sent, and `outcome` once anything is known of it. Any other line is written once done or refused.
 class Event(BaseModel):
     id: int = Field(exclude=True)
     at: datetime
@@ -210,8 +204,7 @@ class Event(BaseModel):
         return self.action is not None and self.has_no_answer
 
     # Whether a reading shows what only this line can have sent: a routes file stamped with the request and attempt that
-    # sent it, or a container made under the request's generation. Nothing on a container shows which sending started,
-    # stopped or removed it, so no such command is seen.
+    # sent it, or a container made under the request's generation. No container shows who started, stopped or removed it.
     def is_seen_in(self, route: LaneRoute, stamp: str, made: Collection[str]) -> bool:
         if self.command is not None:
             return self.command.verb == "make" and self.command.container in made
@@ -223,6 +216,13 @@ class Kept(Request):
     release_verdict: Verdict | None = None
     attempts: list[Attempt]
     events: list[Event]
+
+    # The lines with no answer that a later reading can show to be the request's own. Of the makes of one container only
+    # the last can be, and none where a make of it was answered: the container shows one make, and not which line sent it.
+    def lines_to_read_back(self) -> list[Event]:
+        makes = {each.command.container: each for each in self.events if each.command is not None and each.command.verb == "make"}
+        unanswered = [each for each in self.events if each.has_no_answer]
+        return [each for each in unanswered if each.command is None or makes.get(each.command.container) is each]
 
 
 # An attempt begun. `again` says the request had one before it, which may have sent the host a change that has not run yet.
@@ -278,8 +278,7 @@ def how_replaced(request: Request) -> str:
     )
 
 
-# What every attempt did to put the lane back: a command only where it is the request's own. It is history: nothing is
-# decided from it.
+# What every attempt did to put the lane back, a command only where it is the request's own. Nothing is decided from it.
 def put_back_told(kept: Kept) -> list[str]:
     back = [event for event in kept.events if event.did.endswith(TO_PUT_BACK) and (event.command is None or event.is_own)]
     told = [event.did.removesuffix(TO_PUT_BACK) for event in back]

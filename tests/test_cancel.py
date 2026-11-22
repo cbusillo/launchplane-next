@@ -12,7 +12,7 @@ from launchplane.gate import Answer as GateAnswer
 from launchplane.gate import GateError
 from launchplane.instance import BACK_SOON, DataSetUse, InstanceState, LaneBuild, LoadedRoute, OnHost, RouteStatus, Verdict
 from launchplane.judge import Work
-from launchplane.page import request_note
+from launchplane.page import lines_of, request_note
 from launchplane.record import Asked, Record, RecordError, Request, Stands
 from launchplane.telling import NOBODY, Witness
 from launchplane.worker import Worker
@@ -802,7 +802,7 @@ def test_a_cancel_that_won_and_whose_candidate_docker_refuses_to_remove_ends_as_
         True,
     )
     assert (proxy.written, sorted(proxy.host.instances)) == ({WEB_ADDRESS: "a"}, ["a", NEW])
-    assert request_note(kept, {}) == kept.error
+    assert request_note(kept, {}) == f"{kept.error} Its lines: {'; '.join(lines_of(kept))}."
 
 
 DECIDED_AT_THE_GATE: dict[str, tuple[Callable[[PretendGate, str], object], Stands, list[str]]] = {

@@ -171,7 +171,7 @@ MOVES = {
             *answered("old", "stop", "remove"),
             Discarded("old", kept=False),
         ),
-        answer(Outcome.SWITCHED, "new", did=("made new", "started new", "wrote the route to new", "stopped old", "removed old")),
+        answer(Outcome.SWITCHED, "new", did=("make new", "start new", "wrote the route to new", "stop old", "remove old")),
         gate=COMMITTED_TO_NEW,
     ),
     "a switch found in the routes file answers switched, though this attempt did none of it": Case(
@@ -186,7 +186,7 @@ MOVES = {
         (NEW,),
         ("new", "new"),
         (*answered("stray", "remove"), Discarded("stray", kept=False)),
-        answer(Outcome.REPAIRED, "new", did=("removed stray",)),
+        answer(Outcome.REPAIRED, "new", did=("remove stray",)),
     ),
     "a cleanup that found the instance it would remove already gone answers unchanged": Case(
         (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.UNCHANGED, "new")
@@ -210,7 +210,7 @@ MOVES = {
         (OLD,),
         ("old", "old"),
         (*NEW_MADE_AND_STARTED, STARTED_NEW, REFUSED, *answered("new", "stop", "remove"), Discarded("new", kept=False)),
-        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("made new", "started new", "stopped new", "removed new")),
+        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("make new", "start new", "stop new", "remove new")),
     ),
 }
 

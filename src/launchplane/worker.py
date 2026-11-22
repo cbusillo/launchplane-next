@@ -16,9 +16,9 @@ from launchplane.instance import BACK_SOON, LaneBuild, LaneRoute, Verdict
 from launchplane.judge import Work
 from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
-from launchplane.record import Event, Held, Interrupted, Kept, Record, RecordError, Reply, Request, Sent, Stands, put_back_told
+from launchplane.record import Event, Held, Interrupted, Kept, Record, RecordError, Reply, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import Command, MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
+from launchplane.steps import Command, MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult, Sent
 from launchplane.telling import LOOKS, NOBODY, Answered, Said, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -199,11 +199,11 @@ class Worker:
         finally:
             self.let_go(lane)
 
-    # Each change an earlier attempt sent with no answer is looked for in every reading this attempt makes anyway, until
-    # what is read can only be that change: it may land after the first reading.
+    # Each change of the route an earlier attempt sent with no answer is looked for in every reading this attempt makes
+    # anyway: it may land late. A make is looked for in the first only: a container this attempt then makes is its own.
     def reading_back(self, request: Request, attempt: int) -> Callable[[LaneRoute, Collection[str]], None]:
         kept = self.record.read(request.id)
-        lines = [] if kept is None else [each for each in kept.events if each.has_no_answer]
+        lines = [] if kept is None else kept.lines_to_read_back()
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
         def look(route: LaneRoute, made: Collection[str]) -> None:
@@ -211,6 +211,7 @@ class Worker:
                 if line.is_seen_in(route, stamps[line.attempt], made):
                     self.record.complete(attempt, line.id, Reply(read_back_at=datetime.now(UTC)))
                     lines.remove(line)
+            lines[:] = [each for each in lines if each.command is None]
 
         return look
 
@@ -228,9 +229,6 @@ class Worker:
 
             return answered
 
-        def about_to(did: str, web_address: str, to: str | None) -> Answered:
-            return written(did, Sent(web_address=web_address, to=to))
-
         # Another Launchplane may hold the turn by now and have changed the lane, so what was decided is not acted on.
         def hold() -> None:
             if not held():
@@ -241,7 +239,7 @@ class Worker:
 
         look = self.reading_back(request, attempt) if again else NOBODY.look
         asked = partial(self.record.cancel_asked, request.id)
-        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, about_to, look, written)
+        return Witness(tell, hold, asked, refuse_cancel, request.generation, attempt, look=look, write=written)
 
     # One round of any request: the call, then for a move the gate's word on its ending, then the record. A move's ending
     # that is no release is written once the attempt is fenced with no verdict and, where it failed, what the release made

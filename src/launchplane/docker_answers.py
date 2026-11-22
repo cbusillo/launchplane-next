@@ -89,14 +89,19 @@ def attempting(action: str, address: str) -> Generator[None]:
         raise ContainerHostError(f"{action} on {address} failed: {error}") from error
 
 
-# One command for one named container. Its line is written before it is sent and completed with what Docker answered,
-# before anything else is sent. `already` is a command for a container read as it was asked to be before the command went.
+# One command for one named container: its line is written before it is sent, and answered before anything else is sent.
 @contextmanager
 def sent(by: Witness, verb: Verb, container: str, *, already: bool = False) -> Generator[None]:
     answered = by.sending(verb, container)
     try:
         yield
     except APIError as error:
+        # Docker's client reads a container back once Docker has made it. A refusal of that read is no answer to the make.
+        if verb == "make" and error.response is not None and error.response.request.method == "GET":
+            answered(None, str(error))
+            raise ContainerHostError(
+                f"Docker was sent the make of {container} and did not describe what it made: {error}"
+            ) from error
         answered(Said.REFUSED, str(error))
         raise
     except (DockerException, requests.RequestException) as error:

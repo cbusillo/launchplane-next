@@ -186,14 +186,15 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
     witness.hold()
     if isinstance(action, steps.EditRoute | steps.Switch):
         return route_changed(action, take, witness)
+    by = replace(witness, purpose=TO_PUT_BACK if back else "", unmade=[])
     try:
-        event = take(action, replace(witness, purpose=TO_PUT_BACK) if back else witness)
+        event = take(action, by)
     except (ContainerHostError, ProxyError) as error:
-        witness.tell(named(action), str(error))
+        by.tell_of_step(named(action), str(error))
         raise
     did, refusal = told(action, event)
-    if refusal is not None or not isinstance(action, OF_A_PART):
-        witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
+    if not isinstance(action, OF_A_PART) or refusal is not None:
+        by.tell_of_step(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
     return event
 
 

@@ -257,10 +257,20 @@ type Verb = Literal["make", "start", "stop", "remove"]
 DONE: dict[Verb, str] = {"make": "made", "start": "started", "stop": "stopped", "remove": "removed"}
 
 
+# A change of the route as it is sent: the web address and where it sends visitors, or nowhere for a removal.
+class Sent(BaseModel):
+    web_address: str
+    to: str | None
+
+
 # One command sent to Docker for one named container. Among what a call has done, it is one Docker answered as done.
 class Command(BaseModel, frozen=True):
     verb: Verb
     container: str
+
+    # The words of its line, and of a request's account of what it did.
+    def as_sent(self) -> str:
+        return f"{self.verb} {self.container}"
 
     def as_done(self) -> str:
         return f"{DONE[self.verb]} {self.container}"

@@ -87,13 +87,14 @@ CHANGES: dict[type, Callable[[Any], str | None]] = {
 }
 
 
-# What a step that was taken changed. Of a step for a part, only the commands Docker answered as done are changes.
+# What a taken step changed. A request's account lists a command `as_lines`, in its line's words whatever its attempts.
 def change_made_by(event: Event) -> str | None:
     return CHANGES[type(event)](event) if type(event) in CHANGES else None
 
 
-def changes_made(done: tuple[Event, ...]) -> list[str]:
-    return [change for change in map(change_made_by, done) if change is not None]
+def changes_made(done: tuple[Event, ...], *, as_lines: bool = False) -> list[str]:
+    changes = (each.as_sent() if as_lines and isinstance(each, Command) else change_made_by(each) for each in done)
+    return [change for change in changes if change is not None]
 
 
 def changes_so_far(done: tuple[Event, ...]) -> str:
@@ -287,7 +288,7 @@ class Move:
             outcome=Outcome.SWITCHED if self.gate.verdict is Verdict.COMMITTED else settled,
             container_receiving_visitors=self.lane.route.written,
             data_set=None if receiving is None else receiving.data_set,
-            did=changes_made(done),
+            did=changes_made(done, as_lines=True),
         )
         return answer.model_copy(update=update)
 
