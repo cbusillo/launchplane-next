@@ -292,10 +292,10 @@ def test_with_every_line_of_a_command_and_of_a_route_change_deleted_a_fresh_work
             record.change(request, events=[each for each in kept.events if each not in lines])
         return carried_on(record, proxy, request)
 
-    kept, erased = carried_from_the_interruption(erased=False), carried_from_the_interruption(erased=True)
-    own, own_erased = ([each.did for each in ended.events if each.is_own] for ended in (kept[1], erased[1]))
-    assert kept[0] and (kept[0], kept[2], kept[1].stands) == (erased[0], erased[2], Stands.DONE)
-    assert (erased[1].stands, own != own_erased) == (Stands.DONE, True)
+    whole, without = carried_from_the_interruption(erased=False), carried_from_the_interruption(erased=True)
+    own, own_without = ([each.did for each in ended.events if each.is_own] for ended in (whole[1], without[1]))
+    assert whole[0] and (whole[0], whole[2], whole[1].stands) == (without[0], without[2], Stands.DONE)
+    assert (without[1].stands, own != own_without) == (Stands.DONE, True)
 
 
 LINE: dict[str, Any] = {"id": 1, "at": "2026-11-22T10:00:00Z", "attempt": 1, "did": "stop a", "error": None}
