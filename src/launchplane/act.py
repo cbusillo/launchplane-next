@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from launchplane import maintenance, plan, steps
 from launchplane.container_host import PartStopped
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
-from launchplane.gate import LOST
+from launchplane.gate import ALREADY, LOST
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
     BACK_SOON,
@@ -53,7 +53,7 @@ from launchplane.steps import (
     Stop,
     TooLate,
 )
-from launchplane.telling import NOBODY, TO_PUT_BACK, Witness, named, told
+from launchplane.telling import NOBODY, TO_PUT_BACK, Said, Witness, named, told
 
 MOST_STEPS = 50
 type Lane = tuple[str, str]
@@ -146,7 +146,6 @@ class Status:
     web_addresses: list[WebAddressJudged]
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
-    # Requests that ended a short while ago: each lane's last, and every one replaced or asked to cancel.
     cancels: list[Kept] = field(default_factory=list[Kept])
     # What the gate answers for each move being worked that a cancel was asked of. None is a gate that gave no answer.
     cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
@@ -206,7 +205,8 @@ def route_changed(action: steps.EditRoute | steps.Switch, take: Take, witness: W
         answered(None, str(error))
         raise
     refusal = told(action, event)[1]
-    answered(refusal is None, refusal)
+    already = isinstance(event, steps.EditRoute) and event.already
+    answered(Said.ALREADY if already else Said.CHANGED if refusal is None else Said.REFUSED, refusal)
     return event
 
 
@@ -451,8 +451,7 @@ class Lanes:
     def take(self, action: Action, witness: Witness, *, behind_back_soon: bool = False) -> Event:
         self.refuse_to_take_from_visitors(action)
         if isinstance(action, steps.EditRoute):
-            edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
-            return action if edit != LOST else steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
+            return self.edit_route(action, witness)
         if isinstance(action, steps.Check):
             return self.check(action.container, action.health_path, with_log=not behind_back_soon)
         if isinstance(action, steps.AwaitBackgroundService):
@@ -475,6 +474,12 @@ class Lanes:
             return self.discard(action)
         TAKE[type(action)](self.host, self.proxy, action)
         return action
+
+    def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:
+        edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
+        if edit == LOST:
+            return steps.Refused(action.web_address, "The gate left the route: it was not the one read.")
+        return replace(action, already=edit == ALREADY)
 
     # The one removal of an instance of a release. The gate is asked about the generation that made it, and obeyed: one
     # it says was renamed to stays. Otherwise, the gate has taken away every permission to switch to it, and it goes. One

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
@@ -153,6 +153,8 @@ class EditRoute:
     to: str | None
     read: str
     was: str | None = None
+    # Once taken: the gate found the routes file already as asked, so this sending changed nothing.
+    already: bool = field(default=False, compare=False)
 
 
 # The rename of a release, asked of the gate for the candidate of one attempt. `Switched` is what it is once taken:

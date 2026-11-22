@@ -277,6 +277,7 @@ LINES = {
     "send x to a: may have been sent, no answer": (LINE | {"action": ROUTE}, False),
     "send x to a: may have been sent, no answer ": (LINE | {"action": ROUTE, "outcome": {}, "error": "lost"}, True),
     "send x to a: done": (LINE | {"action": ROUTE, "outcome": {"made": True}}, False),
+    "send x to a: found already as asked": (LINE | {"action": ROUTE, "outcome": {"made": False, "already": True}}, False),
     "send x to a: refused": (LINE | {"action": ROUTE, "outcome": {"made": False}, "error": "not the one read"}, True),
     "send x to a: may have been sent, no answer, then read as made by this request": (
         LINE | {"action": ROUTE, "outcome": READ_BACK, "error": "lost"},
@@ -325,6 +326,47 @@ def test_a_move_ends_with_the_gates_verdict_kept_and_a_request_that_is_no_move_k
     assert answered.json()["release_verdict"] == "committed"
 
 
+def test_a_route_another_hand_removed_while_a_retire_was_in_flight_is_recorded_as_already_and_not_put_down_to_the_retire(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+    edit, was = proxy.edit, proxy.written[WEB_ADDRESS]
+
+    def removed_just_before(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
+        proxy.edit = edit
+        del proxy.written[web_address]
+        return edit(web_address, generation, attempt, read, container)
+
+    proxy.edit = removed_just_before
+    request = record.write(RETIRE, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    [line] = route_lines(kept)
+    assert line.outcome is not None and kept.answer is not None
+    assert (line.outcome.already, line.outcome.made, line.error, credited(kept)) == (True, False, None, [])
+    assert line_of(line, attempt_is_open=False) == f"remove the route of {WEB_ADDRESS}: found already as asked"
+    assert (kept.answer["outcome"], kept.answer["route_removed_to_container"]) == ("retired", was)
+
+
+def test_a_cancel_asked_before_a_lost_reply_was_recovered_leaves_the_completed_line_on_the_card_beside_the_cancels_note(
+    record: Record,
+) -> None:
+    proxy = lane_in_maintenance()
+    worker = worker_on(proxy, record)
+    accepted_and_not_answered(proxy, has_run=True)
+    request = record.write(END, CALLER, None)
+    assert worker.work_next() is True
+    record.cancel(request.id, CALLER)
+    assert worker.work_next() is True
+    kept = kept_of(record, request.id)
+    note = request_note(kept, {}) or ""
+    assert (kept.stands, (kept.answer or {})["outcome"], kept.cancel_asked_at is not None) == (Stands.DONE, "ended", True)
+    assert f"A cancel by {CALLER} was asked and not carried out. It ended as done. Its lines: " in note
+    assert note.endswith(
+        f"send {WEB_ADDRESS} to {proxy.written[WEB_ADDRESS]}: may have been sent, no answer, then read as made by this request."
+    )
+
+
 def test_a_request_that_has_just_ended_stays_on_its_lanes_card_with_its_last_lines_and_is_not_among_the_cancels(
     record: Record,
 ) -> None:
@@ -344,9 +386,5 @@ def test_a_request_that_has_just_ended_stays_on_its_lanes_card_with_its_last_lin
     waiting = record.write(MOVE_B, CALLER, None)
     record.cancel(waiting.id, CALLER)
     [cancelled] = client.get("/running").json()["cancels"]
-    assert (cancelled["id"], cancelled["stands"], "events" in cancelled, "attempts" in cancelled) == (
-        waiting.id,
-        "cancelled",
-        False,
-        False,
-    )
+    assert (cancelled["id"], cancelled["stands"]) == (waiting.id, "cancelled")
+    assert not {"events", "attempts", "release_verdict"} & set(cancelled)

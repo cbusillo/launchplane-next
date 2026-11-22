@@ -19,7 +19,7 @@ from launchplane.proxy import ProxyError
 from launchplane.record import Event, Held, Interrupted, Kept, Record, RecordError, Reply, Request, Sent, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
 from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult
-from launchplane.telling import LOOKS, NOBODY, Answered, Witness
+from launchplane.telling import LOOKS, NOBODY, Answered, Said, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
 # Lanes worked at once. Each holds one connection for its turn, and all share the one container host.
@@ -100,19 +100,14 @@ def of_every_attempt(answer: MoveResult, kept: Kept | None) -> MoveResult:
     return answer.model_copy(update={"did": did, "outcome": repaired})
 
 
-def sent_to(line: Event) -> str | None:
-    return None if line.action is None else line.action.to
-
-
 # A lane found out of maintenance was brought out by this request where a change of the route it made sends visitors to
 # an instance. It is history, for the answer: what was done on the host was decided without it.
 def ended_by(answer: MaintenanceResult, kept: Kept | None) -> MaintenanceResult:
     lines = [] if kept is None else kept.events
-    published = any(line.is_credited and sent_to(line) not in (None, BACK_SOON) for line in lines)
+    published = any(line.is_credited and line.action is not None and line.action.to not in (None, BACK_SOON) for line in lines)
     return answer.model_copy(update={"outcome": MaintenanceOutcome.ENDED}) if published else answer
 
 
-# What the request's lines add to the answer its last attempt gave.
 def accounted(answer: Answer, read: Callable[[], Kept | None]) -> Answer:
     if isinstance(answer, MoveResult):
         return of_every_attempt(answer, read())
@@ -213,9 +208,10 @@ class Worker:
         stamps = {} if kept is None else {each.number: f"{request.generation} {each.id}" for each in kept.attempts}
 
         def look(route: LaneRoute) -> None:
-            for line in [each for each in lines if (route.written, route.installed_by) == (sent_to(each), stamps[each.attempt])]:
-                self.record.complete(attempt, line.id, Reply(read_back_at=datetime.now(UTC)))
-                lines.remove(line)
+            for line in list(lines):
+                if line.action is not None and (line.action.to, stamps[line.attempt]) == (route.written, route.installed_by):
+                    self.record.complete(attempt, line.id, Reply(read_back_at=datetime.now(UTC)))
+                    lines.remove(line)
 
         return look
 
@@ -227,9 +223,9 @@ class Worker:
         def about_to(did: str, web_address: str, to: str | None) -> Answered:
             line = self.record.about_to(attempt, did, Sent(web_address=web_address, to=to))
 
-            def answered(made: bool | None, error: str | None) -> None:
-                reply = Reply() if made is None else Reply(made=made, at=datetime.now(UTC))
-                self.record.complete(attempt, line, reply, error)
+            def answered(said: Said | None, error: str | None) -> None:
+                heard = Reply(made=said is Said.CHANGED, already=said is Said.ALREADY, at=datetime.now(UTC))
+                self.record.complete(attempt, line, Reply() if said is None else heard, error)
 
             return answered
 

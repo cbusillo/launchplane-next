@@ -5,7 +5,7 @@ from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Record, Stands
 from launchplane.steps import MaintenanceOutcome
-from launchplane.telling import Answered, Witness
+from launchplane.telling import Answered, Said, Witness
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
@@ -137,10 +137,10 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
 def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_again_and_decided_again() -> None:
     proxy = lane_brought_up_with_a()
     edit = proxy.edit
-    told: list[tuple[str, bool | None, str | None]] = []
+    told: list[tuple[str, Said | None, str | None]] = []
 
     def about_to(did: str, _web_address: str, _to: str | None) -> Answered:
-        return lambda made, error: told.append((did, made, error))
+        return lambda said, error: told.append((did, said, error))
 
     def not_the_route_read_once(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
         proxy.edit = edit
@@ -151,7 +151,7 @@ def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_
     switch = f"send {WEB_ADDRESS} to {BACK_SOON}"
     assert (answer.outcome, told[:2]) == (
         MaintenanceOutcome.IN_MAINTENANCE,
-        [(switch, False, "The gate left the route: it was not the one read."), (switch, True, None)],
+        [(switch, Said.REFUSED, "The gate left the route: it was not the one read."), (switch, Said.CHANGED, None)],
     )
 
 

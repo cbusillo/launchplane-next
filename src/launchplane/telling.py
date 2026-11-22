@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from launchplane import steps
@@ -7,8 +8,17 @@ from launchplane.instance import LaneRoute
 from launchplane.steps import Action, Event
 
 type Tell = Callable[[str, str | None], None]
-# Told once a change of the route was sent: whether the gate answered that it made it, None for no answer, and the real error.
-type Answered = Callable[[bool | None, str | None], None]
+
+
+# What the gate answered a change of the route. Only `changed` is a change the sender made.
+class Said(StrEnum):
+    CHANGED = "changed"
+    ALREADY = "already as asked"
+    REFUSED = "refused"
+
+
+# Told once a change of the route was sent: what the gate answered, None for no answer, and the real error.
+type Answered = Callable[[Said | None, str | None], None]
 
 
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.

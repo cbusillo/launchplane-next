@@ -113,7 +113,7 @@ def line_of(event: Event, attempt_is_open: bool) -> str:
     reply = event.outcome
     if reply is None:
         return f"about to {event.did}" if attempt_is_open else f"{event.did}: {NO_ANSWER}"
-    heard = {None: NO_ANSWER, True: "done", False: "refused"}[reply.made]
+    heard = "found already as asked" if reply.already else {None: NO_ANSWER, True: "done", False: "refused"}[reply.made]
     return f"{event.did}: {heard}{'' if reply.read_back_at is None else ', then read as made by this request'}"
 
 
@@ -157,13 +157,14 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
         return how_cancelled(request)
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
-    if (won := how_cancel_won(request)) is not None:
+    if isinstance(request, Kept) and (won := how_cancel_won(request)) is not None:
         return won
     if isinstance(request, Kept) and request.stands in ENDED and request.cancel_asked_at is None:
         return how_it_ended(request)
     if request.stands in ENDED:
         why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
-        return f"{why} It ended as {request.stands}."
+        lines = lines_of(request) if isinstance(request, Kept) else []
+        return f"{why} It ended as {request.stands}.{f' Its lines: {"; ".join(lines)}.' if lines else ''}"
     if isinstance(request, Kept) and request.stands is Stands.WORKING:
         return f"{done_so_far(request)}{being_cancelled(request, decided)}"
     return None

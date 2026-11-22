@@ -140,8 +140,6 @@ class Request(Asked):
     cancel_refused: str | None = None
     # The newer request for the lane that took the waiting place from this one, which then ended with nothing done.
     replaced_by: int | None = None
-    # What the gate answered for a move's release when the move ended. None is no move, or one ended before this was kept.
-    release_verdict: Verdict | None = None
 
     def asked(self) -> Asked:
         return Asked.model_validate(self.model_dump(include=set(Asked.model_fields)))
@@ -156,16 +154,16 @@ class Attempt(BaseModel):
     ended: str | None
 
 
-# What the line of a change of the route says before the change is sent.
 class Sent(BaseModel):
     web_address: str
     to: str | None
 
 
-# What came of a change of the route that was sent. `made` is the gate's own answer, and None is no answer. `read_back_at`
-# is when a later attempt read a routes file that names the request and the attempt that sent the change.
+# What came of a change of the route that was sent. With no answer from the gate `made` is None. `read_back_at` is when
+# a later attempt read a routes file that names the request and the attempt that sent the change.
 class Reply(BaseModel):
     made: bool | None = None
+    already: bool = False
     at: datetime | None = None
     read_back_at: datetime | None = None
 
@@ -187,13 +185,14 @@ class Event(BaseModel):
         reply = self.outcome
         return self.action is not None and reply is not None and (reply.made is True or reply.read_back_at is not None)
 
-    # Whether this is a change of the route that may have been sent, with nothing yet to put it down to the request.
     @property
     def is_unanswered(self) -> bool:
         return self.action is not None and not self.is_credited and (self.outcome is None or self.outcome.made is None)
 
 
 class Kept(Request):
+    # What the gate answered for a move's release when the move ended. None is no move, or one ended before this was kept.
+    release_verdict: Verdict | None = None
     attempts: list[Attempt]
     events: list[Event]
 
@@ -257,9 +256,8 @@ def put_back_told(kept: Kept) -> list[str]:
     return list(dict.fromkeys(told))
 
 
-# What is said of a move that failed with a cancel asked of it, from the gate's verdict kept when it ended. A cancel that
-# won is told by the request's own error, which says what could not be put back. None where the gate did not say so.
-def how_cancel_won(request: Request) -> str | None:
+# What is said of a move that failed with a cancel asked of it, from the gate's verdict kept when it ended.
+def how_cancel_won(request: Kept) -> str | None:
     asked = request.cancel_asked_at is not None and request.cancel_refused is None
     if not asked or (request.stands, request.work) != (Stands.FAILED, Work.MOVE):
         return None
@@ -530,8 +528,6 @@ class PostgresRecord(Record):
             lambda session: [Request.model_validate(row) for row in session.execute(Sql.RECENTLY_ENDED).fetchall()],
         )
 
-    # Of the requests that ended a short while ago, with their lines: the one each lane ended last, and every one that
-    # was replaced or had a cancel asked of it, however it ended.
     def ended_lately(self) -> list[Kept]:
         shown = self.gate.made(MINUTES_AN_ENDED_REQUEST_IS_SHOWN)
         return self.reading(
