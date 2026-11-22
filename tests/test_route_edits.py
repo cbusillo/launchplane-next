@@ -5,7 +5,7 @@ from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
 from launchplane.record import Record, Stands
 from launchplane.steps import MaintenanceOutcome
-from launchplane.telling import Witness
+from launchplane.telling import Answered, Witness
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendProxy
 from tests.pretend_record import begun
 from tests.test_act import lane_brought_up_with_a, lane_in_maintenance, lanes_on
@@ -39,7 +39,7 @@ def accepted_and_not_answered(proxy: PretendProxy, *, has_run: bool) -> list[Sen
     return held
 
 
-ENDS_AS = {"a retire": "retired", "a maintenance begin": "in maintenance", "a maintenance end": "not in maintenance"}
+ENDS_AS = {"a retire": "retired", "a maintenance begin": "in maintenance", "a maintenance end": "ended"}
 
 
 @EDITING
@@ -57,8 +57,7 @@ def test_a_change_of_the_route_whose_reply_is_lost_never_fails_its_request_half_
     assert (left.stands, [each.ended for each in left.attempts]) == (Stands.WORKING, ["unfinished"])
     assert worker.work_next() is True
     ended = kept_of(record, request.id)
-    outcome = ENDS_AS[asked] if has_run or work is not END else "ended"
-    assert (ended.stands, (ended.answer or {})["outcome"], edit(*held[0]) != DONE) == (Stands.DONE, outcome, True)
+    assert (ended.stands, (ended.answer or {})["outcome"], edit(*held[0]) != DONE) == (Stands.DONE, ENDS_AS[asked], True)
     running = {part.state for part in (*proxy.host.instances.values(), *proxy.host.background_services.values())}
     assert work is not BEGIN or (proxy.written[WEB_ADDRESS], running) == (BACK_SOON, {InstanceState.STOPPED})
 
@@ -138,18 +137,21 @@ def test_a_request_found_working_fences_its_earlier_attempts_before_it_reads_its
 def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_again_and_decided_again() -> None:
     proxy = lane_brought_up_with_a()
     edit = proxy.edit
-    told: list[tuple[str, str | None]] = []
+    told: list[tuple[str, bool | None, str | None]] = []
+
+    def about_to(did: str, _web_address: str, _to: str | None) -> Answered:
+        return lambda made, error: told.append((did, made, error))
 
     def not_the_route_read_once(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
         proxy.edit = edit
         return edit(web_address, generation, attempt, f"{read}, as it no longer is", container)
 
     proxy.edit = not_the_route_read_once
-    answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(tell=lambda did, error: told.append((did, error))))
+    answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(about_to=about_to))
     switch = f"send {WEB_ADDRESS} to {BACK_SOON}"
     assert (answer.outcome, told[:2]) == (
         MaintenanceOutcome.IN_MAINTENANCE,
-        [(switch, "The gate left the route: it was not the one read."), (switch, None)],
+        [(switch, False, "The gate left the route: it was not the one read."), (switch, True, None)],
     )
 
 

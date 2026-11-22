@@ -174,7 +174,7 @@ def written_route_from_file(text: str, web_address: str, written_at: datetime) -
     found = INSTANCE_URL.search(body)
     if found is None or body != route_text(web_address, found["container"]):
         return Unread(asked=f"The routes file {route_file_of(web_address)}", why="it is not the route Launchplane writes")
-    return WrittenRoute(found["container"], written_at, text)
+    return WrittenRoute(found["container"], written_at, text, first.removeprefix("# ") if body is rest else "")
 
 
 def is_loaded(route: Loaded | None, container: str | None, *, enabled: bool) -> bool:

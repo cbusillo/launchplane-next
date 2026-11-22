@@ -17,7 +17,6 @@ from launchplane.instance import (
 from launchplane.judge import LOGIN_KINDS, Finding, Judgement, Kind, subjects_of
 from launchplane.product import Product
 from launchplane.steps import (
-    CANCEL_WON,
     Abandon,
     Action,
     AwaitBackgroundService,
@@ -334,7 +333,7 @@ def discard(move: Move, instance: RunningInstance | RunningBackgroundService) ->
     container = instance.container
     refusal = removal_refused(move.done, container)
     if refusal is not None and move.gate.verdict is Verdict.ABANDONED:
-        return CannotPutBack(f"{CANCEL_WON}, and {container} could not be removed to put the lane back: {refusal}")
+        return CannotPutBack(f"The cancel won, and {container} could not be removed to put the lane back: {refusal}")
     if refusal is not None:
         return Stop(f"{container} could not be removed: {refusal} {changes_so_far(move.done)}")
     if (wait := unread_owner([instance])) is not None:

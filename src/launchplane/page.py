@@ -8,8 +8,7 @@ from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import InstanceState, PartOfLane, Verdict
 from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
-from launchplane.record import ENDED, Kept, Request, Stands, how_cancelled, how_replaced
-from launchplane.steps import CANCEL_WON
+from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancel_won, how_cancelled, how_replaced
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -103,9 +102,34 @@ def taken_up(request: Kept) -> str:
     return f"Taken up {len(request.attempts)} times, and again by itself until it ends. The last attempt did not end it: {why} "
 
 
+NO_ANSWER = "may have been sent, no answer"
+
+
+# A change of the route says how far it is known to have got: about to be sent, what the gate answered, or no answer,
+# and then that a later attempt read it as the request's own. Any other line says what was done, or that it was refused.
+def line_of(event: Event, attempt_is_open: bool) -> str:
+    if event.action is None:
+        return event.did if event.error is None else f"{event.did}, refused"
+    reply = event.outcome
+    if reply is None:
+        return f"about to {event.did}" if attempt_is_open else f"{event.did}: {NO_ANSWER}"
+    heard = {None: NO_ANSWER, True: "done", False: "refused"}[reply.made]
+    return f"{event.did}: {heard}{'' if reply.read_back_at is None else ', then read as made by this request'}"
+
+
+def lines_of(request: Kept) -> list[str]:
+    open_now = {attempt.number for attempt in request.attempts if attempt.ended is None}
+    return [line_of(event, event.attempt in open_now) for event in request.events]
+
+
 def done_so_far(request: Kept) -> str:
-    lines = [event.did if event.error is None else f"{event.did}, refused" for event in request.events]
+    lines = lines_of(request)
     return f"{taken_up(request)}So far: {'; '.join(lines)}." if lines else f"{taken_up(request)}Nothing done so far."
+
+
+# A request that has just ended keeps its lines on the page, so the last of them can be read after it has ended.
+def how_it_ended(request: Kept) -> str:
+    return f"{request.error or f'It ended as {request.stands}.'} Its lines: {'; '.join(lines_of(request)) or 'none'}."
 
 
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.
@@ -133,8 +157,10 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
         return how_cancelled(request)
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
-    if request.stands is Stands.FAILED and (request.error or "").startswith(CANCEL_WON):
-        return request.error
+    if (won := how_cancel_won(request)) is not None:
+        return won
+    if isinstance(request, Kept) and request.stands in ENDED and request.cancel_asked_at is None:
+        return how_it_ended(request)
     if request.stands in ENDED:
         why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return f"{why} It ended as {request.stands}."
@@ -239,7 +265,7 @@ def no_lane_card(status: Status) -> list[Card]:
     return [Card(title=NO_LANE, rows=rows)] if rows else []
 
 
-# Every request that has not ended, then those replaced or asked to cancel that ended a short while ago.
+# Every request that has not ended, then those that ended a short while ago and are still shown.
 def shown_requests(status: Status) -> list[Request]:
     return [*status.requests, *status.cancels]
 

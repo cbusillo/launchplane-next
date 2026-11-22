@@ -295,10 +295,6 @@ class Wait(Stop):
     pass
 
 
-# How the error of such an ending begins, so a cancel asked again says that it won.
-CANCEL_WON = "The cancel won"
-
-
 # A cancel won at the gate and a part of its release could not be removed: the lane cannot be put back.
 @dataclass(frozen=True)
 class CannotPutBack:

@@ -37,12 +37,13 @@ from launchplane.record import (
     Stands,
     Unconfirmed,
     database,
+    how_cancel_won,
     how_cancelled,
     how_replaced,
 )
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
-from launchplane.steps import CANCEL_WON, MaintenanceResult, MoveResult, RetireResult
+from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
 from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker, carried_out
 
@@ -146,6 +147,11 @@ def lane_answer(judged: Judgement) -> LaneAnswer:
     )
 
 
+# What `cancels` lists. A request that only ended is on its lane's card for a while, and not in that list.
+def is_cancel_or_replaced(request: KeptRequest) -> bool:
+    return request.cancel_asked_at is not None or request.stands is Stands.REPLACED
+
+
 def running_answer(status: Status) -> RunningAnswer:
     on_host = status.reading.parts
     receives = {entry.sends_to_container: entry.web_address for entry in status.web_addresses}
@@ -161,7 +167,7 @@ def running_answer(status: Status) -> RunningAnswer:
         web_addresses=status.web_addresses,
         lanes=[lane_answer(judged) for judged in status.lanes],
         requests=status.requests,
-        cancels=status.cancels,
+        cancels=list[KeptRequest](each for each in status.cancels if is_cancel_or_replaced(each)),
         record_error=status.record_error,
         cards=cards(status),
     )
@@ -418,8 +424,8 @@ def why_not_cancelled(kept: Kept) -> str | None:
     ended = f"Request {kept.id} ended as {kept.stands}"
     if kept.cancel_refused is not None:
         return f"{kept.cancel_refused} {ended}." if kept.stands in ENDED else kept.cancel_refused
-    if kept.stands is Stands.FAILED and kept.cancel_asked_at is not None and (kept.error or "").startswith(CANCEL_WON):
-        return f"{kept.error} {ended}."
+    if (won := how_cancel_won(kept)) is not None:
+        return f"{won} {ended}."
     if kept.stands in (Stands.DONE, Stands.FAILED, Stands.REPLACED):
         return f"{ended}, so it was not cancelled. Nothing was changed by this call."
     return None
@@ -536,7 +542,7 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     record = PostgresRecord(database(), host)
-    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_cancels=record.cancels_answered)
+    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_ended=record.ended_lately)
     worker = Worker(record, lanes, host)
     worker.start()
     app = create_app(lanes.read_status, record, worker.wake, host, lanes)

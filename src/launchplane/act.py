@@ -38,7 +38,7 @@ from launchplane.judge import (
 )
 from launchplane.product import Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.record import Kept, RecordError, Request, Stands
+from launchplane.record import Kept, RecordError, Stands
 from launchplane.steps import (
     Action,
     Cancel,
@@ -103,7 +103,6 @@ class Proxy(Protocol):
 
 type ProductReader = Callable[[str], Product]
 type KeptReader = Callable[[], list[Kept]]
-type CancelsReader = Callable[[], list[Request]]
 
 
 class Stopped(Exception):
@@ -147,7 +146,8 @@ class Status:
     web_addresses: list[WebAddressJudged]
     requests: list[Kept] = field(default_factory=list[Kept])
     record_error: str | None = None
-    cancels: list[Request] = field(default_factory=list[Request])
+    # Requests that ended a short while ago: each lane's last, and every one replaced or asked to cancel.
+    cancels: list[Kept] = field(default_factory=list[Kept])
     # What the gate answers for each move being worked that a cancel was asked of. None is a gate that gave no answer.
     cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
 
@@ -183,6 +183,8 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any], object]] = {
 # Nothing is told as done before it is done: a change that put a lane back is marked so once the host has made it.
 def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) -> Event:
     witness.hold()
+    if isinstance(action, steps.EditRoute | steps.Switch):
+        return route_changed(action, take, witness)
     try:
         event = take(action, witness)
     except (ContainerHostError, ProxyError) as error:
@@ -190,6 +192,21 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
         raise
     did, refusal = told(action, event)
     witness.tell(f"{did}{TO_PUT_BACK}" if back and plan.change_made_by(event) is not None else did, refusal)
+    return event
+
+
+# A change of the route is written down before it is sent, and what the gate answered is written to the same line. An
+# error is no answer: only a later reading of the routes file says whether the change was made.
+def route_changed(action: steps.EditRoute | steps.Switch, take: Take, witness: Witness) -> Event:
+    to = action.to if isinstance(action, steps.EditRoute) else action.container
+    answered = witness.about_to(named(action), action.web_address, to)
+    try:
+        event = take(action, witness)
+    except (ContainerHostError, ProxyError) as error:
+        answered(None, str(error))
+        raise
+    refusal = told(action, event)[1]
+    answered(refusal is None, refusal)
     return event
 
 
@@ -212,6 +229,7 @@ def settle[Answer](
     cancel: Cancel | None = None
     while True:
         lane = read()
+        witness.look(lane.route)
         # Two answers where a lane has room for one hold it: no winner is chosen, neither is touched, no call answers success.
         if isinstance(lane.route.loaded, Conflicting):
             raise Waiting(f"{lane.route.loaded}. The lane is held as it is until the proxy has one. Nothing more was done.")
@@ -250,14 +268,14 @@ class Lanes:
         read_product: ProductReader = lambda _product: Product(),
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
-        read_cancels: CancelsReader = lambda: [],
+        read_ended: KeptReader = lambda: [],
     ) -> None:
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
         self.name_fresh = name_fresh
         self.read_unfinished = read_unfinished
-        self.read_cancels = read_cancels
+        self.read_ended = read_ended
 
     # The containers are read before the proxy, so what is secret on the host is known before anything can be said of it.
     @observing()
@@ -300,7 +318,7 @@ class Lanes:
         before, unread_before = self.kept_or_why_not(self.read_unfinished)
         reading = self.read(EVERY_LANE if only is None else Scope(lane=only, web_addresses=True))
         requests, unread_after = self.kept_or_why_not(self.read_unfinished, unread_before)
-        cancels, record_error = self.kept_or_why_not(self.read_cancels, unread_after)
+        cancels, record_error = self.kept_or_why_not(self.read_ended, unread_after)
         requests = [] if record_error else requests
         at_work = {(each.product, each.lane): each.work for each in (*before, *requests) if each.stands is Stands.WORKING}
         # With either reading of the record missing, which lane a request is at work on is not known for any lane.
@@ -385,6 +403,7 @@ class Lanes:
         # that is no answer is not taken for no mark.
         web_address = web_address_of(product, lane)
         route = self.read(ROUTES_ONLY).proxy.route_of(web_address)
+        witness.look(route)
         if not (route.in_maintenance or isinstance(route.file, Unread) or isinstance(route.loaded, Conflicting)):
             if route.proxy_runs and not is_loaded_as_written(route):
                 self.proxy.await_route(web_address, route.written)

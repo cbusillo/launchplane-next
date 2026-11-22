@@ -40,7 +40,7 @@ def bed_on(record: Record) -> Bed:
     proxy.route(WEB_ADDRESS, "a")
     lanes = Lanes(proxy.host, proxy, name_fresh=numbered_names(), read_unfinished=record.unfinished)
     worker = Worker(record, lanes, NO_SECRETS)
-    lanes.read_cancels = record.cancels_answered
+    lanes.read_ended = record.ended_lately
     app = create_app(lanes.read_status, record, worker.wake, NO_SECRETS, lanes)
     return Bed(TestClient(app), proxy, record, worker, app)
 
