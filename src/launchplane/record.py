@@ -217,7 +217,7 @@ class Kept(Request):
     events: list[Event]
 
     def own_commands(self) -> list[Command]:
-        return [sent for each in self.events if (sent := each.command) is not None and each.is_own]
+        return [sent for sent in (each.command for each in self.events if each.is_own) if sent is not None]
 
     def commands_not_answered(self) -> list[str]:
         lost = [each for each in self.events if each.command is not None and each.has_no_answer]
