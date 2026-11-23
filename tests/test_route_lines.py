@@ -298,7 +298,7 @@ def carried_on(record: PretendRecord, proxy: PretendProxy, request: int) -> tupl
     while kept_of(record, request).stands is Stands.WORKING:
         assert worker.work_next() is True
     left = (proxy.written, sorted(proxy.host.instances), sorted(proxy.host.background_services), sorted(proxy.host.data_sets))
-    return calls, kept_of(record, request), left
+    return calls, kept_of(record, request), (*left, list(proxy.host.logins_sent))
 
 
 @pytest.mark.parametrize("interrupted", INTERRUPTED.values(), ids=INTERRUPTED.keys())

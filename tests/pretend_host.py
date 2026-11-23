@@ -8,7 +8,8 @@ from requests import ReadTimeout
 
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
-from launchplane.docker_answers import ContainerHostRefused, LoginRemovalRefused, attempting, sent
+from launchplane.data_set import login_of
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused, attempting, sent
 from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -40,7 +41,7 @@ from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
 from launchplane.steps import FreshNames, MaintenanceResult, MoveResult, RetireResult, Verb
-from launchplane.telling import NOBODY, Witness
+from launchplane.telling import NOBODY, Said, Witness
 
 WEB_ADDRESS = "testing.site.test"
 # The generations of a release under test and of one before it.
@@ -83,6 +84,10 @@ class PretendHost:
         self.commands_refused: set[str] = set()
         # The commands Docker does, once, and whose reply never comes.
         self.replies_lost: set[str] = set()
+        # Each login a database server was sent the making or the removing of.
+        self.logins_sent: list[str] = []
+        # The logins whose next making or removing the server gives no answer to.
+        self.logins_unanswered: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -128,14 +133,34 @@ class PretendHost:
             of_lane(self.instances.values()), of_lane(self.background_services.values()), of_lane(self.data_sets.values()), networks
         )
 
-    def remove_unheld_logins(self, database: str) -> Unread | None:
+    def unheld_logins(self, database: str) -> list[str]:
+        servers = [each for found in self.data_sets.values() for each in found.databases if each.container == database]
+        return [login for each in servers if isinstance(each.unheld_logins, tuple) for login in each.unheld_logins]
+
+    # A pretend login is made or removed with its line written and answered as the container host does it. The server
+    # refuses the removals a test has it refuse, by the name of the server or of the login.
+    def change_login(self, by: Witness, verb: Verb, database: str, login: str) -> None:
+        answered = by.sending(verb, database, login)
+        self.logins_sent.append(f"{verb} {login}")
+        if login in self.logins_unanswered:
+            self.logins_unanswered.remove(login)
+            answered(None, "psql: connection to server was lost")
+            raise ContainerHostError(
+                f"The database {database} did not {verb} the login {login}: psql: connection to server was lost"
+            )
+        if verb == "remove" and self.removals_refused & {database, login}:
+            answered(Said.REFUSED, "it owns objects")
+            raise LoginRemovalRefused(f"The database {database} did not remove the login {login}: it owns objects")
+        answered(Said.CHANGED, None)
+
+    def remove_unheld_logins(self, database: str, by: Witness = NOBODY) -> Unread | None:
         self.record(f"remove logins from {database}")
         if database in self.holders_unread:
             return Unread(asked=f"Which logins of the database {database} no container holds", why="timed out")
-        if database in self.removals_refused:
-            raise LoginRemovalRefused(f"The database {database} did not remove the login i_left: it owns objects")
+        for login in self.unheld_logins(database):
+            self.change_login(by, "remove", database, login)
+            self.change_database(database, unheld_logins=tuple(self.unheld_logins(database)[1:]))
         self.logins_left_in.pop(database, None)
-        self.change_database(database, unheld_logins=())
         return None
 
     # A pretend command for a part writes its line and has its answer told as the container host does, and Docker
@@ -153,6 +178,8 @@ class PretendHost:
     def start_instance(
         self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
     ) -> None:
+        if use is not None:
+            self.change_login(by, "make", use.database_container, login_of(container))
         with self.command(by, "make", container):
             self.place(target, container, InstanceState.STOPPED, use, generation)
         with self.command(by, "start", container):

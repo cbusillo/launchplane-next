@@ -190,7 +190,7 @@ def test_a_cancel_that_won_says_a_login_was_removed_only_where_it_was_and_names_
         proxy.host.holders_unread.add(DATABASE)
     kept = cancelled_while_checking(record, proxy)
     assert kept.stands is Stands.CANCELLED and kept.answer is not None
-    removed = [each for each in kept.answer["put_back"] if "logins" in each]
+    removed = [each for each in kept.answer["put_back"] if "login" in each]
     assert (len(removed), len(kept.answer["logins_not_read"])) == ((1, 0) if holders_read else (0, 1)), kept.answer
     assert proxy.host.data_sets["data-1"].databases[0].unheld_logins == (() if holders_read else ("i_left",))
 

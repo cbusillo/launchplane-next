@@ -359,7 +359,7 @@ class ContainerHost:
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
             stamped = replace(options, labels=options.labels | stamp_of(generation))
-            self.run_part(stamped, use, lambda on: self.logins.make(container, on), by)
+            self.run_part(stamped, use, lambda on: self.logins.make(container, on, by), by)
 
     def start_background_service(
         self,
@@ -472,14 +472,14 @@ class ContainerHost:
             self.retire_container(container, by)
 
     # A read that fails is answered as unread and nothing is removed. A removal that fails is raised.
-    def remove_unheld_logins(self, database: str) -> Unread | None:
+    def remove_unheld_logins(self, database: str, by: Witness = NOBODY) -> Unread | None:
         try:
             with attempting(f"Reading the logins of the database {database} and who holds them", self.address):
                 unheld = self.logins.unheld(database)
         except ContainerHostError as error:
             return Unread(asked=f"Which logins of the database {database} no container holds", why=str(error))
         with attempting(f"Removing the logins no container holds from the database {database}", self.address):
-            self.logins.remove(database, unheld)
+            self.logins.remove(database, unheld, by)
         return None
 
     def read_log_tail(self, container: str) -> str:

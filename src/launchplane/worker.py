@@ -5,7 +5,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel
 
@@ -57,16 +57,12 @@ class Carries(Protocol):
 @dataclass(frozen=True)
 class Ending:
     stands: Stands
-    answer: dict[str, Any] | None = None
+    answer: BaseModel | None = None
     error: str | None = None
     verdict: Verdict = Verdict.NONE
     left_open: bool = False
     # A database server refused to remove a login. The request ends on that, and the removal is not sent again.
     write_refused: bool = False
-
-
-def ending(stands: Stands, answer: BaseModel | None, error: str | None = None, verdict: Verdict = Verdict.NONE) -> Ending:
-    return Ending(stands, None if answer is None else answer.model_dump(mode="json"), error, verdict)
 
 
 def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness) -> Answer:
@@ -113,7 +109,7 @@ def accounted(answer: Answer, read: Callable[[], Kept | None]) -> Answer:
     if isinstance(answer, MoveResult):
         return of_every_attempt(answer, kept)
     own = kept.own_commands()
-    removed = [each.container for each in own if each.verb == "remove"]
+    removed = [each.container for each in own if each.verb == "remove" and each.login is None]
     retired = RetireOutcome.RETIRED if own and answer.outcome is RetireOutcome.UNCHANGED else answer.outcome
     return answer.model_copy(update={"retired_containers": removed, "outcome": retired})
 
@@ -265,7 +261,12 @@ class Worker:
                 return self.left_open(attempt, why)
         kept = self.record.read(request.id) if (came_to.stands, came_to.answer) == (Stands.FAILED, None) else None
         error = came_to.error if kept is None else f"{came_to.error}{kept.commands_said()}"
-        if self.record.end(attempt, came_to.stands, came_to.answer, error, decided=came_to.verdict):
+        # The account is built here and nowhere else, once cleaning up has written its lines.
+        answer = came_to.answer
+        if isinstance(answer, MoveResult | RetireResult | MaintenanceResult):
+            answer = accounted(answer, partial(self.record.read, request.id))
+        saved = None if answer is None else answer.model_dump(mode="json")
+        if self.record.end(attempt, came_to.stands, saved, error, decided=came_to.verdict):
             return True
         return self.cancel_carried_to_the_gate(request, attempt)
 
@@ -306,7 +307,7 @@ class Worker:
         except Cancelled as cancelled:
             kept = self.record.read(request.id)
             told = [] if kept is None else put_back_told(kept)
-            return ending(Stands.CANCELLED, cancelled.put_back.model_copy(update={"put_back": told}), verdict=Verdict.ABANDONED)
+            return Ending(Stands.CANCELLED, cancelled.put_back.model_copy(update={"put_back": told}), verdict=Verdict.ABANDONED)
         except CouldNotPutBack as error:
             return Ending(Stands.FAILED, error=str(error), verdict=Verdict.ABANDONED)
         except STOPPED as error:
@@ -322,7 +323,6 @@ class Worker:
             log.exception("%s failed in a way Launchplane does not know", request.attempted())
             why = f"{request.attempted()} failed in a way Launchplane does not know, and is safe to ask again: {error!r}"
             return Ending(Stands.FAILED, error=why)
-        answer = accounted(answer, partial(self.record.read, request.id))
         named = request.delete_data_set
         if isinstance(answer, RetireResult) and named not in (None, answer.deleted_data_set, *answer.kept_data_sets):
             # The lane has no such data set. This request deleted it only if an attempt of it sent that: history, for the answer.
@@ -335,4 +335,4 @@ class Worker:
         error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED
         verdict = Verdict.COMMITTED if switched else Verdict.NONE
-        return ending(Stands.FAILED if failed else Stands.DONE, answer, error if failed else None, verdict)
+        return Ending(Stands.FAILED if failed else Stands.DONE, answer, error if failed else None, verdict)

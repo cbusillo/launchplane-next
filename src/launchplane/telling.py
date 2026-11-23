@@ -54,10 +54,11 @@ class Witness:
     def __repr__(self) -> str:
         return f"the witness of attempt {self.attempt} of {self.generation or 'no request'}"
 
-    # One command for one named container. A line that cannot be written raises here, so the command is not sent.
-    def sending(self, verb: Verb, container: str) -> Answered:
-        command = Command(verb=verb, container=container)
-        answered = self.write(f"{verb} {container}{self.purpose}", command)
+    # One command for one named container, or one login of a database server. A line that cannot be written raises
+    # here, so nothing is sent.
+    def sending(self, verb: Verb, container: str, login: str | None = None) -> Answered:
+        command = Command(verb=verb, container=container, login=login)
+        answered = self.write(f"{command.line}{self.purpose}", command)
 
         def heard(said: Said | None, error: str | None) -> None:
             answered(said, error)
@@ -106,8 +107,17 @@ NAMED: dict[type, Callable[[Any], str]] = {
 }
 
 
-# The steps for a part. Each command has its own line, so the step is told only where no command's line says why.
-OF_A_PART = (steps.StartInstance, steps.StartBackgroundService, steps.Retire, steps.Discard, steps.StopPart, steps.StartStopped)
+# The steps for a part or for logins. Each command and each login has its own line, so the step is told only where no
+# line says why.
+OF_A_PART = (
+    steps.StartInstance,
+    steps.StartBackgroundService,
+    steps.Retire,
+    steps.Discard,
+    steps.StopPart,
+    steps.StartStopped,
+    steps.RemoveLogins,
+)
 
 # How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.
 LOOKS = ("wait for ", "check ", "watch ", "read the log ", "mark the release ")
