@@ -116,7 +116,7 @@ Traefik v3.7.18 runs on the container host as `launchplane-proxy`, on port 80, a
 - **Asking for the old build while its instance is still stopping answers `check failed` for a good build.** Confirmed once, after a kill during retirement. Asking again works, and the web address never moves.
 - **Container names are 48 random bits and are not checked against names a route already points at.** A clash with a route to an instance that no longer exists would send that web address's visitors to the new instance before its check. Comes back if names get shorter.
 - **A move does not repair a route the proxy reports as disabled or with a warning.** Retiring the lane and moving it again rewrites the route.
-- **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A change of the route and a command for an instance or a background service are the exceptions: each has its own line, which says whether the request made it. A removal of logins that found none left to remove is listed as one.
+- **What a request did across attempts is sorted by how each told line begins.** A request taken up more than once lists as changes the lines of its events that do not begin as a wait, a check, a watch, a log read or a mark at the gate. A change of the route, a command for an instance or a background service, and a login made or removed are the exceptions: each has its own line, which says whether the request made it.
 - **Two routers on another lane's web address can stop a retire after its route is removed.** The retire removes its lane's route first, and the guard then refuses to remove any container while any web address has two routers. That lane has lost its visitors, and its retire stays `working` until the other lane has one router.
 - **A second router that appears between a move's last reading and its rename does not stop that rename.** The move finds the conflict at its next reading and holds from there, with the routes file already renamed.
 - **A router Launchplane cannot make sense of hides a conflict.** A second router for a web address whose target is on another port, or is not an instance, makes the whole reading of the proxy fail: `/running` answers `503` with why, and does not name the two routers.
@@ -222,6 +222,8 @@ One more case is a retire's. Its removal of the route is accepted by Docker and 
 Another is ending maintenance's, on the lane with a database and a background service: [the maintenance watch](#the-maintenance-watch) by hand. The end is held before its change of the route, where the request's line reads `about to` and a visitor still gets the back soon page. It is then held after the change has taken effect on the host and before the worker has the reply, and Launchplane is killed there. The same request ends `done` and `ended` in a second attempt, its line with no answer and read back; the instance serves, the lane beside it answers every probe, and an end asked after it answers `not in maintenance`. Case 1 also asserts that its switch, which landed after recovery's first reading, is read back and is in the move's `did`.
 
 The last is a move's, on the same lane: [the start watch](#the-start-watch) by hand. The move is held before it starts the new background service, then held again once the line of that start is in the record and before the command is sent, and Launchplane is killed there. The same request ends `done` and `switched` in a second attempt. Its first line of the start has no answer and stays so, its second is done, `did` has that start once, and the lane beside it answers every probe.
+
+One more move, on the same lane, is [the login watch](#the-login-watch) by hand. The move is held once the login of its new instance is made and before the instance is, and Launchplane is killed there. The same request ends `done` and `switched` in a second attempt. It has four lines for logins, each answered as done and each in `did`: the first attempt's making, then the second attempt's removal of that login, which no container ever held, its making of the login of the instance it does start, and after the switch its removal of the old instance's login.
 
 `tests/test_bed_gate.py` proves the gate alone on the real host, with no worker: it sends the gate's own commands to the proxy's container and counts the renames by the inode of the routes file. Its five cases are a command killed just after the rename, a reply lost after the rename, a switch held before the lock whose candidate is discarded meanwhile, a cancel and a switch each sent again after the cancel won, and two generations on one lane. They take 13 s. `tests/test_gate.py` runs the gate's command against a folder on the machine that tests.
 
@@ -329,6 +331,53 @@ curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouc
    The third command prints the attempts, `interrupted` then `done`, the outcome `switched`, and the request's account. In it `start` and the background service's name is there once. The last answers `pretend product b` and `pretend product a`. Look at the page now: the request's row is `done` and stays for 10 minutes, and among its lines are, in this order, the start as `: may have been sent, no answer`; a `stop` of the same container, `: found already as asked`, and its `remove`, `: done`, which is the second attempt clearing away the container that was made and never started; then its `make` and its `start` again, each `: done`. After them `retire` and the old instance's name, `, refused`, is the gate answering that an earlier release was switched to that instance, so it is not removed as something a failed move left. It is removed next as the instance this release replaced, visitors being on the new one by then: its `stop` and `remove` follow, each `: done`.
 
 4. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
+
+```
+for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
+ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
+```
+
+### The login watch
+
+A move on a lane with data, killed once the login of its new instance is made and before the instance is. Every block pastes into zsh as it stands. The lane, the page and the holding mode are those of [the maintenance watch](#the-maintenance-watch).
+
+```
+L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
+P=/lanes/test-bed-gate-ledger; V=http://docker-lp-scratch.shiny/
+ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
+until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
+curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+curl -s -X PUT "$H/holds/after.logins.make"
+R=$(curl -s -X POST "$L$P/held/move" -H "$J" -d '{"build":"launchplane-test-ledger:b"}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
+until curl -s "$H/holds" | grep -q '"stopped_at": \["after.logins.make"\]'; do sleep 1; done
+```
+
+1. **Held with the login made and no instance for it.** The block ends once the move is stopped at its hold. On the page, the card of `test-bed-gate-ledger · held` has the request as `working`, and its note is one line: `make the login i_` and 12 hex digits, ` on ` the database server, `: done`. The lane still has its one instance, and a visitor gets `pretend product a`. The second command asks the server: it has two logins, the old instance's and the new one, which no container holds.
+
+```
+curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"
+ssh root@docker-lp-scratch.shiny 'docker exec $(docker ps --quiet --filter label=launchplane.lane=held --filter label=launchplane.part=database) psql -U postgres -d app -Atc "select rolname from pg_roles where rolname like \$\$i\\_%\$\$ order by 1"; docker ps --filter label=launchplane.lane=held --filter label=launchplane.part=web --format "{{.Names}}"'
+```
+
+2. **Killed, and let go.**
+
+```
+curl -s -X POST "$H/kill"; until curl -sf -X DELETE "$H/holds" >/dev/null; do sleep 1; done
+until curl -s "$L/requests/$R" | grep -q '"stands": "done"'; do sleep 1; done
+curl -s "$L/requests/$R" | python3 -c 'import sys, json; r = json.load(sys.stdin); print([a["ended"] for a in r["attempts"]], r["answer"]["outcome"]); print(*r["answer"]["did"], sep="\n")'
+curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouched.test-bed-gate-ledger.test' "$V"
+```
+
+   The third command prints the attempts, `interrupted` then `done`, the outcome `switched`, and the request's account. Four of its entries are logins, in this order: `make the login` of step 1; `remove the login` of the same name, which is the second attempt clearing away the login no instance was made for; `make the login` of another name, for the instance it then makes and starts; and, after the switch and the removal of the old instance, `remove the login` of the old instance. The last command answers `pretend product b` and `pretend product a`. Look at the page now: the request's row is `done` and stays for 10 minutes, and its note has the same four lines in the same order, each ending `: done`, among the lines of its commands.
+
+3. **What the server has now.** One login, that of the instance that serves:
+
+```
+ssh root@docker-lp-scratch.shiny 'docker exec $(docker ps --quiet --filter label=launchplane.lane=held --filter label=launchplane.part=database) psql -U postgres -d app -Atc "select rolname from pg_roles where rolname like \$\$i\\_%\$\$ order by 1"; docker ps --filter label=launchplane.lane=held --filter label=launchplane.part=web --format "{{.Names}}"'
+```
+
+4. **Put the bed back.** As in [the start watch](#the-start-watch):
 
 ```
 for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done

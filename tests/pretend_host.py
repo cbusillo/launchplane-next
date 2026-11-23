@@ -135,8 +135,8 @@ class PretendHost:
         servers = [each for found in self.data_sets.values() for each in found.databases if each.container == database]
         return [login for each in servers if isinstance(each.unheld_logins, tuple) for login in each.unheld_logins]
 
-    # A pretend login is made or removed with its line written and answered as the container host does it, and the
-    # server refuses the removals a test has it refuse, by the name of the server or of the login.
+    # A pretend login is made or removed with its line written and answered as the container host does it. The server
+    # refuses the removals a test has it refuse, by the name of the server or of the login.
     def change_login(self, by: Witness, verb: Verb, database: str, login: str) -> None:
         answered = by.sending(verb, database, login)
         self.logins_sent.append(f"{verb} {login}")

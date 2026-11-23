@@ -39,14 +39,14 @@ Each of the four calls writes a request and answers `202` with the request and a
 | `replaced_by` | The newer request for the lane that took the waiting place from this one. `null` unless it stands as `replaced`. |
 | `cancel_refused` | Why a cancel that was asked was not carried out: see [cancelling](#cancelling). For a move it is written by whoever learns it at the gate, the call that cancels or the worker. |
 | `attempts` | Each time a worker took the request up: `number`, `began_at`, `ended_at`, and `ended` as `done`, `failed`, `cancelled`, `interrupted`, or `unfinished` for a request that could not be ended yet. A request at work that has more than one was taken up again that often, and the last one that is over says why: `interrupted` is a Launchplane that stopped, or lost its record, while at work on it, and `unfinished` has its reason in `error`. |
-| `events` | One line for each thing Launchplane did or was refused, in order: `at`, the `attempt` it belongs to, `did`, and `error` with the real error where it was refused. The line of [a change of the route](#a-change-of-the-route) also has `action` and `outcome`, and the line of [a command for a part](#a-command-for-a-part) has `command` and `outcome`. |
+| `events` | One line for each thing Launchplane did or was refused, in order: `at`, the `attempt` it belongs to, `did`, and `error` with the real error where it was refused. The line of [a change of the route](#a-change-of-the-route) also has `action` and `outcome`, and the line of [a command for a part](#a-command-for-a-part) or of [a login](#a-login-made-or-removed) has `command` and `outcome`. |
 | `release_verdict` | What [the gate](the-move.md#the-gate) answered for a move's release when the move ended: `none`, `committed` or `abandoned`. `null` for a request that is no move, one that has not ended, one a person gave up, and one that ended before November 21, 2026. |
 
 A request is `done` when its call would have answered `200`, `failed` when it would have answered `422` or `503`, `cancelled` when it was cancelled in time, and `replaced` when a newer request took its waiting place before it was taken up. `answer` is that of the attempt that ended the request, with what [a change of the route](#a-change-of-the-route), [a command for a part](#a-command-for-a-part) and the events of earlier attempts add to it; `events` has every attempt.
 
 ### A change of the route
 
-An edit of a lane's routes file and a release's switch are each one command sent to [the gate](the-move.md#the-gate). Each sending has one line, and only these lines and those of [a command for a part](#a-command-for-a-part) are written before the thing is done:
+An edit of a lane's routes file and a release's switch are each one command sent to [the gate](the-move.md#the-gate). Each sending has one line, and only these lines, those of [a command for a part](#a-command-for-a-part) and those of [a login](#a-login-made-or-removed) are written before the thing is done:
 
 - **Before it is sent** the line is written with `action`: the `web_address`, and `to`, the container it sends visitors to, or `null` for a removal. `outcome` is `null`. Nothing is sent on a line that was not written.
 - **After,** the gate's reply is written on the same line, with `outcome.at`. `outcome.made` is `true` when the gate made the change. It is `false` when the gate refused, with why in `error`, and when the gate found the route already as asked, with `outcome.already` `true`: a route someone else removed while a retire was in flight is not put down to the retire. The retire's answer still names the container the route went to, as before.
@@ -69,9 +69,21 @@ A command Docker answered as done, and a make read back, are the request's own. 
 
 Nothing is decided from these lines. With every one deleted, Launchplane makes the same calls on the host in the same order.
 
-What still comes from the step and not from a line of its own: a data set's network, volume and database server, a login, and starting the proxy. They are listed as before, once the step that did them returned, and are next.
+What still comes from the step and not from a line of its own: a data set's network, volume and database server, and starting the proxy. They are listed as before, once the step that did them returned, and are next.
 
 The page shows the line of a command as it shows a change of the route.
+
+### A login made or removed
+
+Each [login](data-sets.md#logins) Launchplane makes or removes on a lane's database server has one line. A removal of two logins has two lines, and starting an instance on a data set has a line for its login before the two for its container.
+
+- **Before its statements are sent** the line is written with `command`: the `verb`, `make` or `remove`, the `login`, and as `container` the database server. `did` is `make the login i_4f2a… on <server>` or `remove the login i_4f2a… from <server>`. The line is written after the reads that chose the login: the server's access rules, its logins, and which containers hold them. A login whose line cannot be written is neither made nor removed.
+- **After,** the server's answer is written on the same line before anything else is sent. `outcome.made` is `true` when the server did it. It is `false` when the server refused a statement, with the server's own words in `error`.
+- **With no answer,** `outcome.made` stays `null` and `error` has the real error. The statements may have run. Such a line is not put down to the request later. A making is the one exception, as for a container: when the first reading of a later attempt shows an instance stamped with the request's generation whose name is the one the login is named after, `outcome.read_back_at` is written.
+- A login the planner read as held by nobody and the server no longer has when it is asked just before the removal has no line: nothing is sent and nothing is put down to the request.
+- No line holds a statement, a password, its scrambled form or anything else the instance is given. The name of a login is not a secret: it is the end of its instance's name.
+
+A login the server answered as made or removed is the request's own, and is in the same account as its commands: a move's `did`, a cancel's `put_back`, the sentence after why a request failed, and whether a move answers `repaired` or a retire `retired` where nothing else changed. A retire's `retired_containers` lists containers only. Nothing is decided from these lines. With every one deleted, Launchplane sends the same commands and the same statements in the same order.
 
 `GET /requests` answers `unfinished`, every request waiting or working, oldest first and with its attempts and events, and `ended`, the 20 that ended last, newest first.
 

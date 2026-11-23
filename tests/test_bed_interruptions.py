@@ -1002,13 +1002,16 @@ def test_a_move_killed_once_its_instances_login_is_made_and_before_the_instance_
         "switched",
         ["interrupted", "done"],
     )
+    # The last is the login of the old instance, which nothing holds once that instance is retired.
     assert [(each["attempt"], each["command"]["verb"], each["command"]["login"] == left) for each in lines] == [
         (1, "make", True),
         (2, "remove", True),
         (2, "make", False),
+        (2, "remove", False),
     ]
     dids = [each["did"] for each in lines]
-    assert (dids[1], [each["outcome"]["made"] for each in lines]) == (f"remove the login {left} from {database}", [True, True, True])
+    assert (dids[1], [each["outcome"]["made"] for each in lines]) == (f"remove the login {left} from {database}", [True] * 4)
+    assert len(set(dids)) == 4
     assert [each for each in ended["answer"]["did"] if " the login " in each] == dids
     assert [note.index(f"{did}: done") for did in dids] == sorted(note.index(f"{did}: done") for did in dids)
     assert (answering(LEDGER), beside.failures, beside.answers_in_order()) == (LEDGER.answers[1], [], [untouched.answers[0]])
