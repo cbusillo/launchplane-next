@@ -217,7 +217,7 @@ class Kept(Request):
     events: list[Event]
 
     def own_commands(self) -> list[Command]:
-        return [each.command for each in self.events if each.command is not None and each.is_own]
+        return [sent for each in self.events if (sent := each.command) is not None and each.is_own]
 
     def commands_not_answered(self) -> list[str]:
         lost = [each for each in self.events if each.command is not None and each.has_no_answer]
@@ -225,8 +225,8 @@ class Kept(Request):
 
     # What a request that failed with no answer says of its commands for parts, beside why it failed.
     def commands_said(self) -> str:
-        said = [*(f"{each.verb} {each.container} was done" for each in self.own_commands()), *self.commands_not_answered()]
-        return f" Of its commands for the lane's parts, {'; '.join(said)}." if said else ""
+        told = [*(f"{each.verb} {each.container} was done" for each in self.own_commands()), *self.commands_not_answered()]
+        return f" Of its commands for the lane's parts, {'; '.join(told)}." if told else ""
 
     # The lines with no answer that a later reading can show to be the request's own. Of the makes of one container only
     # the last can be, and none where a make of it was answered: the container shows one make, and not which line sent it.

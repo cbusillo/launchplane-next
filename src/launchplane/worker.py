@@ -89,7 +89,7 @@ def is_change(event: Event) -> bool:
     return event.is_own if event.action or event.command else event.error is None and not event.did.startswith(LOOKS)
 
 
-# A move's account is its saved lines, whatever its attempts. What has no line is as the one attempt told it. It is history.
+# A move's account is its saved lines, whatever its attempts. A change with no line keeps the words of its one attempt.
 def of_every_attempt(answer: MoveResult, kept: Kept) -> MoveResult:
     told = iter(answer.did if len(kept.attempts) < 2 else ())
     did = [event.did if event.command is not None else next(told, event.did) for event in kept.events if is_change(event)]
