@@ -261,7 +261,7 @@ class Worker:
                 return self.left_open(attempt, why)
         kept = self.record.read(request.id) if (came_to.stands, came_to.answer) == (Stands.FAILED, None) else None
         error = came_to.error if kept is None else f"{came_to.error}{kept.commands_said()}"
-        # The account is built here and nowhere else, once the clean-up has written its lines.
+        # The account is built here and nowhere else, once cleaning up has written its lines.
         answer = came_to.answer
         if isinstance(answer, MoveResult | RetireResult | MaintenanceResult):
             answer = accounted(answer, partial(self.record.read, request.id))

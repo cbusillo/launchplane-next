@@ -294,7 +294,7 @@ def test_a_move_whose_new_build_fails_its_check_lists_the_login_its_clean_up_rem
     assert [f"{each}: done" for each in kept.answer["did"]] == [each for each in lines_of(kept) if each.endswith(": done")]
 
 
-# A move that answers a failure and leaves what it made to its clean-up, which removes the container and then its login.
+# A move that answers a failure and leaves what it made to be cleaned up: the container is removed, and then its login.
 class FailedAndCleanedUp(LanesNeverAsked):
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult:
         assert generation and attempt and witness
