@@ -4,14 +4,16 @@ import pytest
 from requests import ReadTimeout
 
 from launchplane.container_host import ContainerHost
-from launchplane.data_set import RULES_AS_READ
+from launchplane.data_set import RULES_AS_READ, login_of
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
-from launchplane.instance import Unread
+from launchplane.instance import LaneBuild, Unread
 from launchplane.page import line_of, lines_of
 from launchplane.record import Asked, Event, Interrupted, Record, Sent, Stands
-from launchplane.steps import Command
+from launchplane.steps import Command, MoveResult, Outcome
 from launchplane.telling import NOBODY, Answered, Said, Witness
-from tests.pretend_host import LaunchplaneKilled
+from launchplane.worker import Worker
+from tests.given_secrets import NO_SECRETS
+from tests.pretend_host import WEB_ADDRESS, LanesNeverAsked, LaunchplaneKilled
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 from tests.test_act import BUILD_B, lane_brought_up_with_a
 from tests.test_command_lines import Told, killed_before_it_answered, killed_once_it_wrote
@@ -272,3 +274,45 @@ def test_a_removal_of_a_login_that_is_gone_by_the_time_the_server_is_asked_earns
     kept = kept_of(record, request.id)
     assert kept.answer is not None and proxy.host.actions == [f"remove logins from {SERVER}"]
     assert (kept.stands, kept.answer["outcome"], kept.answer["did"], lines_of(kept)) == (Stands.DONE, "unchanged", [], [])
+
+
+def test_a_move_whose_new_build_fails_its_check_lists_the_login_its_clean_up_removed_as_its_card_does(record: Record) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.failing, retire = {f"site-testing-{number}" for number in range(9)}, proxy.host.retire_instance
+
+    # As the server shows it: the login of an instance that has gone is held by no container.
+    def retire_and_leave_its_login(container: str, by: Witness = NOBODY) -> None:
+        retire(container, by)
+        proxy.host.change_database(SERVER, unheld_logins=(login_of(container),))
+
+    proxy.host.retire_instance = retire_and_leave_its_login
+    request = record.write(MOVE_B, CALLER, None)
+    assert worker_on(proxy, record).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None and (kept.stands, kept.answer["outcome"]) == (Stands.FAILED, "check failed")
+    assert kept.answer["did"][-1] == f"remove the login i_0 from {SERVER}"
+    assert [f"{each}: done" for each in kept.answer["did"]] == [each for each in lines_of(kept) if each.endswith(": done")]
+
+
+# A move that answers a failure and leaves what it made to its clean-up, which removes the container and then its login.
+class FailedAndCleanedUp(LanesNeverAsked):
+    def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness, /) -> MoveResult:
+        assert generation and attempt and witness
+        failed = {"web_address": WEB_ADDRESS, "outcome": Outcome.CHECK_FAILED, "container_receiving_visitors": "a"}
+        return MoveResult.model_validate(target.model_dump() | failed | {"error": "Connection refused"})
+
+    def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
+        assert product and lane and generation and attempt and logins
+        witness.sending("remove", "new")(Said.CHANGED, None)
+        witness.sending("remove", SERVER, "i_new")(Said.CHANGED, None)
+        return []
+
+
+def test_the_account_of_a_failed_move_is_built_after_its_clean_up_so_it_has_the_container_and_the_login_that_removed(
+    record: Record,
+) -> None:
+    request = record.write(MOVE_B, CALLER, None)
+    assert Worker(record, FailedAndCleanedUp(), NO_SECRETS).work_next() is True
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None and (kept.stands, kept.error) == (Stands.FAILED, "Connection refused")
+    assert (kept.answer["outcome"], kept.answer["did"]) == ("check failed", ["remove new", f"remove the login i_new from {SERVER}"])

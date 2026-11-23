@@ -83,7 +83,7 @@ Each [login](data-sets.md#logins) Launchplane makes or removes on a lane's datab
 - A login the planner read as held by nobody and the server no longer has when it is asked just before the removal has no line: nothing is sent and nothing is put down to the request.
 - No line holds a statement, a password, its scrambled form or anything else the instance is given. The name of a login is not a secret: it is the end of its instance's name.
 
-A login the server answered as made or removed is the request's own, and is in the same account as its commands: a move's `did`, a cancel's `put_back`, the sentence after why a request failed, and whether a move answers `repaired` or a retire `retired` where nothing else changed. A retire's `retired_containers` lists containers only. Nothing is decided from these lines. With every one deleted, Launchplane sends the same commands and the same statements in the same order.
+A login the server answered as made or removed, and a making read back, are the request's own, and are in the same account as its commands: a move's `did`, a cancel's `put_back`, the sentence after why a request failed, and whether a move answers `repaired` or a retire `retired` where nothing else changed. A retire's `retired_containers` lists containers only. Nothing is decided from these lines. With every one deleted, Launchplane sends the same commands and the same statements in the same order.
 
 `GET /requests` answers `unfinished`, every request waiting or working, oldest first and with its attempts and events, and `ended`, the 20 that ended last, newest first.
 

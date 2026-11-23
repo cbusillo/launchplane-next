@@ -106,8 +106,7 @@ class HostLogins:
         logins = self.read_logins(database)
         return sorted(set(logins) - self.held(product, data_set))
 
-    # One login made or removed on one server. Its line is written before its statements are sent and answered before
-    # anything else is sent: done, refused in the server's own words where it refused a statement, or no answer.
+    # A statement the server refuses is refused in its own words. Any other failure is no answer: it may have run.
     def change(self, by: Witness, verb: Verb, database: str, login: str, ask: Ask, **variables: str) -> CommandResult:
         answered = by.sending(verb, database, login)
         try:
