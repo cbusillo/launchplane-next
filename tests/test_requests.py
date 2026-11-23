@@ -79,7 +79,7 @@ def test_a_call_is_answered_at_once_with_where_to_read_its_request_and_the_reque
     assert (asked.status_code, where, asked_again.headers["location"]) == (202, f"/requests/{asked.json()['id']}", where)
     assert (meanwhile["stands"], [event["did"] for event in meanwhile["events"]]) == (
         "working",
-        ["start the instance site-testing-0 of site:b"],
+        ["make site-testing-0", "start site-testing-0"],
     )
     assert (ended["answer"]["outcome"], ended["asked_by"], len(ended["attempts"])) == ("switched", "the address testclient", 1)
     assert set(ended["attempts"][0]) == {"number", "began_at", "ended_at", "ended"}

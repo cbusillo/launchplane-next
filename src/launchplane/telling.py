@@ -1,30 +1,37 @@
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from launchplane import steps
 from launchplane.instance import LaneRoute
-from launchplane.steps import Action, Event
+from launchplane.steps import Action, Command, Event, Sent, Verb
 
 type Tell = Callable[[str, str | None], None]
 
 
-# What the gate answered a change of the route. Only `changed` is a change the sender made.
+# What the gate answered a change of the route, or Docker a command. Only `changed` is a change the sender made.
 class Said(StrEnum):
     CHANGED = "changed"
     ALREADY = "already as asked"
     REFUSED = "refused"
 
 
-# Told once a change of the route was sent: what the gate answered, None for no answer, and the real error.
+# Told once a change was sent: what the gate or Docker answered, None for no answer, and the real error.
 type Answered = Callable[[Said | None, str | None], None]
+
+
+def not_written(_did: str, _web_address: str, _to: str | None) -> Answered:
+    return lambda _made, _error: None
 
 
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
-# `about_to` writes a change of the route down before it is sent, with the web address and where it sends visitors, and
-# what it gives is told the answer. `look` is shown the route of each reading, and nothing is decided from what it does.
+# `write` writes the line of a change of the route or of a command for a part before it is sent, and what it gives is
+# told the answer. `about_to` does so for a change of the route, from the web address and where it sends visitors.
+# `look` is shown the route of each reading and the containers read as made under `generation`, and nothing is decided
+# from what it does. `credit` is given each command Docker answered as done. `purpose` ends the line of a command sent
+# to put a lane back. `unmade` is whether a command of the step was not answered as done.
 @dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
@@ -33,13 +40,43 @@ class Witness:
     refuse_cancel: Callable[[str], None] = lambda _why: None
     generation: str = ""
     attempt: int = 0
-    about_to: Callable[[str, str, str | None], Answered] = lambda _did, _web_address, _to: lambda _made, _error: None
-    look: Callable[[LaneRoute], None] = lambda _route: None
+    about_to: Callable[[str, str, str | None], Answered] = not_written
+    look: Callable[[LaneRoute, Collection[str]], None] = lambda _route, _made: None
+    write: Callable[[str, Sent | Command], Answered] = lambda _did, _sent: lambda _made, _error: None
+    credit: Callable[[Command], None] = lambda _command: None
+    purpose: str = ""
+    unmade: bool = False
+
+    def __post_init__(self) -> None:
+        if self.about_to is not_written:
+            self.about_to = lambda did, web_address, to: self.write(did, Sent(web_address=web_address, to=to))
+
+    def __repr__(self) -> str:
+        return f"the witness of attempt {self.attempt} of {self.generation or 'no request'}"
+
+    # One command for one named container. A line that cannot be written raises here, so the command is not sent.
+    def sending(self, verb: Verb, container: str) -> Answered:
+        command = Command(verb=verb, container=container)
+        answered = self.write(f"{verb} {container}{self.purpose}", command)
+
+        def heard(said: Said | None, error: str | None) -> None:
+            answered(said, error)
+            if said is Said.CHANGED:
+                self.credit(command)
+            elif said is not Said.ALREADY:
+                self.unmade = True
+
+        return heard
+
+    # A step for a part is told only where no command of it was refused or left unanswered: that line has said so.
+    def tell_of_step(self, did: str, error: str | None) -> None:
+        if not self.unmade:
+            self.tell(did, error)
 
 
 NOBODY = Witness()
 
-# Ends the line written before a change that puts a lane back. What a cancel put back is told from these lines.
+# Ends the line of a change that puts a lane back. What a cancel put back is told from these lines.
 TO_PUT_BACK = ", to put the lane back"
 
 
@@ -68,6 +105,9 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.ReadLog: lambda step: f"read the log of {step.container}",
 }
 
+
+# The steps for a part. Each command has its own line, so the step is told only where no command's line says why.
+OF_A_PART = (steps.StartInstance, steps.StartBackgroundService, steps.Retire, steps.Discard, steps.StopPart, steps.StartStopped)
 
 # How the line of a step that only looks or waits begins. Every other line told with no refusal is a change.
 LOOKS = ("wait for ", "check ", "watch ", "read the log ", "mark the release ")

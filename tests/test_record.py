@@ -437,7 +437,8 @@ def test_the_migration_to_route_lines_leaves_an_ended_request_and_an_interrupted
         None,
         ["retire new, to put the lane back, refused"],
     )
-    assert request_note(ended, {}) == f"{ended.error} What the gate answered for its cancel was not kept."
+    not_kept = f"{ended.error} What the gate answered for its cancel was not kept."
+    assert request_note(ended, {}) == f"{not_kept} Its lines: {'; '.join(lines_of(ended))}."
     assert (removed.is_credited, removed.is_unanswered, lines_of(interrupted)) == (False, False, [removed.did])
     assert [each.id for each in postgres_record.ended_lately()] == [1]
     attempt = begun(postgres_record, 2)
@@ -508,7 +509,7 @@ def filled(method: str, parameter: str, hint: object, number: int) -> object:
         return True
     if Verdict in kinds:
         return Verdict.COMMITTED
-    if hint is Sent:
+    if Sent in kinds:
         return Sent(web_address=HELD, to=f"to {HELD}")
     if hint is Reply:
         return Reply(made=True)

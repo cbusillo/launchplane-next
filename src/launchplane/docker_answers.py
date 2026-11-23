@@ -25,6 +25,8 @@ from launchplane.instance import (
     Unread,
     is_generation,
 )
+from launchplane.steps import Verb
+from launchplane.telling import Said, Witness
 
 PRODUCT_LABEL = "launchplane.product"
 LANE_LABEL = "launchplane.lane"
@@ -85,6 +87,27 @@ def attempting(action: str, address: str) -> Generator[None]:
         raise ContainerHostRefused(f"{action} on {address} was refused: {error}") from error
     except (DockerException, requests.RequestException) as error:
         raise ContainerHostError(f"{action} on {address} failed: {error}") from error
+
+
+# One command for one named container: its line is written before it is sent, and answered before anything else is sent.
+@contextmanager
+def sent(by: Witness, verb: Verb, container: str, *, already: bool = False) -> Generator[None]:
+    answered = by.sending(verb, container)
+    try:
+        yield
+    except APIError as error:
+        # Docker's client reads a container back once Docker has made it. A refusal of that read is no answer to the make.
+        if verb == "make" and error.response is not None and error.response.request.method == "GET":
+            answered(None, str(error))
+            raise ContainerHostError(
+                f"Docker was sent the make of {container} and did not describe what it made: {error}"
+            ) from error
+        answered(Said.REFUSED, str(error))
+        raise
+    except (DockerException, requests.RequestException) as error:
+        answered(None, str(error))
+        raise
+    answered(Said.ALREADY if already else Said.CHANGED, None)
 
 
 def read_whole[Read](read_once: Callable[[], Read], address: str) -> Read:

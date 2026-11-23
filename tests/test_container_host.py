@@ -114,6 +114,49 @@ def test_a_database_is_given_longer_to_stop_than_a_part_before_docker_kills_it()
     assert docker.containers.by_name[DATABASE].calls[-1] == "stop within 60 s"
 
 
+def test_a_part_is_made_started_stopped_and_removed_by_these_docker_calls_in_this_order() -> None:
+    docker = RecordingDocker()
+    host = ContainerHost(docker.as_client(), "test")
+    asked: list[str] = []
+    look_up_image, create, get = docker.images.get, docker.containers.create, docker.containers.get
+
+    def image_looked_up(image: str) -> str:
+        asked.append(f"look up the image {image}")
+        return look_up_image(image)
+
+    def created(_image: str, _command: list[str] | None = None, **options: object) -> RecordingContainer:
+        asked.append(f"create {cast('str', options['name'])}")
+        made = create(_image, _command, **options)
+        made.calls = asked
+        return made
+
+    def got(name: str) -> RecordingContainer:
+        asked.append(f"get {name}")
+        return get(name)
+
+    docker.images.get, docker.containers.create, docker.containers.get = image_looked_up, created, got
+    host.start_instance(TARGET, WEB, None)
+    host.stop_part(WEB)
+    host.start_part(WEB)
+    host.retire_instance(WEB)
+    host.retire_instance(WEB)
+    host.stop_part(WEB)
+    assert asked == [
+        "look up the image shop:a",
+        f"create {WEB}",
+        "start",
+        f"get {WEB}",
+        "stop within 30 s",
+        f"get {WEB}",
+        "start",
+        f"get {WEB}",
+        "stop within 30 s",
+        "remove",
+        f"get {WEB}",
+        f"get {WEB}",
+    ]
+
+
 def data_sets_read(containers: Sequence[object], networks: Sequence[object], volumes: Sequence[object]) -> list[DataSet]:
     return read(containers, networks, volumes).data_sets
 

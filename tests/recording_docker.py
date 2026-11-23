@@ -34,6 +34,13 @@ class RecordingContainer:
     restart_policy: str = ""
     # What each command run in it answers, in the order they are run; a command past the end is refused.
     answers: list[ExecResult] = field(default_factory=list[ExecResult])
+    # Which of start, stop and remove Docker refuses for it.
+    refuses: set[str] = field(default_factory=set[str])
+
+    def sent(self, command: str, call: str) -> None:
+        self.calls.append(call)
+        if command in self.refuses:
+            raise APIError(f"409 Conflict: cannot {command} {self.name}")
 
     def get_archive(self, path: str) -> tuple[list[bytes], dict[str, Any]]:
         if path not in self.files:
@@ -66,16 +73,16 @@ class RecordingContainer:
         return b""
 
     def start(self) -> None:
+        self.sent("start", "start")
         self.status = "running"
-        self.calls.append("start")
 
     def stop(self, timeout: int) -> None:
+        self.sent("stop", f"stop within {timeout} s")
         self.status = "exited"
-        self.calls.append(f"stop within {timeout} s")
 
     def remove(self, force: bool = False) -> None:
+        self.sent("remove", "remove by force" if force else "remove")
         self.removed = True
-        self.calls.append("remove by force" if force else "remove")
 
     def exec_run(self, command: list[str]) -> ExecResult:
         self.calls.append(" ".join(command))

@@ -267,6 +267,10 @@ class LaneReading:
     def data_set(self, name: str | None) -> DataSet | None:
         return next((found for found in self.data_sets if found.data_set == name), None)
 
+    # The instances and background services stamped as made under a generation, by container.
+    def made_by(self, generation: str) -> set[str]:
+        return {part.container for part in (*self.instances, *self.background_services) if part.generation == generation}
+
 
 class PartOfLane(Protocol):
     @property

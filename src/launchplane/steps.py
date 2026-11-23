@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -29,6 +30,8 @@ class MoveResult(Result):
     container_receiving_visitors: str | None
     data_set: str | None = None
     did: list[str] = []
+    # Each command for a part that may have been sent and had no answer, so `did` cannot say whether it was done.
+    not_answered: list[str] = []
     error: str | None = None
 
 
@@ -44,7 +47,7 @@ class RetireResult(Result):
     web_address: str
     outcome: RetireOutcome
     route_removed_to_container: str | None
-    retired_containers: list[str]
+    retired_containers: list[str] = []
     deleted_data_set: str | None = None
     kept_data_sets: list[str] = []
 
@@ -252,6 +255,21 @@ class LogRead:
     unreadable: str | None = None
 
 
+type Verb = Literal["make", "start", "stop", "remove"]
+
+
+# A change of the route as it is sent: the web address and where it sends visitors, or nowhere for a removal.
+class Sent(BaseModel):
+    web_address: str
+    to: str | None
+
+
+# One command sent to Docker for one named container. Among what a call has done, it is one Docker answered as done.
+class Command(BaseModel, frozen=True):
+    verb: Verb
+    container: str
+
+
 # What a part answered when it would not do as asked, with the real error.
 @dataclass(frozen=True)
 class Refused:
@@ -339,4 +357,4 @@ type Action = (
     | StartStopped
     | ReadLog
 )
-type Event = Action | Refused | LogRead | Switched | Discarded
+type Event = Action | Refused | LogRead | Switched | Discarded | Command

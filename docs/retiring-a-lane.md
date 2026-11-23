@@ -26,7 +26,7 @@ The web address goes first so that no new request reaches an instance that is st
 
 | `outcome` | Status | Meaning |
 | --- | --- | --- |
-| `retired` | 200 | Something was removed, and no data set was deleted. `route_removed_to_container` is the container the web address sent to, or `null`. `retired_containers` lists the background services and instances removed. `kept_data_sets` lists the lane's data sets still on the host. |
+| `retired` | 200 | Something was removed, and no data set was deleted. `route_removed_to_container` is the container the web address sent to, or `null`. `retired_containers` lists the background services and instances Docker answered as removed, from the request's lines whatever attempt removed them. `kept_data_sets` lists the lane's data sets still on the host. |
 | `deleted` | 200 | The data set named in the body was deleted by this request, and `deleted_data_set` names it, also when the attempt that sent the deletion never had its reply. Anything of the lane still running was retired first and is listed as for `retired`. |
 | `unchanged` | 200 | The lane had no route, no background service and no instance, and no data set of it was named. |
 

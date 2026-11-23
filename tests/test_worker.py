@@ -12,7 +12,7 @@ from launchplane.judge import Condition, Work
 from launchplane.page import INTERRUPTED, RECORD_UNREAD, cards
 from launchplane.record import ENDED, Asked, Interrupted, Kept, PostgresRecord, Record, RecordError, Stands
 from launchplane.secret_boundary import SECRET_REMOVED
-from launchplane.telling import Witness
+from launchplane.telling import NOBODY, Witness
 from launchplane.worker import MOST_LANES_AT_ONCE, Worker
 from tests.given_secrets import NO_SECRETS, GivenSecrets
 from tests.pretend_host import WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
@@ -96,11 +96,13 @@ def test_a_request_is_carried_through_and_its_answer_and_each_thing_done_are_kep
     )
     assert [(each.number, each.ended) for each in kept.attempts] == [(1, "done")]
     assert [each.did for each in kept.events] == [
-        f"start the instance {new} of site:b",
+        f"make {new}",
+        f"start {new}",
         f"check {new} at /",
         f"switch {WEB_ADDRESS} to {new}",
         f"wait for the proxy to load the route of {WEB_ADDRESS}",
-        "retire a",
+        "stop a",
+        "remove a",
     ]
     assert worker.work_next() is False
 
@@ -156,8 +158,10 @@ def test_a_step_the_host_refuses_before_the_switch_fails_the_request_with_the_re
 ) -> None:
     worker, _, proxy = serving_a(record)
 
-    def refuse(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
-        assert use is None and generation is not None
+    def refuse(
+        target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
+    ) -> None:
+        assert use is None and generation is not None and by is not NOBODY
         raise ContainerHostRefused(f"Starting the instance {container} from build {target.build} on test failed: no such image")
 
     proxy.host.start_instance = refuse
@@ -174,8 +178,8 @@ def test_a_step_the_host_refuses_after_the_switch_leaves_the_request_working_wit
     worker, _, proxy = serving_a(record)
     retire = proxy.host.retire_instance
 
-    def refuse(container: str) -> None:
-        raise ContainerHostError(f"Retiring {container} on test failed: the daemon is busy")
+    def refuse(container: str, by: Witness = NOBODY) -> None:
+        raise ContainerHostError(f"Retiring {container} on test failed: the daemon is busy, as {by} was told")
 
     proxy.host.retire_instance = refuse
     request = record.write(MOVE_B, CALLER, None)
@@ -202,7 +206,7 @@ def test_a_check_that_fails_ends_the_request_as_failed_and_keeps_the_answer(reco
     kept = kept_of(record, request.id)
     assert kept.answer is not None and kept.error is not None
     assert (kept.stands, kept.answer["outcome"], "Connection refused" in kept.error) == (Stands.FAILED, "check failed", True)
-    assert [(each.did, each.error is None) for each in kept.events][1] == ("check site-testing-0 at /", False)
+    assert [(each.did, each.error is None) for each in kept.events][2] == ("check site-testing-0 at /", False)
 
 
 def test_a_failure_launchplane_does_not_know_fails_its_request_and_the_next_request_is_still_worked(record: Record) -> None:
@@ -265,7 +269,7 @@ def test_the_request_being_worked_shows_on_its_lanes_card_with_what_it_has_done_
     proxy.while_checking = read_the_card
     record.write(MOVE_B, CALLER, None)
     worker.work_next()
-    assert shown == [("moving to site:b", ["working"], "So far: start the instance site-testing-0 of site:b.")]
+    assert shown == [("moving to site:b", ["working"], "So far: make site-testing-0: done; start site-testing-0: done.")]
 
 
 def test_a_request_for_a_lane_with_nothing_on_the_host_still_shows_on_the_page(record: Record) -> None:

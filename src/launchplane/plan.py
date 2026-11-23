@@ -27,6 +27,7 @@ from launchplane.steps import (
     CannotPutBack,
     Check,
     CheckRefused,
+    Command,
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
@@ -51,10 +52,8 @@ from launchplane.steps import (
     StartDatabase,
     StartInstance,
     StartProxy,
-    StartStopped,
     Stop,
     StopDatabase,
-    StopPart,
     Switch,
     Switched,
     TooLate,
@@ -74,28 +73,21 @@ def failure_report(why: str, log_tail: str) -> str:
     return f"{why}\nIts last log lines:\n{log_tail}"
 
 
-CHANGES: dict[type, Callable[[Any], str]] = {
+CHANGES: dict[type, Callable[[Any], str | None]] = {
     StartProxy: lambda _step: "started the proxy",
     CreateDataSetNetwork: lambda step: f"made part of the data set {step.data_set}",
     CreateDataSetVolume: lambda step: f"made part of the data set {step.data_set}",
     CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
     StartDatabase: lambda step: f"started the database {step.container}",
-    StartInstance: lambda step: f"started the instance {step.container}",
     EditRoute: lambda step: f"sent {step.web_address} to {step.to}" if step.to else f"removed the route of {step.web_address}",
-    StartBackgroundService: lambda step: f"started the background service of {step.instance}",
-    Retire: lambda step: f"retired {step.container}",
     RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
-    StopPart: lambda step: f"stopped {step.container}",
     StopDatabase: lambda step: f"stopped {step.container}",
-    StartStopped: lambda step: f"started {step.container}",
+    Switched: lambda step: f"wrote the route to {step.container}" if step.won else None,
 }
 
 
-# What a step that was taken changed. A switch the gate did not rename for, and an instance it kept, changed nothing.
+# What a taken step changed, but for a command for a part: a request's account of those is its saved lines.
 def change_made_by(event: Event) -> str | None:
-    if isinstance(event, Switched | Discarded):
-        changed = event.won if isinstance(event, Switched) else not event.kept
-        return f"{'wrote the route to' if isinstance(event, Switched) else 'retired'} {event.container}" if changed else None
     return CHANGES[type(event)](event) if type(event) in CHANGES else None
 
 
@@ -106,7 +98,7 @@ def changes_made(done: tuple[Event, ...]) -> list[str]:
 def changes_so_far(done: tuple[Event, ...]) -> str:
     changes = changes_made(done)
     if not changes:
-        return "Nothing was changed."
+        return "Nothing else was changed." if any(isinstance(each, Command) for each in done) else "Nothing was changed."
     return f"Before that, this call {', '.join(changes)}, and those changes stay."
 
 
@@ -574,9 +566,8 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     if named is not None:
         return DeleteDataSet(named)
     route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)
-    retired = [event.container for event in done if isinstance(event, Retire)]
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = any(isinstance(event, EditRoute | Retire | RemoveLogins) for event in done)
+    changed = any(isinstance(event, EditRoute | RemoveLogins) for event in done)
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,
@@ -584,7 +575,6 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
             web_address=web_address,
             outcome=RetireOutcome.DELETED if deleted else RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
             route_removed_to_container=route_removed_to,
-            retired_containers=retired,
             deleted_data_set=deleted,
             kept_data_sets=sorted(found.data_set for found in lane.data_sets),
         )

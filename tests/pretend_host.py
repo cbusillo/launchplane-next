@@ -1,10 +1,14 @@
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from docker.errors import APIError
+from requests import ReadTimeout
+
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
-from launchplane.docker_answers import ContainerHostRefused, LoginRemovalRefused
+from launchplane.docker_answers import ContainerHostRefused, LoginRemovalRefused, attempting, sent
 from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -35,7 +39,7 @@ from launchplane.instance import (
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.steps import FreshNames, MaintenanceResult, MoveResult, RetireResult
+from launchplane.steps import FreshNames, MaintenanceResult, MoveResult, RetireResult, Verb
 from launchplane.telling import NOBODY, Witness
 
 WEB_ADDRESS = "testing.site.test"
@@ -76,6 +80,9 @@ class PretendHost:
         self.logins_left_in: dict[str, tuple[str, ...]] = {}
         self.holders_unread: set[str] = set()
         self.removals_refused: set[str] = set()
+        self.commands_refused: set[str] = set()
+        # The commands Docker does, once, and whose reply never comes.
+        self.replies_lost: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -131,28 +138,55 @@ class PretendHost:
         self.change_database(database, unheld_logins=())
         return None
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
-        self.place(target, container, use=use, generation=generation)
-        self.record(f"start {container}")
+    # A pretend command for a part writes its line and has its answer told as the container host does, and Docker
+    # refuses the ones a test has it refuse.
+    @contextmanager
+    def command(self, by: Witness, verb: Verb, container: str, *, already: bool = False) -> Generator[None]:
+        with attempting(f"The command to {verb} {container}", "test"), sent(by, verb, container, already=already):
+            if f"{verb} {container}" in self.commands_refused:
+                raise APIError("409 Conflict")
+            yield
+            if f"{verb} {container}" in self.replies_lost:
+                self.replies_lost.remove(f"{verb} {container}")
+                raise ReadTimeout("the connection was lost before the reply")
+
+    def start_instance(
+        self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
+    ) -> None:
+        with self.command(by, "make", container):
+            self.place(target, container, InstanceState.STOPPED, use, generation)
+        with self.command(by, "start", container):
+            self.place(target, container, use=use, generation=generation)
+            self.record(f"start {container}")
 
     def start_background_service(
-        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
+        self,
+        target: LaneBuild,
+        instance: str,
+        use: DataSetUse | None,
+        command: list[str],
+        generation: str | None = None,
+        by: Witness = NOBODY,
     ) -> None:
         container = background_service_container_of(instance)
-        self.background_services[container] = RunningBackgroundService(
+        made = RunningBackgroundService(
             product=target.product,
             lane=target.lane,
             build=target.build,
             container=container,
-            state=InstanceState.RUNNING,
+            state=InstanceState.STOPPED,
             networks=(LANE_NETWORK,) if use is None else (use.network,),
-            running_for_seconds=0.0,
+            running_for_seconds=None,
             instance=instance,
             data_set=None if use is None else use.data_set,
             generation=generation,
         )
-        self.most_background_services_running = max(self.most_background_services_running, len(self.background_services))
-        self.record(f"start background service {instance} on {None if use is None else use.network} with {' '.join(command)}")
+        with self.command(by, "make", container):
+            self.background_services[container] = made
+        with self.command(by, "start", container):
+            self.change_part(container, InstanceState.RUNNING)
+            self.most_background_services_running = max(self.most_background_services_running, len(self.background_services))
+            self.record(f"start background service {instance} on {None if use is None else use.network} with {' '.join(command)}")
 
     def await_background_service(self, container: str, steady_seconds: float) -> None:
         self.record(f"await background service {container}")
@@ -212,15 +246,20 @@ class PretendHost:
         else:
             self.instances[container] = self.instances[container].model_copy(update={"state": state})
 
-    def start_part(self, container: str) -> None:
+    def is_in(self, container: str, state: InstanceState) -> bool:
+        return (self.background_services.get(container) or self.instances[container]).state == state
+
+    def start_part(self, container: str, by: Witness = NOBODY) -> None:
         if container in self.parts_that_will_not_start:
             raise ContainerHostRefused(f"Starting {container} on test was refused: no such image")
-        self.change_part(container, InstanceState.RUNNING)
-        self.record(f"start {container}")
+        with self.command(by, "start", container, already=self.is_in(container, InstanceState.RUNNING)):
+            self.change_part(container, InstanceState.RUNNING)
+            self.record(f"start {container}")
 
-    def stop_part(self, container: str) -> None:
-        self.change_part(container, InstanceState.STOPPED)
-        self.record(f"stop {container}")
+    def stop_part(self, container: str, by: Witness = NOBODY) -> None:
+        with self.command(by, "stop", container, already=self.is_in(container, InstanceState.STOPPED)):
+            self.change_part(container, InstanceState.STOPPED)
+            self.record(f"stop {container}")
 
     def await_database(self, container: str) -> None:
         self.change_database(container, accepts_connections=True, unheld_logins=self.logins_left_in.get(container, ()))
@@ -230,12 +269,15 @@ class PretendHost:
         del self.data_sets[found.data_set]
         self.record(f"delete {found.data_set}")
 
-    def retire_instance(self, container: str) -> None:
-        if container in self.background_services:
-            del self.background_services[container]
-        else:
-            del self.instances[container]
-        self.record(f"retire {container}")
+    def retire_instance(self, container: str, by: Witness = NOBODY) -> None:
+        with self.command(by, "stop", container, already=self.is_in(container, InstanceState.STOPPED)):
+            self.change_part(container, InstanceState.STOPPED)
+        with self.command(by, "remove", container):
+            if container in self.background_services:
+                del self.background_services[container]
+            else:
+                del self.instances[container]
+            self.record(f"retire {container}")
 
     def read_log_tail(self, container: str) -> str:
         part = self.background_services.get(container) or self.instances[container]

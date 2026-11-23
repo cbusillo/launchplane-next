@@ -54,6 +54,7 @@ from launchplane.docker_answers import (
     on_host_from,
     read_whole,
     running_for,
+    sent,
     tar_of,
 )
 from launchplane.host_logins import HostLogins
@@ -70,6 +71,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
+from launchplane.telling import NOBODY, Said, Witness
 
 DOCKER_API_VERSION = "1.47"
 ANSWER_TIMEOUT_SECONDS = 5
@@ -82,6 +84,8 @@ POLL_SECONDS = 0.5
 type RestartPolicy = Literal["always", "unless-stopped"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
+# The states Docker gives a container that a stop finds stopped.
+STOPPED = ("created", "exited", "dead")
 ALWAYS_RUNS: RestartPolicy = "always"
 
 type Lane = tuple[str, str]
@@ -321,7 +325,6 @@ class ContainerHost:
             )
 
     def create(self, options: RunOptions) -> Container:
-        self.ensure_image(options.image)
         # The stubs name only two of Docker's restart policies; Docker takes unless-stopped.
         restart: Any = {"Name": options.restart}
         return self.client.containers.create(
@@ -337,28 +340,41 @@ class ContainerHost:
             restart_policy=restart,
         )
 
-    def run_part(self, options: RunOptions, use: DataSetUse | None, login_on: Callable[[DataSetUse], dict[str, str]]) -> None:
+    def run_part(
+        self, options: RunOptions, use: DataSetUse | None, login_on: Callable[[DataSetUse], dict[str, str]], by: Witness
+    ) -> None:
         if LANE_NETWORK in options.networks:
             self.ensure_network(LANE_NETWORK, quiet=True)
         ready = options if use is None else on_data_set(options, use, login_on(use))
-        self.create(ready).start()
+        self.ensure_image(ready.image)
+        with sent(by, "make", ready.container):
+            made = self.create(ready)
+        with sent(by, "start", ready.container):
+            made.start()
 
-    def start_instance(self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None) -> None:
+    def start_instance(
+        self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
+    ) -> None:
         networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
             options = part_options(target, container, "web", networks, None)
-            self.run_part(
-                replace(options, labels=options.labels | stamp_of(generation)), use, lambda on: self.logins.make(container, on)
-            )
+            stamped = replace(options, labels=options.labels | stamp_of(generation))
+            self.run_part(stamped, use, lambda on: self.logins.make(container, on), by)
 
     def start_background_service(
-        self, target: LaneBuild, instance: str, use: DataSetUse | None, command: list[str], generation: str | None = None
+        self,
+        target: LaneBuild,
+        instance: str,
+        use: DataSetUse | None,
+        command: list[str],
+        generation: str | None = None,
+        by: Witness = NOBODY,
     ) -> None:
         networks = [LANE_NETWORK] if use is None else [use.network]
         options = part_options(target, background_service_container_of(instance), "background-service", networks, command)
         with attempting(f"Starting the background service of the instance {instance}", self.address):
             marked = replace(options, labels=options.labels | {INSTANCE_LABEL: instance} | stamp_of(generation))
-            self.run_part(marked, use, lambda _on: self.logins.given_to(instance))
+            self.run_part(marked, use, lambda _on: self.logins.given_to(instance), by)
 
     def await_background_service(self, container: str, steady_seconds: float) -> None:
         started = self.clock()
@@ -387,6 +403,7 @@ class ContainerHost:
             throwaway_password = new_password()
             self.secrets.note([throwaway_password])
             options = database_options(product, lane, data_set, network, volume, image)
+            self.ensure_image(image)
             self.start_set_up(self.create(replace(options, environment=server_environment(throwaway_password))))
 
     def start_database(self, container: str) -> None:
@@ -399,21 +416,24 @@ class ContainerHost:
         database.put_archive(str(SET_UP_PATH.parent), tar_of(SET_UP_PATH.name, SET_UP_SCRIPT.encode()))  # pyright: ignore[reportUnknownMemberType]
         database.start()
 
-    def start_part(self, container: str) -> None:
+    def start_part(self, container: str, by: Witness = NOBODY) -> None:
         with attempting(f"Starting {container}", self.address):
-            self.client.containers.get(container).start()
+            found = self.client.containers.get(container)
+            with sent(by, "start", container, already=found.status == "running"):
+                found.start()
 
-    def stop_part(self, container: str) -> None:
-        self.stop(container, RETIRE_GRACE_SECONDS)
+    def stop_part(self, container: str, by: Witness = NOBODY) -> None:
+        self.stop(container, RETIRE_GRACE_SECONDS, by)
 
     def stop_database(self, container: str) -> None:
         self.stop(container, DATABASE_STOP_GRACE_SECONDS)
 
-    def stop(self, container: str, grace_seconds: int) -> None:
+    def stop(self, container: str, grace_seconds: int, by: Witness = NOBODY) -> None:
         with attempting(f"Stopping {container}", self.address):
             found = self.find_container(container)
             if found is not None:
-                found.stop(timeout=grace_seconds)
+                with sent(by, "stop", container, already=found.status in STOPPED):
+                    found.stop(timeout=grace_seconds)
 
     def await_database(self, container: str) -> None:
         started = self.clock()
@@ -436,15 +456,20 @@ class ContainerHost:
                 with suppress(NotFound):
                     self.client.networks.get(network.name).remove()
 
-    def retire_container(self, container: str) -> None:
+    # A database server is retired with nobody told: only a command for a lane's instance or background service has a line.
+    def retire_container(self, container: str, by: Witness = NOBODY) -> None:
         found = self.find_container(container)
-        if found is not None:
+        if found is None:
+            by.sending("remove", container)(Said.ALREADY, None)
+            return
+        with sent(by, "stop", container, already=found.status in STOPPED):
             found.stop(timeout=RETIRE_GRACE_SECONDS)
+        with sent(by, "remove", container):
             found.remove()
 
-    def retire_instance(self, container: str) -> None:
+    def retire_instance(self, container: str, by: Witness = NOBODY) -> None:
         with attempting(f"Stopping and removing {container}", self.address):
-            self.retire_container(container)
+            self.retire_container(container, by)
 
     # A read that fails is answered as unread and nothing is removed. A removal that fails is raised.
     def remove_unheld_logins(self, database: str) -> Unread | None:
@@ -472,6 +497,7 @@ class ContainerHost:
                     self.ensure_network(helper.outside_network, quiet=False)
                 for network in helper.quiet_networks:
                     self.ensure_network(network, quiet=True)
+                self.ensure_image(helper.image)
                 self.create(helper_options(helper)).start()
             elif found.status != "running":
                 found.start()

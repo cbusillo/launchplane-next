@@ -932,3 +932,41 @@ def test_ending_maintenance_killed_with_its_route_change_on_the_host_and_no_repl
     assert (published["outcome"]["made"], published["outcome"]["read_back_at"] is not None) == (None, True)
     assert (answering(LEDGER), again["outcome"]) == (LEDGER.answers[0], "not in maintenance")
     assert (beside.failures, beside.answers_in_order()) == ([], [untouched.answers[0]])
+
+
+# What the record is given for the line of a start, so only the writing of such a line is held.
+A_START = quote("verb='start'")
+
+
+def test_a_move_killed_with_the_start_of_its_background_service_written_and_not_sent_starts_it_once_and_says_so() -> None:
+    let_go()
+    untouched = LEDGER.beside(UNTOUCHED)
+    for each in (LEDGER, untouched):
+        assert move_lane(each.product, each.lane, each.builds[0])[0] == 200
+    hold("before.host.start_background_service")
+    try:
+        with request_loop(lambda: answering(untouched)) as beside:
+            asked = ask(f"/lanes/{LEDGER.product}/{LEDGER.lane}/move", {"build": LEDGER.builds[1]})[1]["id"]
+            wait_until_stopped_at("before.host.start_background_service")
+            hold(f"after.record.about_to?only={A_START}")
+            let_go("before.host.start_background_service")
+            wait_until_stopped_at("after.record.about_to")
+            written = ask(f"/requests/{asked}")[1]["events"][-1]
+            kill_held_launchplane()
+            let_go()
+            ended = request_ended(asked)
+            note = request_row_of(LEDGER, asked)[1]
+    finally:
+        let_go()
+    service = written["command"]["container"]
+    starts = [each for each in ended["events"] if each["command"] == {"verb": "start", "container": service}]
+    assert (written["did"], written["outcome"], service.endswith("-background-service")) == (f"start {service}", None, True)
+    assert (ended["stands"], ended["answer"]["outcome"], [each["ended"] for each in ended["attempts"]]) == (
+        "done",
+        "switched",
+        ["interrupted", "done"],
+    )
+    assert [(each["attempt"], each["outcome"] and each["outcome"]["made"]) for each in starts] == [(1, None), (2, True)]
+    assert ended["answer"]["did"].count(f"start {service}") == 1
+    assert (f"start {service}: may have been sent, no answer; " in note, f"start {service}: done" in note) == (True, True)
+    assert (answering(LEDGER), beside.failures, beside.answers_in_order()) == (LEDGER.answers[1], [], [untouched.answers[0]])

@@ -105,10 +105,11 @@ def taken_up(request: Kept) -> str:
 NO_ANSWER = "may have been sent, no answer"
 
 
-# A change of the route says how far it is known to have got: about to be sent, what the gate answered, or no answer,
-# and then that a later attempt read it as the request's own. Any other line says what was done, or that it was refused.
+# A change of the route and a command for a part say how far they are known to have got: about to be sent, what the gate
+# or Docker answered, or no answer, and then that a later attempt read it as the request's own. Any other line says what
+# was done, or that it was refused.
 def line_of(event: Event, attempt_is_open: bool) -> str:
-    if event.action is None:
+    if (event.action or event.command) is None:
         return event.did if event.error is None else f"{event.did}, refused"
     reply = event.outcome
     if reply is None:
@@ -117,9 +118,9 @@ def line_of(event: Event, attempt_is_open: bool) -> str:
     return f"{event.did}: {heard}{'' if reply.read_back_at is None else ', then read as made by this request'}"
 
 
-def lines_of(request: Kept, *, of_the_route: bool = False) -> list[str]:
+def lines_of(request: Kept, *, only_sent: bool = False) -> list[str]:
     open_now = {attempt.number for attempt in request.attempts if attempt.ended is None}
-    shown = [event for event in request.events if event.action is not None or not of_the_route]
+    shown = [event for event in request.events if (event.action or event.command) is not None or not only_sent]
     return [line_of(event, event.attempt in open_now) for event in shown]
 
 
@@ -129,8 +130,8 @@ def done_so_far(request: Kept) -> str:
 
 
 # A request that has ended keeps its lines on the page, so the last of them can be read after it has ended.
-def with_lines(note: str, request: Request, *, of_the_route: bool = False) -> str:
-    lines = lines_of(request, of_the_route=of_the_route) if isinstance(request, Kept) else []
+def with_lines(note: str, request: Request, *, only_sent: bool = False) -> str:
+    lines = lines_of(request, only_sent=only_sent) if isinstance(request, Kept) else []
     return f"{note} Its lines: {'; '.join(lines)}." if lines else note
 
 
@@ -156,12 +157,12 @@ def being_cancelled(request: Kept, decided: Mapping[int, GateAnswer | None]) -> 
 
 def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> str | None:
     if request.stands is Stands.CANCELLED:
-        # What a cancel put back is in its own note, so only its changes of the route are added.
-        return with_lines(how_cancelled(request), request, of_the_route=True)
+        # What a cancel put back is in its own note, so only the lines of what it sent are added.
+        return with_lines(how_cancelled(request), request, only_sent=True)
     if request.stands is Stands.REPLACED:
         return how_replaced(request)
     if isinstance(request, Kept) and (won := how_cancel_won(request)) is not None:
-        return won
+        return with_lines(won, request)
     if request.stands in ENDED and request.cancel_asked_at is None:
         return with_lines(request.error or f"It ended as {request.stands}.", request)
     if request.stands in ENDED:
