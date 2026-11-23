@@ -987,7 +987,7 @@ def test_a_move_killed_once_its_instances_login_is_made_and_before_the_instance_
             asked = ask(f"/lanes/{LEDGER.product}/{LEDGER.lane}/move", {"build": LEDGER.builds[1]})[1]["id"]
             wait_until_stopped_at("after.logins.make")
             [made] = login_lines(ask(f"/requests/{asked}")[1])
-            instances_then = [each["container"] for each in running()["instances"] if each["lane"] == LEDGER.lane]
+            instances_then = instances_of(LEDGER)
             kill_held_launchplane()
             let_go()
             ended = request_ended(asked)
