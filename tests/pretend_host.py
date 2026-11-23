@@ -9,7 +9,7 @@ from requests import ReadTimeout
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
 from launchplane.data_set import login_of
-from launchplane.docker_answers import ContainerHostRefused, LoginRemovalRefused, attempting, sent
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused, attempting, sent
 from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -86,6 +86,8 @@ class PretendHost:
         self.replies_lost: set[str] = set()
         # Each login a database server was sent the making or the removing of.
         self.logins_sent: list[str] = []
+        # The logins whose next making or removing the server gives no answer to.
+        self.logins_unanswered: set[str] = set()
 
     def record(self, action: str) -> None:
         self.actions.append(action)
@@ -140,6 +142,12 @@ class PretendHost:
     def change_login(self, by: Witness, verb: Verb, database: str, login: str) -> None:
         answered = by.sending(verb, database, login)
         self.logins_sent.append(f"{verb} {login}")
+        if login in self.logins_unanswered:
+            self.logins_unanswered.remove(login)
+            answered(None, "psql: connection to server was lost")
+            raise ContainerHostError(
+                f"The database {database} did not {verb} the login {login}: psql: connection to server was lost"
+            )
         if verb == "remove" and self.removals_refused & {database, login}:
             answered(Said.REFUSED, "it owns objects")
             raise LoginRemovalRefused(f"The database {database} did not remove the login {login}: it owns objects")

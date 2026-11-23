@@ -269,7 +269,6 @@ class Sent(BaseModel):
 class Command(BaseModel, frozen=True):
     verb: Verb
     container: str
-    # A command for a container is kept and answered without it.
     login: str | None = Field(default=None, exclude_if=lambda login: login is None)
 
     # The words of its line. They hold the names alone: no statement, password or environment.

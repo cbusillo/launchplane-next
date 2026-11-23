@@ -129,7 +129,6 @@ class HostLogins:
     def make(self, instance: str, use: DataSetUse, by: Witness) -> dict[str, str]:
         self.require_rules(use)
         database = use.database_container
-        # A start that failed after its login was made left one that no call has answered for yet.
         self.remove(database, self.unheld(database), by)
         login, password = login_of(instance), new_password()
         self.secrets.note([password])

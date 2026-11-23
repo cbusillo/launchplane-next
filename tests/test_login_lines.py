@@ -229,7 +229,7 @@ def test_a_making_whose_line_was_written_and_that_was_never_sent_is_not_credited
     assert (kept.stands, proxy.host.logins_sent[sent_before:]) == (Stands.DONE, [f"make {sent.command.login}"])
     assert (never_sent.attempt, never_sent.is_own, sent.attempt, sent.is_own) == (1, False, 2, True)
     assert kept.answer["did"].count(sent.did) == 1 and kept.answer["not_answered"] == [
-        f"{sent.did} may have been sent, and Docker did not answer"
+        f"{sent.did} may have been sent, and the database server did not answer"
     ]
     assert line_of(never_sent, attempt_is_open=False) == f"{sent.did}: may have been sent, no answer"
     assert line_of(sent, attempt_is_open=False) == f"{sent.did}: done"
@@ -316,3 +316,19 @@ def test_the_account_of_a_failed_move_is_built_after_its_clean_up_so_it_has_the_
     kept = kept_of(record, request.id)
     assert kept.answer is not None and (kept.stands, kept.error) == (Stands.FAILED, "Connection refused")
     assert (kept.answer["outcome"], kept.answer["did"]) == ("check failed", ["remove new", f"remove the login i_new from {SERVER}"])
+
+
+def test_a_move_says_of_a_removal_the_server_gave_no_answer_to_that_the_database_server_did_not_answer_and_not_docker(
+    record: Record,
+) -> None:
+    proxy = lane_brought_up_with_a()
+    proxy.host.change_database(SERVER, unheld_logins=("i_left",))
+    proxy.host.logins_unanswered.add("i_left")
+    request = record.write(MOVE_A, CALLER, None)
+    worker = worker_on(proxy, record)
+    assert (worker.work_next(), worker.work_next()) == (True, True)
+    kept = kept_of(record, request.id)
+    removal = f"remove the login i_left from {SERVER}"
+    assert kept.answer is not None and (kept.stands, kept.events[0].error) == (Stands.DONE, "psql: connection to server was lost")
+    assert kept.answer["not_answered"] == [f"{removal} may have been sent, and the database server did not answer"]
+    assert (kept.answer["did"], lines_of(kept)) == ([removal], [f"{removal}: may have been sent, no answer", f"{removal}: done"])
