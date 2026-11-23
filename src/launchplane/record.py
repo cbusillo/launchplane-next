@@ -224,8 +224,8 @@ class Kept(Request):
         return [sent for sent in (each.command for each in self.events if each.is_own) if sent is not None]
 
     def commands_not_answered(self) -> list[str]:
-        lost = [(each.did, sent.login) for each in self.events if (sent := each.command) is not None and each.has_no_answer]
-        silent = [(did, "Docker" if login is None else "the database server") for did, login in lost]
+        lost = [(each.did, each.command) for each in self.events if each.has_no_answer]
+        silent = [(did, "the database server" if sent.login else "Docker") for did, sent in lost if isinstance(sent, Command)]
         return [f"{did} may have been sent, and {asked} did not answer" for did, asked in silent]
 
     # What a request that failed with no answer says of its commands for parts, beside why it failed.
