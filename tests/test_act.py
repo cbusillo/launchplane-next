@@ -240,15 +240,13 @@ def test_a_login_left_by_a_call_killed_after_its_container_went_is_removed_by_th
     moved = lanes_on(proxy).move(BUILD_A, GENERATION, 1)
     proxy.host.change_database("database-data-1", unheld_logins=("i_left_again",))
     retired = lanes_on(proxy).retire("site", "testing")
-    assert (moved.outcome, proxy.host.actions[0], proxy.host.actions[-1]) == (
-        Outcome.REPAIRED,
+    assert (moved.data_set, proxy.host.actions[0], proxy.host.actions[-1]) == (
+        "data-1",
         "remove logins from database-data-1",
         "remove logins from database-data-1",
     )
-    assert (retired.outcome, [each.unheld_logins for each in proxy.host.data_sets["data-1"].databases]) == (
-        RetireOutcome.RETIRED,
-        [()],
-    )
+    assert (retired.kept_data_sets, [each.unheld_logins for each in proxy.host.data_sets["data-1"].databases]) == (["data-1"], [()])
+    assert proxy.host.logins_sent[-2:] == ["remove i_left", "remove i_left_again"]
 
 
 def test_naming_a_data_set_of_another_lane_deletes_nothing() -> None:

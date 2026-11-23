@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from launchplane.instance import DataSet, DataSetUse, LaneBuild
 
@@ -264,10 +264,20 @@ class Sent(BaseModel):
     to: str | None
 
 
-# One command sent to Docker for one named container. Among what a call has done, it is one Docker answered as done.
+# One command sent to Docker for one named container, or one `login` made or removed on the database server that
+# container is. Among what a call has done, it is one that was answered as done.
 class Command(BaseModel, frozen=True):
     verb: Verb
     container: str
+    # A command for a container is kept and answered without it.
+    login: str | None = Field(default=None, exclude_if=lambda login: login is None)
+
+    # The words of its line. They hold the names alone: no statement, password or environment.
+    @property
+    def line(self) -> str:
+        if self.login is None:
+            return f"{self.verb} {self.container}"
+        return f"{self.verb} the login {self.login} {'on' if self.verb == 'make' else 'from'} {self.container}"
 
 
 # What a part answered when it would not do as asked, with the real error.

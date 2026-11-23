@@ -80,7 +80,6 @@ CHANGES: dict[type, Callable[[Any], str | None]] = {
     CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
     StartDatabase: lambda step: f"started the database {step.container}",
     EditRoute: lambda step: f"sent {step.web_address} to {step.to}" if step.to else f"removed the route of {step.web_address}",
-    RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
     StopDatabase: lambda step: f"stopped {step.container}",
     Switched: lambda step: f"wrote the route to {step.container}" if step.won else None,
 }
@@ -567,7 +566,7 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
         return DeleteDataSet(named)
     route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = any(isinstance(event, EditRoute | RemoveLogins) for event in done)
+    changed = any(isinstance(event, EditRoute) for event in done)
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,

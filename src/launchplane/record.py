@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from launchplane.data_set import login_of
 from launchplane.instance import LaneRoute, Verdict, new_generation
 from launchplane.judge import Work
 from launchplane.secret_boundary import JsonValue, Secrets, carries_a_secret, cleaned_value
@@ -163,8 +164,9 @@ class Reply(BaseModel):
     read_back_at: datetime | None = None
 
 
-# One line of what a request did. A change of the route has `action` and a command for a part has `command`, written
-# before it was sent, and `outcome` once anything is known of it. Any other line is written once done or refused.
+# One line of what a request did. A change of the route has `action`, and a command for a part or a login made or
+# removed has `command`, written before it was sent, and `outcome` once anything is known of it. Any other line is
+# written once done or refused.
 class Event(BaseModel):
     id: int = Field(exclude=True)
     at: datetime
@@ -203,10 +205,12 @@ class Event(BaseModel):
         return self.action is not None and self.has_no_answer
 
     # Whether a reading shows what only this line can have sent: a routes file stamped with the request and attempt that
-    # sent it, or a container made under the request's generation. No container shows who started, stopped or removed it.
+    # sent it, or a container made under the request's generation, which also holds the login made for it. No container
+    # shows who started, stopped or removed it, and nothing shows who removed a login.
     def is_seen_in(self, route: LaneRoute, stamp: str, made: Collection[str]) -> bool:
-        if self.command is not None:
-            return self.command.verb == "make" and self.command.container in made
+        if (sent := self.command) is not None:
+            names = made if sent.login is None else {login_of(container) for container in made}
+            return sent.verb == "make" and (sent.login or sent.container) in names
         return self.action is not None and (self.action.to, stamp) == (route.written, route.installed_by)
 
 
@@ -225,18 +229,19 @@ class Kept(Request):
 
     # What a request that failed with no answer says of its commands for parts, beside why it failed.
     def commands_said(self) -> str:
-        told = [*(f"{each.verb} {each.container} was done" for each in self.own_commands()), *self.commands_not_answered()]
+        told = [*(f"{each.line} was done" for each in self.own_commands()), *self.commands_not_answered()]
         return f" Of its commands for the lane's parts, {'; '.join(told)}." if told else ""
 
-    # The lines with no answer that a later reading can show to be the request's own. Of the makes of one container only
-    # the last can be, and none where a make of it was answered: the container shows one make, and not which line sent it.
+    # The lines with no answer that a later reading can show to be the request's own. Of the makes of one container or
+    # of one login only the last can be, and none where a make of it was answered: what is read shows one make, and not
+    # which line sent it.
     def lines_to_read_back(self) -> list[Event]:
-        makes: dict[str, Event] = {}
+        makes: dict[Command, Event] = {}
         for each in self.events:
             if each.command is not None and each.command.verb == "make":
-                makes[each.command.container] = each
+                makes[each.command] = each
         unanswered = [each for each in self.events if each.has_no_answer]
-        return [each for each in unanswered if each.command is None or makes.get(each.command.container) is each]
+        return [each for each in unanswered if each.command is None or makes.get(each.command) is each]
 
 
 # An attempt begun. `again` says the request had one before it, which may have sent the host a change that has not run yet.

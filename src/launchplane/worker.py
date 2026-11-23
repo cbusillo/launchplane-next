@@ -113,7 +113,7 @@ def accounted(answer: Answer, read: Callable[[], Kept | None]) -> Answer:
     if isinstance(answer, MoveResult):
         return of_every_attempt(answer, kept)
     own = kept.own_commands()
-    removed = [each.container for each in own if each.verb == "remove"]
+    removed = [each.container for each in own if each.verb == "remove" and each.login is None]
     retired = RetireOutcome.RETIRED if own and answer.outcome is RetireOutcome.UNCHANGED else answer.outcome
     return answer.model_copy(update={"retired_containers": removed, "outcome": retired})
 

@@ -448,11 +448,10 @@ def test_only_the_logins_no_container_holds_on_the_fresh_reading_are_removed() -
     assert removals_sent(RecordingDocker(), ROLES, ExecResult(0), ExecResult(0)) == (None, ["i_left", "i_left_too"])
 
 
-def test_a_removal_the_server_refuses_is_a_refused_write_with_its_error_and_says_which_login_went_before_it() -> None:
-    answered, sent = removals_sent(RecordingDocker(), ROLES, ExecResult(0), DROP_REFUSED)
+def test_a_removal_the_server_refuses_is_a_refused_write_with_its_error_and_nothing_is_sent_after_it() -> None:
+    answered, sent = removals_sent(RecordingDocker(), ROLES, ExecResult(0), DROP_REFUSED, ExecResult(0))
     assert isinstance(answered, LoginRemovalRefused) and sent == ["i_left", "i_left_too"]
     assert "did not remove the login i_left_too" in str(answered) and "some objects depend on it" in str(answered)
-    assert "Removed before it: ['i_left']." in str(answered)
 
 
 def test_a_removal_that_got_no_answer_from_the_server_is_neither_unread_nor_refused() -> None:

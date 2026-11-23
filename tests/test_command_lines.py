@@ -195,11 +195,11 @@ def test_each_command_for_a_part_reaches_docker_only_once_its_line_is_written_an
     host.start_instance(TARGET, WEB, LINK, GENERATION, witness)
     host.retire_instance(WEB, witness)
     dids = [f"make {WEB}", f"start {WEB}", f"stop {WEB}", f"remove {WEB}"]
-    assert told.lines == [(did, Said.CHANGED) for did in dids]
+    assert told.lines == [(did, Said.CHANGED) for did in (f"make the login i_aaaaaaaaaaaa on {DATABASE}", *dids)]
     assert [told.sent_before[did] for did in dids] == [["not made"], [], ["start"], ["start", "stop within 30 s"]]
-    assert answered_when_written == [told.lines[:place] for place in range(len(dids))]
+    assert answered_when_written == [told.lines[:place] for place in range(len(told.lines))]
     given = given_to(told.docker, WEB)
-    assert not [value for value in given.values() for did, _ in told.lines if value in did]
+    assert not [value for value in given.values() for did in dids if value in did]
 
 
 def test_a_command_whose_line_cannot_be_written_is_not_sent() -> None:
@@ -473,8 +473,22 @@ def killed_before_the_start_of_a_background_service_is_sent(
     return proxy, request.id
 
 
+def killed_between_making_a_login_and_making_its_instance(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> tuple[PretendProxy, int]:
+    proxy = lane_brought_up_with_a()
+    request = record.write(MOVE_B, CALLER, None)
+    killed_once_it_wrote(monkeypatch, record, lambda did: did.startswith("make site-testing-"))
+    with pytest.raises(LaunchplaneKilled):
+        worker_on(proxy, record).work_next()
+    # The server has the login by now, and no container holds it.
+    proxy.host.change_database("database-data-1", unheld_logins=(proxy.host.logins_sent[-1].removeprefix("make "),))
+    return proxy, request.id
+
+
 KILLED: dict[str, Callable[[Record, pytest.MonkeyPatch], tuple[PretendProxy, int]]] = {
     "killed between a make and its start": killed_between_a_make_and_its_start,
+    "killed between making a login and making its instance": killed_between_making_a_login_and_making_its_instance,
     "killed before the start of a background service is sent": killed_before_the_start_of_a_background_service_is_sent,
     **{name: lambda record, _monkeypatch, begun=begun: begun(record) for name, begun in INTERRUPTED.items()},
 }

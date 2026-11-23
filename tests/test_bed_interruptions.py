@@ -970,3 +970,45 @@ def test_a_move_killed_with_the_start_of_its_background_service_written_and_not_
     assert ended["answer"]["did"].count(f"start {service}") == 1
     assert (f"start {service}: may have been sent, no answer; " in note, f"start {service}: done" in note) == (True, True)
     assert (answering(LEDGER), beside.failures, beside.answers_in_order()) == (LEDGER.answers[1], [], [untouched.answers[0]])
+
+
+def login_lines(request: dict[str, Any]) -> list[dict[str, Any]]:
+    return [each for each in request["events"] if "login" in (each["command"] or ())]
+
+
+def test_a_move_killed_once_its_instances_login_is_made_and_before_the_instance_is_removes_that_login_and_says_each_one() -> None:
+    let_go()
+    untouched = LEDGER.beside(UNTOUCHED)
+    for each in (LEDGER, untouched):
+        assert move_lane(each.product, each.lane, each.builds[0])[0] == 200
+    hold("after.logins.make")
+    try:
+        with request_loop(lambda: answering(untouched)) as beside:
+            asked = ask(f"/lanes/{LEDGER.product}/{LEDGER.lane}/move", {"build": LEDGER.builds[1]})[1]["id"]
+            wait_until_stopped_at("after.logins.make")
+            [made] = login_lines(ask(f"/requests/{asked}")[1])
+            instances_then = [each["container"] for each in running()["instances"] if each["lane"] == LEDGER.lane]
+            kill_held_launchplane()
+            let_go()
+            ended = request_ended(asked)
+            note = request_row_of(LEDGER, asked)[1]
+    finally:
+        let_go()
+    left, lines = made["command"]["login"], login_lines(ended)
+    database = made["command"]["container"]
+    assert (made["did"], made["outcome"]["made"], len(instances_then)) == (f"make the login {left} on {database}", True, 1)
+    assert (ended["stands"], ended["answer"]["outcome"], [each["ended"] for each in ended["attempts"]]) == (
+        "done",
+        "switched",
+        ["interrupted", "done"],
+    )
+    assert [(each["attempt"], each["command"]["verb"], each["command"]["login"] == left) for each in lines] == [
+        (1, "make", True),
+        (2, "remove", True),
+        (2, "make", False),
+    ]
+    dids = [each["did"] for each in lines]
+    assert (dids[1], [each["outcome"]["made"] for each in lines]) == (f"remove the login {left} from {database}", [True, True, True])
+    assert [each for each in ended["answer"]["did"] if " the login " in each] == dids
+    assert [note.index(f"{did}: done") for did in dids] == sorted(note.index(f"{did}: done") for did in dids)
+    assert (answering(LEDGER), beside.failures, beside.answers_in_order()) == (LEDGER.answers[1], [], [untouched.answers[0]])
