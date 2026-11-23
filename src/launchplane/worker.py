@@ -86,33 +86,36 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
 
 # Whether a line says the request changed something. A change of the route or a command for a part says so by its own line.
 def is_change(event: Event) -> bool:
-    sent = (event.action or event.command) is not None
-    return event.is_own if sent else event.error is None and not event.did.startswith(LOOKS)
+    return event.is_own if event.action or event.command else event.error is None and not event.did.startswith(LOOKS)
 
 
-# A request's answer says what every attempt of it did, as each told it. It is history: nothing is decided from it.
-def of_every_attempt(answer: MoveResult, kept: Kept | None) -> MoveResult:
-    if kept is None or len(kept.attempts) < 2:
-        return answer
-    did = [event.did for event in kept.events if is_change(event)]
+# A move's account is its saved lines, whatever its attempts. What has no line is as the one attempt told it. It is history.
+def of_every_attempt(answer: MoveResult, kept: Kept) -> MoveResult:
+    told = iter(answer.did if len(kept.attempts) < 2 else ())
+    did = [event.did if event.command is not None else next(told, event.did) for event in kept.events if is_change(event)]
     repaired = Outcome.REPAIRED if did and answer.outcome is Outcome.UNCHANGED else answer.outcome
     return answer.model_copy(update={"did": did, "outcome": repaired, "not_answered": kept.commands_not_answered()})
 
 
-# A lane found out of maintenance was brought out by this request where a change of the route it made sends visitors to
-# an instance. It is history, for the answer: what was done on the host was decided without it.
+# A lane found out of maintenance was brought out by this request where a route change it made sends visitors to an instance.
 def ended_by(answer: MaintenanceResult, kept: Kept | None) -> MaintenanceResult:
     lines = [] if kept is None else kept.events
     published = any(line.is_credited and line.action is not None and line.action.to not in (None, BACK_SOON) for line in lines)
     return answer.model_copy(update={"outcome": MaintenanceOutcome.ENDED}) if published else answer
 
 
+# What a retire removed is each removal among its saved lines that is its own, whatever the attempt.
 def accounted(answer: Answer, read: Callable[[], Kept | None]) -> Answer:
+    if isinstance(answer, MaintenanceResult):
+        return ended_by(answer, read()) if answer.outcome is MaintenanceOutcome.NOT_IN_MAINTENANCE else answer
+    if (kept := read()) is None:
+        return answer
     if isinstance(answer, MoveResult):
-        return of_every_attempt(answer, read())
-    if isinstance(answer, MaintenanceResult) and answer.outcome is MaintenanceOutcome.NOT_IN_MAINTENANCE:
-        return ended_by(answer, read())
-    return answer
+        return of_every_attempt(answer, kept)
+    own = kept.own_commands()
+    removed = [each.container for each in own if each.verb == "remove"]
+    retired = RetireOutcome.RETIRED if own and answer.outcome is RetireOutcome.UNCHANGED else answer.outcome
+    return answer.model_copy(update={"retired_containers": removed, "outcome": retired})
 
 
 # Several threads each take the oldest request of a lane none of them is on, so a lane has one worker and its requests
@@ -260,7 +263,9 @@ class Worker:
             if fenced is not Verdict.NONE and not came_to.write_refused:
                 why = f"The gate answers {fenced} for this release, so it is not ended on: {came_to.error or 'done'}"
                 return self.left_open(attempt, why)
-        if self.record.end(attempt, came_to.stands, came_to.answer, came_to.error, decided=came_to.verdict):
+        kept = self.record.read(request.id) if (came_to.stands, came_to.answer) == (Stands.FAILED, None) else None
+        error = came_to.error if kept is None else f"{came_to.error}{kept.commands_said()}"
+        if self.record.end(attempt, came_to.stands, came_to.answer, error, decided=came_to.verdict):
             return True
         return self.cancel_carried_to_the_gate(request, attempt)
 

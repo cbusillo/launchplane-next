@@ -89,8 +89,8 @@ def retire_answering(product: str, lane: str, _delete_data_set: str | None, _wit
         lane=lane,
         web_address="testing.site.test",
         outcome=RetireOutcome.RETIRED,
-        route_removed_to_container=None,
-        retired_containers=[f"site-testing-{SECRET}"],
+        route_removed_to_container=f"site-testing-{SECRET}",
+        retired_containers=[],
     )
 
 

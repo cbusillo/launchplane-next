@@ -230,10 +230,9 @@ class RecordNotRead(PretendRecord):
         raise AssertionError(f"the history of request {request} was read for an answer that does not use it")
 
 
-@pytest.mark.parametrize("asked", [RETIRE, BEGIN], ids=["a retire", "beginning maintenance"])
-def test_this_request_ends_without_reading_its_history(asked: Asked) -> None:
+def test_beginning_maintenance_ends_without_reading_its_history() -> None:
     record = RecordNotRead()
-    request = record.write(asked, CALLER, None)
+    request = record.write(BEGIN, CALLER, None)
     assert worker_on(lane_brought_up_with_a(), record).work_next() is True
     kept = PretendRecord.read(record, request.id)
     assert kept is not None and kept.stands is Stands.DONE

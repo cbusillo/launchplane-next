@@ -30,8 +30,8 @@ def not_written(_did: str, _web_address: str, _to: str | None) -> Answered:
 # `write` writes the line of a change of the route or of a command for a part before it is sent, and what it gives is
 # told the answer. `about_to` does so for a change of the route, from the web address and where it sends visitors.
 # `look` is shown the route of each reading and the containers read as made under `generation`, and nothing is decided
-# from what it does. `credit` is given each command Docker answered as done, which a call puts among what it has done.
-# `purpose` ends the line of a command sent to put a lane back. `unmade` is whether a command of the step was not answered as done.
+# from what it does. `credit` is given each command Docker answered as done. `purpose` ends the line of a command sent
+# to put a lane back. `unmade` is whether a command of the step was not answered as done.
 @dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
@@ -57,7 +57,7 @@ class Witness:
     # One command for one named container. A line that cannot be written raises here, so the command is not sent.
     def sending(self, verb: Verb, container: str) -> Answered:
         command = Command(verb=verb, container=container)
-        answered = self.write(f"{command.as_sent()}{self.purpose}", command)
+        answered = self.write(f"{verb} {container}{self.purpose}", command)
 
         def heard(said: Said | None, error: str | None) -> None:
             answered(said, error)

@@ -83,24 +83,22 @@ CHANGES: dict[type, Callable[[Any], str | None]] = {
     RemoveLogins: lambda step: f"removed the logins no container holds from {step.database}",
     StopDatabase: lambda step: f"stopped {step.container}",
     Switched: lambda step: f"wrote the route to {step.container}" if step.won else None,
-    Command: lambda sent: sent.as_done(),
 }
 
 
-# What a taken step changed. A request's account lists a command `as_lines`, in its line's words whatever its attempts.
+# What a taken step changed, but for a command for a part: a request's account of those is its saved lines.
 def change_made_by(event: Event) -> str | None:
     return CHANGES[type(event)](event) if type(event) in CHANGES else None
 
 
-def changes_made(done: tuple[Event, ...], *, as_lines: bool = False) -> list[str]:
-    changes = (each.as_sent() if as_lines and isinstance(each, Command) else change_made_by(each) for each in done)
-    return [change for change in changes if change is not None]
+def changes_made(done: tuple[Event, ...]) -> list[str]:
+    return [change for change in map(change_made_by, done) if change is not None]
 
 
 def changes_so_far(done: tuple[Event, ...]) -> str:
     changes = changes_made(done)
     if not changes:
-        return "Nothing was changed."
+        return "Nothing else was changed." if any(isinstance(each, Command) for each in done) else "Nothing was changed."
     return f"Before that, this call {', '.join(changes)}, and those changes stay."
 
 
@@ -288,7 +286,7 @@ class Move:
             outcome=Outcome.SWITCHED if self.gate.verdict is Verdict.COMMITTED else settled,
             container_receiving_visitors=self.lane.route.written,
             data_set=None if receiving is None else receiving.data_set,
-            did=changes_made(done, as_lines=True),
+            did=changes_made(done),
         )
         return answer.model_copy(update=update)
 
@@ -568,10 +566,8 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
     if named is not None:
         return DeleteDataSet(named)
     route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)
-    sent = [event for event in done if isinstance(event, Command)]
-    retired = [each.container for each in sent if each.verb == "remove"]
     deleted = next((event.found.data_set for event in done if isinstance(event, DeleteDataSet)), None)
-    changed = bool(sent) or any(isinstance(event, EditRoute | RemoveLogins) for event in done)
+    changed = any(isinstance(event, EditRoute | RemoveLogins) for event in done)
     return login_step(judged, done) or Done(
         RetireResult(
             product=lane.product,
@@ -579,7 +575,6 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
             web_address=web_address,
             outcome=RetireOutcome.DELETED if deleted else RetireOutcome.RETIRED if changed else RetireOutcome.UNCHANGED,
             route_removed_to_container=route_removed_to,
-            retired_containers=retired,
             deleted_data_set=deleted,
             kept_data_sets=sorted(found.data_set for found in lane.data_sets),
         )

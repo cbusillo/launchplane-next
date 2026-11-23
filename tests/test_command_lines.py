@@ -22,7 +22,7 @@ from tests.recording_docker import ExecResult, RecordingContainer, RecordingDock
 from tests.test_act import lane_brought_up_with_a
 from tests.test_cancel import cancelling
 from tests.test_container_host import DATABASE, LINK, TARGET, WEB, database_made, given_to
-from tests.test_host_answers import MOVE_A, worker_on
+from tests.test_host_answers import MOVE_A, RETIRE, worker_on
 from tests.test_route_lines import INTERRUPTED, carried_on
 from tests.test_worker import BUILD_A, CALLER, MOVE_B, kept_of, serving_a
 
@@ -255,7 +255,7 @@ def test_a_removal_docker_refuses_after_a_stop_it_answered_shows_both_lines_and_
     assert lines_of(kept) == ["stop stray: done", "remove stray: refused"]
     assert "409 Conflict" in (kept.events[-1].error or "")
     assert kept.error is not None and "Nothing was changed" not in kept.error
-    assert "409 Conflict Before that, this call stopped stray, and those changes stay." in kept.error
+    assert kept.error.endswith("409 Conflict Nothing else was changed. Of its commands for the lane's parts, stop stray was done.")
 
 
 # The line is in the record, and Launchplane dies before the command it was written for is sent.
@@ -519,3 +519,51 @@ def test_the_page_says_how_far_a_command_for_a_part_is_known_to_have_got_as_it_d
     shown: str, line: tuple[dict[str, Any], bool]
 ) -> None:
     assert line_of(Event.model_validate(line[0]), line[1]) == shown
+
+
+def test_a_retire_killed_once_its_last_removal_was_answered_lists_that_removal_and_does_not_answer_unchanged(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker, _, proxy = serving_a(record)
+    request = record.write(RETIRE, CALLER, None)
+    end = record.end
+
+    def killed_before_it_ends(*ending: object, **decided: object) -> bool:
+        monkeypatch.setattr(record, "end", end)
+        raise LaunchplaneKilled(ending, decided)
+
+    monkeypatch.setattr(record, "end", killed_before_it_ends)
+    with pytest.raises(LaunchplaneKilled):
+        worker.work_next()
+    assert (worker.work_next(), proxy.host.instances) == (True, {})
+    kept = kept_of(record, request.id)
+    assert kept.answer is not None and [each.ended for each in kept.attempts] == ["interrupted", "done"]
+    assert (kept.answer["outcome"], kept.answer["retired_containers"]) == ("retired", ["a"])
+    assert lines_of(kept, only_sent=True)[-1] == "remove a: done"
+
+
+def test_a_move_that_fails_on_a_refused_start_after_a_removal_whose_reply_was_lost_says_what_its_lines_say(
+    record: Record,
+) -> None:
+    worker, _, proxy = serving_a(record)
+    proxy.host.place(BUILD_A, "stray", InstanceState.STOPPED)
+    proxy.host.replies_lost = {"remove stray"}
+    proxy.host.commands_refused = {f"start site-testing-{number}" for number in range(9)}
+    request = record.write(MOVE_B, CALLER, None)
+    assert (worker.work_next(), worker.work_next()) == (True, True)
+    kept = kept_of(record, request.id)
+    [new] = {each.container for each in kept.own_commands() if each.verb == "make"}
+    assert (kept.stands, kept.answer, sorted(proxy.host.instances)) == (Stands.FAILED, None, ["a"])
+    assert f"The command to start {new} on test was refused: 409 Conflict" in (kept.error or "")
+    assert (kept.error or "").endswith(
+        f" Of its commands for the lane's parts, make {new} was done; remove {new} was done; "
+        "remove stray may have been sent, and Docker did not answer."
+    )
+    assert lines_of(kept, only_sent=True) == [
+        "stop stray: found already as asked",
+        "remove stray: may have been sent, no answer",
+        f"make {new}: done",
+        f"start {new}: refused",
+        f"stop {new}: found already as asked",
+        f"remove {new}: done",
+    ]

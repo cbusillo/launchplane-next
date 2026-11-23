@@ -118,7 +118,7 @@ def test_retiring_removes_the_route_before_any_instance() -> None:
     lanes, proxy = lanes_serving(BUILD_A, "a")
     result = lanes.retire("site", "testing")
     assert proxy.host.actions == ["unroute", "retire a"]
-    assert (result.outcome, result.route_removed_to_container, result.retired_containers) == (RetireOutcome.RETIRED, "a", ["a"])
+    assert (result.outcome, result.route_removed_to_container) == (RetireOutcome.RETIRED, "a")
 
 
 def test_a_retire_that_finishes_on_its_last_allowed_step_answers_retired_not_stopped() -> None:

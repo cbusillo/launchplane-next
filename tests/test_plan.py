@@ -171,7 +171,7 @@ MOVES = {
             *answered("old", "stop", "remove"),
             Discarded("old", kept=False),
         ),
-        answer(Outcome.SWITCHED, "new", did=("make new", "start new", "wrote the route to new", "stop old", "remove old")),
+        answer(Outcome.SWITCHED, "new", did=("wrote the route to new",)),
         gate=COMMITTED_TO_NEW,
     ),
     "a switch found in the routes file answers switched, though this attempt did none of it": Case(
@@ -182,14 +182,8 @@ MOVES = {
     ),
     "asking for the serving build again changes nothing": Case((NEW,), ("new", "new"), (), answer(Outcome.UNCHANGED, "new")),
     "an instance left beside the serving build is retired": Case((NEW, STRAY), ("new", "new"), (), gone("stray")),
-    "a finished cleanup answers repaired, with what it did": Case(
-        (NEW,),
-        ("new", "new"),
-        (*answered("stray", "remove"), Discarded("stray", kept=False)),
-        answer(Outcome.REPAIRED, "new", did=("remove stray",)),
-    ),
-    "a cleanup that found the instance it would remove already gone answers unchanged": Case(
-        (NEW,), ("new", "new"), (Discarded("stray", kept=False),), answer(Outcome.UNCHANGED, "new")
+    "a finished cleanup answers with no command in what it did: its commands are listed from its lines": Case(
+        (NEW,), ("new", "new"), (*answered("stray", "remove"), Discarded("stray", kept=False)), answer(Outcome.UNCHANGED, "new")
     ),
     "a running instance of the build that anything earlier left is retired, never taken for the candidate": Case(
         (OLD, NEW), ("old", "old"), (), gone("new")
@@ -210,7 +204,7 @@ MOVES = {
         (OLD,),
         ("old", "old"),
         (*NEW_MADE_AND_STARTED, STARTED_NEW, REFUSED, *answered("new", "stop", "remove"), Discarded("new", kept=False)),
-        answer(Outcome.CHECK_FAILED, "old", "Connection refused", did=("make new", "start new", "stop new", "remove new")),
+        answer(Outcome.CHECK_FAILED, "old", "Connection refused"),
     ),
 }
 
@@ -374,16 +368,11 @@ def test_a_committed_release_whose_route_the_proxy_reports_not_enabled_is_waited
     assert next_move_step(replace(disabled, gate=COMMITTED_TO_NEW)) == disabled.step
 
 
-def retired(route_removed_to: str | None, containers: list[str]) -> Done[RetireResult]:
-    outcome = RetireOutcome.RETIRED if route_removed_to or containers else RetireOutcome.UNCHANGED
+def retired(route_removed_to: str | None) -> Done[RetireResult]:
+    outcome = RetireOutcome.RETIRED if route_removed_to else RetireOutcome.UNCHANGED
     return Done(
         RetireResult(
-            product="site",
-            lane="testing",
-            web_address=WEB_ADDRESS,
-            outcome=outcome,
-            route_removed_to_container=route_removed_to,
-            retired_containers=containers,
+            product="site", lane="testing", web_address=WEB_ADDRESS, outcome=outcome, route_removed_to_container=route_removed_to
         )
     )
 
@@ -402,15 +391,12 @@ RETIRES = {
         (),
         (None, None),
         (EditRoute(WEB_ADDRESS, None, "old", "old"), *answered("old", "remove"), Retire("old")),
-        retired("old", ["old"]),
+        retired("old"),
     ),
-    "a lane whose route was already gone answers no route removed": Case(
-        (), (None, None), (*answered("old", "stop", "remove"), Retire("old")), retired(None, ["old"])
+    "a lane whose route was already gone answers no route removed, and what it removed is listed from its lines": Case(
+        (), (None, None), (*answered("old", "stop", "remove"), Retire("old")), retired(None)
     ),
-    "a retire that found its instance already gone answers that it removed none": Case(
-        (), (None, None), (Retire("old"),), retired(None, [])
-    ),
-    "a retired lane is unchanged": Case((), (None, None), (), retired(None, [])),
+    "a retired lane is unchanged": Case((), (None, None), (), retired(None)),
     "a lane whose loaded route is disabled has it removed": Case(
         (OLD,), (LoadedRoute("old", RouteStatus.DISABLED), "old"), (), EditRoute(WEB_ADDRESS, None, "old", "old")
     ),

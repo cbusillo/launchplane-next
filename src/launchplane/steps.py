@@ -47,7 +47,7 @@ class RetireResult(Result):
     web_address: str
     outcome: RetireOutcome
     route_removed_to_container: str | None
-    retired_containers: list[str]
+    retired_containers: list[str] = []
     deleted_data_set: str | None = None
     kept_data_sets: list[str] = []
 
@@ -256,7 +256,6 @@ class LogRead:
 
 
 type Verb = Literal["make", "start", "stop", "remove"]
-DONE: dict[Verb, str] = {"make": "made", "start": "started", "stop": "stopped", "remove": "removed"}
 
 
 # A change of the route as it is sent: the web address and where it sends visitors, or nowhere for a removal.
@@ -269,13 +268,6 @@ class Sent(BaseModel):
 class Command(BaseModel, frozen=True):
     verb: Verb
     container: str
-
-    # The words of its line, and of a request's account of what it did.
-    def as_sent(self) -> str:
-        return f"{self.verb} {self.container}"
-
-    def as_done(self) -> str:
-        return f"{DONE[self.verb]} {self.container}"
 
 
 # What a part answered when it would not do as asked, with the real error.
