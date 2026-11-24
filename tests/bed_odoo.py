@@ -95,6 +95,7 @@ def main(do: str, product: str = "watch-tk", lane: str = "testing") -> None:
         seed(product, lane)
     elif do == "tear-down":
         stop_recorded_git_host()
+        on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
     else:
         raise SystemExit("python -m tests.bed_odoo set-up|seed|tear-down [product] [lane]")
     print(json.dumps({"done": do, "product": product, "builds": {str(RUN): build_of(RUN), str(LATER_RUN): build_of(LATER_RUN)}}))  # noqa: T201

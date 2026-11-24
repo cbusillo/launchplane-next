@@ -363,10 +363,10 @@ curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
 uv run python -m tests.bed_odoo seed watch-tk
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
 curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
-ssh root@docker-lp-scratch.shiny 'docker ps --filter label=launchplane.product=watch-tk --format "{{.Names}} {{.Image}} {{.Mounts}}"'
+ssh root@docker-lp-scratch.shiny 'docker ps --no-trunc --filter label=launchplane.product=watch-tk --format "{{.Names}} {{.Image}} {{.Mounts}}"'
 ```
 
-3. **Seeded, the lane serves the verified digest.** The seed takes about a minute and prints one line. The move answers `switched` after about 17 s, and its lines end with the `make` and `start` of the instance and `wrote the route`; the first is the removal of the seed's login. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on image `0e2ad09feaa7` with the volume `launchplane-data-…-files`, and the database server. The page shows the lane `good`, and its card the same lines.
+3. **Seeded, the lane serves the verified digest.** The seed takes about a minute and prints one line. The move answers `switched` after about 17 s, and its lines end with the `make` and `start` of the instance and `wrote the route`; the first is the removal of the seed's login. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` with the volume `launchplane-data-…-files`, and the database server with `…-database`. The page shows the lane `good`, and its card the same lines.
 
 ```
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
@@ -389,13 +389,13 @@ ssh root@docker-lp-scratch.shiny "docker exec $W mv /volumes/data/held $F"
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
 ```
 
-6. **With the file back, the same move switches.** `switched`, to `…@sha256:f0b8a27b…`.
+6. **With the file back, the same move switches.** `switched`, to `…@sha256:f0b8a27b…`, and after `wrote the route` the `stop` and `remove` of the first build's instance and of its login.
 
-7. **Put the bed back.** The lane is retired with its data set, and Launchplane is taken off the recorded git host:
+7. **Put the bed back.** The lane is retired with its data set, which the second answer names as `deleted_data_set`, and Launchplane is taken off the recorded git host:
 
 ```
 D=$(curl -s "$L$P/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"
-uv run python -m tests.bed_odoo tear-down
+uv run python -m tests.bed_odoo tear-down watch-tk
 ```
 
 ### The login watch
