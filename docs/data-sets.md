@@ -1,6 +1,6 @@
 # A lane with a database
 
-A product that says it has a database runs each lane against a data set: a PostgreSQL server on its own quiet network, with its data on a Docker volume. A release that does not change the data's structure starts the new instance on the same data set. Cloning a data set is not built yet, and neither are files (README, open question 14).
+A product that says it has a database runs each lane against a data set: a PostgreSQL server on its own quiet network, with its data on a Docker volume. A release that does not change the data's structure starts the new instance on the same data set. A product of [the Odoo kind](odoo.md#the-data-set) has a files volume in its data set too. Cloning a data set is not built yet (README, open question 14).
 
 ## The product description
 
@@ -30,6 +30,7 @@ Everything is tied by labels and by networks, never by container names. A data s
 | --- | --- | --- |
 | Data set network | `launchplane-data-<data set>` | product, lane, `launchplane.data-set` |
 | Database volume | `launchplane-data-<data set>-database` | the same |
+| Files volume, for a product that keeps files | `launchplane-data-<data set>-files` | the same, `launchplane.part=files` |
 | Database server | `<product>-<lane>-database-<data set>` | the same, `launchplane.part=database`, `launchplane.secret-variables` |
 | Web part of an instance | `<product>-<lane>-<12 hex>` | product, lane, build, `launchplane.part=web`, `launchplane.data-set`, `launchplane.secret-variables` |
 | Background service of an instance | `<web part's container>-background-service` | the same with `launchplane.part=background-service`, and `launchplane.instance=<web part's container>` |
