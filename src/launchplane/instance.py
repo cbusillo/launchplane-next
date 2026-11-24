@@ -68,7 +68,7 @@ class RunningInstance(BaseModel):
     mounts: tuple[Mount, ...] = ()
     generation: Stamp = None
     # The image it runs, where its build names a digest and the host has another image for that digest, or none.
-    not_its_build: str | None = None
+    other_image: str | None = None
 
 
 class RunningBackgroundService(BaseModel):
@@ -123,17 +123,13 @@ class DataSet(BaseModel):
     generation: Stamp = None
 
 
-# How a kind starts its web part where the build does not say: nothing, for a build that starts by itself. The
-# `files` of its data set are mounted at that path.
+# How a kind starts its web part, where the build does not say. The files of its data set are mounted at `files`.
 @dataclass(frozen=True)
 class Run:
     command: tuple[str, ...] = ()
     environment: Mapping[str, str] = field(default_factory=dict[str, str])
     user: str | None = None
     files: str | None = None
-
-
-PLAIN = Run()
 
 
 # `run` is filled in from the product's description by the call that moves the lane.
@@ -143,7 +139,7 @@ class LaneBuild(BaseModel):
     product: str
     lane: str
     build: str
-    run: Run = PLAIN
+    run: Run = Run()
 
 
 @dataclass(frozen=True)

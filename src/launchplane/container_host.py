@@ -241,13 +241,11 @@ class ContainerHost:
 
     # A build that names a digest is the image the host has for that digest, whatever the instance's label says.
     def held_to_its_build(self, instance: RunningInstance, image: str) -> RunningInstance:
-        if instance.build is None or "@sha256:" not in instance.build:
-            return instance
-        try:
-            of_build = self.client.images.get(instance.build).id
-        except ImageNotFound:
-            of_build = None
-        return instance if of_build == image else instance.model_copy(update={"not_its_build": image})
+        build = instance.build or ""
+        with suppress(ImageNotFound):
+            if "@sha256:" not in build or self.client.images.get(build).id == image:
+                return instance
+        return instance.model_copy(update={"other_image": image or "an image Docker does not name"})
 
     # A container's secrets are noted as it is described, before any later work that can fail and say something of it.
     def described(self, lane: Lane | None) -> Listed:

@@ -192,12 +192,9 @@ class Judged:
         found = self.lane.data_set(data_set)
         return set() if found is None else {network.name for network in found.networks}
 
-    @property
-    def files_path(self) -> str | None:
-        return None if self.product is None else self.product.run.files
-
+    # Where the product keeps files: its data set's files volume, mounted in the instance.
     def files_mounts(self, data_set: str | None) -> tuple[Mount, ...]:
-        found, path = self.lane.data_set(data_set), self.files_path
+        found, path = self.lane.data_set(data_set), None if self.product is None else self.product.run.files
         return () if found is None or path is None else tuple(Mount(source=volume, path=path) for volume in found.files)
 
 
@@ -273,7 +270,7 @@ def stamp_findings(subject: str, stamp: Stamp) -> list[Found]:
 def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
     part, subject = f"The instance {instance.container}", instance.container
     serves = of.serving is not None and of.serving.container == subject
-    active = of.lane.active
+    active, other = of.lane.active, instance.other_image
     beside = active is not None and active.container != subject
     return [
         *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
@@ -283,12 +280,8 @@ def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
         *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
         *mount_findings(part, subject, instance.mounts, of.files_mounts(instance.data_set)),
         *([Found(Weight.UNFINISHED, subject, Kind.BESIDE, f"{part} runs beside the active one")] if beside else []),
-        *([Found(Weight.FAULT, subject, Kind.NOT_ITS_BUILD, not_its_build(part, instance))] if instance.not_its_build else []),
+        *([Found(Weight.FAULT, subject, Kind.NOT_ITS_BUILD, f"{part} runs {other}, which is not its build")] if other else []),
     ]
-
-
-def not_its_build(part: str, instance: RunningInstance) -> str:
-    return f"{part} says it is the build {instance.build} and runs the image {instance.not_its_build}, which is not that build"
 
 
 def doubled_parts(found: DataSet) -> list[str]:
@@ -337,11 +330,11 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         for kind, word, parts in (
             (Kind.NO_NETWORK, "network", found.networks),
             (Kind.NO_VOLUME, "volume", found.volumes),
-            (Kind.NO_FILES, "files volume", found.files if of.files_path else ("not needed",)),
             (Kind.NO_DATABASE, "database", found.databases),
         )
         if not parts
     ]
+    missing += [(Kind.NO_FILES, "files volume")] * (of.product is not None and bool(of.product.run.files) and not found.files)
     return [
         *stamp_findings(subject, found.generation),
         *[

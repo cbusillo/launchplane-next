@@ -278,8 +278,7 @@ def looking(why: str, *, turned_back: bool = False) -> Witness:
 
 
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object], gate: Carries, read: StatusReader, builds: Builds) -> None:
-        self.builds = builds
+    def __init__(self, record: Record, wake: Callable[[], object], gate: Carries, read: StatusReader) -> None:
         self.record = record
         self.wake = wake
         self.gate = gate
@@ -435,7 +434,7 @@ def why_not_cancelled(kept: Kept) -> str | None:
 WAIT = Query(ge=0, le=MOST_SECONDS_WAITED, description="Seconds to wait for the request to end before answering 202.")
 
 
-def add_lane_calls(app: FastAPI, calls: Calls) -> None:
+def add_lane_calls(app: FastAPI, calls: Calls, builds: Builds) -> None:
     @app.post("/lanes/{product}/{lane}/move", responses=responses_to_a_request(MoveResult))
     def move_lane(
         product: Annotated[str, SLUG],
@@ -446,11 +445,10 @@ def add_lane_calls(app: FastAPI, calls: Calls) -> None:
         wait: Annotated[float, WAIT] = 0,
     ) -> MoveResult | NotFinished | Kept:
         try:
-            build = calls.builds.asked(product, request.build, request.run)
-        except NotABuild as error:
-            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
+            build = builds.asked(product, request.build, request.run)
         except (GitHostError, ProductError) as error:
-            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+            status = HTTPStatus.UNPROCESSABLE_CONTENT if isinstance(error, NotABuild) else HTTPStatus.SERVICE_UNAVAILABLE
+            return not_finished(response, status, str(error))
         return calls.keep(Asked(product=product, lane=lane, work=Work.MOVE, build=build), MoveResult, http, response, wait)
 
     @app.post("/lanes/{product}/{lane}/retire", responses=responses_to_a_request(RetireResult))
@@ -529,8 +527,8 @@ def create_app(
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    calls = Calls(record, wake, gate, read, builds)
-    add_lane_calls(app, calls)
+    calls = Calls(record, wake, gate, read)
+    add_lane_calls(app, calls, builds)
     add_request_calls(app, calls)
     add_cancel_call(app, calls)
     return app
