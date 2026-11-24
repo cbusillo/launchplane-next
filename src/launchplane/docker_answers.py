@@ -142,6 +142,7 @@ class DockerContainerSummary(BaseModel):
 
     names: list[str] = Field(alias="Names", min_length=1)
     image: str = Field(alias="Image")
+    image_id: str = Field(default="", alias="ImageID")
     state: DockerState = Field(alias="State")
     labels: dict[str, str] = Field(alias="Labels")
     network_settings: DockerAttachedNetworks = Field(alias="NetworkSettings")
@@ -352,7 +353,9 @@ def data_sets_from(
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
     made_by = {key: generation_in(network.labels or {}, f"the network {network.name}") for key, network in marked}
-    by_volume = grouped((data_set_key(volume.labels, f"the volume {volume.name}"), volume.name) for volume in volumes)
+    keyed = [(data_set_key(volume.labels, f"the volume {volume.name}"), volume) for volume in volumes]
+    by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) != "files")
+    by_files = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) == "files")
     by_database = grouped(databases)
     return [
         DataSet(
@@ -363,8 +366,9 @@ def data_sets_from(
             volumes=tuple(sorted(by_volume.get(key, []))),
             databases=tuple(sorted(by_database.get(key, []), key=lambda database: database.container)),
             generation=made_by.get(key),
+            files=tuple(sorted(by_files.get(key, []))),
         )
-        for key in sorted(by_network.keys() | by_volume.keys() | by_database.keys(), key=str)
+        for key in sorted(by_network.keys() | by_volume.keys() | by_files.keys() | by_database.keys(), key=str)
     ]
 
 

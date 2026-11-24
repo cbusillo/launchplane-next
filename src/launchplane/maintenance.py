@@ -22,7 +22,6 @@ from launchplane.steps import (
     AwaitBackgroundService,
     BackgroundServiceRefused,
     Cancel,
-    Check,
     CheckRefused,
     Done,
     EditRoute,
@@ -192,7 +191,7 @@ def bring_back(judged: Judgement, product: Product, answer: MaintenanceResult, d
     if instance.state == InstanceState.STOPPED and start not in done:
         return start
     if not is_checked(instance, product, done):
-        return Check(instance.container, product.health_path)
+        return product.check(instance.container)
     problems = problems_switching_to(judged, instance)
     if problems:
         return Stop(

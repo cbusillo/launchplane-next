@@ -2,7 +2,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.resources import files
@@ -55,8 +55,6 @@ BACK_SOON_PAGE = HelperContainer(
         "--header=Content-Type: text/html; charset=utf-8",
         f"--body={files('launchplane').joinpath('back_soon.html').read_text()}",
     ],
-    ports={},
-    volumes={},
     quiet_networks=[LANE_NETWORK],
 )
 LOADED_ROUTES_URL = "http://127.0.0.1:8080/api/rawdata"
@@ -272,7 +270,7 @@ class TraefikProxy:
         result = self.fetch("--header", f"Host: {web_address}", WEB_ADDRESS_URL)
         return None if result.succeeded else result.output
 
-    def check_instance(self, container: str, health_path: str) -> None:
+    def check_instance(self, container: str, health_path: str, command: Sequence[str] = ()) -> None:
         started = self.clock()
         answering_since: float | None = None
         while True:
@@ -288,5 +286,7 @@ class TraefikProxy:
             elif answering_since is None:
                 answering_since = now
             elif now - answering_since >= self.steady_seconds:
-                return
+                break
             self.sleep(POLL_SECONDS)
+        if command and not (ran := self.host.run_in(container, [*command])).succeeded:
+            raise CheckFailed(f"{container} answers the proxy, and the check of its kind, run in it, failed: {ran.output}")

@@ -67,6 +67,7 @@ from launchplane.instance import (
     InstanceState,
     LaneBuild,
     OnHost,
+    RunningInstance,
     Unread,
     background_service_container_of,
     new_password,
@@ -100,9 +101,9 @@ class HelperContainer:
     container: str
     image: str
     command: list[str]
-    ports: dict[int, int]
-    volumes: dict[str, str]
     quiet_networks: list[str]
+    ports: dict[int, int] = field(default_factory=dict[int, int])
+    volumes: dict[str, str] = field(default_factory=dict[str, str])
     outside_network: str | None = None
 
     @property
@@ -127,6 +128,7 @@ class RunOptions:
     volumes: dict[str, str] = field(default_factory=dict[str, str])
     ports: dict[int, int] = field(default_factory=dict[int, int])
     restart: RestartPolicy = STAYS_STOPPED_WHEN_STOPPED
+    user: str | None = None
 
 
 def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
@@ -155,7 +157,7 @@ def part_options(target: LaneBuild, container: str, part: Part, networks: list[s
 
 def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> RunOptions:
     labels = options.labels | {DATA_SET_LABEL: use.data_set, SECRET_VARIABLES_LABEL: CLIENT_PASSWORD_VARIABLE}
-    return replace(options, labels=labels, environment=login)
+    return replace(options, labels=labels, environment=options.environment | login)
 
 
 # What a generation makes is stamped with it as it is made, so the host shows what each release started.
@@ -233,7 +235,17 @@ class ContainerHost:
             system = self.system_information() if found.has_part("background-service") else None
         on_host, held = on_host_from(found, networks, volumes, system), logins_held(found)
         data_sets = [self.probed(each, held.get((each.product, each.data_set), set())) for each in on_host.data_sets]
-        return replace(on_host, data_sets=data_sets)
+        images = {summary.name: summary.image_id for summary in found.summaries}
+        instances = [self.held_to_its_build(each, images[each.container]) for each in on_host.instances]
+        return replace(on_host, data_sets=data_sets, instances=instances)
+
+    # A build that names a digest is the image the host has for that digest, whatever the instance's label says.
+    def held_to_its_build(self, instance: RunningInstance, image: str) -> RunningInstance:
+        build = instance.build or ""
+        with attempting(f"Reading the image of the build of {instance.container}", self.address), suppress(ImageNotFound):
+            if "@sha256:" not in build or self.client.images.get(build).id == image:
+                return instance
+        return instance.model_copy(update={"other_image": image or "an image Docker does not name"})
 
     # A container's secrets are noted as it is described, before any later work that can fail and say something of it.
     def described(self, lane: Lane | None) -> Listed:
@@ -338,6 +350,7 @@ class ContainerHost:
             volumes={volume: {"bind": path, "mode": "rw"} for volume, path in options.volumes.items()},
             ports={f"{inside}/tcp": outside for inside, outside in options.ports.items()},
             restart_policy=restart,
+            user=options.user,
         )
 
     def run_part(
@@ -355,11 +368,13 @@ class ContainerHost:
     def start_instance(
         self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
     ) -> None:
-        networks = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network]
+        networks, run = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network], target.run
+        files = {} if use is None or use.files is None or run.files is None else {use.files: run.files}
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
-            options = part_options(target, container, "web", networks, None)
-            stamped = replace(options, labels=options.labels | stamp_of(generation))
-            self.run_part(stamped, use, lambda on: self.logins.make(container, on, by), by)
+            options = part_options(target, container, "web", networks, [*run.command] or None)
+            stamped = replace(options, labels=options.labels | stamp_of(generation), volumes=files, user=run.user)
+            ready = replace(stamped, environment=dict(run.environment))
+            self.run_part(ready, use, lambda on: self.logins.make(container, on, by), by)
 
     def start_background_service(
         self,
@@ -394,9 +409,11 @@ class ContainerHost:
             labels = data_set_labels(product, lane, data_set) | stamp_of(generation)
             self.create_network(f"launchplane-data-{data_set}", labels, quiet=True)
 
-    def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
-        with attempting(f"Making the volume of the data set {data_set}", self.address):
-            self.client.volumes.create(f"launchplane-data-{data_set}-database", labels=data_set_labels(product, lane, data_set))
+    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None:
+        part, marks = ("files", {PART_LABEL: "files"}) if files else ("database", {})
+        with attempting(f"Making the {part} volume of the data set {data_set}", self.address):
+            labels = data_set_labels(product, lane, data_set) | marks
+            self.client.volumes.create(f"launchplane-data-{data_set}-{part}", labels=labels)
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         with attempting(f"Making the database of the data set {data_set}", self.address):
@@ -449,7 +466,7 @@ class ContainerHost:
         with attempting(f"Deleting the data set {found.data_set}", self.address):
             for database in found.databases:
                 self.retire_container(database.container)
-            for volume in found.volumes:
+            for volume in (*found.volumes, *found.files):
                 with suppress(NotFound):
                     self.client.volumes.get(volume).remove()
             for network in found.networks:

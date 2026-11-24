@@ -3,6 +3,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from launchplane.instance import Run
+from launchplane.odoo import Odoo
+from launchplane.steps import Check
+
 
 class ProductError(Exception):
     pass
@@ -26,6 +30,14 @@ class Product(BaseModel):
     health_path: str = Field(default="/", pattern=r"^/[^\s]*$")
     database: Database | None = None
     background_service: BackgroundService | None = None
+    odoo: Odoo | None = None
+
+    @property
+    def run(self) -> Run:
+        return Run() if self.odoo is None else self.odoo.run
+
+    def check(self, container: str) -> Check:
+        return Check(container, self.health_path, () if self.odoo is None else self.odoo.check)
 
 
 @dataclass(frozen=True)

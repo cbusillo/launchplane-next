@@ -2,7 +2,7 @@
 
 `POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when the move ends. The lane answers at the web address `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
-For now a build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a background service or a health path of its own says so in its description: see [a lane with a database](data-sets.md). Each instance gets a new container name, `{product}-{lane}-` and 12 random hex digits. Which product, lane and build an instance is comes from its labels, never from its name.
+A build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a background service or a health path of its own says so in its description: see [a lane with a database](data-sets.md). For [a product of the Odoo kind](odoo.md) a build is given as `{"run": <number>}`, a publishing run of its own workflow, and runs as the image that run published, by digest. Each instance gets a new container name, `{product}-{lane}-` and 12 random hex digits. Which product, lane and build an instance is comes from its labels, never from its name.
 
 ## What it does
 
@@ -52,7 +52,7 @@ A move does not answer success while the lane's web address does not answer a re
 
 A `503` means the move stopped where it was with nothing switched, the gate has confirmed that, and what the move made is gone. Its request has failed, and it is safe to ask again. A build Docker answers it does not have ends this way; a host that does not answer leaves the request working. A lane's requests are worked one at a time, and a newer one that asks for something else [cancels](requests.md#cancelling) a move whose routes file is not renamed yet: the instance it started is removed and the web address never moves.
 
-**The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error.
+**The check.** The proxy requests `http://<instance>:80<health path>`, the path real traffic takes. The instance passes once it has answered with a 2xx for 3 s without a failure, and fails if it has not passed after 20 s, with the last error. An instance of the Odoo kind must then pass [the check of its kind](odoo.md#the-check), run once inside it.
 
 **The old instance** is retired once the switch is loaded: Docker sends the image's stop signal, waits up to 30 s, then kills and removes it. A product must finish its requests in flight and exit on its stop signal. A request that needs longer than 30 s after the switch is cut off.
 
@@ -155,6 +155,8 @@ LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_inter
 uv run pytest tests/test_interruptions.py -v
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_host_answers.py -v
 ```
+
+`LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_odoo.py -v` runs TK's real build as the lane `testing` of `test-bed-tk`: see [the TK watch](#the-tk-watch).
 
 Which bed the tests run against is [chosen by settings](what-is-running.md#choosing-the-test-bed), and these lines name the first one. Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
 
@@ -335,6 +337,72 @@ curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouc
 ```
 for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
 ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
+```
+
+### The TK watch
+
+TK's real Odoo 20 build as a lane, from a build Launchplane verified. Every block pastes into zsh as it stands, from this repository. The first block pulls two of TK's builds on the scratch container, starts [the recorded git host](odoo.md#known-and-not-fixed) on the control container and describes the product `watch-tk`. Open `http://launchplane.shiny:8700/` beside it.
+
+```
+L=http://launchplane.shiny:8700; J='Content-Type: application/json'; V=http://docker-lp-scratch.shiny/; P=/lanes/watch-tk/testing
+export LAUNCHPLANE_URL=$L LAUNCHPLANE_CONTROL_SHELL='ssh root@launchplane.shiny' LAUNCHPLANE_SCRATCH_SHELL='ssh root@docker-lp-scratch.shiny'
+said() { python3 -c 'import sys, json; a = json.load(sys.stdin); e = (a.get("error") or "").splitlines(); print(a.get("outcome"), a.get("build", ""), *a.get("did", []), *e[:1], *e[-3:-1], sep="\n")'; }
+uv run python -m tests.bed_odoo set-up watch-tk
+curl -s -X POST "$L$P/move" -H "$J" -d '{"build":"ghcr.io/cbusillo/odoo-tenant-tk:latest"}'
+```
+
+1. **A build given as text is refused.** The last line answers that a move of `watch-tk` names its build as `{"run": <number>, of a run of .github/workflows/build.yml in cbusillo/odoo-tenant-tk}`. **The page** has no card for `watch-tk`.
+
+```
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
+```
+
+2. **A new lane fails its check, and keeps the data set it made.** After about 30 s: `check failed`, the build as `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…`, and four lines that each name a part: `made the network`, `the database volume`, `the files volume` and `the database server of the data set`. Then the `make`, `start`, `stop` and `remove` of the instance with its login, and that `/web/login` answered `500`. The two lines after it are from the instance's log, and end in `Database app not initialized`.
+
+   **The card** `watch-tk · testing` reads `move failed`. Its web address is `not answering`: the proxy sends it to no instance. The request is `failed`, and its note is one paragraph with no log in it: that `/web/login` did not answer with success, then `The last error in its log: ImportError: Database app not initialized, you can force it with -i base`, then its lines, which begin `make the network`, `make the database volume`, `make the files volume` and `make the database server of the data set`. The row `Found` says `No instance receives visitors`, with `move failed` and the note that the request started an instance that failed its check, so nothing was switched, and that asking for that build again fails the same way until what the check found is put right. The last row is the data set's database server, `running`.
+
+```
+uv run python -m tests.bed_odoo seed watch-tk
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
+curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
+ssh root@docker-lp-scratch.shiny 'docker ps --no-trunc --filter label=launchplane.product=watch-tk --format "{{.Names}} {{.Image}} {{.Mounts}}"'
+```
+
+3. **Seeded, the lane serves the verified digest.** The seed takes about a minute and prints one line. The move answers `switched` after about 17 s, and its lines end with the `make` and `start` of the instance and `wrote the route`; the first is the removal of the seed's login. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` with the volume `launchplane-data-…-files`, and the database server with `…-database`.
+
+   **The card** reads `good`, and its web address `answering`. The request is `done`: `It ended as done.` and its lines, from the removal of the login `i_seed` to `switch testing.watch-tk.test to` the instance, each ending `: done` but the check. There is no row `Found`. `Instance 1` shows the build by its digest, `running` and `active`, and the data set's server is `running`.
+
+```
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
+```
+
+4. **The same build again changes nothing.** `unchanged`, and no line. **The card** is as at point 3, with this request `done` and the note `It ended as done.` alone.
+
+```
+F=/volumes/data/filestore/app/34/34d5bcdaa3ca7286418fae675e3339c20fe1accc
+W=$(ssh root@docker-lp-scratch.shiny 'docker ps --quiet --filter label=launchplane.product=watch-tk --filter label=launchplane.part=web')
+ssh root@docker-lp-scratch.shiny "docker exec $W mv $F /volumes/data/held"
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
+curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
+```
+
+5. **With the attachment's file gone, the next build fails the check and the lane keeps serving.** The move to TK's next build answers `check failed`: the candidate `answers the proxy, and the check of its kind, run in it, failed`, since the attachment `must be there once with the SHA-256 5b8e2378…` and has `e3b0c442…`, the SHA-256 of no bytes. The two lines after it are from the candidate's log. The site still answers its title, from the first build.
+
+   **The card** still reads `good` and `answering`: the lane serves. The request is `failed`, and its note is that one sentence of the check and then its lines, with `check … at /web/login, refused` among them and no line of a log: the candidate's log speaks of no error. There is no row `Found`, and `Instance 1` is still the first build's, `running` and `active`.
+
+```
+ssh root@docker-lp-scratch.shiny "docker exec $W mv /volumes/data/held $F"
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
+```
+
+6. **With the file back, the same move switches.** `switched`, to `…@sha256:f0b8a27b…`, and after `wrote the route` the `stop` and `remove` of the first build's instance and of its login.
+
+   **The card** reads `good`. The request is `done`, and its lines run from the `make` of the new login through the `switch` to the `stop` and `remove` of the first instance. Among them `retire` and the first instance's name, `, refused`, is the gate answering that an earlier release was switched to it, so it is removed as the instance this release replaced and not as something a failed move left. `Instance 1` is the second build's digest, `running` and `active`.
+
+7. **Put the bed back.** The tear-down retires the lane with its data set, and only once that has ended takes Launchplane off the recorded git host and removes the description. If the retire did not end, it stops and says so, and everything is left as it is. **The card** afterwards has one row, the retire, `done`, whose lines end `delete the data set` and its name; it leaves the page 10 minutes later:
+
+```
+uv run python -m tests.bed_odoo tear-down watch-tk
 ```
 
 ### The login watch

@@ -71,6 +71,8 @@ class Kind(StrEnum):
     UNSTEADY = "not yet up as long as it must stay up"
     NO_NETWORK = "no network"
     NO_VOLUME = "no volume"
+    NO_FILES = "no files volume"
+    NOT_ITS_BUILD = "runs an image that is not its build"
     NO_DATABASE = "no database server"
     NOT_QUIET = "network not quiet"
     NOT_ACCEPTING = "does not accept connections"
@@ -190,6 +192,11 @@ class Judged:
         found = self.lane.data_set(data_set)
         return set() if found is None else {network.name for network in found.networks}
 
+    # Where the product keeps files: its data set's files volume, mounted in the instance.
+    def files_mounts(self, data_set: str | None) -> tuple[Mount, ...]:
+        found, path = self.lane.data_set(data_set), None if self.product is None else self.product.run.files
+        return () if found is None or path is None else tuple(Mount(source=volume, path=path) for volume in found.files)
+
 
 type Part = RunningInstance | RunningBackgroundService | DataSetDatabase
 
@@ -263,7 +270,7 @@ def stamp_findings(subject: str, stamp: Stamp) -> list[Found]:
 def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
     part, subject = f"The instance {instance.container}", instance.container
     serves = of.serving is not None and of.serving.container == subject
-    active = of.lane.active
+    active, other = of.lane.active, instance.other_image
     beside = active is not None and active.container != subject
     return [
         *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
@@ -271,8 +278,9 @@ def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
         *state_findings(part, instance, of, Weight.WRONG if serves else Weight.UNFINISHED),
         *data_set_label_findings(part, instance, of),
         *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
-        *mount_findings(part, subject, instance.mounts, ()),
+        *mount_findings(part, subject, instance.mounts, of.files_mounts(instance.data_set)),
         *([Found(Weight.UNFINISHED, subject, Kind.BESIDE, f"{part} runs beside the active one")] if beside else []),
+        *([Found(Weight.FAULT, subject, Kind.NOT_ITS_BUILD, f"{part} runs {other}, which is not its build")] if other else []),
     ]
 
 
@@ -280,6 +288,7 @@ def doubled_parts(found: DataSet) -> list[str]:
     parts: dict[str, tuple[str, ...]] = {
         "networks": tuple(network.name for network in found.networks),
         "volumes": found.volumes,
+        "files volumes": found.files,
         "database servers": tuple(database.container for database in found.databases),
     }
     return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
@@ -325,6 +334,8 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         )
         if not parts
     ]
+    if of.product is not None and of.product.run.files and not found.files:
+        missing.append((Kind.NO_FILES, "files volume"))
     return [
         *stamp_findings(subject, found.generation),
         *[

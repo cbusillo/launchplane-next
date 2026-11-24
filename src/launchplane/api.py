@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
+from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
 from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
@@ -48,6 +49,7 @@ from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker, carried_out
 
 type StatusReader = Callable[..., Status]
+type Verified = Callable[[], str]
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
 PRODUCTS_FOLDER = "/var/lib/launchplane/products"
 MOST_SECONDS_WAITED = 3600
 SECONDS_BETWEEN_READS = 0.1
+TEXT_ALONE = Builds()
 
 
 class InstanceAnswer(RunningInstance):
@@ -98,7 +101,8 @@ class HostUnreadable(BaseModel):
 
 
 class MoveRequest(BaseModel):
-    build: str
+    build: str | None = None
+    run: int | None = None
 
 
 class RetireRequest(BaseModel):
@@ -210,7 +214,7 @@ def cleaned_log_config(secrets: Secrets) -> dict[str, Any]:
     for handler in config["handlers"].values():
         del handler["class"]
         handler["()"] = cleaned_stream
-    config["root"] = {"handlers": ["default"], "level": "INFO"}
+    config["root"] = {"handlers": ["default"], "level": "WARNING"}
     return config
 
 
@@ -338,11 +342,18 @@ class Calls:
             unread = cancelled.put_back.logins_not_read
         return "; ".join(unread) or None
 
+    # A move's build is `verified` only for a key not answered before: a kept request is the answer to its key.
     def keep[Answer: BaseModel](
-        self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
+        self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float, verified: Verified | None = None
     ) -> Answer | NotFinished | Kept:
+        key = http.headers.get("idempotency-key")
         try:
-            request = self.record.write(asked, asker(http), http.headers.get("idempotency-key"))
+            if verified is not None and (key is None or self.record.kept_for(asked, key) is None):
+                asked = asked.model_copy(update={"build": verified()})
+            request = self.record.write(asked, asker(http), key)
+        except (GitHostError, ProductError) as error:
+            status = HTTPStatus.UNPROCESSABLE_CONTENT if isinstance(error, NotABuild) else HTTPStatus.SERVICE_UNAVAILABLE
+            return not_finished(response, status, str(error))
         except CarriesASecret as error:
             return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
         except Refused as error:
@@ -431,7 +442,7 @@ def why_not_cancelled(kept: Kept) -> str | None:
 WAIT = Query(ge=0, le=MOST_SECONDS_WAITED, description="Seconds to wait for the request to end before answering 202.")
 
 
-def add_lane_calls(app: FastAPI, calls: Calls) -> None:
+def add_lane_calls(app: FastAPI, calls: Calls, builds: Builds) -> None:
     @app.post("/lanes/{product}/{lane}/move", responses=responses_to_a_request(MoveResult))
     def move_lane(
         product: Annotated[str, SLUG],
@@ -441,8 +452,8 @@ def add_lane_calls(app: FastAPI, calls: Calls) -> None:
         response: Response,
         wait: Annotated[float, WAIT] = 0,
     ) -> MoveResult | NotFinished | Kept:
-        asked = Asked(product=product, lane=lane, work=Work.MOVE, build=request.build)
-        return calls.keep(asked, MoveResult, http, response, wait)
+        asked = Asked(product=product, lane=lane, work=Work.MOVE, build=request.build, run=request.run)
+        return calls.keep(asked, MoveResult, http, response, wait, lambda: builds.asked(product, request.build, request.run))
 
     @app.post("/lanes/{product}/{lane}/retire", responses=responses_to_a_request(RetireResult))
     def retire_lane(
@@ -500,7 +511,9 @@ def add_cancel_call(app: FastAPI, calls: Calls) -> None:
         return calls.cancel(request, f"a call from {asker(http)}", wait, response)
 
 
-def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: Carries) -> FastAPI:
+def create_app(
+    read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: Carries, builds: Builds = TEXT_ALONE
+) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 
@@ -519,7 +532,7 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
     calls = Calls(record, wake, gate, read)
-    add_lane_calls(app, calls)
+    add_lane_calls(app, calls, builds)
     add_request_calls(app, calls)
     add_cancel_call(app, calls)
     return app
@@ -534,6 +547,7 @@ def serve() -> None:
     address = os.environ.get("LAUNCHPLANE_LISTEN_ADDRESS", "127.0.0.1")
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
+    host.secrets.note(token for token in [os.environ.get(TOKEN_VARIABLE)] if token)
     # Before anything that can log is started, so the first line this process writes is already cleaned.
     logging.config.dictConfig(cleaned_log_config(host))
     proxy = TraefikProxy(host)
@@ -542,5 +556,5 @@ def serve() -> None:
     lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_ended=record.ended_lately)
     worker = Worker(record, lanes, host)
     worker.start()
-    app = create_app(lanes.read_status, record, worker.wake, host, lanes)
+    app = create_app(lanes.read_status, record, worker.wake, host, lanes, Builds(products.read))
     uvicorn.Server(server_config(app, address, port, host)).run()

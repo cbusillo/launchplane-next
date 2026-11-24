@@ -1,6 +1,6 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import astuple, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
@@ -67,7 +67,7 @@ class InstanceHost(Protocol):
     ) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None: ...
-    def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None: ...
+    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
@@ -97,7 +97,7 @@ class Proxy(Protocol):
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer: ...
     @property
     def gate(self) -> AskedGate: ...
-    def check_instance(self, container: str, health_path: str) -> None: ...
+    def check_instance(self, container: str, health_path: str, command: Sequence[str] = ()) -> None: ...
     def why_web_address_fails(self, web_address: str) -> str | None: ...
 
 
@@ -158,13 +158,9 @@ def fresh_names(target: LaneBuild) -> FreshNames:
 TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StartProxy: lambda _host, proxy, _step, _by: proxy.start(),
     steps.AwaitRoute: lambda _host, proxy, step, _by: proxy.await_route(step.web_address, step.container, enabled=step.enabled),
-    steps.CreateDataSetNetwork: lambda host, _proxy, step, _by: host.create_data_set_network(
-        step.product, step.lane, step.data_set, step.generation
-    ),
-    steps.CreateDataSetVolume: lambda host, _proxy, step, _by: host.create_data_set_volume(step.product, step.lane, step.data_set),
-    steps.CreateDatabase: lambda host, _proxy, step, _by: host.create_database(
-        step.product, step.lane, step.data_set, step.network, step.volume, step.image
-    ),
+    steps.CreateDataSetNetwork: lambda host, _proxy, step, _by: host.create_data_set_network(*astuple(step)),
+    steps.CreateDataSetVolume: lambda host, _proxy, step, _by: host.create_data_set_volume(*astuple(step)),
+    steps.CreateDatabase: lambda host, _proxy, step, _by: host.create_database(*astuple(step)),
     steps.StartDatabase: lambda host, _proxy, step, _by: host.start_database(step.container),
     steps.AwaitDatabase: observing()(lambda host, _proxy, step, _by: host.await_database(step.container)),
     steps.DeleteDataSet: lambda host, _proxy, step, _by: host.delete_data_set(step.found),
@@ -349,7 +345,7 @@ class Lanes:
     # The lane is read, and then the gate is asked, so the gate's answer is never older than the reading it is set beside.
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness = NOBODY) -> MoveResult:
         product = self.read_product(target.product)
-        of = (target, product, generation, attempt, witness)
+        of = (target.model_copy(update={"run": product.run}), product, generation, attempt, witness)
         return settle(
             *self.judging(target.product, target.lane, product, Work.MOVE),
             lambda judged, done, cancel: plan.decide_move(self.release(judged, done, *of), cancel),
@@ -460,7 +456,7 @@ class Lanes:
         if isinstance(action, steps.EditRoute):
             return self.edit_route(action, witness)
         if isinstance(action, steps.Check):
-            return self.check(action.container, action.health_path, with_log=not behind_back_soon)
+            return self.check(action, with_log=not behind_back_soon)
         if isinstance(action, steps.AwaitBackgroundService):
             return self.await_background_service(action.container, with_log=not behind_back_soon)
         if isinstance(action, steps.ReadLog):
@@ -514,12 +510,12 @@ class Lanes:
         return plan.failure_report(str(error), self.host.read_log_tail(container)) if with_log else str(error)
 
     @observing()
-    def check(self, container: str, health_path: str, *, with_log: bool) -> Event:
+    def check(self, check: steps.Check, *, with_log: bool) -> Event:
         try:
-            self.proxy.check_instance(container, health_path)
+            self.proxy.check_instance(check.container, check.health_path, check.command)
         except CheckFailed as error:
-            return steps.CheckRefused(container, self.refusal(error, container, with_log=with_log))
-        return steps.Check(container, health_path)
+            return steps.CheckRefused(check.container, self.refusal(error, check.container, with_log=with_log))
+        return check
 
     @observing()
     def await_background_service(self, container: str, *, with_log: bool) -> Event:

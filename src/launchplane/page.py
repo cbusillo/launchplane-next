@@ -1,3 +1,4 @@
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Literal
@@ -7,8 +8,9 @@ from pydantic import BaseModel
 from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import InstanceState, PartOfLane, Verdict
-from launchplane.judge import Condition, Judgement, Shown, Standing, WebAddressJudged, Work
+from launchplane.judge import Condition, Finding, Judgement, Kind, Shown, Standing, WebAddressJudged, Work
 from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancel_won, how_cancelled, how_replaced
+from launchplane.steps import Outcome
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -62,6 +64,18 @@ class Card(BaseModel):
     rows: list[Row] = []
 
 
+MOVE_FAILED = Pill(text="move failed", tone=Standing.WRONG)
+LOG_FOLLOWS = "\nIts last log lines:\n"
+SAYS_AN_ERROR = re.compile("error|exception|critical|fatal", re.IGNORECASE)
+
+
+# What failed, and the last line of the log after it that speaks of an error. The log whole is in the request's answer.
+def in_one_line(error: str) -> str:
+    what, _, log = error.partition(LOG_FOLLOWS)
+    last = next((line.strip() for line in reversed(log.splitlines()) if SAYS_AN_ERROR.search(line)), None)
+    return what if last is None else f"{what} The last error in its log: {last}"
+
+
 def said(text: Condition | Shown) -> Pill:
     return Pill(text=text, tone=TONE[text])
 
@@ -70,16 +84,45 @@ def code(text: str) -> Piece:
     return Piece(text=text, drawn_as="code")
 
 
-def lane_pills(judged: Judgement) -> list[Pill]:
+# The last request taken up for the lane, where it is a move that ended because its new instance failed its check. Such a
+# move stopped nowhere part way: nothing was switched and the instance is gone. One that waits has changed nothing yet.
+def failed_check(requests: Sequence[Kept]) -> Kept | None:
+    last = max((each for each in requests if each.attempts), key=lambda each: each.id, default=None)
+    failed = last is not None and (last.stands, (last.answer or {}).get("outcome")) == (Stands.FAILED, Outcome.CHECK_FAILED)
+    return last if failed else None
+
+
+# A failed check leaves a new lane with no instance to send visitors to. Whatever else is found, that move did not leave.
+def left_by(failed: Kept | None, judged: Judgement) -> list[Finding]:
+    left = [each for each in judged.findings if (each.kind, each.shown) == (Kind.NO_VISITORS, Shown.LEFT_UNFINISHED)]
+    return left if failed else []
+
+
+def left_unfinished(judged: Judgement) -> list[Finding]:
+    return [each for each in judged.findings if each.shown is Shown.LEFT_UNFINISHED]
+
+
+def lane_pills(judged: Judgement, failed: Kept | None) -> list[Pill]:
     in_maintenance = judged.lane.route.in_maintenance and judged.condition != Condition.IN_MAINTENANCE
-    return [*([said(Condition.IN_MAINTENANCE)] if in_maintenance else []), said(judged.condition)]
+    only_the_failed_move = judged.condition is Condition.UNFINISHED and left_unfinished(judged) == left_by(failed, judged)
+    condition = MOVE_FAILED if only_the_failed_move else said(judged.condition)
+    return [*([said(Condition.IN_MAINTENANCE)] if in_maintenance else []), condition]
 
 
-def finding_rows(judged: Judgement) -> list[Row]:
-    rows = [Row(name="Found", value=[Piece(text=finding.sentence)], pills=[said(finding.shown)]) for finding in judged.findings]
-    if judged.shown_as(Shown.LEFT_UNFINISHED):
+def finding_rows(judged: Judgement, failed: Kept | None) -> list[Row]:
+    explained = left_by(failed, judged)
+    rows = [
+        Row(name="Found", value=[Piece(text=each.sentence)], pills=[MOVE_FAILED if each in explained else said(each.shown)])
+        for each in judged.findings
+    ]
+    if left_unfinished(judged) != explained:
         again = "Beginning maintenance again" if judged.lane.route.in_maintenance else "Asking for a build again"
         rows[-1].note = f"No call is at work on this lane. {again} finishes what was left unfinished."
+    if failed and explained:
+        rows[judged.findings.index(explained[-1])].note = (
+            f"Request {failed.id} started an instance that failed its check, so nothing was switched and that instance is gone. "
+            "Asking for that build again fails the same way until what the check found is put right."
+        )
     return rows
 
 
@@ -164,7 +207,7 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
     if isinstance(request, Kept) and (won := how_cancel_won(request)) is not None:
         return with_lines(won, request)
     if request.stands in ENDED and request.cancel_asked_at is None:
-        return with_lines(request.error or f"It ended as {request.stands}.", request)
+        return with_lines(in_one_line(request.error or f"It ended as {request.stands}."), request)
     if request.stands in ENDED:
         why = request.cancel_refused or f"A cancel by {request.cancel_asked_by} was asked and not carried out."
         return with_lines(f"{why} It ended as {request.stands}.", request)
@@ -203,9 +246,10 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
     data_sets = of_lane(on_host.data_sets)
     receiving = [Pill(text="active", tone=Standing.GOOD)]
     requests = [each for each in shown_requests(status) if (each.product, each.lane) == (entry.product, entry.lane)]
+    failed = failed_check(requests)
     return Card(
         title=f"{entry.product} · {entry.lane or 'no lane'}" if entry.product else "A web address with no instance on the host",
-        pills=[] if judged is None else lane_pills(judged),
+        pills=[] if judged is None else lane_pills(judged, failed),
         in_maintenance_since=None if judged is None else judged.lane.route.back_soon_since,
         rows=[
             Row(
@@ -215,7 +259,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 note=entry.error,
             ),
             *request_rows(requests, status.cancels_decided),
-            *([] if judged is None else finding_rows(judged)),
+            *([] if judged is None else finding_rows(judged, failed)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])
                 for each in of_lane(on_host.background_services)
@@ -270,7 +314,7 @@ def no_lane_card(status: Status) -> list[Card]:
 
 
 # Every request that has not ended, then those that ended a short while ago and are still shown.
-def shown_requests(status: Status) -> list[Request]:
+def shown_requests(status: Status) -> list[Kept]:
     return [*status.requests, *status.cancels]
 
 

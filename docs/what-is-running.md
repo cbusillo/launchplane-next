@@ -27,9 +27,9 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 | Field | Each entry has |
 | --- | --- |
-| `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `generation`, `receives_visitors_for`. An instance is its web part. A missing lane or build label is `null`. |
+| `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `generation`, `other_image`, `receives_visitors_for`. An instance is its web part. `other_image` is `null` unless [it runs another image than its build's digest](odoo.md#a-build-is-a-publishing-run). A missing lane or build label is `null`. |
 | `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
-| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`). An empty list is a missing part and two are two. |
+| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names, of the database), `files` (names, of [the files volume](odoo.md#the-data-set)) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`). An empty list is a missing part and two are two. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`, and what the page shows for it: `says` and `standing`. |
 | `lanes` | the judgement on each lane: see [the judgement on a lane](data-sets.md#the-judgement-on-a-lane). |
