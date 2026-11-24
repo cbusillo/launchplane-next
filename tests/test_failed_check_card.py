@@ -86,6 +86,36 @@ def test_each_part_of_a_data_set_is_named_on_the_card_and_in_the_answer(record: 
     assert answer["did"][:4] == [f"made the {part} of the data set {data_set}" for part in parts]
 
 
+def found_on(card: Card) -> list[tuple[str, str | None]]:
+    return [(row.pills[0].text, row.note) for row in card.rows if row.name == "Found"]
+
+
+def test_a_request_that_waits_behind_a_failed_check_leaves_the_card_saying_the_check_failed(record: Record) -> None:
+    proxy = PretendProxy(PretendHost())
+    proxy.failing = {f"site-testing-{number}" for number in range(100)}
+    lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), record.unfinished, record.ended_lately)
+    record.write(MOVE, CALLER, None)
+    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    [failed] = cards(lanes.read_status())
+    waiting = record.write(MOVE, CALLER, None)
+    [card] = cards(lanes.read_status())
+    assert kept_of(record, waiting.id).stands is Stands.WAITING
+    assert (card.pills, found_on(card)) == (failed.pills, found_on(failed))
+    assert [pill.text for pill in card.pills] == ["move failed"]
+
+
+def test_a_proxy_that_stopped_after_a_failed_check_is_not_drawn_as_that_failed_move(record: Record) -> None:
+    proxy = PretendProxy(PretendHost())
+    proxy.failing = {f"site-testing-{number}" for number in range(100)}
+    lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), record.unfinished, record.ended_lately)
+    record.write(MOVE, CALLER, None)
+    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    proxy.running = False
+    [card] = cards(lanes.read_status())
+    assert ([pill.text for pill in card.pills], [pill for pill, _ in found_on(card)]) == (["unfinished"], ["left unfinished"])
+    assert found_on(card)[-1][1] == "No call is at work on this lane. Asking for a build again finishes what was left unfinished."
+
+
 def test_a_lane_no_failed_move_explains_still_reads_as_left_unfinished() -> None:
     [card] = cards(Lanes(*lane_with_a_stray_instance()).read_status())
     found = [row for row in card.rows if row.name == "Found"]

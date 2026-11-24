@@ -22,6 +22,8 @@ IMAGE = "ghcr.io/cbusillo/odoo-tenant-tk"
 RUN, LATER_RUN = 45278647986, 45291692474
 PORT = int(os.environ.get("LAUNCHPLANE_RECORDED_GIT_HOST_PORT", "8702"))
 ASKED = re.compile(rf"/repos/{REPOSITORY}/actions/(?:runs/(?P<run>\d+)(?P<artifacts>/artifacts)?|artifacts/(?P<artifact>\d+)/zip)")
+SIGNED = re.compile(r"/signed/(?P<artifact>\d+)")
+SIGNATURE = "sig=a-signature-anyone-may-download-with"
 
 
 def recorded(run: int, name: str) -> Any:  # noqa: ANN401 whatever GitHub answered
@@ -50,9 +52,16 @@ def serve(runs: dict[int, dict[str, Any]], port: int) -> ThreadingHTTPServer:
     class Recorded(BaseHTTPRequestHandler):
         # noinspection PyPep8Naming
         def do_GET(self) -> None:
-            asked = ASKED.fullmatch(self.path.split("?")[0])
-            if asked is not None and asked["artifact"] and int(asked["artifact"]) in manifests:
-                self.answer("application/zip", zipped(manifests[int(asked["artifact"])]))
+            path, _, query = self.path.partition("?")
+            asked, signed = ASKED.fullmatch(path), SIGNED.fullmatch(path)
+            if signed is not None and query == SIGNATURE and int(signed["artifact"]) in manifests:
+                self.answer("application/zip", zipped(manifests[int(signed["artifact"])]))
+            elif signed is not None:
+                self.send_error(HTTPStatus.FORBIDDEN)
+            elif asked is not None and asked["artifact"]:
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", f"/signed/{asked['artifact']}?{SIGNATURE}")
+                self.end_headers()
             elif asked is not None and asked["run"] and int(asked["run"]) in runs:
                 found = runs[int(asked["run"])]["artifacts" if asked["artifacts"] else "run"]
                 self.answer("application/json", json.dumps(found).encode())

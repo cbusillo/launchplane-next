@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import logging.config
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -10,12 +11,14 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from githubkit import GitHub
 
 from launchplane import api
 from launchplane.act import Lanes, Status, Stopped
 from launchplane.api import cleaned_log_config, create_app
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.git_host import Builds
 from launchplane.instance import (
     InstanceState,
     LaneBuild,
@@ -34,8 +37,10 @@ from launchplane.steps import MaintenanceOutcome, MaintenanceResult, MoveResult,
 from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker
 from tests.given_secrets import GivenSecrets
+from tests.odoo_product import TK
 from tests.pretend_host import SINCE, GateNeverAsked, PretendHost, PretendProxy
 from tests.pretend_record import PretendRecord
+from tests.recorded_git_host import RUN, SIGNATURE, answers, build_of, serve
 from tests.recording_docker import RecordingDocker
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
@@ -332,6 +337,16 @@ def test_every_log_launchplane_writes_as_a_service_is_cleaned_whichever_library_
     logging.getLogger("docker.some.library").warning("retrying after %s", SECRET)
     assert SECRET not in written_by_the_service_log.getvalue()
     assert written_by_the_service_log.getvalue().count(SECRET_REMOVED) == 3
+
+
+def test_no_part_of_the_signed_link_a_manifest_is_downloaded_from_is_logged(written_by_the_service_log: io.StringIO) -> None:
+    git_host = serve(answers(), 0)
+    threading.Thread(target=git_host.serve_forever, daemon=True).start()
+    builds = Builds(lambda _product: TK, GitHub(base_url=f"http://127.0.0.1:{git_host.server_port}"))
+    assert builds.asked("tk", None, RUN) == build_of(RUN)
+    git_host.shutdown()
+    written = written_by_the_service_log.getvalue()
+    assert (SIGNATURE in written, "/signed/" in written) == (False, False)
 
 
 def holding_the_secret(docker: RecordingDocker, **labels: str) -> None:
