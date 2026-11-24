@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
-from launchplane.git_host import Builds, GitHostError, NotABuild
+from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
 from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
@@ -543,6 +543,7 @@ def serve() -> None:
     address = os.environ.get("LAUNCHPLANE_LISTEN_ADDRESS", "127.0.0.1")
     port = int(os.environ.get("LAUNCHPLANE_LISTEN_PORT", "8700"))
     host = ContainerHost.from_environment()
+    host.secrets.note(token for token in [os.environ.get(TOKEN_VARIABLE)] if token)
     # Before anything that can log is started, so the first line this process writes is already cleaned.
     logging.config.dictConfig(cleaned_log_config(host))
     proxy = TraefikProxy(host)

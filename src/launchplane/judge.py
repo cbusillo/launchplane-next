@@ -334,7 +334,8 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         )
         if not parts
     ]
-    missing += [(Kind.NO_FILES, "files volume")] * (of.product is not None and bool(of.product.run.files) and not found.files)
+    if of.product is not None and of.product.run.files and not found.files:
+        missing.append((Kind.NO_FILES, "files volume"))
     return [
         *stamp_findings(subject, found.generation),
         *[

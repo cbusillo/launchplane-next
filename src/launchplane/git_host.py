@@ -72,7 +72,6 @@ class Builds:
             "the commit in its manifest": (manifest.source_commit, found.head_sha),
             "the image repository in its manifest": (manifest.repository, image),
         }
-        wrong = [f"{what} is {said}, not {must}" for what, (said, must) in facts.items() if said != must]
-        if wrong:
+        if wrong := [f"{what} is {said}, not {must}" for what, (said, must) in facts.items() if said != must]:
             raise NotABuild(f"Run {run} is not a build of this product, so it was refused: {'; '.join(wrong)}. Nothing was changed.")
         return f"{image}@{manifest.digest}"
