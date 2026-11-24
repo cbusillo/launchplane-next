@@ -192,6 +192,7 @@ class DockerContainerState(BaseModel):
     paused: bool = Field(alias="Paused")
     started_at: AwareDatetime = Field(alias="StartedAt")
     exit_code: int = Field(alias="ExitCode")
+    status: str = Field(default="", alias="Status")
 
 
 class DockerContainerDetails(BaseModel):
@@ -344,12 +345,13 @@ def database_part(summary: DockerContainerSummary, details: Mapping[str, DockerC
     )
 
 
-# Docker's own account of one copier: the volume it could write, and whether it ran to its end with no error.
+# Docker's own account of one copier: the volume it could write, and whether it ran to its end with no error. Its state
+# is read from its description: the list can still say running just after it has exited.
 def volume_copy(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails]) -> VolumeCopy:
     written = [mount.name or mount.source for mount in summary.mounts if mount.writable]
-    finished = summary.state == "exited" and described(summary, details, "copier").state.exit_code == 0
-    stopped = state_of(summary) is InstanceState.STOPPED
-    return VolumeCopy(container=summary.name, volume="".join(written[:1]), finished=finished, stopped=stopped)
+    state = described(summary, details, "copier").state
+    finished = (state.status, state.exit_code) == ("exited", 0)
+    return VolumeCopy(container=summary.name, volume="".join(written[:1]), finished=finished, stopped=not state.running)
 
 
 def network_from(network: DockerNetworkSummary) -> HostNetwork:

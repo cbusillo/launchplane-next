@@ -115,7 +115,9 @@ def copy_step(copying: Copying) -> Action:
         return GiveUp(f"The lane is not stopped as it must be for its data to be copied: {sentences(found)}.")
     sources, destinations = (*source.volumes, *source.files), (*copy.volumes, *copy.files)
     to_copy = [pair for pair in zip(sources, destinations, strict=False) if pair[1] not in copied_now]
-    if len(sources) != len(destinations) or set(sources) & set(destinations) or not to_copy:
+    if len(sources) == len(destinations) and not to_copy:
+        return GiveUp(f"Every volume of the copy {copy.data_set} was copied, and Docker does not show each copier as finished.")
+    if len(sources) != len(destinations) or set(sources) & set(destinations):
         return GiveUp(
             f"The volumes of the copy {copy.data_set} ({', '.join(destinations)}) are not one fresh volume for each volume "
             f"of {source.data_set} ({', '.join(sources)}), so nothing was written to them."

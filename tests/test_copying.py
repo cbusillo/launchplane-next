@@ -6,6 +6,7 @@ import pytest
 from launchplane.act import Cancelled, Lanes, Stopped, Waiting
 from launchplane.container_host import COPY_COMMAND, ContainerHost
 from launchplane.copying import Copying, decide
+from launchplane.data_set import DATA_PATH
 from launchplane.docker_answers import ContainerHostRefused
 from launchplane.instance import BACK_SOON, DataSet, InstanceState, Reading, Verdict, VolumeCopy
 from launchplane.judge import Condition, Work, judge
@@ -255,27 +256,23 @@ def test_while_the_instance_fails_its_check_the_back_soon_page_stays_and_the_req
     assert (result.outcome, proxy.loaded_to(WEB_ADDRESS)) == (CopyOutcome.COPIED, web_part)
 
 
-def stopped(listed: dict[str, object]) -> dict[str, object]:
-    return listed | {"State": "exited"}
+def details(name: str, status: str, exit_code: int = 0) -> dict[str, object]:
+    state = {"Running": status == "running", "Restarting": False, "Paused": False, "StartedAt": "2026-11-15T20:00:00Z"}
+    return {"Name": f"/{name}", "Config": {"Env": []}, "State": state | {"ExitCode": exit_code, "Status": status}}
 
 
-def details(name: str, exit_code: int) -> dict[str, object]:
-    state = {"Running": False, "Restarting": False, "Paused": False, "StartedAt": "2026-11-15T20:00:00Z", "ExitCode": exit_code}
-    return {"Name": f"/{name}", "Config": {"Env": []}, "State": state}
-
-
-def test_a_copier_is_read_as_finished_only_once_docker_says_it_exited_with_code_0() -> None:
+def test_a_copier_is_read_as_finished_only_once_its_description_says_it_exited_with_code_0_whatever_the_list_says() -> None:
     mounts = [
         {"Name": "source", "Source": "", "Destination": "/from", "RW": False},
         {"Name": "copy", "Source": "", "Destination": "/to"},
     ]
-    listed = [
-        stopped(container("done", "copier", [], mounts)),
-        stopped(container("failed", "copier", [], mounts)),
-        container("made", "copier", [], mounts) | {"State": "created"},
-        container("running", "copier", [], mounts),
+    listed = [container(name, "copier", [], mounts) for name in ("done", "failed", "made", "running")]
+    described = [
+        details("done", "exited"),
+        details("failed", "exited", 1),
+        details("made", "created"),
+        details("running", "running"),
     ]
-    described = [details("done", 0), details("failed", 1), details("made", 0), details("running", 0)]
     volumes = [{"Name": "copy", "Labels": DATA_SET_LABELS | {"launchplane.copy-of": "d0", "launchplane.generation": GENERATION}}]
     [found] = read(listed, volumes=volumes, described=described).data_sets
     assert (found.copy_of, found.generation, found.is_whole_copy) == ("d0", GENERATION, False)
@@ -325,7 +322,7 @@ COPY = CopyVolume("shop", "testing", "d2", "source", "copy", "postgres:18-alpine
 def test_the_copier_can_only_read_what_it_copies_reaches_no_network_and_writes_the_fresh_volume_alone() -> None:
     copiers = Copiers([])
     ContainerHost(SimpleNamespace(containers=copiers), "test").copy_volume(COPY)  # pyright: ignore[reportArgumentType]
-    mounted = {"source": {"bind": "/from", "mode": "ro"}, "copy": {"bind": "/to", "mode": "rw"}}
+    mounted = {"source": {"bind": "/from", "mode": "ro"}, "copy": {"bind": DATA_PATH, "mode": "rw"}}
     assert copiers.made == [("postgres:18-alpine", COPY_COMMAND, mounted, "none")]
     assert copiers.asked == {"volume": "source", "status": "running"}
 

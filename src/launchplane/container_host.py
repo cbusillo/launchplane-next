@@ -87,7 +87,8 @@ POLL_SECONDS = 0.5
 # How long one volume may take to copy. Its lane shows the back soon page for that long.
 COPY_DEADLINE_SECONDS = 300
 # Everything in the volume as it is, then every byte read again from both: a file the copy lacks or has too many fails it.
-COPY_COMMAND = ["sh", "-c", "cp -a /from/. /to/ && diff -r /from /to && sync"]
+# The copy is written where the database image keeps its one volume, so the copier is given no other volume to write.
+COPY_COMMAND = ["sh", "-c", f"cp -a /from/. {DATA_PATH}/ && diff -r /from {DATA_PATH} && sync"]
 type RestartPolicy = Literal["always", "unless-stopped"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
@@ -437,7 +438,7 @@ class ContainerHost:
                 COPY_COMMAND,
                 name=f"{copy.destination}-copier",
                 labels=data_set_labels(copy.product, copy.lane, copy.data_set) | {PART_LABEL: "copier"},
-                volumes={copy.source: {"bind": "/from", "mode": "ro"}, copy.destination: {"bind": "/to", "mode": "rw"}},
+                volumes={copy.source: {"bind": "/from", "mode": "ro"}, copy.destination: {"bind": DATA_PATH, "mode": "rw"}},
                 network_mode="none",
             )
             copier.start()
