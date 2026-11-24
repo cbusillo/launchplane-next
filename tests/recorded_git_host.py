@@ -19,7 +19,7 @@ ANSWERS = Path(__file__).parent / "answers" / "git_host"
 REPOSITORY = "cbusillo/odoo-tenant-tk"
 WORKFLOW = ".github/workflows/build.yml"
 IMAGE = "ghcr.io/cbusillo/odoo-tenant-tk"
-RUN, LATER_RUN = 45278647986, 45359350705
+RUN, LATER_RUN = 45278647986, 45291692474
 PORT = int(os.environ.get("LAUNCHPLANE_RECORDED_GIT_HOST_PORT", "8702"))
 ASKED = re.compile(rf"/repos/{REPOSITORY}/actions/(?:runs/(?P<run>\d+)(?P<artifacts>/artifacts)?|artifacts/(?P<artifact>\d+)/zip)")
 

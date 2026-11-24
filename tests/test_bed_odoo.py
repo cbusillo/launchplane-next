@@ -145,3 +145,5 @@ def test_a_missing_attachment_file_fails_the_check_of_the_next_build_and_the_lan
     assert "Coastal Towne Realty" in site_answer()
     [instance] = [each for each in ask("/running")[1]["instances"] if each["product"] == PRODUCT]
     assert (instance["container"], instance["build"]) == (story.serving, build_of(RUN))
+    with_the_file_back = move_to(LATER_RUN)
+    assert (with_the_file_back["outcome"], with_the_file_back["build"]) == ("switched", build_of(LATER_RUN))
