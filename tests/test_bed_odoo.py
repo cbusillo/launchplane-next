@@ -83,7 +83,9 @@ def test_a_lane_odoo_was_never_installed_in_fails_its_check_with_odoos_words_and
     answer = story.never_installed
     assert (answer["outcome"], answer["container_receiving_visitors"]) == ("check failed", None)
     assert "Database app not initialized" in answer["error"]
-    assert answer["did"].count(f"made part of the data set {data_set_of(PRODUCT, LANE)}") == 4
+    data_set = data_set_of(PRODUCT, LANE)
+    made = ("network", "database volume", "files volume", "database server")
+    assert answer["did"][:4] == [f"made the {part} of the data set {data_set}" for part in made]
 
 
 def test_a_database_without_the_declared_modules_fails_the_check_of_the_kind_though_the_login_page_answers(story: Story) -> None:

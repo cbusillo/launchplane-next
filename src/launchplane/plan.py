@@ -74,9 +74,9 @@ def failure_report(why: str, log_tail: str) -> str:
 
 CHANGES: dict[type, Callable[[Any], str | None]] = {
     StartProxy: lambda _step: "started the proxy",
-    CreateDataSetNetwork: lambda step: f"made part of the data set {step.data_set}",
-    CreateDataSetVolume: lambda step: f"made part of the data set {step.data_set}",
-    CreateDatabase: lambda step: f"made part of the data set {step.data_set}",
+    CreateDataSetNetwork: lambda step: f"made the network of the data set {step.data_set}",
+    CreateDataSetVolume: lambda step: f"made the {step.volume} of the data set {step.data_set}",
+    CreateDatabase: lambda step: f"made the database server of the data set {step.data_set}",
     StartDatabase: lambda step: f"started the database {step.container}",
     EditRoute: lambda step: f"sent {step.web_address} to {step.to}" if step.to else f"removed the route of {step.web_address}",
     StopDatabase: lambda step: f"stopped {step.container}",

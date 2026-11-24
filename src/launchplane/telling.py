@@ -89,7 +89,7 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.Discard: lambda step: f"retire {step.container}",
     steps.Abandon: lambda step: f"mark the release of {step.web_address} as cancelled",
     steps.CreateDataSetNetwork: lambda step: f"make the network of the data set {step.data_set}",
-    steps.CreateDataSetVolume: lambda step: f"make the volume of the data set {step.data_set}",
+    steps.CreateDataSetVolume: lambda step: f"make the {step.volume} of the data set {step.data_set}",
     steps.CreateDatabase: lambda step: f"make the database server of the data set {step.data_set}",
     steps.StartDatabase: lambda step: f"start the database {step.container}",
     steps.AwaitDatabase: lambda step: f"wait for the database {step.container} to accept connections",

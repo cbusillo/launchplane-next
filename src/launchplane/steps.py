@@ -115,6 +115,10 @@ class CreateDataSetVolume:
     data_set: str
     files: bool = False
 
+    @property
+    def volume(self) -> str:
+        return "files volume" if self.files else "database volume"
+
 
 @dataclass(frozen=True)
 class CreateDatabase:
