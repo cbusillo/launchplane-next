@@ -5,10 +5,11 @@ from typing import Any, cast
 
 import pytest
 from docker.errors import ImageNotFound
+from requests import ConnectionError
 
 from launchplane.container_host import ContainerHost
 from launchplane.data_set import RULES_AS_READ
-from launchplane.docker_answers import CommandResult
+from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.instance import DataSet, DataSetUse, LaneBuild
 from launchplane.odoo import FILES_PATH
 from launchplane.proxy import CheckFailed
@@ -116,19 +117,22 @@ def test_a_build_that_starts_by_itself_is_given_no_command_user_or_volume_also_o
 class Images:
     by_reference: dict[str, str]
     asked: list[str] = field(default_factory=list[str])
+    connection_lost: bool = False
 
     def get(self, reference: str) -> object:
         self.asked.append(reference)
+        if self.connection_lost:
+            raise ConnectionError("Connection aborted: the remote end closed the connection without a response")
         if reference not in self.by_reference:
             raise ImageNotFound(f"No such image: {reference}")
         return SimpleNamespace(id=self.by_reference[reference])
 
 
 # The image the one instance is read to run that is not its build's, where the host has `images` and it runs `image`.
-def other_image_read(build: str, image: str, images: dict[str, str]) -> tuple[str | None, list[str]]:
+def other_image_read(build: str, image: str, images: dict[str, str], *, lost: bool = False) -> tuple[str | None, list[str]]:
     docker = RecordingDocker()
     ContainerHost(docker.as_client(), "test").start_instance(TARGET.model_copy(update={"build": build}), WEB, None)
-    on_host = Images(images)
+    on_host = Images(images, connection_lost=lost)
 
     def listed_running_the_image(**options: object) -> list[dict[str, Any]]:
         return [each | {"ImageID": image} for each in docker.api.containers(**options)]
@@ -153,6 +157,14 @@ def test_an_instance_is_read_as_its_build_only_while_it_runs_the_image_the_host_
 
 def test_an_instance_whose_builds_digest_the_host_no_longer_has_is_not_read_as_that_build() -> None:
     assert other_image_read(BUILD, DIGEST, {})[0] == DIGEST
+
+
+def test_a_connection_to_docker_lost_while_an_instances_image_is_looked_up_leaves_the_host_unread() -> None:
+    with pytest.raises(
+        ContainerHostError, match="Reading the image of the build of shop-testing-aaaaaaaaaaaa on test failed"
+    ) as lost:
+        other_image_read(BUILD, DIGEST, {BUILD: DIGEST}, lost=True)
+    assert not isinstance(lost.value, ContainerHostRefused)
 
 
 def test_a_build_named_by_a_tag_is_not_held_to_an_image_since_a_tag_moves() -> None:

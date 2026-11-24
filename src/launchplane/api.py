@@ -49,6 +49,7 @@ from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker, carried_out
 
 type StatusReader = Callable[..., Status]
+type Verified = Callable[[], str]
 
 
 log = logging.getLogger(__name__)
@@ -341,11 +342,18 @@ class Calls:
             unread = cancelled.put_back.logins_not_read
         return "; ".join(unread) or None
 
+    # A move's build is `verified` only for a key not answered before: a kept request is the answer to its key.
     def keep[Answer: BaseModel](
-        self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float
+        self, asked: Asked, answer: type[Answer], http: Request, response: Response, wait: float, verified: Verified | None = None
     ) -> Answer | NotFinished | Kept:
+        key = http.headers.get("idempotency-key")
         try:
-            request = self.record.write(asked, asker(http), http.headers.get("idempotency-key"))
+            if verified is not None and (key is None or self.record.kept_for(asked, key) is None):
+                asked = asked.model_copy(update={"build": verified()})
+            request = self.record.write(asked, asker(http), key)
+        except (GitHostError, ProductError) as error:
+            status = HTTPStatus.UNPROCESSABLE_CONTENT if isinstance(error, NotABuild) else HTTPStatus.SERVICE_UNAVAILABLE
+            return not_finished(response, status, str(error))
         except CarriesASecret as error:
             return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
         except Refused as error:
@@ -444,12 +452,8 @@ def add_lane_calls(app: FastAPI, calls: Calls, builds: Builds) -> None:
         response: Response,
         wait: Annotated[float, WAIT] = 0,
     ) -> MoveResult | NotFinished | Kept:
-        try:
-            build = builds.asked(product, request.build, request.run)
-        except (GitHostError, ProductError) as error:
-            status = HTTPStatus.UNPROCESSABLE_CONTENT if isinstance(error, NotABuild) else HTTPStatus.SERVICE_UNAVAILABLE
-            return not_finished(response, status, str(error))
-        return calls.keep(Asked(product=product, lane=lane, work=Work.MOVE, build=build), MoveResult, http, response, wait)
+        asked = Asked(product=product, lane=lane, work=Work.MOVE, build=request.build, run=request.run)
+        return calls.keep(asked, MoveResult, http, response, wait, lambda: builds.asked(product, request.build, request.run))
 
     @app.post("/lanes/{product}/{lane}/retire", responses=responses_to_a_request(RetireResult))
     def retire_lane(

@@ -40,7 +40,7 @@ Copying a lane's data, a module update inside a release, the background service 
 - it has the artifact `artifact-manifest-<its attempt>`, which holds `artifact-manifest.json`. A merge-train run passes without publishing and has none
 - the manifest's `source_commit` is the run's commit, its `image.repository` is the described one, and its `image.digest` is a SHA-256
 
-The request is then kept with the build `<image>@<digest>`, and the move runs that. A run that is not such a build is answered `422` with each fact that differs. A git host that cannot be read, or a manifest that cannot be read as one, is answered `503`. Nothing is kept either way. `{"build": "..."}` is answered `422` for a product of this kind, and `{"run": ...}` for any other.
+The request is then kept with its `run` and the build `<image>@<digest>`, and the move runs that. A call sent again with its `Idempotency-Key` is answered with its request before anything is read from the git host, whatever the run publishes later. A run that is not such a build is answered `422` with each fact that differs. A git host that cannot be read, or a manifest that cannot be read as one, is answered `503`. Nothing is kept either way. `{"build": "..."}` is answered `422` for a product of this kind, and `{"run": ...}` for any other.
 
 Launchplane reads GitHub with the token in `LAUNCHPLANE_GIT_HOST_TOKEN`. `LAUNCHPLANE_GIT_HOST` names another address in place of `https://api.github.com`.
 
@@ -84,6 +84,8 @@ The data set of an Odoo lane has a files volume beside the database's: `launchpl
 - **A new lane cannot pass its first move.** The seed above is a person's work. Installing the modules belongs to the update of a release, which is not built.
 - **A build that needs its modules updated fails its check.** TK's run 45359350705, four commits after the first, answered `500` at `/web/login` on data seeded from the first build. The lane kept serving.
 - **The admin password of a seeded lane is Odoo's default.** The lane is reachable only on the test bed's own network.
+- **A move to the build already serving does not run the check again.** It answers `unchanged`. A file lost from the files volume while the lane serves is found only by the next release.
+- **Moves of one lane asked at the same moment are kept in the order the git host answers them,** not the order they were sent. Each is verified before it is written.
 - **The modules the check requires come from the description,** not from the manifest of the build being moved to, which lists them too.
 - **A background service is not held to its build's digest,** and no Odoo product has one yet.
 - **The files volume is on the container host's own disk,** as the database volume is.

@@ -391,10 +391,9 @@ curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
 
 6. **With the file back, the same move switches.** `switched`, to `…@sha256:f0b8a27b…`, and after `wrote the route` the `stop` and `remove` of the first build's instance and of its login.
 
-7. **Put the bed back.** The lane is retired with its data set, which the second answer names as `deleted_data_set`, and Launchplane is taken off the recorded git host:
+7. **Put the bed back.** The tear-down retires the lane with its data set, and only once that has ended takes Launchplane off the recorded git host and removes the description. If the retire did not end, it stops and says so, and everything is left as it is:
 
 ```
-D=$(curl -s "$L$P/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"
 uv run python -m tests.bed_odoo tear-down watch-tk
 ```
 

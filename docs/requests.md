@@ -32,6 +32,7 @@ Each of the four calls writes a request and answers `202` with the request and a
 | `generation` | The number of the release this request is, stamped on what it makes: see [the move](the-move.md#what-it-does). No other request has it, also after the record is lost and made again. |
 | `work` | `moving`, `retiring`, `beginning maintenance` or `ending maintenance`. |
 | `build`, `delete_data_set` | Exactly what was asked: the build of a move, the data set a retire named for deleting. |
+| `run` | The publishing run a move of [an Odoo product](odoo.md#a-build-is-a-publishing-run) named. Its `build` is then the image that run was verified to have published. |
 | `asked_by`, `asked_at` | The address the call came from, and when. Nobody is known by name yet. |
 | `stands` | `waiting`, `working`, `done`, `failed`, `cancelled` or `replaced`. |
 | `ended_at`, `answer`, `error` | When it ended; the result the call answers with `?wait=`, or for a cancelled request what [cancelling](#cancelling) left; the real error of a request that failed, or why a request that is still working is not finished yet. |

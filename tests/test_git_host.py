@@ -1,21 +1,26 @@
 import threading
 from collections.abc import Callable, Iterator
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from githubkit import GitHub
 
+from launchplane import api
 from launchplane.act import Lanes
 from launchplane.api import create_app
-from launchplane.git_host import Builds, GitHostError, NotABuild
+from launchplane.container_host import ContainerHost
+from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
 from launchplane.product import Product
 from launchplane.record import Record
 from tests.given_secrets import GivenSecrets
 from tests.odoo_product import TK
 from tests.pretend_host import PretendHost, PretendProxy
-from tests.recorded_git_host import LATER_RUN, RUN, answers, build_of, serve
+from tests.pretend_record import PretendRecord
+from tests.recorded_git_host import IMAGE, LATER_RUN, RUN, answers, build_of, serve
+from tests.recording_docker import RecordingDocker
 
 type Runs = dict[int, dict[str, Any]]
 FORK = "someone/odoo-tenant-tk"
@@ -69,6 +74,10 @@ REFUSED: dict[str, tuple[Runs, str]] = {
         with_run({"head_repository": answers()[RUN]["run"]["head_repository"] | {"full_name": FORK}}),
         f"the repository of its commit is {FORK}, not cbusillo/odoo-tenant-tk",
     ),
+    "a run the git host answers as another repository's": (
+        with_run({"repository": answers()[RUN]["run"]["repository"] | {"full_name": FORK}}),
+        f"its repository is {FORK}, not cbusillo/odoo-tenant-tk",
+    ),
     "a run of another workflow": (with_run({"path": ".github/workflows/other.yml"}), "its workflow is .github/workflows/other.yml"),
     "a run that failed": (with_run({"conclusion": "failure"}), "its conclusion is failure, not success"),
     "a manifest for another commit": (with_manifest({"source_commit": "0" * 40}), "the commit in its manifest is 0000"),
@@ -93,6 +102,16 @@ UNREAD: dict[str, tuple[Runs, int]] = {
         RUN,
     ),
     "a manifest that names no image": (with_manifest({"image": {}}), RUN),
+    **{
+        f"a manifest whose digest is {digest}": (with_manifest({"image": {"repository": IMAGE, "digest": digest}}), RUN)
+        for digest in (
+            "sha256:" + "0" * 63,
+            "sha256:" + "0" * 65,
+            "sha256:" + "Z" * 64,
+            "sha256:" + "0" * 64 + "\n",
+            "sha512:" + "0" * 64,
+        )
+    },
 }
 
 
@@ -137,3 +156,67 @@ def test_a_move_that_names_no_verified_build_keeps_no_request(builds_from: Calla
     unread = app.post("/lanes/tk/testing/move", json={"run": 1})
     assert (refused.status_code, as_text.status_code, unread.status_code) == (422, 422, 503)
     assert record.unfinished() == []
+
+
+KEY = {"Idempotency-Key": "sent-once"}
+OTHER_DIGEST = "sha256:" + "c" * 64
+
+
+def test_a_move_sent_again_with_its_key_is_answered_with_its_request_while_the_git_host_cannot_be_read(
+    builds_from: Callable[[Runs], Builds], record: Record
+) -> None:
+    runs = answers()
+    app = app_with(builds_from(runs), record)
+    kept = app.post("/lanes/tk/testing/move", json={"run": RUN}, headers=KEY)
+    runs.clear()
+    again = app.post("/lanes/tk/testing/move", json={"run": RUN}, headers=KEY)
+    without_the_key = app.post("/lanes/tk/testing/move", json={"run": RUN})
+    assert (kept.status_code, again.status_code, without_the_key.status_code) == (202, 202, 503)
+    assert (again.json()["id"], again.json()["build"], again.json()["run"]) == (kept.json()["id"], build_of(RUN), RUN)
+
+
+def test_a_move_sent_again_with_its_key_is_answered_with_its_request_though_the_run_has_since_published_another_image(
+    builds_from: Callable[[Runs], Builds], record: Record
+) -> None:
+    runs = answers()
+    app = app_with(builds_from(runs), record)
+    kept = app.post("/lanes/tk/testing/move", json={"run": RUN}, headers=KEY)
+    runs[RUN]["manifest"]["image"]["digest"] = OTHER_DIGEST
+    again = app.post("/lanes/tk/testing/move", json={"run": RUN}, headers=KEY)
+    assert (again.status_code, again.json()["id"], again.json()["build"]) == (202, kept.json()["id"], build_of(RUN))
+    assert app.post("/lanes/tk/testing/move", json={"run": RUN}).json()["build"] == f"{IMAGE}@{OTHER_DIGEST}"
+
+
+def test_a_key_given_again_for_another_run_is_refused_before_that_run_is_read(
+    builds_from: Callable[[Runs], Builds], record: Record
+) -> None:
+    runs = answers()
+    app = app_with(builds_from(runs), record)
+    app.post("/lanes/tk/testing/move", json={"run": RUN}, headers=KEY)
+    runs.clear()
+    reused = app.post("/lanes/tk/testing/move", json={"run": LATER_RUN}, headers=KEY)
+    assert (reused.status_code, "which asked something else" in reused.json()["error"]) == (409, True)
+
+
+def nothing(*_arguments: object) -> None:
+    pass
+
+
+def pretend_record(*_arguments: object) -> PretendRecord:
+    return PretendRecord()
+
+
+def test_the_git_hosts_key_is_among_the_secrets_cleaned_from_every_answer_and_log_line_from_start_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = ContainerHost(RecordingDocker().as_client(), "test")
+    monkeypatch.setenv(TOKEN_VARIABLE, "a-key-to-the-git-host")
+    monkeypatch.setenv("LAUNCHPLANE_PRODUCTS", str(tmp_path))
+    monkeypatch.setattr(ContainerHost, "from_environment", lambda: host)
+    monkeypatch.setattr(api, "PostgresRecord", pretend_record)
+    monkeypatch.setattr(api, "database", lambda: "")
+    monkeypatch.setattr(api.Worker, "start", nothing)
+    monkeypatch.setattr(api.uvicorn.Server, "run", nothing)
+    monkeypatch.setattr(api.logging.config, "dictConfig", nothing)
+    api.serve()
+    assert "a-key-to-the-git-host" in host.secrets_seen()

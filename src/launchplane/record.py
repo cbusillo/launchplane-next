@@ -120,6 +120,12 @@ class Asked(BaseModel):
     work: Work
     build: str | None = None
     delete_data_set: str | None = None
+    # The publishing run a move named. Its `build` is then what that run was verified to have published.
+    run: int | None = None
+
+    # What the caller named, which a key is held to: a run names its build.
+    def named(self) -> Asked:
+        return self if self.run is None else self.model_copy(update={"build": None})
 
     def attempted(self) -> str:
         return ATTEMPTED[self.work].format(lane=self.lane, product=self.product, build=self.build)
@@ -253,6 +259,7 @@ class Taken(NamedTuple):
 
 class Record(Protocol):
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request: ...
+    def kept_for(self, asked: Asked, idempotency_key: str) -> Request | None: ...
     def read(self, request: int) -> Kept | None: ...
     def unfinished(self) -> list[Kept]: ...
     def recently_ended(self) -> list[Request]: ...
@@ -330,8 +337,8 @@ class Sql:
     order by id limit 1
     """
     WRITE: Final = """
-    insert into request (product, lane, work, build, delete_data_set, asked_by, generation)
-    values (%s, %s, %s, %s, %s, %s, %s) returning *
+    insert into request (product, lane, work, build, delete_data_set, asked_by, generation, run)
+    values (%s, %s, %s, %s, %s, %s, %s, %s) returning *
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working') order by id"
     RECENTLY_ENDED: Final = """
@@ -444,20 +451,23 @@ def keep_key(session: Session, gate: Gate, idempotency_key: str | None, request:
     return request
 
 
+def same_key(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
+    row = session.execute(Sql.SAME_KEY, gate.made(key_digest(idempotency_key))).fetchone()
+    if row is not None and Request.model_validate(row).asked().named() != asked.named():
+        raise key_reused(Request.model_validate(row))
+    return None if row is None else Request.model_validate(row)
+
+
 # A key says only that a call is one sent before. With a key not seen, a call is held to its lane's rule like any other.
 def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
-    row = session.execute(Sql.SAME_KEY, gate.made(key_digest(idempotency_key))).fetchone()
-    if row is not None:
-        same_key = Request.model_validate(row)
-        if same_key.asked() != asked:
-            raise key_reused(same_key)
-        return same_key
+    if (kept := same_key(session, gate, asked, idempotency_key)) is not None:
+        return kept
     row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
     return None if row is None else keep_key(session, gate, idempotency_key, Request.model_validate(row))
 
 
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-    passed = gate.sent(*said(asked), asked_by, new_generation())
+    passed = gate.sent(*said(asked), asked_by, new_generation(), asked.run)
     waited = [row["id"] for row in session.execute(Sql.END_WAITING, gate.sent(asked.product, asked.lane)).fetchall()]
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
     session.execute(Sql.REPLACED_BY, gate.made(new.id, list[JsonValue](waited)))
@@ -546,6 +556,14 @@ class PostgresRecord(Record):
         except TimeoutError:
             waited_for.cancel()
             raise RecordError(f"Launchplane's record did not answer within {self.seconds_to_answer:g} s while {doing}.") from None
+
+    # Asked before a build is verified, so a call sent again is answered with its request whatever the git host says by then.
+    def kept_for(self, asked: Asked, idempotency_key: str) -> Request | None:
+        try:
+            with self.session("reading the request of a key") as session:
+                return same_key(session, self.gate, asked, idempotency_key)
+        except RecordError as error:
+            raise Unconfirmed(str(error)) from error
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         # A record that fails may hold the request all the same: the call may repeat one it holds, or the write may have landed.

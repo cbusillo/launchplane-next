@@ -75,7 +75,7 @@ class PretendRecord(Record):
 
     def same_as_written(self, asked: Asked, idempotency_key: str | None) -> Request | None:
         same_key = self.kept.get(self.keys.get(key_digest(idempotency_key) or "", 0))
-        if same_key is not None and same_key.asked() != asked:
+        if same_key is not None and same_key.asked().named() != asked.named():
             raise key_reused(same_key)
         unfinished = (each for each in self.every() if each.stands in UNFINISHED and each.cancel_asked_at is None)
         same = same_key or next((each for each in unfinished if each.asked() == asked), None)
@@ -107,6 +107,14 @@ class PretendRecord(Record):
         if not self.confirms_writes:
             raise Unconfirmed("Launchplane's record could not be reached while writing a request: the connection was lost.")
         return new
+
+    def kept_for(self, asked: Asked, idempotency_key: str) -> Request | None:
+        if not self.reachable:
+            raise Unconfirmed("Launchplane's record could not be reached while reading the request of a key: connection refused.")
+        same_key = self.kept.get(self.keys.get(key_digest(idempotency_key) or "", 0))
+        if same_key is not None and same_key.asked().named() != asked.named():
+            raise key_reused(same_key)
+        return same_key
 
     def write(self, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
         if not self.reachable:

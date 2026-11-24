@@ -242,7 +242,7 @@ class ContainerHost:
     # A build that names a digest is the image the host has for that digest, whatever the instance's label says.
     def held_to_its_build(self, instance: RunningInstance, image: str) -> RunningInstance:
         build = instance.build or ""
-        with suppress(ImageNotFound):
+        with attempting(f"Reading the image of the build of {instance.container}", self.address), suppress(ImageNotFound):
             if "@sha256:" not in build or self.client.images.get(build).id == image:
                 return instance
         return instance.model_copy(update={"other_image": image or "an image Docker does not name"})

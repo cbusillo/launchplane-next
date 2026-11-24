@@ -8,10 +8,11 @@ import json
 import shlex
 import subprocess
 import sys
+from http import HTTPStatus
 
 from launchplane.data_set import client_environment
 from launchplane.odoo import FILES_PATH, SERVER, USER
-from tests.bed import ask, launchplane_answers, on_control, on_scratch, wait_for
+from tests.bed import ask, launchplane_answers, on_control, on_scratch, retire, wait_for
 from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TK
 from tests.recorded_git_host import LATER_RUN, PORT, RUN, build_of
 
@@ -86,6 +87,18 @@ def seed(product: str, lane: str, modules: list[str] = MODULES, *, attachment: b
         on_scratch(odoo_on(data_set, "shell", "--no-http", "--log-level=error"), given=MAKE_ATTACHMENT)
 
 
+# The description is what holds a lane to verified builds and to its check, so it outlives everything of the lane.
+def retire_with_its_data(product: str, lane: str) -> None:
+    kept = [each["data_set"] for each in ask("/running")[1]["data_sets"] if (each["product"], each["lane"]) == (product, lane)]
+    for data_set in kept or [None]:
+        status, answer = retire(product, lane, data_set)
+        if status != HTTPStatus.OK:
+            raise SystemExit(
+                f"Retiring {lane} of {product} did not end, so its description and the recorded git host were left as they "
+                f"are. Run the tear-down again once it has: {answer}"
+            )
+
+
 def main(do: str, product: str = "watch-tk", lane: str = "testing") -> None:
     if do == "set-up":
         pull_builds()
@@ -94,6 +107,7 @@ def main(do: str, product: str = "watch-tk", lane: str = "testing") -> None:
     elif do == "seed":
         seed(product, lane)
     elif do == "tear-down":
+        retire_with_its_data(product, lane)
         stop_recorded_git_host()
         on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
     else:
