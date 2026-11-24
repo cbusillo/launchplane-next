@@ -351,13 +351,15 @@ uv run python -m tests.bed_odoo set-up watch-tk
 curl -s -X POST "$L$P/move" -H "$J" -d '{"build":"ghcr.io/cbusillo/odoo-tenant-tk:latest"}'
 ```
 
-1. **A build given as text is refused.** The last line answers that a move of `watch-tk` names its build as `{"run": <number>, of a run of .github/workflows/build.yml in cbusillo/odoo-tenant-tk}`. The page shows no lane.
+1. **A build given as text is refused.** The last line answers that a move of `watch-tk` names its build as `{"run": <number>, of a run of .github/workflows/build.yml in cbusillo/odoo-tenant-tk}`. **The page** has no card for `watch-tk`.
 
 ```
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
 ```
 
-2. **A new lane fails its check, and keeps the data set it made.** After about 30 s: `check failed`, the build as `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…`, four lines `made part of the data set`, the `make`, `start`, `stop` and `remove` of the instance with its login, and that `/web/login` answered `500`. The two lines after it are from the instance's log, and end in `Database app not initialized`. On the page the lane has a data set and no instance.
+2. **A new lane fails its check, and keeps the data set it made.** After about 30 s: `check failed`, the build as `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…`, and four lines that each name a part: `made the network`, `the database volume`, `the files volume` and `the database server of the data set`. Then the `make`, `start`, `stop` and `remove` of the instance with its login, and that `/web/login` answered `500`. The two lines after it are from the instance's log, and end in `Database app not initialized`.
+
+   **The card** `watch-tk · testing` reads `move failed`. Its web address is `not answering`: the proxy sends it to no instance. The request is `failed`, and its note is one paragraph with no log in it: that `/web/login` did not answer with success, then `The last error in its log: ImportError: Database app not initialized, you can force it with -i base`, then its lines, which begin `make the network`, `make the database volume`, `make the files volume` and `make the database server of the data set`. The row `Found` says `No instance receives visitors`, with `move failed` and the note that the request started an instance that failed its check, so nothing was switched, and that asking for that build again fails the same way until what the check found is put right. The last row is the data set's database server, `running`.
 
 ```
 uv run python -m tests.bed_odoo seed watch-tk
@@ -366,13 +368,15 @@ curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
 ssh root@docker-lp-scratch.shiny 'docker ps --no-trunc --filter label=launchplane.product=watch-tk --format "{{.Names}} {{.Image}} {{.Mounts}}"'
 ```
 
-3. **Seeded, the lane serves the verified digest.** The seed takes about a minute and prints one line. The move answers `switched` after about 17 s, and its lines end with the `make` and `start` of the instance and `wrote the route`; the first is the removal of the seed's login. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` with the volume `launchplane-data-…-files`, and the database server with `…-database`. The page shows the lane `good`, and its card the same lines.
+3. **Seeded, the lane serves the verified digest.** The seed takes about a minute and prints one line. The move answers `switched` after about 17 s, and its lines end with the `make` and `start` of the instance and `wrote the route`; the first is the removal of the seed's login. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` with the volume `launchplane-data-…-files`, and the database server with `…-database`.
+
+   **The card** reads `good`, and its web address `answering`. The request is `done`: `It ended as done.` and its lines, from the removal of the login `i_seed` to `switch testing.watch-tk.test to` the instance, each ending `: done` but the check. There is no row `Found`. `Instance 1` shows the build by its digest, `running` and `active`, and the data set's server is `running`.
 
 ```
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
 ```
 
-4. **The same build again changes nothing.** `unchanged`, and no line.
+4. **The same build again changes nothing.** `unchanged`, and no line. **The card** is as at point 3, with this request `done` and the note `It ended as done.` alone.
 
 ```
 F=/volumes/data/filestore/app/34/34d5bcdaa3ca7286418fae675e3339c20fe1accc
@@ -384,6 +388,8 @@ curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
 
 5. **With the attachment's file gone, the next build fails the check and the lane keeps serving.** The move to TK's next build answers `check failed`: the candidate `answers the proxy, and the check of its kind, run in it, failed`, since the attachment `must be there once with the SHA-256 5b8e2378…` and has `e3b0c442…`, the SHA-256 of no bytes. The two lines after it are from the candidate's log. The site still answers its title, from the first build.
 
+   **The card** still reads `good` and `answering`: the lane serves. The request is `failed`, and its note is that one sentence of the check and then its lines, with `check … at /web/login, refused` among them and no line of a log: the candidate's log speaks of no error. There is no row `Found`, and `Instance 1` is still the first build's, `running` and `active`.
+
 ```
 ssh root@docker-lp-scratch.shiny "docker exec $W mv /volumes/data/held $F"
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
@@ -391,7 +397,9 @@ curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
 
 6. **With the file back, the same move switches.** `switched`, to `…@sha256:f0b8a27b…`, and after `wrote the route` the `stop` and `remove` of the first build's instance and of its login.
 
-7. **Put the bed back.** The tear-down retires the lane with its data set, and only once that has ended takes Launchplane off the recorded git host and removes the description. If the retire did not end, it stops and says so, and everything is left as it is:
+   **The card** reads `good`. The request is `done`, and its lines run from the `make` of the new login through the `switch` to the `stop` and `remove` of the first instance. Among them `retire` and the first instance's name, `, refused`, is the gate answering that an earlier release was switched to it, so it is removed as the instance this release replaced and not as something a failed move left. `Instance 1` is the second build's digest, `running` and `active`.
+
+7. **Put the bed back.** The tear-down retires the lane with its data set, and only once that has ended takes Launchplane off the recorded git host and removes the description. If the retire did not end, it stops and says so, and everything is left as it is. **The card** afterwards has one row, the retire, `done`, whose lines end `delete the data set` and its name; it leaves the page 10 minutes later:
 
 ```
 uv run python -m tests.bed_odoo tear-down watch-tk
