@@ -1,3 +1,5 @@
+from typing import Any
+
 from launchplane.act import Lanes
 from launchplane.judge import Work
 from launchplane.page import Card, cards, in_one_line
@@ -40,7 +42,7 @@ def test_a_log_that_speaks_of_no_error_adds_nothing_to_what_failed() -> None:
 
 
 # A new lane of an Odoo product whose first instance fails its check, as the page then draws it and the request ended.
-def card_after_a_failed_first_move(record: Record) -> tuple[Card, dict[str, object], int]:
+def card_after_a_failed_first_move(record: Record) -> tuple[Card, dict[str, Any], int]:
     proxy = PretendProxy(PretendHost())
     proxy.failing = {f"site-testing-{number}" for number in range(100)}
     lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), record.unfinished, record.ended_lately)
@@ -72,7 +74,7 @@ def test_the_note_of_a_request_that_failed_its_check_is_one_line_and_its_answer_
     [row] = [row for row in card.rows if row.name == f"Request {request}"]
     assert row.note is not None
     assert ("\n" in row.note, row.note.startswith("Connection refused Its lines: ")) == (False, True)
-    assert "Connection refused\nIts last log lines:\nsite:b listening on :5678" in str(answer["error"])
+    assert "Connection refused\nIts last log lines:\nsite:b listening on :5678" in answer["error"]
 
 
 def test_each_part_of_a_data_set_is_named_on_the_card_and_in_the_answer(record: Record) -> None:
@@ -81,9 +83,7 @@ def test_each_part_of_a_data_set_is_named_on_the_card_and_in_the_answer(record: 
     [data_set] = {line.rsplit(" ", 1)[1] for line in (row.note or "").split("; ") if " of the data set " in line}
     parts = ("network", "database volume", "files volume", "database server")
     assert [f"make the {part} of the data set {data_set}" in (row.note or "") for part in parts] == [True] * 4
-    did = answer["did"]
-    assert isinstance(did, list)
-    assert did[:4] == [f"made the {part} of the data set {data_set}" for part in parts]
+    assert answer["did"][:4] == [f"made the {part} of the data set {data_set}" for part in parts]
 
 
 def test_a_lane_no_failed_move_explains_still_reads_as_left_unfinished() -> None:
