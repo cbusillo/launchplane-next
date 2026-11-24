@@ -562,6 +562,12 @@ def retire_step(judged: Judgement, delete_data_set: str | None, done: tuple[Even
         return Stop(
             f"{sentences(doubled)}, so nothing of the data set was deleted: which is its data is not known. {changes_so_far(done)}"
         )
+    copies = sorted(found.data_set for found in lane.data_sets if named is not None and found.copy_of == named.data_set)
+    if copies:
+        return Stop(
+            f"The data set {delete_data_set} has the copy {', '.join(copies)}, whose copiers hold its volumes as what they "
+            f"read, so it was not deleted. Delete the copy first, by name. {changes_so_far(done)}"
+        )
     if named is not None:
         return DeleteDataSet(named)
     route_removed_to = next((event.was for event in done if isinstance(event, EditRoute)), None)

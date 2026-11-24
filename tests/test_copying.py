@@ -373,3 +373,15 @@ def test_a_copy_that_was_not_finished_ends_its_request_as_failed_with_why_and_th
     assert "What was copied is kept, and no instance is started on it." in (kept.error or "")
     rows = [row for card in cards(lanes.read_status()) for row in card.rows if row.name == "Data set"]
     assert "is a copy that was not finished of data-1" in "".join(piece.text for piece in rows[0].value)
+
+
+def test_a_data_set_is_not_deleted_while_a_copy_of_it_is_on_the_host_and_goes_once_the_copy_has() -> None:
+    lanes, proxy, _ = serving()
+    copied_to = lanes.copy("site", "testing", GENERATION, first()).copied_to
+    proxy.host.actions.clear()
+    with pytest.raises(Stopped, match=f"The data set data-1 has the copy {copied_to}.* Delete the copy first, by name"):
+        lanes.retire("site", "testing", "data-1")
+    assert not [each for each in proxy.host.actions if each.startswith("delete")]
+    lanes.retire("site", "testing", copied_to)
+    lanes.retire("site", "testing", "data-1")
+    assert (proxy.host.actions[-2:], proxy.host.data_sets) == ([f"delete {copied_to}", "delete data-1"], {})
