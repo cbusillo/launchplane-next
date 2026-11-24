@@ -68,6 +68,12 @@ def files_in(volume: str) -> str:
     return on_scratch(f"docker run --rm --network none --volume {volume}:/copy:ro busybox:1.37 ls -A /copy").strip()
 
 
+# What was copied: the files and bytes of each volume, as the copier found them.
+def size_of(volume: str) -> str:
+    count = 'echo "$(find /copy -type f | wc -l) files, $(find /copy -type f -exec cat {} + | wc -c) bytes"'
+    return on_scratch(f"docker run --rm --network none --volume {volume}:/copy:ro busybox:1.37 sh -c '{count}'").strip()
+
+
 def clear_the_lane() -> None:
     retire_with_its_data(PRODUCT, LANE)
     remove_product_copies(PRODUCT)
@@ -117,7 +123,8 @@ def test_a_whole_copy_holds_the_lead_and_its_bytes_in_volumes_of_its_own_and_the
     assert (status, answer["outcome"], answer["container_receiving_visitors"]) == (200, "copied", serving["instance"]), answer
     [copy] = [each for each in copies_of(PRODUCT, LANE) if each["data_set"] == answer["copied_to"]]
     confirmed = max(finished_at(each["container"]) for each in copy["copies"])
-    print(f"\nfrom the first back soon answer to both copies confirmed: {confirmed - seen[0]:.1f} s")  # noqa: T201
+    sizes = "; ".join(f"{volume}: {size_of(volume)}" for volume in (*copy["volumes"], *copy["files"]))
+    print(f"\nfrom the first back soon answer to both copies confirmed: {confirmed - seen[0]:.1f} s. {sizes}")  # noqa: T201
     assert 0 < confirmed - seen[0] < 60
     in_the_copy = read_copy(copy)
     assert (in_the_copy["lead"], in_the_copy["attachment"]) == ("lead", ATTACHMENT) == (serving["lead"], serving["attachment"])
