@@ -1,0 +1,25 @@
+{
+    "total_count": 1,
+    "artifacts": [
+        {
+            "id": 14867403974,
+            "node_id": "MDg6QXJ0aWZhY3QxNDg2NzQwMzk3NA==",
+            "name": "artifact-manifest-1",
+            "size_in_bytes": 48933,
+            "url": "https://api.github.com/repos/cbusillo/odoo-tenant-tk/actions/artifacts/14867403974",
+            "archive_download_url": "https://api.github.com/repos/cbusillo/odoo-tenant-tk/actions/artifacts/14867403974/zip",
+            "expired": false,
+            "digest": "sha256:d89b6ad08429c5388ddf511928e865aade43f259a912ae4847e6200e8ff2cbad",
+            "created_at": "2026-11-23T22:23:03Z",
+            "updated_at": "2026-11-23T22:23:03Z",
+            "expires_at": "2027-02-21T22:20:01Z",
+            "workflow_run": {
+                "id": 45278647986,
+                "repository_id": 1447456337,
+                "head_repository_id": 1447456337,
+                "head_branch": "main",
+                "head_sha": "302cb11b30fb320b4f12a49227294e7a173710e4"
+            }
+        }
+    ]
+}

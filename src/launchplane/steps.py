@@ -113,6 +113,7 @@ class CreateDataSetVolume:
     product: str
     lane: str
     data_set: str
+    files: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,10 +144,12 @@ class StartInstance:
     generation: str | None = None
 
 
+# The instance answers at `health_path`, and then the `command` of its kind, run in it, succeeds.
 @dataclass(frozen=True)
 class Check:
     container: str
     health_path: str = "/"
+    command: tuple[str, ...] = ()
 
 
 # The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.

@@ -25,7 +25,6 @@ from launchplane.steps import (
     BackgroundServiceRefused,
     Cancel,
     CannotPutBack,
-    Check,
     CheckRefused,
     Command,
     CreateDatabase,
@@ -62,7 +61,7 @@ from launchplane.steps import (
 
 type Step[Answer] = Action | Done[Answer] | Stop
 type StepBack = Step[PutBack] | TooLate
-MADE_READY = {Kind.NO_NETWORK, Kind.NO_VOLUME, Kind.NO_DATABASE, Kind.STOPPED, Kind.NOT_ACCEPTING}
+MADE_READY = {Kind.NO_NETWORK, Kind.NO_VOLUME, Kind.NO_FILES, Kind.NO_DATABASE, Kind.STOPPED, Kind.NOT_ACCEPTING}
 LOGINS_UNKNOWN = {Kind.LOGINS_UNREAD, Kind.NOT_ACCEPTING, Kind.NOT_ASKED}
 WATCHED = {Kind.STOPPED, Kind.NOT_RUNNING, Kind.UNSTEADY}
 
@@ -145,7 +144,7 @@ def data_set_change(lane: LaneReading, switching_to: RunningInstance) -> list[st
 
 # Whether a check passed in this call, the host cannot show, so it is asked of what the call has done.
 def is_checked(instance: RunningInstance, product: Product, done: tuple[Event, ...]) -> bool:
-    return Check(instance.container, product.health_path) in done and instance.state == InstanceState.RUNNING
+    return product.check(instance.container) in done and instance.state == InstanceState.RUNNING
 
 
 def problems_switching_to(judged: Judgement, instance: RunningInstance) -> list[str]:
@@ -168,8 +167,8 @@ def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: s
 def step_toward_ready(found: DataSet, kinds: set[Kind], lane: LaneReading, image: str, generation: str | None) -> Action:
     if Kind.NO_NETWORK in kinds:
         return CreateDataSetNetwork(lane.product, lane.lane, found.data_set, generation)
-    if Kind.NO_VOLUME in kinds:
-        return CreateDataSetVolume(lane.product, lane.lane, found.data_set)
+    if kinds & {Kind.NO_VOLUME, Kind.NO_FILES}:
+        return CreateDataSetVolume(lane.product, lane.lane, found.data_set, files=Kind.NO_VOLUME not in kinds)
     if Kind.NO_DATABASE in kinds:
         return CreateDatabase(lane.product, lane.lane, found.data_set, found.networks[0].name, found.volumes[0], image)
     server = found.databases[0]
@@ -204,7 +203,7 @@ def prepared(
         )
     if findings:
         return step_toward_ready(found, {finding.kind for finding in findings}, lane, product.database.image, generation)
-    return DataSetUse(found.data_set, found.networks[0].name, found.databases[0].container)
+    return DataSetUse(found.data_set, found.networks[0].name, found.databases[0].container, *found.files[:1])
 
 
 # A move answers for the instance it serves from and that instance's data set, not for another data set of the lane.
@@ -457,7 +456,7 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
 
 def switch_or_check(move: Move, candidate: RunningInstance) -> Action | Stop:
     if not is_checked(candidate, move.product, move.done):
-        return Check(candidate.container, move.product.health_path)
+        return move.product.check(candidate.container)
     problems = problems_switching_to(move.judged, candidate)
     if problems:
         return Stop(

@@ -1,0 +1,26 @@
+{
+    "schema_version": 2,
+    "artifact_id": "artifact-tk-5a7f64395863f151",
+    "source_commit": "e6e4dc5722a4e339b9c1b600fa91e969c8547349",
+    "image": {
+        "digest": "sha256:5a7f64395863f151491f54200c42672ec3244bb0643538372ebe24227d11cf31",
+        "repository": "ghcr.io/cbusillo/odoo-tenant-tk",
+        "tags": [
+            "tk-main-e6e4dc5722a4e339b9c1b600fa91e969c8547349"
+        ]
+    },
+    "odoo_install_modules": [
+        "launchplane_settings",
+        "disable_odoo_online",
+        "crm",
+        "contacts",
+        "website_crm",
+        "website_livechat",
+        "crm_livechat",
+        "base_automation",
+        "auth_passkey",
+        "website_cf_turnstile",
+        "tk_website",
+        "tk_listings"
+    ]
+}

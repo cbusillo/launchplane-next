@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from launchplane.act import Cancelled, Lanes, Status, Stopped
 from launchplane.container_host import ContainerHost
 from launchplane.docker_answers import ContainerHostError
+from launchplane.git_host import Builds, GitHostError, NotABuild
 from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
@@ -57,6 +58,7 @@ UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
 PRODUCTS_FOLDER = "/var/lib/launchplane/products"
 MOST_SECONDS_WAITED = 3600
 SECONDS_BETWEEN_READS = 0.1
+TEXT_ALONE = Builds()
 
 
 class InstanceAnswer(RunningInstance):
@@ -98,7 +100,8 @@ class HostUnreadable(BaseModel):
 
 
 class MoveRequest(BaseModel):
-    build: str
+    build: str | None = None
+    run: int | None = None
 
 
 class RetireRequest(BaseModel):
@@ -275,7 +278,8 @@ def looking(why: str, *, turned_back: bool = False) -> Witness:
 
 
 class Calls:
-    def __init__(self, record: Record, wake: Callable[[], object], gate: Carries, read: StatusReader) -> None:
+    def __init__(self, record: Record, wake: Callable[[], object], gate: Carries, read: StatusReader, builds: Builds) -> None:
+        self.builds = builds
         self.record = record
         self.wake = wake
         self.gate = gate
@@ -441,8 +445,13 @@ def add_lane_calls(app: FastAPI, calls: Calls) -> None:
         response: Response,
         wait: Annotated[float, WAIT] = 0,
     ) -> MoveResult | NotFinished | Kept:
-        asked = Asked(product=product, lane=lane, work=Work.MOVE, build=request.build)
-        return calls.keep(asked, MoveResult, http, response, wait)
+        try:
+            build = calls.builds.asked(product, request.build, request.run)
+        except NotABuild as error:
+            return not_finished(response, HTTPStatus.UNPROCESSABLE_CONTENT, str(error))
+        except (GitHostError, ProductError) as error:
+            return not_finished(response, HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+        return calls.keep(Asked(product=product, lane=lane, work=Work.MOVE, build=build), MoveResult, http, response, wait)
 
     @app.post("/lanes/{product}/{lane}/retire", responses=responses_to_a_request(RetireResult))
     def retire_lane(
@@ -500,7 +509,9 @@ def add_cancel_call(app: FastAPI, calls: Calls) -> None:
         return calls.cancel(request, f"a call from {asker(http)}", wait, response)
 
 
-def create_app(read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: Carries) -> FastAPI:
+def create_app(
+    read: StatusReader, record: Record, wake: Callable[[], object], secrets: Secrets, gate: Carries, builds: Builds = TEXT_ALONE
+) -> FastAPI:
     app = FastAPI(title="Launchplane")
     page = running_page()
 
@@ -518,7 +529,7 @@ def create_app(read: StatusReader, record: Record, wake: Callable[[], object], s
             response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
             return HostUnreadable(read_at=datetime.now(UTC), error=str(error))
 
-    calls = Calls(record, wake, gate, read)
+    calls = Calls(record, wake, gate, read, builds)
     add_lane_calls(app, calls)
     add_request_calls(app, calls)
     add_cancel_call(app, calls)
@@ -542,5 +553,5 @@ def serve() -> None:
     lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_ended=record.ended_lately)
     worker = Worker(record, lanes, host)
     worker.start()
-    app = create_app(lanes.read_status, record, worker.wake, host, lanes)
+    app = create_app(lanes.read_status, record, worker.wake, host, lanes, Builds(products.read))
     uvicorn.Server(server_config(app, address, port, host)).run()

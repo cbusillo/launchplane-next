@@ -107,6 +107,8 @@ class PretendHost:
         use: DataSetUse | None = None,
         generation: str | None = None,
     ) -> None:
+        files = None if use is None else use.files
+        path = target.run.files
         self.instances[container] = RunningInstance(
             product=target.product,
             lane=target.lane,
@@ -116,6 +118,7 @@ class PretendHost:
             networks=(LANE_NETWORK,) if use is None else (LANE_NETWORK, use.network),
             data_set=None if use is None else use.data_set,
             generation=generation,
+            mounts=() if files is None or path is None else (Mount(source=files, path=path),),
         )
 
     def attach(self, container: str, network: str, *, quiet: bool) -> None:
@@ -239,9 +242,12 @@ class PretendHost:
         self.change_data_set(product, lane, data_set, networks=(network,), generation=generation)
         self.record(f"network {data_set}")
 
-    def create_data_set_volume(self, product: str, lane: str, data_set: str) -> None:
-        self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",))
-        self.record(f"volume {data_set}")
+    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None:
+        if files:
+            self.change_data_set(product, lane, data_set, files=(f"files-{data_set}",))
+        else:
+            self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",))
+        self.record(f"{'files' if files else 'volume'} {data_set}")
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         database = DataSetDatabase(
@@ -428,6 +434,7 @@ class PretendProxy:
         # While held, a written route stays unloaded and the proxy goes on sending visitors where it did.
         self.holds_delivery = False
         self.failing: set[str] = set()
+        self.failing_its_kind: set[str] = set()
         self.not_answering: dict[str, str] = {}
         self.asked: list[str] = []
         self.while_awaiting: Callable[[], None] = lambda: None
@@ -503,11 +510,13 @@ class PretendProxy:
     def switch(self, web_address: str, generation: str, attempt: int, candidate: str) -> GateAnswer:
         return self.gate.switch(web_address, generation, attempt, candidate)
 
-    def check_instance(self, container: str, health_path: str) -> None:
+    def check_instance(self, container: str, health_path: str, command: Sequence[str] = ()) -> None:
         self.host.record(f"check {container}{health_path}")
         self.while_checking(container)
         if container in self.failing:
             raise CheckFailed("Connection refused")
+        if command and container in self.failing_its_kind:
+            raise CheckFailed("The check of its kind failed")
 
     def why_web_address_fails(self, web_address: str) -> str | None:
         self.asked.append(web_address)

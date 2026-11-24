@@ -67,6 +67,8 @@ class RunningInstance(BaseModel):
     data_set: str | None = None
     mounts: tuple[Mount, ...] = ()
     generation: Stamp = None
+    # The image it runs, where its build names a digest and the host has another image for that digest, or none.
+    not_its_build: str | None = None
 
 
 class RunningBackgroundService(BaseModel):
@@ -116,16 +118,32 @@ class DataSet(BaseModel):
     networks: tuple[HostNetwork, ...]
     volumes: tuple[str, ...]
     databases: tuple[DataSetDatabase, ...]
+    files: tuple[str, ...] = ()
     # Stamped on its network, the first part of it that is made.
     generation: Stamp = None
 
 
+# How a kind starts its web part where the build does not say: nothing, for a build that starts by itself. The
+# `files` of its data set are mounted at that path.
+@dataclass(frozen=True)
+class Run:
+    command: tuple[str, ...] = ()
+    environment: Mapping[str, str] = field(default_factory=dict[str, str])
+    user: str | None = None
+    files: str | None = None
+
+
+PLAIN = Run()
+
+
+# `run` is filled in from the product's description by the call that moves the lane.
 class LaneBuild(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     product: str
     lane: str
     build: str
+    run: Run = PLAIN
 
 
 @dataclass(frozen=True)
@@ -133,6 +151,7 @@ class DataSetUse:
     data_set: str
     network: str
     database_container: str
+    files: str | None = None
 
 
 # What the gate has decided for a generation, and the only thing it is told apart by from then on.

@@ -71,6 +71,8 @@ class Kind(StrEnum):
     UNSTEADY = "not yet up as long as it must stay up"
     NO_NETWORK = "no network"
     NO_VOLUME = "no volume"
+    NO_FILES = "no files volume"
+    NOT_ITS_BUILD = "runs an image that is not its build"
     NO_DATABASE = "no database server"
     NOT_QUIET = "network not quiet"
     NOT_ACCEPTING = "does not accept connections"
@@ -190,6 +192,14 @@ class Judged:
         found = self.lane.data_set(data_set)
         return set() if found is None else {network.name for network in found.networks}
 
+    @property
+    def files_path(self) -> str | None:
+        return None if self.product is None else self.product.run.files
+
+    def files_mounts(self, data_set: str | None) -> tuple[Mount, ...]:
+        found, path = self.lane.data_set(data_set), self.files_path
+        return () if found is None or path is None else tuple(Mount(source=volume, path=path) for volume in found.files)
+
 
 type Part = RunningInstance | RunningBackgroundService | DataSetDatabase
 
@@ -271,15 +281,21 @@ def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
         *state_findings(part, instance, of, Weight.WRONG if serves else Weight.UNFINISHED),
         *data_set_label_findings(part, instance, of),
         *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
-        *mount_findings(part, subject, instance.mounts, ()),
+        *mount_findings(part, subject, instance.mounts, of.files_mounts(instance.data_set)),
         *([Found(Weight.UNFINISHED, subject, Kind.BESIDE, f"{part} runs beside the active one")] if beside else []),
+        *([Found(Weight.FAULT, subject, Kind.NOT_ITS_BUILD, not_its_build(part, instance))] if instance.not_its_build else []),
     ]
+
+
+def not_its_build(part: str, instance: RunningInstance) -> str:
+    return f"{part} says it is the build {instance.build} and runs the image {instance.not_its_build}, which is not that build"
 
 
 def doubled_parts(found: DataSet) -> list[str]:
     parts: dict[str, tuple[str, ...]] = {
         "networks": tuple(network.name for network in found.networks),
         "volumes": found.volumes,
+        "files volumes": found.files,
         "database servers": tuple(database.container for database in found.databases),
     }
     return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
@@ -321,6 +337,7 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         for kind, word, parts in (
             (Kind.NO_NETWORK, "network", found.networks),
             (Kind.NO_VOLUME, "volume", found.volumes),
+            (Kind.NO_FILES, "files volume", found.files if of.files_path else ("not needed",)),
             (Kind.NO_DATABASE, "database", found.databases),
         )
         if not parts
