@@ -2,7 +2,7 @@
 
 A product whose description has an `odoo` part is of the Odoo kind. Its lane runs a build Launchplane has verified, on a data set of its own: a database server and a files volume. The first product of the kind is TK, `cbusillo/odoo-tenant-tk`, on Odoo 20.
 
-Copying a lane's data, a module update inside a release, the background service that runs Odoo's scheduled jobs, previews, backups and acceptance are not built.
+[A lane's data is copied](copying.md) by a call of its own. A module update inside a release, a release that uses a copy, the background service that runs Odoo's scheduled jobs, previews, backups and acceptance are not built.
 
 ## The description
 
@@ -104,3 +104,4 @@ On November 24, on the scratch host, with TK's build `sha256:0e2ad09f…` of com
 | A move of the seeded lane to the build | 17.4 s. Asked again: 1.7 s |
 | A move that fails its check | 30 s on a database never installed in |
 | `tests/test_bed_odoo.py`, 8 tests | 2 min 19 s |
+| A copy of the lane's two volumes, from the first back soon answer at the web address to both copies confirmed | 4.2 s, for a database volume of 3,242 files and 141 MB, the database `app` being 47 MB, and a files volume of 110 files and 4.6 MB. The rest is in [a copy of a lane's data](copying.md#measured) |

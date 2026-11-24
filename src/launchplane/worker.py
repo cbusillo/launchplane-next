@@ -9,6 +9,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from launchplane import steps
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
@@ -18,18 +19,7 @@ from launchplane.product import ProductError
 from launchplane.proxy import ProxyError
 from launchplane.record import Event, Held, Interrupted, Kept, Record, RecordError, Reply, Request, Stands, put_back_told
 from launchplane.secret_boundary import Secrets
-from launchplane.steps import (
-    Command,
-    CopyOutcome,
-    CopyResult,
-    MaintenanceOutcome,
-    MaintenanceResult,
-    MoveResult,
-    Outcome,
-    RetireOutcome,
-    RetireResult,
-    Sent,
-)
+from launchplane.steps import Command, MaintenanceOutcome, MaintenanceResult, MoveResult, Outcome, RetireOutcome, RetireResult, Sent
 from launchplane.telling import LOOKS, NOBODY, Answered, Said, Witness
 
 SECONDS_BETWEEN_LOOKS = 0.5
@@ -45,11 +35,11 @@ NOT_A_SUCCESS = {
     MaintenanceOutcome.DATABASE_KILLED,
     MaintenanceOutcome.WEB_PART_FAILED,
     MaintenanceOutcome.BACKGROUND_SERVICE_FAILED,
-    CopyOutcome.NOT_COPIED,
+    steps.CopyOutcome.NOT_COPIED,
 }
 log = logging.getLogger(__name__)
 
-type Answer = MoveResult | RetireResult | MaintenanceResult | CopyResult
+type Answer = MoveResult | RetireResult | MaintenanceResult | steps.CopyResult
 type Lane = tuple[str, str]
 
 
@@ -61,7 +51,7 @@ class Carries(Protocol):
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
     def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
-    def copy(self, product: str, lane: str, generation: str, witness: Witness, /) -> CopyResult: ...
+    def copy(self, product: str, lane: str, generation: str, witness: Witness, /) -> steps.CopyResult: ...
 
 
 # How a call came out, before it is written. `verdict` is the gate's verdict the call itself ended on: committed for a

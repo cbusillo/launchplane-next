@@ -1,6 +1,6 @@
 # Requests
 
-A call that changes a lane is written down as a request, answered at once, and carried through by a worker inside Launchplane. Each lane has its own turn, so different lanes are worked at the same time, and a request can be cancelled. The four calls are the [move](the-move.md), [retire](retiring-a-lane.md), and beginning and ending [maintenance](maintenance.md). What each does to a lane is in its own document and is unchanged.
+A call that changes a lane is written down as a request, answered at once, and carried through by a worker inside Launchplane. Each lane has its own turn, so different lanes are worked at the same time, and a request can be cancelled. The five calls are the [move](the-move.md), [retire](retiring-a-lane.md), beginning and ending [maintenance](maintenance.md), and [the copy of a lane's data](copying.md). What each does to a lane is in its own document and is unchanged.
 
 ```
 curl -i -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/move \
@@ -13,7 +13,7 @@ curl -X POST http://launchplane.shiny:8700/requests/<id>/cancel
 
 ## Asking
 
-Each of the four calls writes a request and answers `202` with the request and a `Location` header, `/requests/<id>`. Nothing on the host has changed yet.
+Each of the five calls writes a request and answers `202` with the request and a `Location` header, `/requests/<id>`. Nothing on the host has changed yet.
 
 - **`?wait=<seconds>`**, up to 3600. The call answers when the request ends, with the status and body the call had before requests were kept: `200` with the result, `422` with the result for an outcome that is not a success, or `503` with `error` when it stopped. A request that was cancelled answers `409` with `error`, saying by what and what was put back, and one that was replaced answers `409` saying by which request. If the request has not ended in that time, the answer is `202` with the request. The `Location` header is there either way.
 - **Asking the same thing of a lane while a request for it is waiting or working** writes nothing, replaces nothing and answers with that request, without a key or with one not used before. The same thing is the same call, lane, build and data set named for deleting. If that request is being cancelled, the call writes a new one.
@@ -30,7 +30,7 @@ Each of the four calls writes a request and answers `202` with the request and a
 | --- | --- |
 | `id`, `product`, `lane` | Which request, and its lane. |
 | `generation` | The number of the release this request is, stamped on what it makes: see [the move](the-move.md#what-it-does). No other request has it, also after the record is lost and made again. |
-| `work` | `moving`, `retiring`, `beginning maintenance` or `ending maintenance`. |
+| `work` | `moving`, `retiring`, `beginning maintenance`, `ending maintenance` or `copying`. |
 | `build`, `delete_data_set` | Exactly what was asked: the build of a move, the data set a retire named for deleting. |
 | `run` | The publishing run a move of [an Odoo product](odoo.md#a-build-is-a-publishing-run) named. Its `build` is then the image that run was verified to have published. |
 | `asked_by`, `asked_at` | The address the call came from, and when. Nobody is known by name yet. |

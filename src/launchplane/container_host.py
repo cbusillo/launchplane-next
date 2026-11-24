@@ -444,10 +444,8 @@ class ContainerHost:
             copier.start()
             exit_code = copier.wait(timeout=COPY_DEADLINE_SECONDS)["StatusCode"]
             if exit_code != 0:
-                said = copier.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip()
-                raise ContainerHostRefused(
-                    f"The copy of the volume {copy.source} to {copy.destination} ended with code {exit_code}: {said or 'no log'}"
-                )
+                said = copier.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip() or "no log"
+                raise ContainerHostRefused(f"The copy of {copy.source} to {copy.destination} ended with code {exit_code}: {said}")
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         with attempting(f"Making the database of the data set {data_set}", self.address):

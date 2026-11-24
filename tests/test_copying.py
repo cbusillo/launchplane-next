@@ -136,7 +136,7 @@ def test_each_volume_is_copied_from_the_data_set_the_copy_names_once_everything_
 def test_a_copy_whose_volume_is_a_volume_of_what_it_copies_is_given_up_before_anything_is_written() -> None:
     given = Given((web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(volumes=("volume-d1",))))
     step = decide(frozen_by_this_request(given))
-    assert isinstance(step, GiveUp) and "are not one fresh volume for each volume of d1" in step.why
+    assert isinstance(step, GiveUp) and "are not one fresh volume, still to be written, for each volume of d1" in step.why
 
 
 def test_a_copy_another_attempt_began_is_given_up_and_never_gone_on_with() -> None:

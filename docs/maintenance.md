@@ -1,6 +1,6 @@
 # A lane in maintenance
 
-A lane is in maintenance when its web address shows the back soon page and nothing can write to its data set. Two calls put a lane in and take it out. Nothing else does yet: no release calls them.
+A lane is in maintenance when its web address shows the back soon page and nothing can write to its data set. Two calls put a lane in and take it out. [Copying a lane's data](copying.md) takes the same steps in and out within one request, and no release does yet.
 
 ```
 curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/maintenance/begin
@@ -18,6 +18,7 @@ A lane is in maintenance when its own routes file sends its web address to the b
 While the routes file points at the back soon page:
 
 - `move` answers `503` and says to end maintenance first. It starts, replaces and repairs nothing, the proxy included.
+- `copy` answers `503` unless it is the request that put the lane there, and changes nothing.
 - `retire` works as on any lane: it removes the route, then the stopped background service and web part, and keeps the data set.
 
 ## Into maintenance

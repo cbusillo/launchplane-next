@@ -78,9 +78,6 @@ class CopyOutcome(StrEnum):
 
 # `data_set` is the one the lane runs against, and `copied_to` the copy the request made of it, whole or not.
 class CopyResult(Result):
-    product: str
-    lane: str
-    web_address: str
     outcome: CopyOutcome
     container_receiving_visitors: str | None
     data_set: str | None

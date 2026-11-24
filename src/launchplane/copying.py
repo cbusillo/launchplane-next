@@ -1,38 +1,10 @@
 from dataclasses import dataclass
 
-from launchplane import maintenance
+from launchplane import maintenance, plan, steps
 from launchplane.instance import BACK_SOON, DataSet, LaneReading
 from launchplane.judge import LOGIN_KINDS, Judgement, Work, judge
-from launchplane.plan import (
-    Step,
-    StepBack,
-    changes_so_far,
-    is_turned_back,
-    left_for_a_move,
-    put_back_or_what_is_left,
-    route_step,
-    sentences,
-    unread_route,
-)
 from launchplane.product import Product
-from launchplane.steps import (
-    Action,
-    Cancel,
-    CopyOutcome,
-    CopyRefused,
-    CopyResult,
-    CopyVolume,
-    CreateDataSetVolume,
-    Done,
-    EditRoute,
-    Event,
-    GiveUp,
-    MaintenanceOutcome,
-    Stop,
-    StopPart,
-    TooLate,
-    Wait,
-)
+from launchplane.steps import CopyOutcome, CopyResult, CopyVolume, Done, GiveUp, Stop, Wait
 
 
 # One copy of a lane's data: one reading of the host, and what this attempt has done. The copy is the data set stamped
@@ -43,7 +15,7 @@ class Copying:
     product: Product
     generation: str
     fresh: str
-    done: tuple[Event, ...]
+    done: tuple[steps.Event, ...]
 
     @property
     def lane(self) -> LaneReading:
@@ -60,18 +32,13 @@ class Copying:
     # Why this attempt stopped copying. What an earlier attempt gave up for is read from what it left on the host.
     @property
     def given_up(self) -> str | None:
-        told = (
-            each.why if isinstance(each, GiveUp) else each.report for each in self.done if isinstance(each, GiveUp | CopyRefused)
-        )
-        return next(told, None)
+        refused = (GiveUp, steps.CopyRefused)
+        return next((each.why if isinstance(each, GiveUp) else each.report for each in self.done if isinstance(each, refused)), None)
 
     def answer(self) -> Done[CopyResult]:
         lane, copy = self.lane, self.copy
         left = "A copy was begun by an attempt of this request that did not finish it, and is never gone on with."
         result = CopyResult(
-            product=lane.product,
-            lane=lane.lane,
-            web_address=lane.web_address,
             outcome=CopyOutcome.COPIED if self.is_whole else CopyOutcome.NOT_COPIED,
             container_receiving_visitors=lane.route.sends_visitors_to,
             data_set=None if lane.active is None else lane.active.data_set,
@@ -83,23 +50,25 @@ class Copying:
 
 # While the proxy still sends visitors to it, the instance to bring back and its data set are read, and written on the
 # volumes of the copy as they are made. Only then is the web address changed.
-def begin_step(copying: Copying) -> Action | Stop:
+def begin_step(copying: Copying) -> steps.Action | Stop:
     lane, copy, active = copying.lane, copying.copy, copying.lane.active
     source = None if active is None else lane.data_set(active.data_set)
-    found = [] if active is None else left_for_a_move(copying.judged, active)
+    found = [] if active is None else plan.left_for_a_move(copying.judged, active)
     if active is None or source is None or len(lane.instances) != 1 or found:
-        why = sentences(found) or f"it has {len(lane.instances)} instances, and must have one, receiving visitors, on a data set"
-        return Stop(f"{lane.lane} of {lane.product} is not as it must be to be copied: {why}. {changes_so_far(copying.done)}")
+        why = (
+            plan.sentences(found) or f"it has {len(lane.instances)} instances, and must have one, receiving visitors, on a data set"
+        )
+        return Stop(f"{lane.lane} of {lane.product} is not as it must be to be copied: {why}. {plan.changes_so_far(copying.done)}")
     name = copying.fresh if copy is None else copy.data_set
     for files in (False, True) if source.files else (False,):
         if copy is None or not (copy.files if files else copy.volumes):
-            return CreateDataSetVolume(lane.product, lane.lane, name, files, source.data_set, copying.generation)
-    return EditRoute(lane.web_address, BACK_SOON, lane.route.installed)
+            return steps.CreateDataSetVolume(lane.product, lane.lane, name, files, source.data_set, copying.generation)
+    return steps.EditRoute(lane.web_address, BACK_SOON, lane.route.installed)
 
 
 # Behind the back soon page: everything of the lane is stopped, the database server last and cleanly, and then each
 # volume is copied. Anything else gives the copy up, and a copy another attempt began is never gone on with.
-def copy_step(copying: Copying) -> Action:
+def copy_step(copying: Copying) -> steps.Action:
     lane, copy, database = copying.lane, copying.copy, copying.product.database
     source = None if copy is None else lane.data_set(copy.copy_of)
     if copy is None or source is None or database is None:
@@ -112,35 +81,27 @@ def copy_step(copying: Copying) -> Action:
         return stop
     found = [finding for finding in copying.judged.findings if finding.kind not in LOGIN_KINDS]
     if found:
-        return GiveUp(f"The lane is not stopped as it must be for its data to be copied: {sentences(found)}.")
+        return GiveUp(f"The lane is not stopped as it must be for its data to be copied: {plan.sentences(found)}.")
     sources, destinations = (*source.volumes, *source.files), (*copy.volumes, *copy.files)
     to_copy = [pair for pair in zip(sources, destinations, strict=False) if pair[1] not in copied_now]
-    if len(sources) == len(destinations) and not to_copy:
-        return GiveUp(f"Every volume of the copy {copy.data_set} was copied, and Docker does not show each copier as finished.")
-    if len(sources) != len(destinations) or set(sources) & set(destinations):
+    if len(sources) != len(destinations) or set(sources) & set(destinations) or not to_copy:
         return GiveUp(
-            f"The volumes of the copy {copy.data_set} ({', '.join(destinations)}) are not one fresh volume for each volume "
-            f"of {source.data_set} ({', '.join(sources)}), so nothing was written to them."
+            f"The volumes of the copy {copy.data_set} ({', '.join(destinations)}) are not one fresh volume, still to be "
+            f"written, for each volume of {source.data_set} ({', '.join(sources)})."
         )
     return CopyVolume(lane.product, lane.lane, copy.data_set, *to_copy[0], database.image)
 
 
 # The lane comes back as the end of maintenance brings one back: its database server, its one instance with the login
 # it has, the check, and only then the web address. While it cannot, the request waits and is taken up again.
-def bring_back(copying: Copying) -> Action | Wait:
+def bring_back(copying: Copying) -> steps.Action | Wait:
     lane, copy = copying.lane, copying.copy
-    copiers = () if copy is None else copy.copies
     # A copier still reading would go on reading a volume that is being written again.
-    running = next((each.container for each in copiers if not each.stopped), None)
+    running = next((each.container for each in (() if copy is None else copy.copies) if not each.stopped), None)
     if running is not None:
-        return StopPart(running)
-    if copy is not None and any(each.data_set != copy.copy_of for each in lane.instances):
-        return Wait(
-            f"{lane.web_address} shows the back soon page, and an instance of the lane does not run against "
-            f"{copy.copy_of}, the data set that was copied, so none was started."
-        )
+        return steps.StopPart(running)
     judged = judge(lane, copying.product, Work.END_MAINTENANCE)
-    answer = maintenance.answer_for(lane.product, lane.lane, lane.route, MaintenanceOutcome.ENDED)
+    answer = maintenance.answer_for(lane.product, lane.lane, lane.route, steps.MaintenanceOutcome.ENDED)
     step = maintenance.bring_back(judged, copying.product, answer, copying.done)
     if isinstance(step, Done):
         return Wait(f"The lane could not be brought back yet, and it is tried again: {step.answer.error}")
@@ -148,22 +109,22 @@ def bring_back(copying: Copying) -> Action | Wait:
 
 
 # Out of maintenance, the copy has not begun or the lane is back. A copy begun is never begun again by its request.
-def open_step(copying: Copying, cancel: Cancel | None) -> Step[CopyResult] | StepBack:
+def open_step(copying: Copying, cancel: steps.Cancel | None) -> plan.Step[CopyResult] | plan.StepBack:
     lane, copy = copying.lane, copying.copy
-    if is_turned_back(cancel) and copy is not None and copying.is_whole:
-        return TooLate(
+    if plan.is_turned_back(cancel) and copy is not None and copying.is_whole:
+        return steps.TooLate(
             f"The copy {copy.data_set} of {copy.copy_of} is whole and {lane.web_address} is out of maintenance again, so "
             "copying could not be cancelled and is finished as asked. The copy is kept."
         )
-    if is_turned_back(cancel):
-        return put_back_or_what_is_left(copying.judged, copying.generation)
+    if plan.is_turned_back(cancel):
+        return plan.put_back_or_what_is_left(copying.judged, copying.generation)
     began = copy is not None and bool(copy.copies)
     return copying.answer() if began or copying.given_up else begin_step(copying)
 
 
-def decide(copying: Copying, cancel: Cancel | None = None) -> Step[CopyResult] | StepBack:
+def decide(copying: Copying, cancel: steps.Cancel | None = None) -> plan.Step[CopyResult] | plan.StepBack:
     lane, route = copying.lane, copying.lane.route
-    step = unread_route(lane, "copied", copying.done) or route_step(copying.judged, copying.done)
+    step = plan.unread_route(lane, "copied", copying.done) or plan.route_step(copying.judged, copying.done)
     if step is not None:
         return step
     if not route.in_maintenance:
@@ -171,8 +132,8 @@ def decide(copying: Copying, cancel: Cancel | None = None) -> Step[CopyResult] |
     if route.installed_by.split(" ")[0] != copying.generation:
         return Stop(
             f"{lane.lane} of {lane.product} is in maintenance, and this request did not put it there, so it is left as "
-            f"it is and its data was not copied. {changes_so_far(copying.done)}"
+            f"it is and its data was not copied. {plan.changes_so_far(copying.done)}"
         )
-    if is_turned_back(cancel) or copying.given_up or copying.is_whole:
+    if plan.is_turned_back(cancel) or copying.given_up or copying.is_whole:
         return bring_back(copying)
     return copy_step(copying)
