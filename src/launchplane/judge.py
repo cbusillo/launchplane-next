@@ -35,6 +35,7 @@ class Work(StrEnum):
     RETIRE = "retiring"
     BEGIN_MAINTENANCE = "beginning maintenance"
     END_MAINTENANCE = "ending maintenance"
+    COPY = "copying"
 
 
 # Launchplane's record could not be read, so whether a request is at work on a lane is not known.
@@ -332,9 +333,10 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
             (Kind.NO_VOLUME, "volume", found.volumes),
             (Kind.NO_DATABASE, "database", found.databases),
         )
-        if not parts
+        # A copy is kept offline: it has a network and a server only once something is to run on it.
+        if not parts and (found.copy_of is None or found.networks or found.databases)
     ]
-    if of.product is not None and of.product.run.files and not found.files:
+    if of.product is not None and of.product.run.files and not found.files and found.copy_of is None:
         missing.append((Kind.NO_FILES, "files volume"))
     return [
         *stamp_findings(subject, found.generation),

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
 
-from launchplane import maintenance, plan, steps
+from launchplane import copying, maintenance, plan, steps
 from launchplane.container_host import PartStopped
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
 from launchplane.gate import ALREADY, LOST
@@ -42,6 +42,7 @@ from launchplane.record import Kept, RecordError, Stands
 from launchplane.steps import (
     Action,
     Cancel,
+    CopyResult,
     Done,
     Event,
     FreshNames,
@@ -67,7 +68,10 @@ class InstanceHost(Protocol):
     ) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None: ...
-    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None: ...
+    def create_data_set_volume(
+        self, product: str, lane: str, data_set: str, files: bool = False, copy_of: str | None = None, generation: str | None = None
+    ) -> None: ...
+    def copy_volume(self, copy: steps.CopyVolume) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
@@ -174,6 +178,9 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.Abandon: lambda _host, proxy, step, _by: proxy.gate.abandon(step.web_address, step.generation),
     steps.StopPart: lambda host, _proxy, step, by: host.stop_part(step.container, by),
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
+    steps.GiveUp: lambda _host, _proxy, _step, _by: None,
+    steps.StartStopped: lambda host, _proxy, step, by: host.start_part(step.container, by),
+    steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
 }
 
 
@@ -420,6 +427,17 @@ class Lanes:
             witness,
         )
 
+    # While the copy is made the lane is judged as one in maintenance is, and the planner judges it again to bring it back.
+    def copy(self, product: str, lane: str, generation: str, witness: Witness = NOBODY) -> CopyResult:
+        description = self.read_product(product)
+        fresh = self.name_fresh(LaneBuild(product=product, lane=lane, build="")).data_set
+        return settle(
+            *self.judging(product, lane, description, Work.COPY),
+            lambda judged, done, cancel: copying.decide(copying.Copying(judged, description, generation, fresh, done), cancel),
+            partial(self.take, behind_back_soon=True),
+            witness,
+        )
+
     # How a call reads its lane, and how it judges what it read. A move answers from what the status call sees, so it
     # asks its lane's web address too.
     def judging(
@@ -464,18 +482,24 @@ class Lanes:
         if isinstance(action, steps.RemoveLogins):
             unread = self.host.remove_unheld_logins(action.database, witness)
             return action if unread is None else steps.LoginsUnread(action.database, str(unread))
-        if isinstance(action, steps.StartStopped):
-            try:
-                self.host.start_part(action.container, witness)
-            except ContainerHostRefused as error:
-                return steps.StartRefused(action.container, str(error))
-            return action
+        if isinstance(action, steps.StartStopped | steps.CopyVolume):
+            return self.taken_or_refused(action, witness)
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
             return self.discard(action, witness)
         TAKE[type(action)](self.host, self.proxy, action, witness)
+        return action
+
+    # Docker's no to a start or to a copy is an answer, and its planner goes on from it.
+    def taken_or_refused(self, action: steps.StartStopped | steps.CopyVolume, witness: Witness) -> Event:
+        try:
+            TAKE[type(action)](self.host, self.proxy, action, witness)
+        except ContainerHostRefused as error:
+            if isinstance(action, steps.CopyVolume):
+                return steps.CopyRefused(action.destination, str(error))
+            return steps.StartRefused(action.container, str(error))
         return action
 
     def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:

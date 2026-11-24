@@ -155,7 +155,8 @@ def problems_switching_to(judged: Judgement, instance: RunningInstance) -> list[
 def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: str) -> str | Stop:
     if receiving is not None and receiving.data_set is not None:
         return receiving.data_set
-    names = sorted(data_set.data_set for data_set in lane.data_sets)
+    # A copy is never the data a lane starts on by being there: neither a whole one nor what was left of one.
+    names = sorted(data_set.data_set for data_set in lane.data_sets if data_set.copy_of is None)
     if len(names) > 1:
         return Stop(
             f"The lane has the data sets {', '.join(names)} and no instance receiving visitors that uses one, "

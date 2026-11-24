@@ -109,6 +109,7 @@ ATTEMPTED = {
     Work.RETIRE: "Retiring {lane} of {product}",
     Work.BEGIN_MAINTENANCE: "Putting into maintenance {lane} of {product}",
     Work.END_MAINTENANCE: "Taking out of maintenance {lane} of {product}",
+    Work.COPY: "Copying the data of {lane} of {product}",
 }
 
 

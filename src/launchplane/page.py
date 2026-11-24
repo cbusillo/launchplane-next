@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import InstanceState, PartOfLane, Verdict
+from launchplane.instance import DataSet, InstanceState, PartOfLane, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Kind, Shown, Standing, WebAddressJudged, Work
 from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancel_won, how_cancelled, how_replaced
 from launchplane.steps import Outcome
@@ -228,6 +228,13 @@ def request_rows(requests: Sequence[Request], decided: Mapping[int, GateAnswer |
     ]
 
 
+def without_a_server(found: DataSet) -> str:
+    if found.copy_of is None:
+        return " has no database server"
+    whole = "a whole copy" if found.is_whole_copy else "a copy that was not finished"
+    return f" is {whole} of {found.copy_of}, kept offline: no instance is started on it"
+
+
 def part_row(name: str, made_from: str, build: str | None, container: str, pills: list[Pill]) -> Row:
     built = code("not marked") if build is None else Piece(text=build, drawn_as="build")
     return Row(name=name, value=[Piece(text=f"{made_from} "), built], pills=pills, note=container)
@@ -275,7 +282,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 for number, each in enumerate(instances, start=1)
             ],
             *[
-                Row(name="Data set", value=[code(found.data_set), Piece(text=" has no database server")])
+                Row(name="Data set", value=[code(found.data_set), Piece(text=without_a_server(found))])
                 for found in data_sets
                 if not found.databases
             ],

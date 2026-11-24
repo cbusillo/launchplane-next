@@ -322,6 +322,8 @@ CHANGING = (
     steps.CreateDataSetNetwork("site", "testing", "d1"),
     steps.CreateDataSetVolume("site", "testing", "d1"),
     steps.CreateDatabase("site", "testing", "d1", "network", "volume", "image"),
+    steps.CopyVolume("site", "testing", "d2", "volume", "copy", "image"),
+    steps.GiveUp("The database did not stop cleanly."),
     steps.StartDatabase("database"),
     steps.DeleteDataSet(D1),
     steps.StartInstance(BUILD_A, "a"),
