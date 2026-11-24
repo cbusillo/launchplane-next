@@ -41,17 +41,22 @@ def test_a_log_that_speaks_of_no_error_adds_nothing_to_what_failed() -> None:
     assert in_one_line(failure_report("Connection refused", "")) == "Connection refused It wrote no log."
 
 
-# A new lane of an Odoo product whose first instance fails its check, as the page then draws it and the request ended.
-def card_after_a_failed_first_move(record: Record) -> tuple[Card, dict[str, Any], int]:
+# A new lane of an Odoo product whose first instance fails its check, and the request ended.
+def after_a_failed_first_move(record: Record) -> tuple[Lanes, PretendProxy, int]:
     proxy = PretendProxy(PretendHost())
     proxy.failing = {f"site-testing-{number}" for number in range(100)}
     lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), record.unfinished, record.ended_lately)
     request = record.write(MOVE, CALLER, None)
     assert Worker(record, lanes, NO_SECRETS).work_next() is True
-    kept = kept_of(record, request.id)
+    return lanes, proxy, request.id
+
+
+def card_after_a_failed_first_move(record: Record) -> tuple[Card, dict[str, Any], int]:
+    lanes, _, request = after_a_failed_first_move(record)
+    kept = kept_of(record, request)
     assert (kept.stands, kept.answer is not None) == (Stands.FAILED, True)
     [card] = cards(lanes.read_status())
-    return card, kept.answer or {}, request.id
+    return card, kept.answer or {}, request
 
 
 def test_the_card_of_a_lane_whose_new_instance_failed_its_check_reads_as_failed_with_what_would_change_the_answer(
@@ -91,11 +96,7 @@ def found_on(card: Card) -> list[tuple[str, str | None]]:
 
 
 def test_a_request_that_waits_behind_a_failed_check_leaves_the_card_saying_the_check_failed(record: Record) -> None:
-    proxy = PretendProxy(PretendHost())
-    proxy.failing = {f"site-testing-{number}" for number in range(100)}
-    lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), record.unfinished, record.ended_lately)
-    record.write(MOVE, CALLER, None)
-    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    lanes, _, _ = after_a_failed_first_move(record)
     [failed] = cards(lanes.read_status())
     waiting = record.write(MOVE, CALLER, None)
     [card] = cards(lanes.read_status())
@@ -105,11 +106,7 @@ def test_a_request_that_waits_behind_a_failed_check_leaves_the_card_saying_the_c
 
 
 def test_a_proxy_that_stopped_after_a_failed_check_is_not_drawn_as_that_failed_move(record: Record) -> None:
-    proxy = PretendProxy(PretendHost())
-    proxy.failing = {f"site-testing-{number}" for number in range(100)}
-    lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), record.unfinished, record.ended_lately)
-    record.write(MOVE, CALLER, None)
-    assert Worker(record, lanes, NO_SECRETS).work_next() is True
+    lanes, proxy, _ = after_a_failed_first_move(record)
     proxy.running = False
     [card] = cards(lanes.read_status())
     assert ([pill.text for pill in card.pills], [pill for pill, _ in found_on(card)]) == (["unfinished"], ["left unfinished"])
