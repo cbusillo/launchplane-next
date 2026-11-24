@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from docker.errors import ImageNotFound
@@ -13,7 +13,7 @@ from launchplane.instance import DataSet, DataSetUse, LaneBuild
 from launchplane.odoo import FILES_PATH
 from launchplane.proxy import CheckFailed
 from tests.odoo_product import TK
-from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker, RecordingImages
+from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker, as_docker_client
 from tests.test_container_host import (
     DATA_SET_LABELS,
     DATA_SET_NETWORK,
@@ -21,11 +21,11 @@ from tests.test_container_host import (
     QUIET_OPTIONS,
     TARGET,
     WEB,
-    container,
     database_made,
     network,
     read,
 )
+from tests.test_container_host import container as listed
 from tests.test_proxy import ProxyHost, ticking
 
 DATABASE_VOLUME, FILES_VOLUME = "launchplane-data-d1-database", "launchplane-data-d1-files"
@@ -39,7 +39,7 @@ CHECK = TK.check(WEB).command
 
 def test_a_files_volume_is_read_as_the_data_sets_files_and_never_as_a_second_database_volume() -> None:
     volumes = [{"Name": DATABASE_VOLUME, "Labels": DATA_SET_LABELS}, {"Name": FILES_VOLUME, "Labels": FILES_LABELS}]
-    [found] = read([container(DATABASE, "database", [DATA_SET_NETWORK])], [network(True, QUIET_OPTIONS)], volumes).data_sets
+    [found] = read([listed(DATABASE, "database", [DATA_SET_NETWORK])], [network(True, QUIET_OPTIONS)], volumes).data_sets
     assert (found.volumes, found.files) == ((DATABASE_VOLUME,), (FILES_VOLUME,))
 
 
@@ -127,13 +127,22 @@ class Images:
 # The image the one instance is read to run that is not its build's, where the host has `images` and it runs `image`.
 def other_image_read(build: str, image: str, images: dict[str, str]) -> tuple[str | None, list[str]]:
     docker = RecordingDocker()
-    host = ContainerHost(docker.as_client(), "test")
-    host.start_instance(TARGET.model_copy(update={"build": build}), WEB, None)
-    listed = docker.api.containers
-    docker.api.containers = lambda **options: [each | {"ImageID": image} for each in listed(**options)]
+    ContainerHost(docker.as_client(), "test").start_instance(TARGET.model_copy(update={"build": build}), WEB, None)
     on_host = Images(images)
-    docker.images = cast("RecordingImages", on_host)
-    [instance] = host.read().instances
+
+    def listed_running_the_image(**options: object) -> list[dict[str, Any]]:
+        return [each | {"ImageID": image} for each in docker.api.containers(**options)]
+
+    client = SimpleNamespace(
+        api=SimpleNamespace(
+            containers=listed_running_the_image,
+            networks=docker.api.networks,
+            volumes=docker.api.volumes,
+            inspect_container=docker.api.inspect_container,
+        ),
+        images=on_host,
+    )
+    [instance] = ContainerHost(as_docker_client(client), "test").read().instances
     return instance.other_image, on_host.asked
 
 

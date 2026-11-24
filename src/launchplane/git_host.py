@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from githubkit import GitHub
+from githubkit import GitHub, TokenAuthStrategy, UnauthAuthStrategy
 from githubkit.exception import GitHubException
 from pydantic import AliasPath, BaseModel, Field, ValidationError
 
@@ -30,7 +30,8 @@ class Manifest(BaseModel):
 
 
 def from_environment() -> GitHub[Any]:
-    return GitHub(os.environ.get(TOKEN_VARIABLE), base_url=os.environ.get("LAUNCHPLANE_GIT_HOST"), timeout=20)
+    key = TokenAuthStrategy(token) if (token := os.environ.get(TOKEN_VARIABLE)) else UnauthAuthStrategy()
+    return GitHub(key, base_url=os.environ.get("LAUNCHPLANE_GIT_HOST"), timeout=20)
 
 
 # What a move runs. A product that says where its builds come from runs only the image one run there published.

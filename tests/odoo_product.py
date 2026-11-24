@@ -18,7 +18,7 @@ MODULES = [
     "tk_listings",
 ]
 ATTACHMENT = "launchplane-check"
-ATTACHMENT_BYTES = b"invented bytes for the quiet check\n"
+ATTACHMENT_BYTES: bytes = b"invented bytes for the quiet check\n"
 ATTACHMENT_SHA256 = "5b8e2378c01c9392fc415eb0d02888d76f0a04ea8dec78a3860b07181260ffb4"
 TK = Product(
     health_path="/web/login",

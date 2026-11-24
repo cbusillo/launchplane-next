@@ -48,6 +48,7 @@ def serve(runs: dict[int, dict[str, Any]], port: int) -> ThreadingHTTPServer:
     manifests = {each["id"]: found["manifest"] for found in runs.values() for each in found["artifacts"]["artifacts"]}
 
     class Recorded(BaseHTTPRequestHandler):
+        # noinspection PyPep8Naming
         def do_GET(self) -> None:
             asked = ASKED.fullmatch(self.path.split("?")[0])
             if asked is not None and asked["artifact"] and int(asked["artifact"]) in manifests:
@@ -64,9 +65,6 @@ def serve(runs: dict[int, dict[str, Any]], port: int) -> ThreadingHTTPServer:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-
-        def log_message(self, format: str, *args: object) -> None:
-            pass
 
     return ThreadingHTTPServer(("127.0.0.1", port), Recorded)
 

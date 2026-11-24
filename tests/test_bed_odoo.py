@@ -18,6 +18,9 @@ PRODUCT, LANE = "test-bed-tk", "testing"
 WEB_ADDRESS = f"{LANE}.{PRODUCT}.test"
 OUTSIDE_ADDRESS = "1.1.1.1"
 NO_BYTES = hashlib.sha256(b"").hexdigest()
+# noinspection SqlResolve
+JOBS_RUN = "select count(*) from ir_cron where lastcall is not null"
+# noinspection SqlResolve
 STORED_FILE = "select store_fname from ir_attachment where name = 'launchplane-check'"
 
 
@@ -122,7 +125,7 @@ def test_the_instance_has_no_way_out_and_runs_no_scheduled_job(story: Story) -> 
     )
     assert "exit=0" not in reached
     assert on_scratch(f"docker exec {story.serving} printenv ODOO_MAX_CRON_THREADS").strip() == "0"
-    assert in_the_lanes_database("select count(*) from ir_cron where lastcall is not null") == "0"
+    assert in_the_lanes_database(JOBS_RUN) == "0"
 
 
 def test_a_build_given_as_text_is_refused_for_the_odoo_product_and_nothing_is_kept(story: Story) -> None:

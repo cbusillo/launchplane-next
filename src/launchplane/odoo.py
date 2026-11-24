@@ -52,4 +52,4 @@ class Odoo(BaseModel):
     @property
     def check(self) -> tuple[str, ...]:
         script = CHECK.format(want=json.dumps(self.model_dump(include={"modules", "attachment", "sha256"})))
-        return ("sh", "-c", f"exec {SERVER} shell --no-http --log-level=error <<'CHECK'\n{script}CHECK\n")
+        return "sh", "-c", f"exec {SERVER} shell --no-http --log-level=error <<'CHECK'\n{script}CHECK\n"
