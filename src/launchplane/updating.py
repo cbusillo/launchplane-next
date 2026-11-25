@@ -18,6 +18,7 @@ NOT_FINISHED = (
 )
 # How often one release asks for one old copy to be deleted. One still refused then is left to the next that switches.
 MOST_DELETIONS = 2
+COPIED_FROM = "Kept: the lane's data was copied from it by an earlier release."
 type Decided = plan.Step[MoveResult] | plan.StepBack | steps.CannotPutBack
 
 
@@ -96,7 +97,9 @@ def why_kept(lane: LaneReading, found: DataSet) -> str | None:
     if found.data_set == serving.data_set:
         return "Kept: the lane serves from it."
     if found.data_set == serving.copy_of:
-        return "Kept: the last release replaced it."
+        # The release that copied it stamped the copy, and the release that switched last stamped the instance.
+        replaced_last = isinstance(serving.generation, str) and active is not None and active.generation == serving.generation
+        return "Kept: the last release replaced it." if replaced_last else COPIED_FROM
     if found.copy_of is None:
         return "Kept: it is no copy, and a release deletes only copies."
     if any(each.data_set == found.data_set for each in (*lane.instances, *lane.background_services)):

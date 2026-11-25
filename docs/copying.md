@@ -65,13 +65,14 @@ When a release has switched and has nothing else left to do, it deletes the lane
 | The card says | Which data set |
 | --- | --- |
 | `Kept: the lane serves from it.` | The one the instance receiving visitors runs against. |
-| `Kept: the last release replaced it.` | The one the serving data set is a copy of, by its label `launchplane.copy-of`. |
+| `Kept: the last release replaced it.` | The one the serving data set is a copy of, by its label `launchplane.copy-of`, where the release that made that copy also started the instance that serves. |
+| `Kept: the lane's data was copied from it by an earlier release.` | The same data set, once a later release has switched and kept the lane's data. |
 | `Kept: it is no copy, and a release deletes only copies.` | Any other data set that is not labelled as a copy, such as the one a lane began on. |
 | `Kept: a part of the lane runs against it.` | A copy an instance or a background service still runs against. |
 
 Every other copy of the lane is deleted, whole or not: one asked for by itself, and one a release that gave up left. Each has its own line, `delete the data set <name>`, and is gone from the card and from `GET /running` with it. Its database server, its copiers, its network and its volumes go, the volumes last. The copiers of a copy made from it go too, since they hold its volumes and Docker deletes no volume a container holds; what they copied has served since, or is deleted as well.
 
-**A deletion Docker refuses** is written on its line with Docker's own words, and asked for once more. Refused twice, the copy is left, and the release ends `switched` as it would have. The next release of the lane that switches finds the copy on the host and deletes it then. Until one has, the card says of it `An old copy: the next release that switches deletes it.`
+**A deletion Docker refuses** is written on its line with Docker's own words, and asked for once more. Refused twice, the copy is left, and the release ends `switched` as it would have. The next release of the lane that switches finds the copy on the host and deletes it then. Until one has, the card says of it `An old copy: the next release that switches deletes it.` A copy left half deleted, such as one whose database server is gone and whose network Docker would not remove, is a finding on the card and nothing more: a later release copies, updates and switches as if it were not there, and then deletes what is left of it.
 
 Nothing marks a data set as kept by a person yet (cbusillo/launchplane-next#49), so none is kept for that. While no instance of the lane receives visitors, nothing is deleted. A release that does not switch deletes nothing.
 
@@ -80,6 +81,7 @@ Nothing marks a data set as kept by a person yet (cbusillo/launchplane-next#49),
 - **A copy is on the host until a release of its lane switches.** A lane that is copied and never released keeps each copy, also one that was not finished, until a retire names it.
 - **The data set a lane began on is never deleted by a release.** It is no copy. After a second release it is neither served from nor what the last release replaced, and it stays until a retire names it.
 - **A copy the next release would delete cannot be kept.** No mark says a person wants one.
+- **A restart just as Docker removed a copy's last volume loses that deletion's line.** The line is written once Docker has answered. Launchplane killed in between, or a reply lost there, leaves a release that ends `switched` with the copy gone and no `delete the data set` line for it.
 - **An old copy Docker refuses to delete twice waits for the next release that switches.** Nothing tries in between, and nobody is told but by the request's lines.
 - **The data set the last release replaced loses its copiers when the copy it was made from is deleted.** It has served, and nothing reads whether it is whole after that.
 - **The copier's image comes from Docker Hub,** the first time a host copies. A host that cannot fetch it fails the request before anything is stopped.

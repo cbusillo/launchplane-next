@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from launchplane import maintenance, plan, steps
 from launchplane.instance import BACK_SOON, DataSet, LaneReading
-from launchplane.judge import LOGIN_KINDS, Judgement, Work, judge
+from launchplane.judge import LOGIN_KINDS, Judgement, Work, judge, subjects_of
 from launchplane.product import Product
 from launchplane.steps import CopyOutcome, CopyResult, CopyVolume, Done, GiveUp, Stop, Wait
 
@@ -76,7 +76,10 @@ def copy_step(copying: Copying) -> steps.Action:
         return GiveUp(f"An earlier attempt began the copy {copy.data_set} and did not finish it: {', '.join(left)} is of it.")
     if (stop := maintenance.next_to_stop(lane)) is not None:
         return stop
-    found = [finding for finding in copying.judged.findings if finding.kind not in LOGIN_KINDS]
+    # Another copy of the lane is not read or written here, and one left half deleted is never why this one is given up.
+    others = (each for each in lane.data_sets if each.copy_of is not None and each.data_set not in (copy.data_set, source.data_set))
+    apart = {subject for each in others for subject in subjects_of(each)}
+    found = [each for each in copying.judged.findings if each.kind not in LOGIN_KINDS and each.subject not in apart]
     if found:
         return GiveUp(f"The lane is not stopped as it must be for its data to be copied: {plan.sentences(found)}.")
     sources, destinations = (*source.volumes, *source.files), (*copy.volumes, *copy.files)

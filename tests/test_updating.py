@@ -15,7 +15,7 @@ from launchplane.steps import CopyVolume, FreshNames, Outcome, Stop
 from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
-from tests.odoo_product import TK_UPDATING
+from tests.odoo_product import TK, TK_UPDATING
 from tests.pretend_host import (
     EARLIER,
     GENERATION,
@@ -457,3 +457,56 @@ def test_an_old_copy_is_deleted_with_the_copiers_of_the_copy_made_from_it_which_
     assert [each.data_set for each in gone] == [first_copy.data_set]
     assert readers < {each.container for each in gone[0].copies}
     assert sorted(proxy.host.data_sets) == sorted(["data-1", second, third])
+
+
+def test_an_old_copy_left_half_deleted_with_no_database_server_never_keeps_the_next_release_from_updating_and_switching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lanes, proxy, old = serving()
+    proxy.host.updates_that_fail = {BUILD_B.build}
+    given_up(lanes, proxy, old)
+    proxy.host.updates_that_fail = set()
+    half = copy_on(proxy).data_set
+
+    def remove_the_server_and_refuse_the_network(_host: PretendHost, found: DataSet) -> None:
+        proxy.host.data_sets[found.data_set] = proxy.host.data_sets[found.data_set].model_copy(update={"databases": ()})
+        raise ContainerHostRefused(f"Deleting the data set {found.data_set} on test was refused: network has active endpoints")
+
+    with monkeypatch.context() as refusing:
+        refusing.setattr(PretendHost, "delete_data_set", remove_the_server_and_refuse_the_network)
+        switched = lanes.move(BUILD_B, LATER, 1, Witness(generation=LATER, attempt=1))
+    assert (switched.outcome, proxy.host.data_sets[half].databases, len(proxy.host.data_sets[half].networks)) == (
+        Outcome.SWITCHED,
+        (),
+        1,
+    )
+    again = copy_generation(9)
+    result = lanes.move(BUILD_A, again, 1, Witness(generation=again, attempt=1))
+    assert (result.outcome, sorted(proxy.host.data_sets)) == (
+        Outcome.SWITCHED,
+        sorted(["data-1", switched.data_set or "", result.data_set or ""]),
+    )
+
+
+def data_set_notes(lanes: Lanes) -> dict[str, str]:
+    notes = [row.note or "" for card in cards(lanes.read_status()) for row in card.rows if row.name == "Data set"]
+    return dict(each.removeprefix("database-").split(" ", 1) for each in notes)
+
+
+def test_after_a_release_that_kept_the_lane_s_data_the_card_no_longer_says_the_last_release_replaced_what_it_was_copied_from() -> (
+    None
+):
+    lanes, proxy, _ = serving()
+    copied_to = lanes.move(BUILD_B, GENERATION, 1, first()).data_set or ""
+    assert data_set_notes(lanes) == {copied_to: "Kept: the lane serves from it.", "data-1": "Kept: the last release replaced it."}
+    keeping = Lanes(proxy.host, proxy, lambda _product: TK, lambda _target: FreshNames("site-testing-later", "data-later"))
+    kept = keeping.move(BUILD_A, LATER, 1, Witness(generation=LATER, attempt=1))
+    assert (kept.outcome, kept.data_set, sorted(proxy.host.data_sets)) == (
+        Outcome.SWITCHED,
+        copied_to,
+        sorted(["data-1", copied_to]),
+    )
+    assert data_set_notes(keeping) == {
+        copied_to: "Kept: the lane serves from it.",
+        "data-1": "Kept: the lane's data was copied from it by an earlier release.",
+    }
