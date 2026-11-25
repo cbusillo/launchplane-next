@@ -13,6 +13,7 @@ class Outcome(StrEnum):
     UNCHANGED = "unchanged"
     REPAIRED = "repaired"
     CHECK_FAILED = "check failed"
+    NOT_UPDATED = "not updated"
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
@@ -186,6 +187,13 @@ class Check:
     command: tuple[str, ...] = ()
 
 
+# The update of the product's kind, run once in a candidate on a copy of the lane's data.
+@dataclass(frozen=True)
+class Update:
+    container: str
+    command: tuple[str, ...]
+
+
 # The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.
 @dataclass(frozen=True)
 class EditRoute:
@@ -339,6 +347,10 @@ class CopyRefused(Refused):
     pass
 
 
+class UpdateRefused(Refused):
+    pass
+
+
 # Docker answered that it will not remove the part.
 class RemovalRefused(Refused):
     pass
@@ -403,6 +415,7 @@ type Action = (
     | Retire
     | RemoveLogins
     | Check
+    | Update
     | AwaitBackgroundService
     | StopPart
     | StopDatabase

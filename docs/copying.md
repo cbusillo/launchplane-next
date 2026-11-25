@@ -2,7 +2,7 @@
 
 `POST /lanes/{product}/{lane}/copy` puts a serving lane behind the back soon page, copies its database volume and its files volume into a new data set while everything of the lane is stopped, and brings the same instance back on its own data. It takes no body. It is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when it ends.
 
-Nothing uses a copy yet. No module is updated on it, no instance is started on it, visitors are never sent to it, and no release is committed: the copy's request changes the route twice, to the back soon page and back, and both are edits at [the gate](the-move.md#the-gate).
+Nothing uses the copy this call makes. No module is updated on it, no instance is started on it, visitors are never sent to it, and no release is committed. [A release that updates](odoo.md#a-release-that-updates) makes a copy of its own the same way, inside its own freeze, and never uses one made here: the copy's request changes the route twice, to the back soon page and back, and both are edits at [the gate](the-move.md#the-gate).
 
 ```
 curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/copy
@@ -31,6 +31,8 @@ It reads the host and the proxy again before every step and takes the first of t
 
 It answers `503`, having stopped nothing, when the lane is not as step 1 needs it, and when the lane is in maintenance that this request did not begin: whose route it is, is read from the routes file's first line.
 
+Whether a refusal fails the request or is tried again is read from the routes file at the moment of the refusal: while it sends the web address to the back soon page, the refusal is tried again.
+
 **While the lane cannot be brought back** the request does not end. It stays `working`, the back soon page stays, `error` says what it waits for, such as a check that failed, and it is taken up again every 5 s. Docker's refusal of any step behind the back soon page is the same: a start Docker answers no to is tried again from a fresh reading, and only a refused copy gives the copy up. A refusal before the back soon page shows fails the request, with the lane still serving. A cancel does not end it either: a cancel brings the lane back the same way.
 
 ## After a kill, a lost reply or a cancel
@@ -53,7 +55,7 @@ A copy is whole when each of its volumes was written by one copier whose descrip
 - `GET /running` gives each data set `copy_of`, `generation` and `copies`: each copier's `container`, the `volume` it could write, `finished` and `stopped`.
 - The page shows a copy as `is a whole copy of <data set>, kept offline: no instance is started on it`, or `is a copy, not whole, of <data set>`. Neither is a finding: the lane stays `good`.
 - A copy has no network and no database server.
-- A [move](data-sets.md#a-move-with-data) never starts an instance on a copy, whole or not. A lane whose only data set is a copy is given a new, empty data set, and the copy is left as it is.
+- A [move](data-sets.md#a-move-with-data) never starts an instance on a copy made by this call, whole or not. A lane whose only data set is such a copy is given a new, empty data set, and the copy is left as it is.
 - A copy is kept until [a retire names it](data-sets.md#retiring-a-lane-with-data). A data set that has a copy is not deleted before the copy: the copiers hold its volumes as what they read, and the retire answers `503` naming the copy.
 
 ## Known and not fixed

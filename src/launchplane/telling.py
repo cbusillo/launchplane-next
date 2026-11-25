@@ -101,6 +101,7 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.Retire: lambda step: f"retire {step.container}",
     steps.RemoveLogins: lambda step: f"remove the logins no container holds from {step.database}",
     steps.Check: lambda step: f"check {step.container} at {step.health_path}",
+    steps.Update: lambda step: f"update the data of {step.container}",
     steps.AwaitBackgroundService: lambda step: f"watch the background service {step.container} stay up",
     steps.StopPart: lambda step: f"stop {step.container}",
     steps.StopDatabase: lambda step: f"stop the database {step.container}",

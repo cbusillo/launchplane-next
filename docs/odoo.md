@@ -2,7 +2,7 @@
 
 A product whose description has an `odoo` part is of the Odoo kind. Its lane runs a build Launchplane has verified, on a data set of its own: a database server and a files volume. The first product of the kind is TK, `cbusillo/odoo-tenant-tk`, on Odoo 20.
 
-[A lane's data is copied](copying.md) by a call of its own. A module update inside a release, a release that uses a copy, the background service that runs Odoo's scheduled jobs, previews, backups and acceptance are not built.
+A release to another build of a product that declares `update` is made on [a copy of the lane's data, updated before the switch](#a-release-that-updates). [A lane's data is also copied](copying.md) by a call of its own. The background service that runs Odoo's scheduled jobs, previews, backups, acceptance, going back after a switch and deleting the data set a release replaced are not built.
 
 ## The description
 
@@ -17,7 +17,8 @@ A product whose description has an `odoo` part is of the Odoo kind. Its lane run
     "addons_path": ["/opt/project/addons", "/opt/project/addons/shared", "/opt/launchplane/addons", "/odoo/addons", "/odoo/odoo/addons"],
     "modules": ["launchplane_settings", "disable_odoo_online", "crm", "contacts", "website_crm", "website_livechat", "crm_livechat", "base_automation", "auth_passkey", "tk_website", "tk_listings"],
     "attachment": "launchplane-check",
-    "sha256": "5b8e2378c01c9392fc415eb0d02888d76f0a04ea8dec78a3860b07181260ffb4"
+    "sha256": "5b8e2378c01c9392fc415eb0d02888d76f0a04ea8dec78a3860b07181260ffb4",
+    "update": ["tk_website"]
   }
 }
 ```
@@ -28,8 +29,9 @@ A product whose description has an `odoo` part is of the Odoo kind. Its lane run
 | `addons_path` | Where the build keeps its modules. The path in TK's image leaves out its shared modules, so it is declared. |
 | `modules` | The modules the check requires installed. TK's are those its build manifest lists as `odoo_install_modules`. |
 | `attachment`, `sha256` | The name of one attachment in the lane's data, and the SHA-256 of its bytes. The check reads it. |
+| `update` | The modules a release to another build updates. It may be left out: such a product's releases run on the data the lane has, and nothing is copied or updated. |
 
-`database` is as for [any lane with a database](data-sets.md) and must be there. Every other field of `odoo` is required, and a field Launchplane does not know makes the file unreadable.
+`database` is as for [any lane with a database](data-sets.md) and must be there. Every other field of `odoo` but `update` is required, and a field Launchplane does not know makes the file unreadable.
 
 ## A build is a publishing run
 
@@ -69,6 +71,33 @@ A candidate must answer `health_path` with success for 3 s, as any instance. The
 - the declared attachment is there exactly once, and its bytes, read through Odoo from the files volume, have the declared SHA-256
 
 A failure answers `check failed` with what the check read, the candidate is removed, and the lane keeps what it served. It fails this way on a database that has only `base` installed, although `/web/login` answers `200` there, and on an attachment whose file is gone, which Odoo reads as no bytes.
+
+## A release that updates
+
+A move of a lane that serves one build to another build, for a product that declares `update`, is made on a copy taken inside the release's own freeze. Nothing written to the lane after the copy can be lost, because nothing can be written: visitors get the back soon page from before the lane is stopped until the release switches or gives up. The first move of a new lane, and a move to the build already serving, copy and update nothing and are [the ordinary move](the-move.md).
+
+It reads the host and the proxy before every step, asks [the gate](the-move.md#the-gate), and takes the first of these that applies.
+
+1. **Freeze and copy,** as [a copy of a lane's data](copying.md#what-it-does) does it, steps 1 to 5: the copy's two volumes are made, the web address is sent to the back soon page, the background service, the web part and the database server are stopped, and each volume is copied and compared. The lane must have exactly one instance, receiving visitors, with nothing found about it.
+2. **Give the copy a network and a database server.** Both volumes must be whole copies first: a copy with one volume, or with a copier that did not finish, is never given a server.
+3. **Start the candidate** from the new build on the copy: the copy's database server through a login of its own, the copy's files volume, and the copy's network. Its networks have no way out, it runs no scheduled job, and neither volume of the data set that was copied is mounted in it or reachable from it.
+4. **Update, once.** `/odoo/odoo-bin --update <modules> --stop-after-init --no-http`, run in the candidate under `timeout 600`. It is sent once by a request and never again.
+5. **Check the candidate,** with [the check](#the-check) whole: it answers `health_path` for 3 s, every declared module is installed, and the declared attachment is there once with its bytes.
+6. **Switch,** by asking the gate, once. Then the instance the release replaced is removed. Its data set is kept, both volumes and its stopped database server, and shows on the page as it is: the server `exited`, and the lane `good`.
+
+**Giving up.** If the copy is given up, the update ends with an error or runs out of time, the check fails, or a cancel wins at the gate, the candidate is taken through the gate and removed, the copy's database server is stopped, and the lane is brought back as [ending maintenance](maintenance.md#out-of-maintenance) does: the original database server, the original instance, its check, and last the route. Only then does the request end. The copy is kept, with its network and its stopped server, and is never used again.
+
+| `outcome` | Status | Meaning |
+| --- | --- | --- |
+| `switched` | 200 | The web address sends visitors to the new build on the updated copy. `data_set` names the copy. |
+| `not updated` | 422 | Nothing was switched, and the lane serves from its own data again. `error` says why: what the update wrote last, why the copy was given up, or that an earlier attempt did not finish. |
+| `check failed` | 422 | The update ran and the candidate failed its check. Nothing was switched, and the lane serves from its own data again. `error` has what the check read. |
+
+**An update whose outcome is not known is never looked into.** A reply that was lost, or a Launchplane killed while the update ran, leaves a request that is taken up again. An attempt that finds the lane behind the back soon page of its own request, and did not put it there itself, gives that copy up whatever is on it, brings the original back, and ends the request `not updated`. Asking again makes a new copy. An attempt that finds the lane already back, with a copy this request began, changes nothing and ends the same way.
+
+**While the original cannot be brought back** the request does not end. It stays `working`, the back soon page stays, `error` says what it waits for, and it is taken up again every 5 s. Docker's refusal of any step behind the back soon page does the same.
+
+**On the page,** a move that put its lane behind the back soon page shows one short paragraph in place of its lines: that the data is being copied, that the copy is being updated and checked, what failed and that the original is coming back, or how it ended. Every line is in `GET /requests/<id>`.
 
 ## The data set
 

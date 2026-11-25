@@ -9,7 +9,14 @@ from requests import ReadTimeout
 from launchplane.act import Lanes
 from launchplane.container_host import Lane, PartStopped
 from launchplane.data_set import login_of
-from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused, attempting, sent
+from launchplane.docker_answers import (
+    CommandResult,
+    ContainerHostError,
+    ContainerHostRefused,
+    LoginRemovalRefused,
+    attempting,
+    sent,
+)
 from launchplane.gate import ALREADY, DONE, LOST, GateError
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -84,6 +91,9 @@ class PretendHost:
         self.removals_refused: set[str] = set()
         self.commands_refused: set[str] = set()
         self.copies_refused: set[str] = set()
+        # The builds whose update ends with an error, and those whose update runs and whose reply never comes.
+        self.updates_that_fail: set[str | None] = set()
+        self.updates_unanswered: set[str | None] = set()
         # The commands Docker does, once, and whose reply never comes.
         self.replies_lost: set[str] = set()
         # Each login a database server was sent the making or the removing of.
@@ -326,6 +336,13 @@ class PretendHost:
             else:
                 del self.instances[container]
             self.record(f"retire {container}")
+
+    def run_in(self, container: str, command: list[str]) -> CommandResult:
+        self.record(f"update {container} with {' '.join(command)}")
+        build = self.instances[container].build
+        if build in self.updates_unanswered:
+            raise ContainerHostError(f"Running {command[0]} in {container} on test failed: the reply was lost")
+        return CommandResult(exit_code=1, output="module not found") if build in self.updates_that_fail else CommandResult(0, "")
 
     def read_log_tail(self, container: str) -> str:
         part = self.background_services.get(container) or self.instances[container]

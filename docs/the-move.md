@@ -2,6 +2,8 @@
 
 `POST /lanes/{product}/{lane}/move` with `{"build": "<image>"}` moves one lane to one build. The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when the move ends. The lane answers at the web address `{lane}.{product}.test`. Product and lane are lowercase letters, digits and hyphens.
 
+A move of a product that declares an update, to another build than the one serving, is [a release that updates](odoo.md#a-release-that-updates): it copies the lane's data behind the back soon page, updates the copy, and switches to it. What is below is every other move.
+
 A build is a container image reference, and the instance must answer HTTP on port 80. A product with a database, a background service or a health path of its own says so in its description: see [a lane with a database](data-sets.md). For [a product of the Odoo kind](odoo.md) a build is given as `{"run": <number>}`, a publishing run of its own workflow, and runs as the image that run published, by digest. Each instance gets a new container name, `{product}-{lane}-` and 12 random hex digits. Which product, lane and build an instance is comes from its labels, never from its name.
 
 ## What it does
@@ -42,6 +44,7 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | `unchanged` | 200 | It already did, and nothing was done. |
 | `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, stopped and removed. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
+| `not updated` | 422 | Only for [a release that updates](odoo.md#a-release-that-updates): nothing switched, and the lane serves from its own data again. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
@@ -481,6 +484,29 @@ C=$(stands $R | cut -d' ' -f3); ssh root@docker-lp-scratch.shiny "docker run --r
 ```
 ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'; until curl -sf "$L/requests" >/dev/null; do sleep 1; done
 uv run python -m tests.bed_odoo tear-down watch-copy
+```
+
+### The update watch
+
+[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, then one that switches. It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes about PLACEHOLDER minutes and puts the bed back. Both blocks paste into zsh as they stand.
+
+```zsh
+cd /Users/cbusillo/Developer/launchplane-next
+export LAUNCHPLANE_URL=http://launchplane.shiny:8700
+export LAUNCHPLANE_CONTROL_SHELL='ssh root@launchplane.shiny'
+export LAUNCHPLANE_SCRATCH_SHELL='ssh root@docker-lp-scratch.shiny'
+open "$LAUNCHPLANE_URL/"
+uv run pytest -q -s tests/test_bed_tk_update.py
+```
+
+In a second zsh window, this block samples what a visitor gets, and the build and data set of the instance the proxy sends visitors to. Stop it with Ctrl-C.
+
+```zsh
+while true; do
+  curl -sS -o /dev/null -w 'visitor %{http_code}  ' -H 'Host: testing.watch-update.test' http://docker-lp-scratch.shiny/web/login
+  curl -fsS http://launchplane.shiny:8700/running | python3 -c 'import json,sys; r=json.load(sys.stdin); print(next((i["build"]+" "+i["data_set"] for i in r["instances"] if i["receives_visitors_for"]=="testing.watch-update.test"),"no instance receives visitors"))'
+  sleep 1
+done
 ```
 
 ### The login watch

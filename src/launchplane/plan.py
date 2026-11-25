@@ -27,6 +27,7 @@ from launchplane.steps import (
     CannotPutBack,
     CheckRefused,
     Command,
+    CopyVolume,
     CreateDatabase,
     CreateDataSetNetwork,
     CreateDataSetVolume,
@@ -37,6 +38,7 @@ from launchplane.steps import (
     EditRoute,
     Event,
     FreshNames,
+    GiveUp,
     LoginsUnread,
     MoveResult,
     Outcome,
@@ -56,6 +58,7 @@ from launchplane.steps import (
     Switch,
     Switched,
     TooLate,
+    Update,
     Wait,
 )
 
@@ -80,6 +83,9 @@ CHANGES: dict[type, Callable[[Any], str | None]] = {
     StartDatabase: lambda step: f"started the database {step.container}",
     EditRoute: lambda step: f"sent {step.web_address} to {step.to}" if step.to else f"removed the route of {step.web_address}",
     StopDatabase: lambda step: f"stopped {step.container}",
+    CopyVolume: lambda step: f"copied the volume {step.source} to {step.destination}",
+    GiveUp: lambda step: f"gave the copy up: {step.why}",
+    Update: lambda step: f"updated the data of {step.container}",
     Switched: lambda step: f"wrote the route to {step.container}" if step.won else None,
 }
 
@@ -155,8 +161,9 @@ def problems_switching_to(judged: Judgement, instance: RunningInstance) -> list[
 def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: str) -> str | Stop:
     if receiving is not None and receiving.data_set is not None:
         return receiving.data_set
-    # A copy is never the data a lane starts on by being there: neither a whole one nor what was left of one.
-    names = sorted(data_set.data_set for data_set in lane.data_sets if data_set.copy_of is None)
+    # A copy kept offline is never the data a lane starts on by being there. One given a server may be what a release
+    # switched to, so it counts.
+    names = sorted(data_set.data_set for data_set in lane.data_sets if data_set.copy_of is None or data_set.databases)
     if len(names) > 1:
         return Stop(
             f"The lane has the data sets {', '.join(names)} and no instance receiving visitors that uses one, "

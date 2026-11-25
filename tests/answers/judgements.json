@@ -485,6 +485,16 @@
  },
  "a second data set whose database is stopped": {
   "at rest": [
+   "good",
+   "parts: new good, new-background-service good, database-d1 good, database-d2 good"
+  ],
+  "at work": [
+   "work under way",
+   "parts: new good, new-background-service good, database-d1 good, database-d2 good"
+  ]
+ },
+ "a second data set whose database did not stop cleanly": {
+  "at rest": [
    "unfinished",
    "left unfinished | stopped | The database database-d2 is stopped",
    "parts: new good, new-background-service good, database-d1 good, database-d2 wrong"
@@ -493,6 +503,20 @@
    "work under way",
    "under way | stopped | The database database-d2 is stopped",
    "parts: new good, new-background-service good, database-d1 good, database-d2 on purpose"
+  ]
+ },
+ "a second data set that an instance beside the active one runs against, its database stopped": {
+  "at rest": [
+   "unfinished",
+   "left unfinished | beside the active instance | The instance old runs beside the active one",
+   "left unfinished | stopped | The database database-d2 is stopped",
+   "parts: new good, old wrong, new-background-service good, database-d1 good, database-d2 wrong"
+  ],
+  "at work": [
+   "work under way",
+   "under way | beside the active instance | The instance old runs beside the active one",
+   "under way | stopped | The database database-d2 is stopped",
+   "parts: new good, old on purpose, new-background-service good, database-d1 good, database-d2 on purpose"
   ]
  },
  "a login no container holds": {

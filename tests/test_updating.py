@@ -1,0 +1,312 @@
+from collections.abc import Callable
+
+import pytest
+
+from launchplane.act import Cancelled, Lanes, Waiting
+from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
+from launchplane.gate import Answer as GateAnswer
+from launchplane.instance import BACK_SOON, InstanceState, Verdict
+from launchplane.judge import Condition, Work
+from launchplane.page import cards
+from launchplane.plan import lane_data_set
+from launchplane.record import Asked, Kept, Record, Stands
+from launchplane.steps import Outcome, Stop
+from launchplane.telling import Witness
+from launchplane.worker import Worker
+from tests.given_secrets import NO_SECRETS
+from tests.odoo_product import TK_UPDATING
+from tests.pretend_host import (
+    EARLIER,
+    GENERATION,
+    WEB_ADDRESS,
+    Given,
+    LaunchplaneKilled,
+    PretendHost,
+    PretendProxy,
+    data_set_named,
+    lanes_on,
+    numbered_names,
+)
+from tests.test_act import BUILD_A, BUILD_B
+from tests.test_copying import DATABASE, SOURCE, brought_back, copy_of_d1, copy_on, first, frozen
+from tests.test_copying import worked as copy_worked
+from tests.test_worker import CALLER, kept_of
+
+STOPPED = InstanceState.STOPPED
+LATER = "01900000-0000-7000-8000-00000000000c"
+UPDATE = "timeout 600 /odoo/odoo-bin --update tk_website --stop-after-init --no-http"
+
+
+# One lane of TK on build a, serving, whose releases update a module.
+def serving() -> tuple[Lanes, PretendProxy, str]:
+    proxy = PretendProxy(PretendHost())
+    lanes = lanes_on(proxy, TK_UPDATING)
+    lanes.move(BUILD_A, EARLIER, 1)
+    proxy.host.actions.clear()
+    return lanes, proxy, proxy.written[WEB_ADDRESS]
+
+
+def candidate_of(proxy: PretendProxy, old: str) -> str:
+    [candidate] = [each for each in proxy.host.instances if each != old]
+    return candidate
+
+
+def copied(proxy: PretendProxy) -> list[str]:
+    copy = copy_on(proxy)
+    made = [f"volume {copy.data_set}", f"files {copy.data_set}"]
+    return [*made, *[f"copy {source} to {to}" for source, to in zip(SOURCE, (*copy.volumes, *copy.files), strict=True)]]
+
+
+def test_a_release_to_another_build_updates_once_on_a_copy_made_in_its_own_freeze_and_switches_once() -> None:
+    lanes, proxy, old = serving()
+    result = lanes.move(BUILD_B, GENERATION, 1, first())
+    copy, new = copy_on(proxy), proxy.loaded_to(WEB_ADDRESS)
+    made, copies = copied(proxy)[:2], copied(proxy)[2:]
+    server = f"database-{copy.data_set}"
+    assert proxy.host.actions == [
+        *made,
+        *frozen(old),
+        *copies,
+        f"network {copy.data_set}",
+        f"database {copy.data_set} on network-{copy.data_set} and {copy.volumes[0]} from postgres:18-alpine",
+        f"await {server}",
+        f"start {new}",
+        f"update {new} with {UPDATE}",
+        f"check {new}/web/login",
+        f"route {new}",
+        f"retire {old}",
+    ]
+    assert (result.outcome, result.container_receiving_visitors, result.data_set) == (Outcome.SWITCHED, new, copy.data_set)
+    assert proxy.gate.verdict(WEB_ADDRESS, GENERATION) == GateAnswer(Verdict.COMMITTED, new)
+    kept = proxy.host.data_sets["data-1"]
+    assert (kept.databases[0].state, kept.volumes, kept.files) == (STOPPED, (SOURCE[0],), (SOURCE[1],))
+    assert [each.condition for each in lanes.read_status().lanes] == [Condition.GOOD]
+
+
+def test_the_candidate_and_its_update_reach_only_the_copy_s_network_and_files() -> None:
+    lanes, proxy, old = serving()
+    lanes.move(BUILD_B, GENERATION, 1, first())
+    copy, new = copy_on(proxy), proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)]
+    assert (new.data_set, new.networks[1:], [each.source for each in new.mounts]) == (
+        copy.data_set,
+        (f"network-{copy.data_set}",),
+        list(copy.files),
+    )
+    assert old not in proxy.host.instances
+
+
+def given_up(lanes: Lanes, proxy: PretendProxy, old: str, attempt: int = 1) -> tuple[Outcome, str]:
+    result = lanes.move(BUILD_B, GENERATION, attempt, first(attempt))
+    assert proxy.host.actions[-5:] == brought_back(old)
+    assert (proxy.loaded_to(WEB_ADDRESS), list(proxy.host.instances)) == (old, [old])
+    assert (result.container_receiving_visitors, result.data_set) == (old, "data-1")
+    assert proxy.gate.verdict(WEB_ADDRESS, GENERATION).verdict is Verdict.NONE
+    assert copy_on(proxy).databases[0].state is STOPPED
+    return result.outcome, result.error or ""
+
+
+def test_an_update_that_fails_puts_visitors_back_on_the_original_instance_and_data_and_nothing_is_switched() -> None:
+    lanes, proxy, old = serving()
+    proxy.host.updates_that_fail = {BUILD_B.build}
+    outcome, error = given_up(lanes, proxy, old)
+    assert outcome is Outcome.NOT_UPDATED
+    assert "ended with code 1. Nothing was switched" in error and error.endswith("Its last log lines:\nmodule not found")
+    assert not [each for each in proxy.host.actions if each.startswith("check ") and old not in each]
+    assert [each.condition for each in lanes.read_status().lanes] == [Condition.GOOD]
+
+
+def test_a_candidate_that_fails_its_check_after_the_update_is_never_switched_to_and_the_original_comes_back() -> None:
+    lanes, proxy, old = serving()
+    proxy.while_checking = lambda container: proxy.failing_its_kind.add(container) if container != old else None
+    outcome, error = given_up(lanes, proxy, old)
+    assert (outcome, "The check of its kind failed" in error) == (Outcome.CHECK_FAILED, True)
+    assert len([each for each in proxy.host.actions if each.startswith("update ")]) == 1
+
+
+def test_an_update_whose_reply_was_lost_is_not_run_or_looked_into_again_and_the_next_attempt_brings_the_original_back() -> None:
+    lanes, proxy, old = serving()
+    proxy.host.updates_unanswered = {BUILD_B.build}
+    with pytest.raises(ContainerHostError, match="the reply was lost"):
+        lanes.move(BUILD_B, GENERATION, 1, first())
+    assert proxy.written[WEB_ADDRESS] == BACK_SOON
+    proxy.host.actions.clear()
+    outcome, error = given_up(lanes, proxy, old, attempt=2)
+    assert (outcome, "whether its update ran is not known" in error) == (Outcome.NOT_UPDATED, True)
+    assert not [each for each in proxy.host.actions if each.startswith(("update ", "copy "))]
+
+
+def killed_during_the_update() -> tuple[Lanes, PretendProxy, str]:
+    lanes, proxy, old = serving()
+    proxy.host.killed_after = 12
+    with pytest.raises(LaunchplaneKilled):
+        lanes.move(BUILD_B, GENERATION, 1, first())
+    assert proxy.host.actions[-1].startswith("update ")
+    proxy.host.killed_after = None
+    proxy.host.actions.clear()
+    return lanes, proxy, old
+
+
+def test_after_a_kill_during_the_update_the_next_attempt_gives_that_copy_up_and_the_original_serves_again() -> None:
+    lanes, proxy, old = killed_during_the_update()
+    candidate = candidate_of(proxy, old)
+    outcome, _ = given_up(lanes, proxy, old, attempt=2)
+    assert outcome is Outcome.NOT_UPDATED
+    assert proxy.host.actions == [f"retire {candidate}", f"stop database database-{copy_on(proxy).data_set}", *brought_back(old)]
+
+
+def test_an_attempt_that_finds_the_lane_already_back_changes_nothing_and_begins_no_second_copy() -> None:
+    lanes, proxy, old = killed_during_the_update()
+    given_up(lanes, proxy, old, attempt=2)
+    proxy.host.actions.clear()
+    again = lanes.move(BUILD_B, GENERATION, 3, first(3))
+    assert (again.outcome, proxy.host.actions, len(proxy.host.data_sets)) == (Outcome.NOT_UPDATED, [], 2)
+
+
+def test_a_request_asked_after_a_failed_one_makes_a_fresh_copy_and_switches() -> None:
+    lanes, proxy, old = serving()
+    proxy.host.updates_that_fail = {BUILD_B.build}
+    given_up(lanes, proxy, old)
+    proxy.host.updates_that_fail = set()
+    result = lanes.move(BUILD_B, LATER, 1, Witness(generation=LATER, attempt=1))
+    used = proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)].data_set
+    assert (result.outcome, len(proxy.host.data_sets)) == (Outcome.SWITCHED, 3)
+    assert proxy.host.data_sets[used or ""].generation == LATER
+
+
+def test_the_serving_build_asked_again_copies_nothing_and_updates_nothing() -> None:
+    lanes, proxy, _ = serving()
+    result = lanes.move(BUILD_A, GENERATION, 1, first())
+    assert (result.outcome, proxy.host.actions) == (Outcome.UNCHANGED, [])
+
+
+def test_a_cancel_behind_the_back_soon_page_brings_the_original_back_before_the_request_ends_as_cancelled() -> None:
+    lanes, proxy, old = serving()
+
+    def asked_once_the_update_ran() -> bool:
+        return any(each.startswith("update ") for each in proxy.host.actions)
+
+    with pytest.raises(Cancelled) as cancelled:
+        lanes.move(BUILD_B, GENERATION, 1, Witness(generation=GENERATION, attempt=1, cancel_asked=asked_once_the_update_ran))
+    assert proxy.host.actions[-5:] == brought_back(old)
+    assert (proxy.loaded_to(WEB_ADDRESS), list(proxy.host.instances)) == (old, [old])
+    assert cancelled.value.put_back.data_sets_kept == [copy_on(proxy).data_set]
+    assert proxy.gate.verdict(WEB_ADDRESS, GENERATION).verdict is Verdict.ABANDONED
+
+
+# The names a pretend lane gives are counted, so a second lane brought up the same way names its candidate the same.
+def name_of_the_candidate() -> str:
+    lanes, proxy, _ = serving()
+    lanes.move(BUILD_B, GENERATION, 1, first())
+    return proxy.loaded_to(WEB_ADDRESS)
+
+
+def test_a_start_docker_refuses_behind_the_back_soon_page_does_not_end_the_request_with_the_lane_frozen() -> None:
+    lanes, proxy, old = serving()
+    proxy.host.commands_refused = {f"make {name_of_the_candidate()}"}
+    with pytest.raises(Waiting, match="behind the back soon page, so this is tried again"):
+        lanes.move(BUILD_B, GENERATION, 1, first())
+    proxy.host.commands_refused = set()
+    proxy.host.actions.clear()
+    outcome, _ = given_up(lanes, proxy, old, attempt=2)
+    assert outcome is Outcome.NOT_UPDATED
+
+
+def test_a_refusal_before_the_back_soon_page_shows_fails_the_request_with_the_lane_still_serving() -> None:
+    lanes, proxy, old = serving()
+    proxy.host.refuses_helpers = True
+    with pytest.raises(ContainerHostRefused, match="pull access denied"):
+        lanes.move(BUILD_B, GENERATION, 1, first())
+    assert (proxy.loaded_to(WEB_ADDRESS), proxy.host.is_in(old, InstanceState.RUNNING)) == (old, True)
+
+
+def test_a_lane_with_no_instance_does_not_pick_between_its_data_set_and_a_copy_a_release_may_have_switched_to() -> None:
+    served = copy_of_d1(databases=data_set_named("d2", STOPPED).databases)
+    lane = Given(data_sets=(data_set_named("d1", STOPPED), served)).reading()
+    picked = lane_data_set(lane, None, "fresh")
+    assert isinstance(picked, Stop) and "has the data sets d1, d2" in picked.reason
+
+
+def test_the_first_move_of_a_lane_whose_product_updates_copies_nothing() -> None:
+    proxy = PretendProxy(PretendHost())
+    result = lanes_on(proxy, TK_UPDATING).move(BUILD_A, GENERATION, 1, first())
+    assert result.outcome is Outcome.SWITCHED
+    assert not [each for each in proxy.host.actions if each.startswith(("copy ", "update ", "show back soon"))]
+    assert DATABASE in [each.container for found in proxy.host.data_sets.values() for each in found.databases]
+
+
+def worked(record: Record, change: Callable[[PretendProxy], None] = lambda _proxy: None) -> tuple[Kept, Lanes, PretendProxy]:
+    proxy = PretendProxy(PretendHost())
+    lanes = Lanes(
+        proxy.host,
+        proxy,
+        lambda _product: TK_UPDATING,
+        numbered_names(),
+        read_unfinished=record.unfinished,
+        read_ended=record.ended_lately,
+    )
+    lanes.move(BUILD_A, EARLIER, 1)
+    change(proxy)
+    request = record.write(Asked(product="site", lane="testing", work=Work.MOVE, build=BUILD_B.build), CALLER, None)
+    assert Worker(record, lanes, NO_SECRETS).work_next()
+    return kept_of(record, request.id), lanes, proxy
+
+
+def note_on_the_card(lanes: Lanes, kept: Kept) -> str:
+    [note] = [row.note for card in cards(lanes.read_status()) for row in card.rows if row.name == f"Request {kept.id}"]
+    return note or ""
+
+
+def test_a_release_on_a_copy_ends_done_as_switched_once_with_one_update_and_its_card_says_so_in_one_paragraph(
+    record: Record,
+) -> None:
+    kept, lanes, proxy = worked(record)
+    assert (kept.stands, kept.answer and kept.answer["outcome"], kept.release_verdict) == (
+        Stands.DONE,
+        "switched",
+        Verdict.COMMITTED,
+    )
+    lines = [each.did for each in kept.events]
+    assert len([each for each in lines if each.startswith("update the data of ")]) == 1
+    assert len([each for each in lines if each.startswith("switch ")]) == 1
+    assert kept.answer and [each for each in kept.answer["did"] if each.startswith("updated the data of ")]
+    assert note_on_the_card(lanes, kept) == (
+        f"Visitors are on the new build and the updated copy. Every line is in GET /requests/{kept.id}."
+    )
+    assert copy_on(proxy).data_set == proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)].data_set
+
+
+def test_a_failed_update_ends_the_request_failed_with_no_switch_and_its_card_says_what_failed_and_that_the_lane_serves(
+    record: Record,
+) -> None:
+    kept, lanes, _ = worked(record, lambda proxy: proxy.host.updates_that_fail.add(BUILD_B.build))
+    assert (kept.stands, kept.answer and kept.answer["outcome"], kept.release_verdict) == (
+        Stands.FAILED,
+        "not updated",
+        Verdict.NONE,
+    )
+    assert not [each for each in kept.events if each.did.startswith("switch ")]
+    note = note_on_the_card(lanes, kept)
+    assert "ended with code 1. Nothing was switched, and the lane serves from its own data again." in note
+    assert "Its lines:" not in note and note.endswith(f"Every line is in GET /requests/{kept.id}.")
+    assert [each.condition for each in lanes.read_status().lanes] == [Condition.GOOD]
+
+
+def test_while_the_original_cannot_come_back_the_request_stays_working_and_its_card_says_what_failed_and_what_comes_next(
+    record: Record,
+) -> None:
+    def fail_the_update_and_the_original(proxy: PretendProxy) -> None:
+        proxy.host.updates_that_fail.add(BUILD_B.build)
+        proxy.failing = {proxy.written[WEB_ADDRESS]}
+
+    kept, lanes, proxy = worked(record, fail_the_update_and_the_original)
+    assert (kept.stands, proxy.written[WEB_ADDRESS]) == (Stands.WORKING, BACK_SOON)
+    assert "The lane could not be brought back yet, and it is tried again" in (kept.error or "")
+    note = note_on_the_card(lanes, kept)
+    assert "update the data of " in note and "ended with code 1." in note
+    assert "Nothing is switched: Launchplane is bringing the original instance back on its own data." in note
+
+
+def test_a_copy_asked_for_by_itself_keeps_every_line_on_its_card(record: Record) -> None:
+    kept, lanes = copy_worked(record, set())
+    [note] = [row.note for card in cards(lanes.read_status()) for row in card.rows if row.name == f"Request {kept.id}"]
+    assert "Its lines: make the database volume of the data set" in (note or "")

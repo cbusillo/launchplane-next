@@ -1,6 +1,6 @@
 # A lane with a database
 
-A product that says it has a database runs each lane against a data set: a PostgreSQL server on its own quiet network, with its data on a Docker volume. A release that does not change the data's structure starts the new instance on the same data set. A product of [the Odoo kind](odoo.md#the-data-set) has a files volume in its data set too. A lane's data is [copied by a call of its own](copying.md), and no release uses a copy yet (README, open question 14).
+A product that says it has a database runs each lane against a data set: a PostgreSQL server on its own quiet network, with its data on a Docker volume. A release that does not change the data's structure starts the new instance on the same data set. A product of [the Odoo kind](odoo.md#the-data-set) has a files volume in its data set too. A release that updates the data is made on [a copy taken inside the release](odoo.md#a-release-that-updates), and a lane's data is also [copied by a call of its own](copying.md). Whether the file store could be shared instead is not measured (README, open question 14).
 
 ## The product description
 
@@ -92,7 +92,7 @@ Every answer of the API, headers and body, and every line of Launchplane's own l
 A move takes these steps, each only when needed, reading the host again before each one:
 
 1. Make the data set: its network, its volume, its database server with its set-up. Start a stopped server. Wait up to 60 s for the server to accept connections.
-2. Make a login and start the new instance with it, on the data set of the instance receiving visitors, or on the lane's only data set, or on a new one.
+2. Make a login and start the new instance with it, on the data set of the instance receiving visitors, or on the lane's only data set, or on a new one. [A copy](copying.md#a-copy-on-the-host) kept offline is never that data set. A copy that has a database server may be what a release switched to, so it counts: a lane with no instance receiving visitors and two such data sets answers `503` and starts on neither.
 3. Check the new instance at the product's health path, then point the web address at it.
 4. Stop the old instance's background service, start the new instance's, and watch it stay up 3 s.
 5. Retire the old instance.
@@ -154,7 +154,7 @@ A finding is `shown` one of five ways:
 | --- | --- |
 | `wrong` | Never acceptable, whatever a call is doing: a part attached or mounted where it must not be, a database server in maintenance that did not stop cleanly, the back soon page not running for a lane in maintenance. Or wrong with no call at work: a part that keeps restarting, a data set with a part twice or a network that is not quiet, a part not stopped in a lane in maintenance, a route the proxy reports as not enabled, a web address that does not answer with success. |
 | `under way` | A call is at work on the lane, and the finding is one of those wrong only with no call at work, or one a call passes through. |
-| `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, a routes file the proxy has not loaded yet, an instance beside the active one, a stopped or missing part, a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
+| `left unfinished` | No call is at work, and the finding is a state a call passes through: no instance receives visitors, a routes file the proxy has not loaded yet, an instance beside the active one, a stopped or missing part (but for the database server of a data set kept beside the one the lane serves from: with no instance on that data set, a server that stopped with exit code 0 is meant to be stopped, and is not a finding), a background service not yet up 3 s, a login no container holds, the proxy not running. Asking again finishes it. |
 | `could not be read` | Something asked has no answer: Launchplane's record of requests, the product's description, a server's logins, a server not asked whether it accepts connections, a network a part is attached to that was not among the networks read. The sentence names what was asked. Never shown as under way. |
 | `conflicting` | Something asked has more than one answer where it must have one: the proxy has loaded two routers for the lane's web address. The sentence names each. Never shown as under way: see [two routers](the-move.md#two-routers-for-one-web-address). |
 

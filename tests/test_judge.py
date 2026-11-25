@@ -150,6 +150,12 @@ WITH_A_DATABASE: dict[str, Given] = {
     ),
     "a data set with no volume and no database": serving(NEW_ON_D1, data_sets=(data_set_named("d1", None, volume=False),)),
     "a second data set whose database is stopped": serving(NEW_ON_D1, data_sets=(D1, data_set_named("d2", STOPPED))),
+    "a second data set whose database did not stop cleanly": serving(
+        NEW_ON_D1, data_sets=(D1, data_set_named("d2", STOPPED, exit_code=KILLED))
+    ),
+    "a second data set that an instance beside the active one runs against, its database stopped": serving(
+        NEW_ON_D1, on_data(OLD, "d2"), data_sets=(D1, data_set_named("d2", STOPPED))
+    ),
     "a login no container holds": serving(NEW_ON_D1, data_sets=(data_set_named("d1", unheld=("i_left",)),)),
     "logins that could not be read": serving(NEW_ON_D1, data_sets=(with_database(D1, unheld_logins=LOGINS_NOT_TOLD),)),
     "a lane retired with its data set kept": Given(data_sets=(D1,)),

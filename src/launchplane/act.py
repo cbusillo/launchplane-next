@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
 
-from launchplane import copying, maintenance, plan, steps
+from launchplane import copying, maintenance, plan, steps, updating
 from launchplane.container_host import PartStopped
-from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
+from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused, observing
 from launchplane.gate import ALREADY, LOST
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
@@ -57,6 +57,7 @@ from launchplane.steps import (
 from launchplane.telling import NOBODY, OF_A_PART, TO_PUT_BACK, Said, Witness, named, told
 
 MOST_STEPS = 50
+LOG_TAIL_LINES = 20
 type Lane = tuple[str, str]
 
 
@@ -82,6 +83,7 @@ class InstanceHost(Protocol):
     def retire_instance(self, container: str, by: Witness) -> None: ...
     def remove_unheld_logins(self, database: str, by: Witness) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
+    def run_in(self, container: str, command: list[str]) -> CommandResult: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -159,6 +161,15 @@ def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
 
+# A lost reply is no answer: only what the command itself answered says the update failed.
+def update_refused(host: InstanceHost, action: steps.Update) -> steps.UpdateRefused | None:
+    ran = host.run_in(action.container, [*action.command])
+    if ran.succeeded:
+        return None
+    why = f"The update of the data, run in {action.container}, ended with code {ran.exit_code}."
+    return steps.UpdateRefused(action.container, plan.failure_report(why, "\n".join(ran.output.splitlines()[-LOG_TAIL_LINES:])))
+
+
 TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StartProxy: lambda _host, proxy, _step, _by: proxy.start(),
     steps.AwaitRoute: lambda _host, proxy, step, _by: proxy.await_route(step.web_address, step.container, enabled=step.enabled),
@@ -180,6 +191,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
+    steps.Update: lambda host, _proxy, step, _by: update_refused(host, step),
 }
 
 
@@ -354,8 +366,8 @@ class Lanes:
         of = (target.model_copy(update={"run": product.run}), product, generation, attempt, witness)
         return settle(
             *self.judging(target.product, target.lane, product, Work.MOVE),
-            lambda judged, done, cancel: plan.decide_move(self.release(judged, done, *of), cancel),
-            self.take,
+            lambda judged, done, cancel: updating.decide(self.release(judged, done, *of), cancel),
+            partial(self.take_behind_back_soon, web_address_of(target.product, target.lane), with_logs=True),
             witness,
         )
 
@@ -432,7 +444,7 @@ class Lanes:
         return settle(
             *self.judging(product, lane, description, Work.COPY),
             lambda judged, done, cancel: copying.decide(copying.Copying(judged, description, generation, fresh, done), cancel),
-            self.take_for_a_copy,
+            partial(self.take_behind_back_soon, web_address_of(product, lane)),
             witness,
         )
 
@@ -491,18 +503,19 @@ class Lanes:
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
             return self.discard(action, witness)
-        TAKE[type(action)](self.host, self.proxy, action, witness)
-        return action
+        refused = TAKE[type(action)](self.host, self.proxy, action, witness)
+        return refused if isinstance(refused, steps.Refused) else action
 
     # Behind the back soon page Docker's no ends nothing: a copy refused is given up, and any other step is tried again
-    # from a later reading until the lane is back. Before the page shows, a refusal fails the request as any does.
-    def take_for_a_copy(self, action: Action, witness: Witness) -> Event:
+    # from a later reading until the lane is back. While the routes file sends visitors elsewhere, a refusal fails the
+    # request as any does.
+    def take_behind_back_soon(self, web_address: str, action: Action, witness: Witness, *, with_logs: bool = False) -> Event:
         try:
-            return self.take(action, witness, behind_back_soon=True)
+            return self.take(action, witness, behind_back_soon=not with_logs)
         except ContainerHostRefused as error:
             if isinstance(action, steps.CopyVolume):
                 return steps.CopyRefused(action.destination, str(error))
-            if isinstance(action, steps.CreateDataSetVolume) or (isinstance(action, steps.EditRoute) and action.to == BACK_SOON):
+            if not self.proxy.read().route_of(web_address).in_maintenance:
                 raise
             raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error
 
