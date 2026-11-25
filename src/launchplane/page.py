@@ -202,13 +202,13 @@ def frozen_note(request: Kept) -> str | None:
     if request.stands in ENDED:
         said = in_one_line(request.error) if request.error else "Visitors are on the new build and the updated copy."
     elif stopped is not None:
-        said = f"{in_one_line(': '.join(filter(None, (stopped.did, stopped.error))))} {COMING_BACK}"
+        said = f"{in_one_line(': '.join(filter(None, (stopped.did, stopped.error)))).rstrip('.')}. {COMING_BACK}"
     elif any(line.did.startswith("switch ") and line.is_own for line in lines):
         said = SWITCHED
     else:
         said = UPDATING if any(line.did.startswith("make the network of the data set") for line in lines) else COPYING
     again = "" if request.stands in ENDED else taken_up(request)
-    return f"{again}{said} {EVERY_LINE.format(id=request.id)}"
+    return f"{again}{said.rstrip('.')}. {EVERY_LINE.format(id=request.id)}"
 
 
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.

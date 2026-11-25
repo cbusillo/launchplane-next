@@ -297,10 +297,11 @@ def test_6_an_uninterrupted_release_updates_once_switches_once_and_keeps_everyth
         f"docker exec {PRODUCT}-{LANE}-database-{old_database.split('-')[2]} {PSQL} --command \"select pg_database_size('app')\""
     ).strip()
     files = size_of(old_files)
+    key = {"Idempotency-Key": f"watch-update-after-{ask('/requests')[1]['ended'][0]['id']}"}
     sampled: list[str] = []
     sampling = threading.Thread(target=lambda: sampled.append(on_scratch(SAMPLE)))
     sampling.start()
-    status, moved = ask_and_wait(MOVE, NEXT, timeout=300)
+    status, moved = ask(f"{MOVE}?wait=290", NEXT, timeout=300, headers=key)
     sampling.join()
     first_back_soon, first_served = (float(each) for each in sampled[0].split())
     assert (status, moved["outcome"]) == (200, "switched"), moved
@@ -343,16 +344,17 @@ def test_6_an_uninterrupted_release_updates_once_switches_once_and_keeps_everyth
     assert (old["files"], [(each["state"], each["exit_code"]) for each in old["databases"]]) == ([old_files], [("stopped", 0)])
 
     write("after the switch")
-    key = {"Idempotency-Key": f"watch-update-{ended['id']}"}
-    again = ask(MOVE, NEXT, headers=key)[1]
     replayed = ask(MOVE, NEXT, headers=key)[1]
-    unchanged = request_ended(again["id"])
+    unchanged = request_ended(ask(MOVE, NEXT)[1]["id"])
     said(
-        "6. Asked again",
-        replayed_request=replayed["id"],
-        asked_again=unchanged["answer"]["outcome"],
-        card=card(again["id"])["reads"],
+        "6. The key sent again, then the serving build asked for again",
+        request_that_switched=ended["id"],
+        the_key_answers_request=replayed["id"],
+        asked_again=f"request {unchanged['id']}, {unchanged['answer']['outcome']}, {len(unchanged['events'])} lines",
+        card=card()["reads"],
     )
-    assert (replayed["id"], unchanged["answer"]["outcome"], unchanged["events"]) == (again["id"], "unchanged", [])
+    assert (replayed["id"], replayed["stands"]) == (ended["id"], "done")
+    assert (unchanged["id"] != ended["id"], unchanged["answer"]["outcome"], unchanged["events"]) == (True, "unchanged", [])
+    assert len(lines_of(ask(f"/requests/{ended['id']}")[1], "update the data of ")) == 1
     assert read_lane(PRODUCT, LANE)["written"].split(",") == kept["written"]
     assert card()["reads"] == ["good"]
