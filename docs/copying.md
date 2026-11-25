@@ -76,7 +76,7 @@ On November 24, on the scratch host, with TK's build `sha256:0e2ad09f…` seeded
 | | |
 | --- | --- |
 | What was copied | The database volume, 3,242 files and 141 MB, of which the database `app` is 47 MB. The files volume, 110 files and 4.6 MB |
-| From the first back soon answer at the web address to both copies confirmed | 4.2 s |
+| From the first back soon answer at the web address to both copies confirmed | 3.9 to 4.2 s, three runs |
 | Of that, by the request's lines | Stopping Odoo 0.5 s, stopping the database server 0.9 to 2.6 s, copying and comparing the database volume 1.1 to 1.3 s and the files volume 0.2 to 0.3 s |
 | The back soon page, from the route to it to the route back | 10.2 to 11.9 s. Odoo starting and its check are 6.6 s of it |
 | A kill between the two volumes, to the lane back | 13 to 14 s after the request began |
