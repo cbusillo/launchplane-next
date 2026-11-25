@@ -51,7 +51,7 @@ A **cancel** asked while the back soon page shows brings the lane back and ends 
 A copy is whole when each of its volumes was written by one copier whose description says it exited with code 0, and no copier of it ended otherwise. The state is read from the description, not from Docker's list, which can still say `running` just after a container has exited.
 
 - `GET /running` gives each data set `copy_of`, `generation` and `copies`: each copier's `container`, the `volume` it could write, `finished` and `stopped`.
-- The page shows a copy as `is a whole copy of <data set>, kept offline: no instance is started on it`, or `is a copy that was not finished of <data set>`. Neither is a finding: the lane stays `good`.
+- The page shows a copy as `is a whole copy of <data set>, kept offline: no instance is started on it`, or `is a copy, not whole, of <data set>`. Neither is a finding: the lane stays `good`.
 - A copy has no network and no database server.
 - A [move](data-sets.md#a-move-with-data) never starts an instance on a copy, whole or not. A lane whose only data set is a copy is given a new, empty data set, and the copy is left as it is.
 - A copy is kept until [a retire names it](data-sets.md#retiring-a-lane-with-data). A data set that has a copy is not deleted before the copy: the copiers hold its volumes as what they read, and the retire answers `503` naming the copy.

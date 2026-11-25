@@ -376,7 +376,7 @@ def test_a_copy_that_was_not_finished_ends_its_request_as_failed_with_why_and_th
     assert "ended with code 1" in (kept.error or "")
     assert "What was copied is kept, and no instance is started on it." in (kept.error or "")
     rows = [row for card in cards(lanes.read_status()) for row in card.rows if row.name == "Data set"]
-    assert "is a copy that was not finished of data-1" in "".join(piece.text for piece in rows[0].value)
+    assert "is a copy, not whole, of data-1" in "".join(piece.text for piece in rows[0].value)
 
 
 def test_a_data_set_is_not_deleted_while_a_copy_of_it_is_on_the_host_and_goes_once_the_copy_has() -> None:

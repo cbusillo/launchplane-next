@@ -231,7 +231,7 @@ def request_rows(requests: Sequence[Request], decided: Mapping[int, GateAnswer |
 def without_a_server(found: DataSet) -> str:
     if found.copy_of is None:
         return " has no database server"
-    whole = "a whole copy" if found.is_whole_copy else "a copy that was not finished"
+    whole = "a whole copy" if found.is_whole_copy else "a copy, not whole,"
     return f" is {whole} of {found.copy_of}, kept offline: no instance is started on it"
 
 
