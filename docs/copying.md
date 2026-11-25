@@ -123,6 +123,7 @@ On November 25, on the scratch host, the copier before and the copier now, each 
 - **The pool's `bcloneused` and `bclonesaved` were not read.** They are properties of the pool `guests` on the Proxmox host, which the builder holds no key to. On that host, `zpool get -Hp bcloneused,bclonesaved guests` before and after a copy gives them. cbusillo/launchplane-next#65 read them for the same two ways of copying on the other scratch container: the pool's saved bytes rose by the copy's size with GNU `cp`, and by nothing with BusyBox's.
 - `df` in the scratch container grew by about 543 MB for each copy of the PostgreSQL directory, shared or not: the dataset is charged for a copy either way.
 - The comparison costs two to three times the copy. Through Launchplane, from the first back soon answer to both of TK's volumes confirmed: 3.8 s, one run, where it was 3.9 to 4.2 s.
+- Fetching the copier's image by digest, through Launchplane, on a scratch host that did not have it: 1.0 s.
 - Not measured: a volume of real size. OPW's files are about 110 GB, and a copier has 300 s.
 
 ## On the test bed
