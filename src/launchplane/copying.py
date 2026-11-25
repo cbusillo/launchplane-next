@@ -44,7 +44,9 @@ class Copying:
             container_receiving_visitors=lane.route.sends_visitors_to,
             data_set=None if active is None else active.data_set,
             copied_to=None if copy is None else copy.data_set,
-            error=None if self.is_whole else f"{self.given_up or left} What was copied is kept, and no instance is started on it.",
+            error=None
+            if self.is_whole
+            else f"{self.given_up or left} What was copied is kept, and no instance is started on it. Asking again makes a new copy.",
         )
         return Done(result)
 
