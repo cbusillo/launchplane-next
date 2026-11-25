@@ -107,7 +107,7 @@ def frozen_by_this_request(given: Given, product: Product = WITH_A_DATABASE, don
     return Copying(judge(reading, product, Work.COPY), product, GENERATION, "fresh", done)
 
 
-def web_part(state: InstanceState) -> Any:  # noqa: ANN401 a part of a given lane
+def lane_web(state: InstanceState) -> Any:  # noqa: ANN401 a part of a given lane
     return on_data(lane_instance("web", "b", state), "d1")
 
 
@@ -120,24 +120,24 @@ IN_MAINTENANCE = (BACK_SOON, BACK_SOON)
 
 
 def test_a_writer_that_still_runs_is_stopped_before_anything_is_copied() -> None:
-    given = Given((web_part(RUNNING),), IN_MAINTENANCE, data_sets=(data_set_named("d1"), copy_of_d1()))
+    given = Given((lane_web(RUNNING),), IN_MAINTENANCE, data_sets=(data_set_named("d1"), copy_of_d1()))
     assert decide(frozen_by_this_request(given)) == StopPart("web")
 
 
 def test_a_database_server_that_did_not_stop_cleanly_is_never_copied() -> None:
-    given = Given((web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED, exit_code=137), copy_of_d1()))
+    given = Given((lane_web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED, exit_code=137), copy_of_d1()))
     step = decide(frozen_by_this_request(given))
     assert isinstance(step, GiveUp) and "did not stop cleanly: it exited with code 137" in step.why
 
 
 def test_each_volume_is_copied_from_the_data_set_the_copy_names_once_everything_is_stopped() -> None:
-    given = Given((web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1()))
+    given = Given((lane_web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1()))
     assert decide(frozen_by_this_request(given)) == CopyVolume("site", "testing", "d2", "volume-d1", "volume-d2", "postgres:18")
 
 
 def test_a_copy_whose_volume_is_a_volume_of_what_it_copies_is_given_up_before_anything_is_written() -> None:
     given = Given(
-        (web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(volumes=("volume-d1",)))
+        (lane_web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(volumes=("volume-d1",)))
     )
     step = decide(frozen_by_this_request(given))
     assert isinstance(step, GiveUp) and "are not one fresh volume, still to be written, for each volume of d1" in step.why
@@ -147,7 +147,7 @@ def test_a_copy_another_attempt_began_is_given_up_and_never_gone_on_with() -> No
     half = VolumeCopy(container="volume-d2-copier", volume="volume-d2", finished=True, stopped=True)
     files = {"files": ("files-d1",)}
     given = Given(
-        (web_part(STOPPED),),
+        (lane_web(STOPPED),),
         IN_MAINTENANCE,
         data_sets=(data_set_named("d1", STOPPED).model_copy(update=files), copy_of_d1(files=("files-d2",), copies=(half,))),
     )
@@ -157,7 +157,7 @@ def test_a_copy_another_attempt_began_is_given_up_and_never_gone_on_with() -> No
 
 def test_a_copier_still_running_is_stopped_before_the_volume_it_reads_is_written_again() -> None:
     running = VolumeCopy(container="volume-d2-copier", volume="volume-d2", finished=False, stopped=False)
-    given = Given((web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(copies=(running,))))
+    given = Given((lane_web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(copies=(running,))))
     assert decide(frozen_by_this_request(given), Cancel()) == StopPart("volume-d2-copier")
 
 
