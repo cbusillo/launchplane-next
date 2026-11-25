@@ -362,8 +362,8 @@ def test_6_an_uninterrupted_release_updates_once_switches_once_and_keeps_everyth
     assert sorted(each["data_set"] for each in of_this_lane(running["data_sets"])) == sorted([used["data_set"], old["data_set"]])
     assert sorted(volumes) == sorted([*used["volumes"], *used["files"], *old["volumes"], *old["files"]])
     assert sorted(each.split(" ", 1)[1] for each in lane_card["data_sets"]) == [
-        "Kept: the last release replaced it.",
         "Kept: the lane serves from it.",
+        "Kept: the last release replaced it.",
     ]
 
     write("after the switch")

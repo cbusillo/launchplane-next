@@ -274,7 +274,7 @@ def without_a_server(found: DataSet) -> str:
 GOES = "An old copy: the next release that switches deletes it."
 
 
-# Why each data set of a lane that serves is still there, by name. A lane that does not serve says nothing of it.
+# Why each data set is still there, by name, said only of a lane with an instance receiving visitors.
 def kept_notes(judged: Judgement | None) -> dict[str, str]:
     if judged is None or judged.lane.active is None:
         return {}
