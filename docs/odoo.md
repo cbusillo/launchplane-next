@@ -152,6 +152,7 @@ On November 25, on the scratch host, a release from that build to `sha256:f0b8a2
 | From the first back soon answer at the web address to the first answer of the new instance there | 20.9 s and 20.1 s, two runs. A third took 35.9 s while the scratch host's load average was 18 to 22 from other work, with every step slower: the update 12.6 s and the check 9.6 s. `/web/login` was asked every 0.05 s, from the scratch host itself |
 | What was copied and updated | A database `app` of 49,206,975 bytes, and a files volume of 125 files and 4,588,484 bytes |
 | Of that, by the request's lines in the first run | Stopping Odoo 0.8 s, stopping the database server 1.4 s, copying and comparing the database volume 1.7 s and the files volume 0.9 s, the copy's network and database server 1.2 s, the candidate's login and start 0.9 s, the update 6.5 s, the check 6.5 s, the switch 0.7 s |
+| The same, later that day, with [the copier that shares blocks](copying.md#measured) and three older copies deleted after the switch | 21.8 s, one run. `tests/test_bed_tk_update.py` took 4 min 25 s, twice |
 | A release whose update fails, from the first back soon answer to the original answering again | Not measured |
 | `tests/test_bed_tk_update.py`, 5 tests | 4 min 7 s and 4 min 11 s, and 7 min 18 s under that load |
 

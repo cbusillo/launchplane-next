@@ -93,7 +93,7 @@ Nothing marks a data set as kept by a person yet (cbusillo/launchplane-next#49),
 - **Pruning unused Docker volumes during an interrupted copy can make a half copy read as whole.** Between the two volumes the copy's files volume is empty and no container holds it, so `docker volume prune --all` would remove it. Not tried. The copy then has one volume and one finished copier, which is what whole means. [A release that updates](odoo.md#a-release-that-updates) starts nothing on such a copy: it also holds the copy to one volume for each volume of the data set copied.
 - **A request whose lane cannot be brought back keeps its lane for as long as that lasts.** Nobody is told.
 - **Whether blocks are shared is the host's to decide,** and Launchplane does not read whether they were. The data set's own charged size grows by the copy's size even where the pool shares the blocks (cbusillo/launchplane-next#65).
-- **Untried:** a product with a background service on the real host, a lane with more than one earlier copy, and a volume too large for 300 s.
+- **Untried on the test bed:** a product with a background service, a volume too large for 300 s, a deletion Docker refuses, and a third release on a lane, which deletes a copy that the copy before the serving one was made from. The last two are held by `tests/test_updating.py` against a pretend host.
 
 ## Measured
 
@@ -107,6 +107,23 @@ On November 24, on the scratch host, with TK's build `sha256:0e2ad09f…` seeded
 | The back soon page, from the route to it to the route back | 10.2 to 11.9 s. Odoo starting and its check are 6.6 s of it |
 | A kill between the two volumes, to the lane back | 13 to 14 s after the request began |
 | `tests/test_bed_copy.py`, 2 tests | 2 min 12 s |
+
+On November 25, on the scratch host, the copier before and the copier now, each run twice by hand as Launchplane runs it: the source read-only, a fresh volume, no network. The PostgreSQL directory was made with `initdb` by `postgres:18-alpine`, filled with 6,500,000 invented rows and stopped cleanly. TK's volumes were a whole copy of a seeded lane. `Written` is what the scratch container's own ZFS dataset counted as written while the copy ran, read from `/proc/spl/kstat/zfs/guests/` inside the container.
+
+| What was copied | Copier | `cp` | `diff -r` | Written |
+| --- | --- | --- | --- | --- |
+| A PostgreSQL 18 data directory, 986 files, 1,081,753,146 bytes | before, BusyBox `cp -a` | 2.74 s, 2.02 s | 4.48 s, 7.33 s | 1,083,564,288 and 1,084,170,142 bytes |
+| | now, GNU `cp -a --reflink=auto` | 1.19 s, 0.64 s | 2.59 s, 1.86 s | 1,658,617 and 1,858,699 bytes |
+| TK's database volume, 3,242 files, 141,194,222 bytes | before | 0.49 s, 0.50 s | 0.58 s, 0.70 s | 141,868,469 and 141,703,566 bytes |
+| | now | 0.26 s, 0.49 s | 0.30 s, 0.32 s | 746,683 and 745,823 bytes |
+| TK's files volume, 110 files, 4,580,852 bytes | before | 0.06 s, 0.06 s | 0.05 s, 0.06 s | 5,048,148 and 5,039,958 bytes |
+| | now | 0.06 s, 0.07 s | 0.05 s, 0.06 s | 475,259 and 467,278 bytes |
+
+- With nothing copied, the same dataset counted 1.7 MB written in 40 s beside the PostgreSQL runs, and 31 MB and 1.9 MB beside TK's, whose lane was serving.
+- **The pool's `bcloneused` and `bclonesaved` were not read.** They are properties of the pool `guests` on the Proxmox host, which the builder holds no key to. On that host, `zpool get -Hp bcloneused,bclonesaved guests` before and after a copy gives them. cbusillo/launchplane-next#65 read them for the same two ways of copying on the other scratch container: the pool's saved bytes rose by the copy's size with GNU `cp`, and by nothing with BusyBox's.
+- `df` in the scratch container grew by about 543 MB for each copy of the PostgreSQL directory, shared or not: the dataset is charged for a copy either way.
+- The comparison costs two to three times the copy. Through Launchplane, from the first back soon answer to both of TK's volumes confirmed: 3.8 s, one run, where it was 3.9 to 4.2 s.
+- Not measured: a volume of real size. OPW's files are about 110 GB, and a copier has 300 s.
 
 ## On the test bed
 
