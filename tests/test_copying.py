@@ -400,10 +400,10 @@ def test_a_start_docker_refuses_once_while_the_lane_is_brought_back_keeps_the_re
     web_part, start = proxy.written[WEB_ADDRESS], proxy.host.start_database
     refusals = iter(["500 Server Error: Internal Server Error"])
 
-    def refused_once(container: str) -> None:
+    def refused_once(database: str) -> None:
         if (refusal := next(refusals, None)) is not None:
-            raise ContainerHostRefused(f"Starting the database {container} was refused: {refusal}")
-        start(container)
+            raise ContainerHostRefused(f"Starting the database {database} was refused: {refusal}")
+        start(database)
 
     monkeypatch.setattr(proxy.host, "start_database", refused_once)
     request = record.write(Asked(product="site", lane="testing", work=Work.COPY), CALLER, None)
