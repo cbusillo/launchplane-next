@@ -109,7 +109,7 @@ def test_a_repair_whose_login_read_is_refused_keeps_its_background_service_writi
     [repaired] = of_lane(running()["background_services"])
     started, beats = container_id(repaired["container"]), beats_written(database["container"])
     time.sleep(LONGER_THAN_A_REQUEST_IS_LEFT_BEFORE_IT_IS_TAKEN_UP_AGAIN)
-    kept, shown = ask(f"/requests/{asked['id']}")[1], judged()
+    kept, shown = read_between_attempts(asked["id"]), judged()
     assert (kept["stands"], {each["ended"] for each in kept["attempts"]}) == ("working", {"unfinished"}), kept
     assert (container_id(repaired["container"]), repaired["generation"]) == (started, asked["generation"])
     assert started.endswith("true") and beats_written(database["container"]) > beats + 20
@@ -152,6 +152,18 @@ def test_a_start_on_a_database_with_another_volume_ends_failed_with_its_data_kep
         on_scratch(f"docker rm --force {IMPOSTOR}; docker volume rm {ANOTHER_VOLUME}")
 
 
+# A request left working is taken up again every few seconds, and an attempt open while it is read has not ended yet.
+def read_between_attempts(request: int) -> dict[str, Any]:
+    read: list[dict[str, Any]] = []
+
+    def no_attempt_is_open() -> bool:
+        read[:] = [ask(f"/requests/{request}")[1]]
+        return None not in {each["ended"] for each in read[0]["attempts"]}
+
+    wait_for(no_attempt_is_open, seconds=30)
+    return read[0]
+
+
 def states_of_the_lane() -> set[str]:
     shown = running()
     databases = [database for data_set in of_lane(shown["data_sets"]) for database in data_set["databases"]]
@@ -175,7 +187,7 @@ def test_beginning_maintenance_whose_first_read_behind_back_soon_fails_stays_wor
 
         wait_for(left_working_over_the_read, seconds=30)
         time.sleep(LONGER_THAN_A_REQUEST_IS_LEFT_BEFORE_IT_IS_TAKEN_UP_AGAIN)
-        kept = ask(f"/requests/{asked['id']}")[1]
+        kept = read_between_attempts(asked["id"])
         assert (kept["stands"], {each["ended"] for each in kept["attempts"]}) == ("working", {"unfinished"}), kept
         assert (len(kept["attempts"]) > 1, "running" in states_of_the_lane(), judged()["work"]) == (
             True,

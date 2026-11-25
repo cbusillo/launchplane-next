@@ -1,9 +1,10 @@
 from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
-from launchplane.act import Cancelled, Lanes, Waiting
+from launchplane.act import Cancelled, Lanes, Status, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import BACK_SOON, DataSet, InstanceState, Verdict
@@ -418,20 +419,27 @@ def test_a_release_that_fails_deletes_nothing_and_the_copy_it_made_is_kept_until
     assert (kept.stands, deleted(kept), len(proxy.host.data_sets)) == (Stands.FAILED, [], 2)
 
 
-def test_an_old_copy_docker_will_not_delete_is_asked_for_twice_never_changes_the_release_s_answer_and_goes_with_the_next_one(
-    record: Record, monkeypatch: pytest.MonkeyPatch
+NO_ANSWERS = {
+    "refused": ContainerHostRefused("Deleting the data set on test was refused: volume is in use"),
+    "not answered": ContainerHostError("Deleting the data set on test failed: Read timed out."),
+}
+
+
+@pytest.mark.parametrize("no", NO_ANSWERS.values(), ids=NO_ANSWERS.keys())
+def test_an_old_copy_docker_will_not_or_does_not_delete_is_asked_for_twice_never_holds_the_switched_release_and_goes_with_the_next(
+    record: Record, monkeypatch: pytest.MonkeyPatch, no: ContainerHostError
 ) -> None:
-    def refuse(_host: PretendHost, found: DataSet) -> None:
-        raise ContainerHostRefused(f"Deleting the data set {found.data_set} on test was refused: volume is in use")
+    def refuse(_host: PretendHost, _found: DataSet) -> None:
+        raise no
 
     with monkeypatch.context() as refusing:
         refusing.setattr(PretendHost, "delete_data_set", refuse)
         kept, lanes, proxy, old = released_with_three_old_copies(record)
     assert (kept.stands, kept.answer and kept.answer["outcome"], kept.error) == (Stands.DONE, "switched", None)
-    assert [did for did, error in deleted(kept) if error and "volume is in use" in error] == [
+    assert [did for did, error in deleted(kept) if error == str(no)] == [
         f"delete the data set {each}" for each in old for _ in range(2)
     ]
-    assert set(old) < set(proxy.host.data_sets)
+    assert (set(old) < set(proxy.host.data_sets), record.unfinished()) == (True, [])
     lanes.move(BUILD_A, LATER, 1, Witness(generation=LATER, attempt=1))
     assert not set(old) & set(proxy.host.data_sets)
 
@@ -488,9 +496,16 @@ def test_an_old_copy_left_half_deleted_with_no_database_server_never_keeps_the_n
     )
 
 
+# The sentence under each data set of the card, by data set: a row with a server names its container before it.
+def data_set_rows(status: Status) -> dict[str, str]:
+    rows = [row for card in cards(status) for row in card.rows if row.name == "Data set"]
+    with_a_server = [(row.note or "").removeprefix("database-").split(" ", 1) for row in rows if row.value[0].drawn_as != "code"]
+    without = [(row.value[0].text, row.note or "") for row in rows if row.value[0].drawn_as == "code"]
+    return dict([*((name, note) for name, note in with_a_server), *without])
+
+
 def data_set_notes(lanes: Lanes) -> dict[str, str]:
-    notes = [row.note or "" for card in cards(lanes.read_status()) for row in card.rows if row.name == "Data set"]
-    return dict(each.removeprefix("database-").split(" ", 1) for each in notes)
+    return data_set_rows(lanes.read_status())
 
 
 def test_after_a_release_that_kept_the_lane_s_data_the_card_no_longer_says_the_last_release_replaced_what_it_was_copied_from() -> (
@@ -510,3 +525,24 @@ def test_after_a_release_that_kept_the_lane_s_data_the_card_no_longer_says_the_l
         copied_to: "Kept: the lane serves from it.",
         "data-1": "Kept: the lane's data was copied from it by an earlier release.",
     }
+
+
+def test_while_a_release_is_copying_the_card_says_its_new_copy_is_being_made_and_never_that_it_is_an_old_copy(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[dict[str, str]] = []
+    edit = PretendProxy.edit
+
+    def read_the_card_as_the_freeze_begins(proxy: PretendProxy, web_address: str, *sent: Any) -> str:  # noqa: ANN401 as edit takes them
+        if sent[-1] == BACK_SOON and not read:
+            status = Lanes(proxy.host, proxy, lambda _product: TK_UPDATING, read_unfinished=record.unfinished).read_status()
+            read.append(data_set_rows(status))
+        return edit(proxy, web_address, *sent)
+
+    monkeypatch.setattr(PretendProxy, "edit", read_the_card_as_the_freeze_begins)
+    kept, _, proxy = worked(record)
+    serving_from = proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)].data_set or ""
+    assert (kept.stands, read) == (
+        Stands.DONE,
+        [{"data-1": "Kept: the lane serves from it.", serving_from: "A request at work on the lane is making it."}],
+    )

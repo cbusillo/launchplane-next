@@ -355,7 +355,7 @@ class RemovalRefused(Refused):
     pass
 
 
-# Docker answered that it will not delete an old copy of a lane whose release has switched.
+# Docker would not delete an old copy of a lane whose release has switched, or gave no answer.
 class DeletionRefused(Refused):
     pass
 

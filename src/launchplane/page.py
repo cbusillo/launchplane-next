@@ -272,13 +272,18 @@ def without_a_server(found: DataSet) -> str:
 
 
 GOES = "An old copy: the next release that switches deletes it."
+BEING_MADE = "A request at work on the lane is making it."
 
 
-# Why each data set is still there, by name, said only of a lane with an instance receiving visitors.
-def kept_notes(judged: Judgement | None) -> dict[str, str]:
+# Said only of a lane with an instance receiving visitors. A copy is old only where no request at work made it.
+def kept_notes(judged: Judgement | None, requests: Sequence[Kept]) -> dict[str, str]:
     if judged is None or judged.lane.active is None:
         return {}
-    return {found.data_set: why_kept(judged.lane, found) or GOES for found in judged.lane.data_sets}
+    at_work = {each.generation for each in requests if each.stands is Stands.WORKING}
+    return {
+        found.data_set: why_kept(judged.lane, found) or (BEING_MADE if found.generation in at_work else GOES)
+        for found in judged.lane.data_sets
+    }
 
 
 def part_row(name: str, made_from: str, build: str | None, container: str, pills: list[Pill]) -> Row:
@@ -298,9 +303,9 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
     instances = sorted(of_lane(on_host.instances), key=lambda each: (each.container != active, each.container))
     data_sets = of_lane(on_host.data_sets)
     receiving = [Pill(text="active", tone=Standing.GOOD)]
-    kept = kept_notes(judged)
     requests = [each for each in shown_requests(status) if (each.product, each.lane) == (entry.product, entry.lane)]
     failed = failed_check(requests)
+    kept = kept_notes(judged, requests)
     return Card(
         title=f"{entry.product} · {entry.lane or 'no lane'}" if entry.product else "A web address with no instance on the host",
         pills=[] if judged is None else lane_pills(judged, failed),

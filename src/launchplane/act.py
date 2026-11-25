@@ -512,11 +512,14 @@ class Lanes:
     def take_behind_back_soon(self, web_address: str, action: Action, witness: Witness, *, with_logs: bool = False) -> Event:
         try:
             return self.take(action, witness, behind_back_soon=not with_logs)
-        except ContainerHostRefused as error:
-            if isinstance(action, steps.CopyVolume):
-                return steps.CopyRefused(action.destination, str(error))
+        except ContainerHostError as error:
+            # An old copy's deletion that Docker did not answer counts as one it refused, so it too is given up on.
             if isinstance(action, steps.DeleteDataSet):
                 return steps.DeletionRefused(action.found.data_set, str(error))
+            if not isinstance(error, ContainerHostRefused):
+                raise
+            if isinstance(action, steps.CopyVolume):
+                return steps.CopyRefused(action.destination, str(error))
             if not self.proxy.read().route_of(web_address).in_maintenance:
                 raise
             raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error
