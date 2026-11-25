@@ -26,6 +26,7 @@ from launchplane.data_set import (
 )
 from launchplane.docker_answers import (
     BUILD_LABEL,
+    COPY_OF_LABEL,
     DATA_SET_LABEL,
     DOCKER_CONTAINER_DETAILS,
     DOCKER_NETWORK,
@@ -57,7 +58,7 @@ from launchplane.docker_answers import (
     sent,
     tar_of,
 )
-from launchplane.host_logins import HostLogins
+from launchplane.host_logins import Filters, HostLogins
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_of
 from launchplane.instance import (
     LANE_NETWORK,
@@ -72,6 +73,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
+from launchplane.steps import CopyVolume
 from launchplane.telling import NOBODY, Said, Witness
 
 DOCKER_API_VERSION = "1.47"
@@ -82,6 +84,11 @@ LOG_TAIL_LINES = 20
 DATABASE_DEADLINE_SECONDS = 60
 BACKGROUND_SERVICE_DEADLINE_MARGIN_SECONDS = 15
 POLL_SECONDS = 0.5
+# How long one volume may take to copy. Its lane shows the back soon page for that long.
+COPY_DEADLINE_SECONDS = 300
+# Everything in the volume as it is, then every byte read again from both: a file the copy lacks or has too many fails it.
+# The copy is written where the database image keeps its one volume, so the copier is given no other volume to write.
+COPY_COMMAND = ["sh", "-c", f"cp -a /from/. {DATA_PATH}/ && diff -r /from {DATA_PATH} && sync"]
 type RestartPolicy = Literal["always", "unless-stopped"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
@@ -409,11 +416,36 @@ class ContainerHost:
             labels = data_set_labels(product, lane, data_set) | stamp_of(generation)
             self.create_network(f"launchplane-data-{data_set}", labels, quiet=True)
 
-    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None:
+    def create_data_set_volume(
+        self, product: str, lane: str, data_set: str, files: bool = False, copy_of: str | None = None, generation: str | None = None
+    ) -> None:
         part, marks = ("files", {PART_LABEL: "files"}) if files else ("database", {})
         with attempting(f"Making the {part} volume of the data set {data_set}", self.address):
-            labels = data_set_labels(product, lane, data_set) | marks
+            copy = {} if copy_of is None else {COPY_OF_LABEL: copy_of}
+            labels = data_set_labels(product, lane, data_set) | marks | copy | stamp_of(generation)
             self.client.volumes.create(f"launchplane-data-{data_set}-{part}", labels=labels)
+
+    # Whether anything can still write the volume is asked at the moment of the copy, of every container on the host.
+    def copy_volume(self, copy: CopyVolume) -> None:
+        with attempting(f"Copying the volume {copy.source} to {copy.destination}", self.address):
+            mounted: Filters = {"volume": copy.source, "status": "running"}
+            writers = self.client.containers.list(filters=mounted)
+            if writers:
+                names = ", ".join(sorted(str(each.name) for each in writers))
+                raise ContainerHostRefused(f"{names} runs with the volume {copy.source} mounted, so it was not copied.")
+            copier = self.client.containers.create(
+                copy.image,
+                COPY_COMMAND,
+                name=f"{copy.destination}-copier",
+                labels=data_set_labels(copy.product, copy.lane, copy.data_set) | {PART_LABEL: "copier"},
+                volumes={copy.source: {"bind": "/from", "mode": "ro"}, copy.destination: {"bind": DATA_PATH, "mode": "rw"}},
+                network_mode="none",
+            )
+            copier.start()
+            exit_code = copier.wait(timeout=COPY_DEADLINE_SECONDS)["StatusCode"]
+            if exit_code != 0:
+                said = copier.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip() or "no log"
+                raise ContainerHostRefused(f"The copy of {copy.source} to {copy.destination} ended with code {exit_code}: {said}")
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         with attempting(f"Making the database of the data set {data_set}", self.address):
@@ -464,8 +496,8 @@ class ContainerHost:
 
     def delete_data_set(self, found: DataSet) -> None:
         with attempting(f"Deleting the data set {found.data_set}", self.address):
-            for database in found.databases:
-                self.retire_container(database.container)
+            for part in (*found.databases, *found.copies):
+                self.retire_container(part.container)
             for volume in (*found.volumes, *found.files):
                 with suppress(NotFound):
                     self.client.volumes.get(volume).remove()

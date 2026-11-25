@@ -1,6 +1,6 @@
 # A lane with a database
 
-A product that says it has a database runs each lane against a data set: a PostgreSQL server on its own quiet network, with its data on a Docker volume. A release that does not change the data's structure starts the new instance on the same data set. A product of [the Odoo kind](odoo.md#the-data-set) has a files volume in its data set too. Cloning a data set is not built yet (README, open question 14).
+A product that says it has a database runs each lane against a data set: a PostgreSQL server on its own quiet network, with its data on a Docker volume. A release that does not change the data's structure starts the new instance on the same data set. A product of [the Odoo kind](odoo.md#the-data-set) has a files volume in its data set too. A lane's data is [copied by a call of its own](copying.md), and no release uses a copy yet (README, open question 14).
 
 ## The product description
 
@@ -32,6 +32,8 @@ Everything is tied by labels and by networks, never by container names. A data s
 | Database volume | `launchplane-data-<data set>-database` | the same |
 | Files volume, for a product that keeps files | `launchplane-data-<data set>-files` | the same, `launchplane.part=files` |
 | Database server | `<product>-<lane>-database-<data set>` | the same, `launchplane.part=database`, `launchplane.secret-variables` |
+| Volume of [a copy](copying.md) | as the volume it is a copy of | the same as that volume, `launchplane.copy-of`, `launchplane.generation` |
+| Copier of a copy's volume | `<the copy's volume>-copier` | the copy's product, lane and data set, `launchplane.part=copier` |
 | Web part of an instance | `<product>-<lane>-<12 hex>` | product, lane, build, `launchplane.part=web`, `launchplane.data-set`, `launchplane.secret-variables` |
 | Background service of an instance | `<web part's container>-background-service` | the same with `launchplane.part=background-service`, and `launchplane.instance=<web part's container>` |
 
@@ -129,6 +131,8 @@ curl -X POST http://launchplane.shiny:8700/lanes/<product>/<lane>/retire \
 The data set is deleted once the lane has no background service and no instance left: its database servers, then its volumes, then its networks. The answer's `outcome` is `deleted` and its `deleted_data_set` names it. A name that is not one of this lane's data sets deletes nothing, and the request ends `failed` naming it once the rest of the retire is done. The one exception is a name an earlier attempt of the same request sent the deletion for: that answers `deleted`. This is read from the request's own events, for the answer only.
 
 A data set with two networks, two volumes or two database servers carrying its labels is never deleted: which of them is its data is not known. The rest of the retire is done, then the call answers `503` naming both and deletes nothing of the set. Remove by hand the one that is not its data, then ask again.
+
+A data set that has [a copy](copying.md#a-copy-on-the-host) on the host is not deleted before the copy. The rest of the retire is done, then the call answers `503` naming the copy. Name the copy first.
 
 ## The judgement on a lane
 

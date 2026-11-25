@@ -109,6 +109,15 @@ class DataSetDatabase(BaseModel):
     unheld_logins: Answered[tuple[str, ...]] = None
 
 
+class VolumeCopy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    container: str
+    volume: str
+    finished: bool
+    stopped: bool
+
+
 class DataSet(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -119,8 +128,16 @@ class DataSet(BaseModel):
     volumes: tuple[str, ...]
     databases: tuple[DataSetDatabase, ...]
     files: tuple[str, ...] = ()
-    # Stamped on its network, the first part of it that is made.
+    # Stamped on the first part of it that is made: its network, or the volumes of a copy.
     generation: Stamp = None
+    copy_of: str | None = None
+    copies: tuple[VolumeCopy, ...] = ()
+
+    # Each of its volumes was written by one copier that finished, and nothing began a copy that did not finish.
+    @property
+    def is_whole_copy(self) -> bool:
+        written = sorted(each.volume for each in self.copies if each.finished)
+        return bool(self.volumes) and len(written) == len(self.copies) and written == sorted((*self.volumes, *self.files))
 
 
 # How a kind starts its web part, where the build does not say. The files of its data set are mounted at `files`.

@@ -9,6 +9,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from launchplane import steps
 from launchplane.act import Cancelled, CouldNotPutBack, Stopped, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, LoginRemovalRefused
 from launchplane.gate import Answer as GateAnswer
@@ -34,10 +35,11 @@ NOT_A_SUCCESS = {
     MaintenanceOutcome.DATABASE_KILLED,
     MaintenanceOutcome.WEB_PART_FAILED,
     MaintenanceOutcome.BACKGROUND_SERVICE_FAILED,
+    steps.CopyOutcome.NOT_COPIED,
 }
 log = logging.getLogger(__name__)
 
-type Answer = MoveResult | RetireResult | MaintenanceResult
+type Answer = MoveResult | RetireResult | MaintenanceResult | steps.CopyResult
 type Lane = tuple[str, str]
 
 
@@ -49,6 +51,7 @@ class Carries(Protocol):
     def retire(self, product: str, lane: str, delete_data_set: str | None, witness: Witness, /) -> RetireResult: ...
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
     def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult: ...
+    def copy(self, product: str, lane: str, generation: str, witness: Witness, /) -> steps.CopyResult: ...
 
 
 # How a call came out, before it is written. `verdict` is the gate's verdict the call itself ended on: committed for a
@@ -78,6 +81,8 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
             return lanes.begin_maintenance(product, lane, witness)
         case Work.END_MAINTENANCE:
             return lanes.end_maintenance(product, lane, witness)
+        case Work.COPY:
+            return lanes.copy(product, lane, request.generation, witness)
 
 
 # Whether a line says the request changed something. A change of the route or a command for a part says so by its own line.
@@ -332,7 +337,7 @@ class Worker:
                 return Ending(Stands.FAILED, error=f"{why} Nothing was deleted.")
             answer = answer.model_copy(update={"outcome": RetireOutcome.DELETED, "deleted_data_set": named})
         failed = answer.outcome in NOT_A_SUCCESS
-        error = answer.error if isinstance(answer, MoveResult | MaintenanceResult) else None
+        error = None if isinstance(answer, RetireResult) else answer.error
         switched = isinstance(answer, MoveResult) and answer.outcome is Outcome.SWITCHED
         verdict = Verdict.COMMITTED if switched else Verdict.NONE
         return Ending(Stands.FAILED if failed else Stands.DONE, answer, error if failed else None, verdict)

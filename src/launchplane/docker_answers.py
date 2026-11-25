@@ -23,6 +23,7 @@ from launchplane.instance import (
     RunningInstance,
     Stamp,
     Unread,
+    VolumeCopy,
     is_generation,
 )
 from launchplane.steps import Verb
@@ -35,12 +36,13 @@ PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
 GENERATION_LABEL = "launchplane.generation"
+COPY_OF_LABEL = "launchplane.copy-of"
 GATEWAY_MODE_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
 QUIET_GATEWAY_MODE = "isolated"
 MOST_READS = 3
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
-type Part = Literal["web", "background-service", "database"]
+type Part = Literal["web", "background-service", "database", "copier"]
 
 INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
     "created": InstanceState.STOPPED,
@@ -135,6 +137,7 @@ class DockerMount(BaseModel):
     name: str | None = Field(default=None, alias="Name")
     source: str = Field(alias="Source")
     destination: str = Field(alias="Destination")
+    writable: bool = Field(default=True, alias="RW")
 
 
 class DockerContainerSummary(BaseModel):
@@ -189,6 +192,7 @@ class DockerContainerState(BaseModel):
     paused: bool = Field(alias="Paused")
     started_at: AwareDatetime = Field(alias="StartedAt")
     exit_code: int = Field(alias="ExitCode")
+    status: str = Field(default="", alias="Status")
 
 
 class DockerContainerDetails(BaseModel):
@@ -235,7 +239,7 @@ def required_label(labels: dict[str, str], label: str, what: str) -> str:
 
 def part_of(summary: DockerContainerSummary) -> Part:
     part = summary.labels.get(PART_LABEL, "web")
-    if part not in ("web", "background-service", "database"):
+    if part not in ("web", "background-service", "database", "copier"):
         raise ContainerHostError(f"The container {summary.name} is marked as the part {part}, which Launchplane does not know.")
     return part
 
@@ -341,6 +345,14 @@ def database_part(summary: DockerContainerSummary, details: Mapping[str, DockerC
     )
 
 
+# Its state is read from its description: the list can still say running just after it has exited.
+def volume_copy(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails]) -> VolumeCopy:
+    written = [mount.name or mount.source for mount in summary.mounts if mount.writable]
+    state = described(summary, details, "copier").state
+    finished = (state.status, state.exit_code) == ("exited", 0)
+    return VolumeCopy(container=summary.name, volume="".join(written[:1]), finished=finished, stopped=not state.running)
+
+
 def network_from(network: DockerNetworkSummary) -> HostNetwork:
     return HostNetwork(name=network.name, is_quiet=is_quiet(network))
 
@@ -349,11 +361,16 @@ def data_sets_from(
     databases: Iterable[tuple[DataSetKey, DataSetDatabase]],
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
+    copies: Iterable[tuple[DataSetKey, VolumeCopy]] = (),
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
     made_by = {key: generation_in(network.labels or {}, f"the network {network.name}") for key, network in marked}
     keyed = [(data_set_key(volume.labels, f"the volume {volume.name}"), volume) for volume in volumes]
+    stamped = [(key, volume) for key, volume in keyed if GENERATION_LABEL in volume.labels]
+    made_by = {key: generation_in(volume.labels, f"the volume {volume.name}") for key, volume in stamped} | made_by
+    copy_of = {key: volume.labels[COPY_OF_LABEL] for key, volume in keyed if COPY_OF_LABEL in volume.labels}
+    by_copier = grouped(copies)
     by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) != "files")
     by_files = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) == "files")
     by_database = grouped(databases)
@@ -367,6 +384,8 @@ def data_sets_from(
             databases=tuple(sorted(by_database.get(key, []), key=lambda database: database.container)),
             generation=made_by.get(key),
             files=tuple(sorted(by_files.get(key, []))),
+            copy_of=copy_of.get(key),
+            copies=tuple(sorted(by_copier.get(key, []), key=lambda copy: copy.container)),
         )
         for key in sorted(by_network.keys() | by_volume.keys() | by_files.keys() | by_database.keys(), key=str)
     ]
@@ -408,7 +427,7 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
     every_network = checked(DOCKER_NETWORK_LIST, networks, "network list")
     volume_list = checked(DOCKER_VOLUME_LIST, volumes, "volume list").volumes or []
     marked_networks = [network for network in every_network if PRODUCT_LABEL in (network.labels or {})]
-    by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "background-service": [], "database": []}
+    by_part: dict[Part, list[DockerContainerSummary]] = {"web": [], "background-service": [], "database": [], "copier": []}
     for summary in found.summaries:
         by_part[part_of(summary)].append(summary)
     details = found.details
@@ -417,10 +436,11 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
         now = checked(DOCKER_SYSTEM_TIME, system, "system information").system_time
         background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
     databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
+    copies = [(data_set_key(summary.labels, summary.name), volume_copy(summary, details)) for summary in by_part["copier"]]
     return OnHost(
         instances=[instance_from(summary) for summary in by_part["web"]],
         background_services=background_services,
-        data_sets=data_sets_from(databases, marked_networks, volume_list),
+        data_sets=data_sets_from(databases, marked_networks, volume_list, copies),
         networks=[network_from(network) for network in every_network],
     )
 

@@ -44,7 +44,7 @@ from launchplane.record import (
 )
 from launchplane.record import Request as KeptRequest
 from launchplane.secret_boundary import CleanedStream, Secrets, cleaned, cleaned_body
-from launchplane.steps import MaintenanceResult, MoveResult, RetireResult
+from launchplane.steps import CopyResult, MaintenanceResult, MoveResult, RetireResult
 from launchplane.telling import Witness
 from launchplane.worker import Carries, Worker, carried_out
 
@@ -486,6 +486,16 @@ def add_lane_calls(app: FastAPI, calls: Calls, builds: Builds) -> None:
         wait: Annotated[float, WAIT] = 0,
     ) -> MaintenanceResult | NotFinished | Kept:
         return calls.keep(Asked(product=product, lane=lane, work=Work.END_MAINTENANCE), MaintenanceResult, http, response, wait)
+
+    @app.post("/lanes/{product}/{lane}/copy", responses=responses_to_a_request(CopyResult))
+    def copy_lane_data(
+        product: Annotated[str, SLUG],
+        lane: Annotated[str, SLUG],
+        http: Request,
+        response: Response,
+        wait: Annotated[float, WAIT] = 0,
+    ) -> CopyResult | NotFinished | Kept:
+        return calls.keep(Asked(product=product, lane=lane, work=Work.COPY), CopyResult, http, response, wait)
 
 
 def add_request_calls(app: FastAPI, calls: Calls) -> None:

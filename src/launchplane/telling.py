@@ -91,6 +91,8 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.CreateDataSetNetwork: lambda step: f"make the network of the data set {step.data_set}",
     steps.CreateDataSetVolume: lambda step: f"make the {step.volume} of the data set {step.data_set}",
     steps.CreateDatabase: lambda step: f"make the database server of the data set {step.data_set}",
+    steps.CopyVolume: lambda step: f"copy the volume {step.source} to {step.destination}",
+    steps.GiveUp: lambda step: f"give the copy up: {step.why}",
     steps.StartDatabase: lambda step: f"start the database {step.container}",
     steps.AwaitDatabase: lambda step: f"wait for the database {step.container} to accept connections",
     steps.DeleteDataSet: lambda step: f"delete the data set {step.found.data_set}",

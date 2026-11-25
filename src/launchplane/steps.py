@@ -71,6 +71,19 @@ class MaintenanceResult(Result):
     error: str | None = None
 
 
+class CopyOutcome(StrEnum):
+    COPIED = "copied"
+    NOT_COPIED = "not copied"
+
+
+class CopyResult(Result):
+    outcome: CopyOutcome
+    container_receiving_visitors: str | None
+    data_set: str | None
+    copied_to: str | None
+    error: str | None = None
+
+
 # The answer of a request that a cancel ended: what was done to put its lane back as it was.
 class PutBack(Result):
     put_back: list[str] = []
@@ -114,10 +127,27 @@ class CreateDataSetVolume:
     lane: str
     data_set: str
     files: bool = False
+    copy_of: str | None = None
+    generation: str | None = None
 
     @property
     def volume(self) -> str:
         return "files volume" if self.files else "database volume"
+
+
+@dataclass(frozen=True)
+class CopyVolume:
+    product: str
+    lane: str
+    data_set: str
+    source: str
+    destination: str
+    image: str
+
+
+@dataclass(frozen=True)
+class GiveUp:
+    why: str
 
 
 @dataclass(frozen=True)
@@ -305,6 +335,10 @@ class BackgroundServiceRefused(Refused):
     pass
 
 
+class CopyRefused(Refused):
+    pass
+
+
 # Docker answered that it will not remove the part.
 class RemovalRefused(Refused):
     pass
@@ -358,6 +392,8 @@ type Action = (
     | Abandon
     | CreateDataSetNetwork
     | CreateDataSetVolume
+    | CopyVolume
+    | GiveUp
     | CreateDatabase
     | StartDatabase
     | AwaitDatabase

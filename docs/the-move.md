@@ -156,7 +156,7 @@ uv run pytest tests/test_interruptions.py -v
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_host_answers.py -v
 ```
 
-`LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_odoo.py -v` runs TK's real build as the lane `testing` of `test-bed-tk`: see [the TK watch](#the-tk-watch).
+`LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_odoo.py -v` runs TK's real build as the lane `testing` of `test-bed-tk`: see [the TK watch](#the-tk-watch). `tests/test_bed_copy.py` copies that lane's data, whole and killed between its volumes: see [the copy watch](#the-copy-watch).
 
 Which bed the tests run against is [chosen by settings](what-is-running.md#choosing-the-test-bed), and these lines name the first one. Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
 
@@ -403,6 +403,84 @@ curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
 
 ```
 uv run python -m tests.bed_odoo tear-down watch-tk
+```
+
+### The copy watch
+
+[A copy of a lane's data](copying.md), whole and then killed between its two volumes. Every block pastes into zsh as it stands, from this repository. The first block brings up TK's build as the lane `testing` of `watch-copy`, as [the TK watch](#the-tk-watch) does, and writes one invented lead with an attachment through Odoo at the lane's web address. It takes about three minutes. Open `http://launchplane.shiny:8700/` beside it.
+
+```
+L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'; V=http://docker-lp-scratch.shiny/; P=/lanes/watch-copy/testing
+export LAUNCHPLANE_URL=$L LAUNCHPLANE_CONTROL_SHELL='ssh root@launchplane.shiny' LAUNCHPLANE_SCRATCH_SHELL='ssh root@docker-lp-scratch.shiny'
+site() { curl -s -o /dev/null -w '%{http_code}' -H 'Host: testing.watch-copy.test' "$V"; }
+stands() { curl -s "$L/requests/$1" | python3 -c 'import sys, json; r = json.load(sys.stdin); print(r["stands"], (r["answer"] or {}).get("outcome", ""), (r["answer"] or {}).get("copied_to", ""))'; }
+uv run python -m tests.bed_odoo set-up watch-copy >/dev/null
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' >/dev/null
+uv run python -m tests.bed_odoo seed watch-copy >/dev/null
+curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' >/dev/null
+uv run python -m tests.bed_odoo lead watch-copy
+```
+
+1. **The lane serves, with the lead.** Six lines: the `instance` the web address is sent to, its `build`, `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…`, its two `volumes`, `launchplane-data-…-database` and `…-files`, then what Odoo answers there: `lead: lead`, `attachment: 2663df39…`, the SHA-256 of the attachment's bytes, and `written:` with nothing after it.
+
+   **The card** `watch-copy · testing` reads `good`, its web address `answering`. `Instance 1` is `running` and `active`, and the data set's server is `running`.
+
+```
+R=$(curl -s -X POST "$L$P/copy" | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])')
+for each in $(seq 16); do echo "$(site) $(stands $R)"; sleep 1; done
+C=$(stands $R | cut -d' ' -f3); uv run python -m tests.bed_odoo show-copy watch-copy testing $C
+```
+
+2. **A whole copy.** The loop prints what a visitor gets beside how the request stands, once a second: `200 working`, then `503 working` for about 11 s, the back soon page, then `200 done copied` and the copy's name. The last command reads the copy from its own two volumes and nothing else, in a container that reaches no network: `data_set` is the copy, its `volumes` are two that step 1 did not show, and `lead`, `attachment` and `written` are as in step 1.
+
+   **The card,** while the loop prints `503`: the pills `in maintenance` and `work under way`, the web address `shows the back soon page`, and the request `working` with what it has done so far, ending in a `stop` or in `copy the volume` and the two volumes' names. A row `Found` says a part still running in a lane in maintenance, `under way`, and the copy's row says `is a copy, not whole, of` the lane's data set. **Afterwards** it reads `good` and `answering` again. The request is `done`: `It ended as done.` and its lines, from `make the database volume of the data set` through the two `copy the volume … to …` to `send testing.watch-copy.test to` the instance, `: done`. There is no `switch` among them. A new row says the copy `is a whole copy of` the lane's data set, `kept offline: no instance is started on it`.
+
+```
+uv run python -m tests.bed_odoo write watch-copy testing 'after the copy'
+```
+
+3. **The same instance takes a write.** The six lines of step 1 again, with the same `instance`, `build` and `volumes`, and `written: Written after the copy`: a lead made through Odoo just now and read back.
+
+```
+ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
+until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
+curl -s -X PUT "$H/holds/before.host.copy_volume?only=-files" >/dev/null
+R=$(curl -s -X POST "$L$P/copy" | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
+until curl -s "$H/holds" | grep -q '"stopped_at": \["before.host.copy_volume"\]'; do sleep 1; done
+site; echo; ssh root@docker-lp-scratch.shiny 'docker ps --all --filter label=launchplane.product=watch-copy --format "{{.Names}}: {{.Status}}"'
+```
+
+4. **Held between the two volumes.** The first `ssh` puts the bed into [holding mode](#holding-a-move-and-interrupting-it). The block ends once the second copy is stopped at its hold, with the database volume copied and the files volume not. A visitor gets `503`. The second `ssh` is to the scratch container: the instance and the database server are `Exited`, the server with `(0)`, and there are three copiers, each `Exited (0)`: the two of step 2 and one `…-database-copier` of the new copy. It has no `…-files-copier`.
+
+   **The card** has `in maintenance` and `work under way`. The request is `working`, and its note ends `copy the volume` and the names of the two database volumes.
+
+```
+curl -s -X PUT "$H/holds/after.proxy.edit?only=testing.watch-copy.test" >/dev/null
+curl -s -X POST "$H/kill"; until curl -s "$H/holds" | grep -q '"stopped_at": \["after.proxy.edit"\]'; do sleep 1; done
+sleep 3; site; echo; uv run python -m tests.bed_odoo write watch-copy testing 'after the kill'
+```
+
+5. **Killed, and the lane is brought back by itself.** Launchplane is killed as `kill -9` does, and systemd starts it again. Nothing lets the held copy go on: the request is taken up again, gives the copy up, and brings the lane back. The block ends once that attempt is stopped at a second hold, with its change of the route made on the host and its reply not yet had. A visitor gets `200`. The last command writes a lead through Odoo and prints the lane: the `instance`, `build` and `volumes` of step 1, `lead: lead`, the same `attachment`, and `written` ending `Written after the kill`.
+
+   **The card** reads `work under way`, its web address `answering`. The request is `working`, `Taken up 2 times`, the last attempt ended by `Launchplane stopped, or lost its record, while it was at work on it.` Its lines go on from the copy of the database volume with `give the copy up: An earlier attempt began the copy` and its name, `and did not finish it`, then the `start` of the database server and of the instance, its `check`, and last `about to send testing.watch-copy.test to` the instance.
+
+```
+curl -s -X POST "$H/kill"; until curl -sf -X DELETE "$H/holds" >/dev/null; do sleep 1; done
+until stands $R | grep -q failed; do sleep 1; done; stands $R
+curl -s "$L/requests/$R" | python3 -c 'import sys, json; r = json.load(sys.stdin); print([a["ended"] for a in r["attempts"]]); print(r["error"])'
+uv run python -m tests.bed_odoo show watch-copy
+C=$(stands $R | cut -d' ' -f3); ssh root@docker-lp-scratch.shiny "docker run --rm --network none --volume launchplane-data-$C-files:/copy:ro busybox:1.37 ls -A /copy | wc -l; docker ps --all --quiet --filter volume=launchplane-data-$C-files | wc -l"
+```
+
+6. **Taken up a third time, the same request changes nothing.** Launchplane is killed again, with the lane already back, and the holds are let go. The request ends `failed`, `not copied`, with the name of what it left. Its attempts are `interrupted`, `interrupted` and `failed`, and its error is that a copy was begun by an attempt of this request that did not finish it and is never gone on with, that what was copied is kept with no instance started on it, and that asking again makes a new copy. The lane is as in step 5, the write `Written after the kill` with it. The last line counts the files in the files volume of the copy that was not finished, and the containers that have it mounted: `0` and `0`.
+
+   **The card** reads `good` and `answering`. The request is `failed`, and its note is that error and its lines: the last is `send testing.watch-copy.test to` the instance, `: may have been sent, no answer, then read as made by this request`, and the third attempt added none. Two rows are copies: the one of step 2, `a whole copy`, and this one, `is a copy, not whole, of` the lane's data set, `kept offline: no instance is started on it`. Nothing is left to do by hand.
+
+7. **Put the bed back.** The plain service is started, and the tear-down retires the lane with each copy and then its data set:
+
+```
+ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'; until curl -sf "$L/requests" >/dev/null; do sleep 1; done
+uv run python -m tests.bed_odoo tear-down watch-copy
 ```
 
 ### The login watch

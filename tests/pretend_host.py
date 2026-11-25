@@ -34,13 +34,14 @@ from launchplane.instance import (
     RunningInstance,
     Unread,
     Verdict,
+    VolumeCopy,
     WrittenRoute,
     background_service_container_of,
 )
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.steps import FreshNames, MaintenanceResult, MoveResult, RetireResult, Verb
+from launchplane.steps import CopyResult, CopyVolume, FreshNames, MaintenanceResult, MoveResult, RetireResult, Verb
 from launchplane.telling import NOBODY, Said, Witness
 
 WEB_ADDRESS = "testing.site.test"
@@ -82,6 +83,7 @@ class PretendHost:
         self.holders_unread: set[str] = set()
         self.removals_refused: set[str] = set()
         self.commands_refused: set[str] = set()
+        self.copies_refused: set[str] = set()
         # The commands Docker does, once, and whose reply never comes.
         self.replies_lost: set[str] = set()
         # Each login a database server was sent the making or the removing of.
@@ -242,12 +244,25 @@ class PretendHost:
         self.change_data_set(product, lane, data_set, networks=(network,), generation=generation)
         self.record(f"network {data_set}")
 
-    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None:
+    def create_data_set_volume(
+        self, product: str, lane: str, data_set: str, files: bool = False, copy_of: str | None = None, generation: str | None = None
+    ) -> None:
+        marks = {} if copy_of is None else {"copy_of": copy_of, "generation": generation}
         if files:
-            self.change_data_set(product, lane, data_set, files=(f"files-{data_set}",))
+            self.change_data_set(product, lane, data_set, files=(f"files-{data_set}",), **marks)
         else:
-            self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",))
+            self.change_data_set(product, lane, data_set, volumes=(f"volume-{data_set}",), **marks)
         self.record(f"{'files' if files else 'volume'} {data_set}")
+
+    # As Docker keeps it: the copier stays, and says whether it ran to its end. One that is refused wrote a part.
+    def copy_volume(self, copy: CopyVolume) -> None:
+        refused = copy.destination in self.copies_refused
+        copier = VolumeCopy(container=f"{copy.destination}-copier", volume=copy.destination, finished=not refused, stopped=True)
+        found = self.data_sets[copy.data_set]
+        self.data_sets[copy.data_set] = found.model_copy(update={"copies": (*found.copies, copier)})
+        self.record(f"copy {copy.source} to {copy.destination}")
+        if refused:
+            raise ContainerHostRefused(f"The copy of the volume {copy.source} to {copy.destination} ended with code 1")
 
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None:
         database = DataSetDatabase(
@@ -403,6 +418,9 @@ class GateNeverAsked:
     def clean_up(self, product: str, lane: str, generation: str, attempt: int, witness: Witness, /, *, logins: bool) -> list[str]:
         assert self.answers.verdict is Verdict.NONE and product and lane and generation and attempt and witness and logins
         return []
+
+    def copy(self, product: str, lane: str, generation: str, witness: Witness, /) -> CopyResult:
+        raise AssertionError(f"a copy of {lane} of {product} was asked for as {generation} by {witness}")
 
 
 # What the calls are given where no request is worked: no lane is ever asked to do anything.

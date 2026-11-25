@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
 
-from launchplane import maintenance, plan, steps
+from launchplane import copying, maintenance, plan, steps
 from launchplane.container_host import PartStopped
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused, observing
 from launchplane.gate import ALREADY, LOST
@@ -42,6 +42,7 @@ from launchplane.record import Kept, RecordError, Stands
 from launchplane.steps import (
     Action,
     Cancel,
+    CopyResult,
     Done,
     Event,
     FreshNames,
@@ -67,7 +68,10 @@ class InstanceHost(Protocol):
     ) -> None: ...
     def await_background_service(self, container: str, steady_seconds: float) -> None: ...
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None: ...
-    def create_data_set_volume(self, product: str, lane: str, data_set: str, files: bool = False) -> None: ...
+    def create_data_set_volume(
+        self, product: str, lane: str, data_set: str, files: bool = False, copy_of: str | None = None, generation: str | None = None
+    ) -> None: ...
+    def copy_volume(self, copy: steps.CopyVolume) -> None: ...
     def create_database(self, product: str, lane: str, data_set: str, network: str, volume: str, image: str) -> None: ...
     def start_database(self, container: str) -> None: ...
     def await_database(self, container: str) -> None: ...
@@ -174,6 +178,8 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.Abandon: lambda _host, proxy, step, _by: proxy.gate.abandon(step.web_address, step.generation),
     steps.StopPart: lambda host, _proxy, step, by: host.stop_part(step.container, by),
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
+    steps.GiveUp: lambda _host, _proxy, _step, _by: None,
+    steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
 }
 
 
@@ -420,6 +426,16 @@ class Lanes:
             witness,
         )
 
+    def copy(self, product: str, lane: str, generation: str, witness: Witness = NOBODY) -> CopyResult:
+        description = self.read_product(product)
+        fresh = self.name_fresh(LaneBuild(product=product, lane=lane, build="")).data_set
+        return settle(
+            *self.judging(product, lane, description, Work.COPY),
+            lambda judged, done, cancel: copying.decide(copying.Copying(judged, description, generation, fresh, done), cancel),
+            self.take_for_a_copy,
+            witness,
+        )
+
     # How a call reads its lane, and how it judges what it read. A move answers from what the status call sees, so it
     # asks its lane's web address too.
     def judging(
@@ -477,6 +493,18 @@ class Lanes:
             return self.discard(action, witness)
         TAKE[type(action)](self.host, self.proxy, action, witness)
         return action
+
+    # Behind the back soon page Docker's no ends nothing: a copy refused is given up, and any other step is tried again
+    # from a later reading until the lane is back. Before the page shows, a refusal fails the request as any does.
+    def take_for_a_copy(self, action: Action, witness: Witness) -> Event:
+        try:
+            return self.take(action, witness, behind_back_soon=True)
+        except ContainerHostRefused as error:
+            if isinstance(action, steps.CopyVolume):
+                return steps.CopyRefused(action.destination, str(error))
+            if isinstance(action, steps.CreateDataSetVolume) or (isinstance(action, steps.EditRoute) and action.to == BACK_SOON):
+                raise
+            raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error
 
     def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:
         edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
