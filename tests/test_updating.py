@@ -10,7 +10,7 @@ from launchplane.judge import Condition, Work
 from launchplane.page import cards
 from launchplane.plan import lane_data_set
 from launchplane.record import Asked, Kept, Record, Stands
-from launchplane.steps import Outcome, Stop
+from launchplane.steps import CopyVolume, Outcome, Stop
 from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
@@ -138,6 +138,26 @@ def test_an_update_whose_reply_was_lost_is_not_run_or_looked_into_again_and_the_
     outcome, error = given_up(lanes, proxy, old, attempt=2)
     assert (outcome, "whether its update ran is not known" in error) == (Outcome.NOT_UPDATED, True)
     assert not [each for each in proxy.host.actions if each.startswith(("update ", "copy "))]
+
+
+def test_a_copy_whose_files_volume_is_gone_is_never_given_a_server_though_its_database_volume_was_copied_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lanes, proxy, old = serving()
+    copy_volume = proxy.host.copy_volume
+
+    def copy_and_lose_the_files_volume(copy: CopyVolume) -> None:
+        copy_volume(copy)
+        if copy.destination.startswith("files-"):
+            found = proxy.host.data_sets[copy.data_set]
+            proxy.host.data_sets[copy.data_set] = found.model_copy(update={"files": (), "copies": found.copies[:1]})
+
+    monkeypatch.setattr(proxy.host, "copy_volume", copy_and_lose_the_files_volume)
+    result = lanes.move(BUILD_B, GENERATION, 1, first())
+    half = copy_on(proxy)
+    assert (half.is_whole_copy, half.networks, half.databases) == (True, (), ())
+    assert (result.outcome, proxy.loaded_to(WEB_ADDRESS), list(proxy.host.instances)) == (Outcome.NOT_UPDATED, old, [old])
+    assert "does not have one volume for each volume of data-1" in (result.error or "")
 
 
 def killed_during_the_update() -> tuple[Lanes, PretendProxy, str]:

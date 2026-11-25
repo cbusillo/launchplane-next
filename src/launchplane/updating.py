@@ -31,6 +31,11 @@ def given_up(move: Move) -> str | None:
 # candidate and before its check, and nothing of the data set copied is within its reach.
 def candidate_step(move: Move, copy: DataSet) -> steps.Action | Stop:
     lane = move.lane
+    source = lane.data_set(copy.copy_of)
+    if source is None or (len(copy.volumes), len(copy.files)) != (len(source.volumes), len(source.files)):
+        return Stop(
+            f"The copy {copy.data_set} does not have one volume for each volume of {copy.copy_of}, so nothing is started on it."
+        )
     judged = judge(lane, move.product, Work.END_MAINTENANCE)
     if not copy.networks:
         return steps.CreateDataSetNetwork(lane.product, lane.lane, copy.data_set, move.generation)
