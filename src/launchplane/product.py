@@ -39,6 +39,11 @@ class Product(BaseModel):
     def check(self, container: str) -> Check:
         return Check(container, self.health_path, () if self.odoo is None else self.odoo.check)
 
+    # A product whose releases change its data says how. With no command, a release is made on the data its lane has.
+    @property
+    def update(self) -> tuple[str, ...]:
+        return self.odoo.update_command if self.odoo is not None and self.odoo.update else ()
+
 
 @dataclass(frozen=True)
 class ProductFolder:

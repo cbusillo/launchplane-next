@@ -2,7 +2,7 @@
 
 A product whose description has an `odoo` part is of the Odoo kind. Its lane runs a build Launchplane has verified, on a data set of its own: a database server and a files volume. The first product of the kind is TK, `cbusillo/odoo-tenant-tk`, on Odoo 20.
 
-[A lane's data is copied](copying.md) by a call of its own. A module update inside a release, a release that uses a copy, the background service that runs Odoo's scheduled jobs, previews, backups and acceptance are not built.
+A release to another build of a product that declares `update` is made on [a copy of the lane's data, updated before the switch](#a-release-that-updates). [A lane's data is also copied](copying.md) by a call of its own. The background service that runs Odoo's scheduled jobs, previews, backups, acceptance, going back after a switch and deleting the data set a release replaced are not built.
 
 ## The description
 
@@ -17,7 +17,8 @@ A product whose description has an `odoo` part is of the Odoo kind. Its lane run
     "addons_path": ["/opt/project/addons", "/opt/project/addons/shared", "/opt/launchplane/addons", "/odoo/addons", "/odoo/odoo/addons"],
     "modules": ["launchplane_settings", "disable_odoo_online", "crm", "contacts", "website_crm", "website_livechat", "crm_livechat", "base_automation", "auth_passkey", "tk_website", "tk_listings"],
     "attachment": "launchplane-check",
-    "sha256": "5b8e2378c01c9392fc415eb0d02888d76f0a04ea8dec78a3860b07181260ffb4"
+    "sha256": "5b8e2378c01c9392fc415eb0d02888d76f0a04ea8dec78a3860b07181260ffb4",
+    "update": ["tk_website"]
   }
 }
 ```
@@ -28,8 +29,9 @@ A product whose description has an `odoo` part is of the Odoo kind. Its lane run
 | `addons_path` | Where the build keeps its modules. The path in TK's image leaves out its shared modules, so it is declared. |
 | `modules` | The modules the check requires installed. TK's are those its build manifest lists as `odoo_install_modules`. |
 | `attachment`, `sha256` | The name of one attachment in the lane's data, and the SHA-256 of its bytes. The check reads it. |
+| `update` | The modules a release to another build updates. It may be left out: such a product's releases run on the data the lane has, and nothing is copied or updated. |
 
-`database` is as for [any lane with a database](data-sets.md) and must be there. Every other field of `odoo` is required, and a field Launchplane does not know makes the file unreadable.
+`database` is as for [any lane with a database](data-sets.md) and must be there. Every other field of `odoo` but `update` is required, and a field Launchplane does not know makes the file unreadable.
 
 ## A build is a publishing run
 
@@ -70,6 +72,33 @@ A candidate must answer `health_path` with success for 3 s, as any instance. The
 
 A failure answers `check failed` with what the check read, the candidate is removed, and the lane keeps what it served. It fails this way on a database that has only `base` installed, although `/web/login` answers `200` there, and on an attachment whose file is gone, which Odoo reads as no bytes.
 
+## A release that updates
+
+A move of a lane that serves one build to another build, for a product that declares `update`, is made on a copy taken inside the release's own freeze. Nothing written to the lane after the copy can be lost, because nothing can be written: visitors get the back soon page from before the lane is stopped until the release switches or gives up. The first move of a new lane, and a move to the build already serving, copy and update nothing and are [the ordinary move](the-move.md).
+
+It reads the host and the proxy before every step, asks [the gate](the-move.md#the-gate), and takes the first of these that applies.
+
+1. **Freeze and copy,** as [a copy of a lane's data](copying.md#what-it-does) does it, steps 1 to 5: the copy's two volumes are made, the web address is sent to the back soon page, the background service, the web part and the database server are stopped, and each volume is copied and compared. The lane must have exactly one instance, receiving visitors, with nothing found about it.
+2. **Give the copy a network and a database server.** Both volumes must be whole copies first: a copy with one volume, or with a copier that did not finish, is never given a server.
+3. **Start the candidate** from the new build on the copy: the copy's database server through a login of its own, the copy's files volume, and the copy's network. Its networks have no way out, it runs no scheduled job, and neither volume of the data set that was copied is mounted in it or reachable from it.
+4. **Update, once.** `/odoo/odoo-bin --update <modules> --stop-after-init --no-http`, run in the candidate under `timeout 600`. It is sent once by a request and never again.
+5. **Check the candidate,** with [the check](#the-check) whole: it answers `health_path` for 3 s, every declared module is installed, and the declared attachment is there once with its bytes.
+6. **Switch,** by asking the gate, once. Then the instance the release replaced is removed. Its data set is kept, both volumes and its stopped database server, and shows on the page as it is: the server `exited`, and the lane `good`.
+
+**Giving up.** If the copy is given up, the update ends with an error or runs out of time, the check fails, or a cancel wins at the gate, the candidate is taken through the gate and removed, the copy's database server is stopped, and the lane is brought back as [ending maintenance](maintenance.md#out-of-maintenance) does: the original database server, the original instance, its check, and last the route. Only then does the request end. The copy is kept, with its network and its stopped server, and is never used again.
+
+| `outcome` | Status | Meaning |
+| --- | --- | --- |
+| `switched` | 200 | The web address sends visitors to the new build on the updated copy. `data_set` names the copy. |
+| `not updated` | 422 | Nothing was switched, and the lane serves from its own data again. `error` says why: what the update wrote last, why the copy was given up, or that an earlier attempt did not finish. |
+| `check failed` | 422 | The update ran and the candidate failed its check. Nothing was switched, and the lane serves from its own data again. `error` has what the check read. |
+
+**An update whose outcome is not known is never looked into.** A reply that was lost, or a Launchplane killed while the update ran, leaves a request that is taken up again. An attempt that finds the lane behind the back soon page of its own request, and did not put it there itself, gives that copy up whatever is on it, brings the original back, and ends the request `not updated`. Asking again makes a new copy. An attempt that finds the lane already back, with a copy this request began, changes nothing and ends the same way.
+
+**While the original cannot be brought back** the request does not end. It stays `working`, the back soon page stays, `error` says what it waits for, and it is taken up again every 5 s. Docker's refusal of any step behind the back soon page does the same.
+
+**On the page,** a move that put its lane behind the back soon page shows one short paragraph in place of its lines: that the data is being copied, that the copy is being updated and checked, what failed and that the original is coming back, or how it ended. Every line is in `GET /requests/<id>`.
+
 ## The data set
 
 The data set of an Odoo lane has a files volume beside the database's: `launchplane-data-<data set>-files`, labelled like the database volume and with `launchplane.part=files`. It is made after the database volume and before the server, shows in `GET /running` as the data set's `files`, and is deleted with the data set. An instance that does not have it mounted shows as wrong.
@@ -81,8 +110,18 @@ The data set of an Odoo lane has a files volume beside the database's: `launchpl
 - **Launchplane on the test bed holds no key to GitHub.** The bed tests and the watch read the answers GitHub gave for two of TK's runs, served on the control container by `tests/recorded_git_host.py`. From the builder's Mac the same code read both runs from GitHub itself, 1.2 s a run. Granting the bed a key is Chris's.
 - **Launchplane cannot pull TK's image.** The image is private, and Launchplane sends Docker no registry login. The scratch host pulls with its own. A build that is not on the host fails the move with Docker's `No such image`. Launchplane also gives Docker 5 s to answer, and this pull took 36 s.
 - **The shared Odoo tools cannot start Odoo on a lane's login.** `run_odoo_startup.py` of `odoo-devkit` connects to the database `postgres`, which a lane's login is refused. It waited there until stopped, with 66 refusals in the server's log. So an instance runs Odoo's server directly, and none of that script's work is done: no install of missing modules, no website settings, no admin password. Its module update will meet the same refusal.
-- **A new lane cannot pass its first move.** The seed above is a person's work. Installing the modules belongs to the update of a release, which is not built.
-- **A build that needs its modules updated fails its check.** TK's run 45359350705, four commits after the first, answered `500` at `/web/login` on data seeded from the first build. The lane kept serving.
+- **A new lane cannot pass its first move.** The seed above is a person's work. The update of a release updates modules that are installed, and installs none.
+- **A build that needs its modules updated fails its check where the product declares no `update`.** TK's run 45359350705, four commits after the first, answered `500` at `/web/login` on data seeded from the first build. The lane kept serving.
+- **The check knows nothing of a product's records.** It requires the declared modules and the declared attachment's bytes. That a lead became an opportunity on its team is read by `tests/test_bed_tk_update.py`, on the updated copy before the switch and at the web address after it, and by nothing in Launchplane.
+- **Every release that updates leaves a data set behind.** One that switched leaves the data set it replaced: both volumes, its network and its stopped database server. One that gave up leaves its copy the same way. Nothing deletes either but [a retire that names it](data-sets.md#retiring-a-lane-with-data), and the data set a release replaced cannot be deleted while the copy made from it is on the host, which is now what the lane serves.
+- **The update has 600 s,** chosen with nothing measured at real size, and the back soon page shows for that long. When it runs out the request ends `not updated`. Only the last 20 lines it wrote are kept.
+- **The candidate's server is started before the update runs,** on data its build has not updated yet, and the update runs beside it. No visitor reaches it before its check.
+- **A release that updates cannot repair a lane.** It begins only on a lane with one instance, receiving visitors, with nothing found about it or its data set, and answers `503` otherwise, with nothing stopped.
+- **After an interrupted attempt, `error` says only that an earlier attempt did not finish.** What that attempt had been told, such as the update's own error, is in the request's lines.
+- **A request whose original cannot be brought back keeps its lane behind the back soon page for as long as that lasts.** Nobody is told.
+- **A lane with no instance receiving visitors and two data sets that each have a database server starts on neither.** After a release that updated, that is a lane retired and moved again: the move answers `503` until a retire has named the data set that is not wanted.
+- **A stopped database server of a data set no instance runs against is no longer a finding,** where the lane serves from another data set and the server stopped with exit code 0, also when nobody meant to stop it.
+- **Untried on the test bed:** a cancel while the back soon page shows, a refusal by Docker behind it, an update that runs out of time, a release that updates a product with a background service, and a second release on a lane that already serves from a copy. The cancel, the refusal and the second release are held by `tests/test_updating.py` against a pretend host.
 - **The admin password of a seeded lane is Odoo's default.** The lane is reachable only on the test bed's own network.
 - **A move to the build already serving does not run the check again.** It answers `unchanged`. A file lost from the files volume while the lane serves is found only by the next release.
 - **Moves of one lane asked at the same moment are kept in the order the git host answers them,** not the order they were sent. Each is verified before it is written.
@@ -105,3 +144,15 @@ On November 24, on the scratch host, with TK's build `sha256:0e2ad09f…` of com
 | A move that fails its check | 30 s on a database never installed in |
 | `tests/test_bed_odoo.py`, 8 tests | 2 min 19 s |
 | A copy of the lane's two volumes, from the first back soon answer at the web address to both copies confirmed | 3.9 to 4.2 s, for a database volume of 3,242 files and 141 MB, the database `app` being 47 MB, and a files volume of 110 files and 4.6 MB. The rest is in [a copy of a lane's data](copying.md#measured) |
+
+On November 25, on the scratch host, a release from that build to `sha256:f0b8a27b…` of commit `ec5895d`, updating `tk_website`, left alone:
+
+| | |
+| --- | --- |
+| From the first back soon answer at the web address to the first answer of the new instance there | 20.9 s and 20.1 s, two runs. A third took 35.9 s while the scratch host's load average was 18 to 22 from other work, with every step slower: the update 12.6 s and the check 9.6 s. `/web/login` was asked every 0.05 s, from the scratch host itself |
+| What was copied and updated | A database `app` of 49,206,975 bytes, and a files volume of 125 files and 4,588,484 bytes |
+| Of that, by the request's lines in the first run | Stopping Odoo 0.8 s, stopping the database server 1.4 s, copying and comparing the database volume 1.7 s and the files volume 0.9 s, the copy's network and database server 1.2 s, the candidate's login and start 0.9 s, the update 6.5 s, the check 6.5 s, the switch 0.7 s |
+| A release whose update fails, from the first back soon answer to the original answering again | Not measured |
+| `tests/test_bed_tk_update.py`, 5 tests | 4 min 7 s and 4 min 11 s, and 7 min 18 s under that load |
+
+How long an interruption is acceptable is not decided (README, open question 2).

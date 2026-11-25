@@ -31,6 +31,7 @@ HOST_UNREAD = (ContainerHostError, ProxyError)
 STOPPED = (*HOST_UNREAD, ProductError, Stopped)
 NOT_A_SUCCESS = {
     Outcome.CHECK_FAILED,
+    Outcome.NOT_UPDATED,
     Outcome.BACKGROUND_SERVICE_FAILED,
     MaintenanceOutcome.DATABASE_KILLED,
     MaintenanceOutcome.WEB_PART_FAILED,

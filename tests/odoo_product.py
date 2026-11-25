@@ -33,3 +33,5 @@ TK = Product(
         sha256=ATTACHMENT_SHA256,
     ),
 )
+# The same product once its releases update a module on a copy of the lane's data.
+TK_UPDATING = TK.model_copy(update={"odoo": TK.odoo and TK.odoo.model_copy(update={"update": ["tk_website"]})})

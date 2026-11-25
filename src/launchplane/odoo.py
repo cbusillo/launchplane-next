@@ -18,6 +18,8 @@ SETTINGS = {
     "ODOO_LIST_DB": "False",
     "ODOO_MAX_CRON_THREADS": "0",
 }
+# How long an update may take. Its lane shows the back soon page for that long.
+UPDATE_DEADLINE_SECONDS = 600
 # Run by Odoo's own shell in the instance, so with the registry Odoo loads for its database: each declared module's
 # state, and the declared attachment read through Odoo from its file.
 CHECK = """\
@@ -44,10 +46,18 @@ class Odoo(BaseModel):
     modules: list[str] = Field(min_length=1)
     attachment: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # The modules a release to another build updates, on a copy of the lane's data. With none, a release copies nothing.
+    update: list[str] = []
 
     @property
     def run(self) -> Run:
         return Run((SERVER,), SETTINGS | {"ODOO_ADDONS_PATH": ",".join(self.addons_path)}, USER, FILES_PATH)
+
+    # Run in the candidate, beside its server: with its login, its files and no way out, and no scheduled job is run.
+    @property
+    def update_command(self) -> tuple[str, ...]:
+        modules = ",".join(self.update)
+        return "timeout", str(UPDATE_DEADLINE_SECONDS), SERVER, "--update", modules, "--stop-after-init", "--no-http"
 
     @property
     def check(self) -> tuple[str, ...]:

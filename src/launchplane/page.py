@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import DataSet, InstanceState, PartOfLane, Verdict
+from launchplane.instance import BACK_SOON, DataSet, InstanceState, PartOfLane, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Kind, Shown, Standing, WebAddressJudged, Work
 from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancel_won, how_cancelled, how_replaced
 from launchplane.steps import Outcome
@@ -178,6 +178,39 @@ def with_lines(note: str, request: Request, *, only_sent: bool = False) -> str:
     return f"{note} Its lines: {'; '.join(lines)}." if lines else note
 
 
+COPYING = (
+    "Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build is "
+    "started on the copy and its update runs there."
+)
+UPDATING = (
+    "The data is copied, and the new build is updated and then checked on the copy. If both pass, visitors are switched "
+    "to it. If not, the original instance comes back on its own data."
+)
+COMING_BACK = "Nothing is switched: Launchplane is bringing the original instance back on its own data."
+SWITCHED = "Visitors are switched to the new build on the updated copy. The instance it replaces is retired next."
+EVERY_LINE = "Every line is in GET /requests/{id}."
+
+
+# A move that put its lane behind the back soon page has too many lines for a card. Its note is where it is and what
+# comes next, told from its own lines, and the lines are in the request.
+def frozen_note(request: Kept) -> str | None:
+    lines = request.events
+    froze = any(line.action is not None and line.action.to == BACK_SOON for line in lines)
+    if request.work is not Work.MOVE or not froze:
+        return None
+    stopped = next((line for line in lines if line.error is not None or line.did.startswith("give the copy up")), None)
+    if request.stands in ENDED:
+        paragraph = in_one_line(request.error) if request.error else "Visitors are on the new build and the updated copy."
+    elif any(line.did.startswith("switch ") and line.is_own for line in lines):
+        paragraph = SWITCHED
+    elif stopped is not None:
+        paragraph = f"{in_one_line(': '.join(filter(None, (stopped.did, stopped.error)))).rstrip('.')}. {COMING_BACK}"
+    else:
+        paragraph = UPDATING if any(line.did.startswith("make the network of the data set") for line in lines) else COPYING
+    again = "" if request.stands in ENDED else taken_up(request)
+    return f"{again}{paragraph.rstrip('.')}. {EVERY_LINE.format(id=request.id)}"
+
+
 # A cancel of a move is decided at the gate, so what is said of it is what the gate answered when the status was read.
 CANCEL_AT_THE_GATE: dict[Verdict | None, str] = {
     None: "the gate could not be asked whether that came in time.",
@@ -199,6 +232,8 @@ def being_cancelled(request: Kept, decided: Mapping[int, GateAnswer | None]) -> 
 
 
 def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> str | None:
+    if isinstance(request, Kept) and request.cancel_asked_at is None and (frozen := frozen_note(request)) is not None:
+        return frozen
     if request.stands is Stands.CANCELLED:
         # What a cancel put back is in its own note, so only the lines of what it sent are added.
         return with_lines(how_cancelled(request), request, only_sent=True)

@@ -16,12 +16,14 @@ from typing import Any
 
 from launchplane.data_set import client_environment
 from launchplane.odoo import FILES_PATH, SERVER, USER
+from launchplane.product import Product
 from tests.bed import SCRATCH_ADDRESS, ask, launchplane_answers, on_control, on_scratch, retire, wait_for
-from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TK
+from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TK, TK_UPDATING
 from tests.recorded_git_host import LATER_RUN, PORT, RUN, build_of
 
 GIT_HOST_UNIT = "launchplane-recorded-git-host"
-DROP_IN = "/etc/systemd/system/launchplane.service.d/recorded-git-host.conf"
+# Launchplane as the service and as its test harness runs it both read the recorded git host.
+DROP_INS = " ".join(f"/etc/systemd/system/{unit}.service.d/recorded-git-host.conf" for unit in ("launchplane", "launchplane-held"))
 SEED_LOGIN, SEED_PASSWORD = "i_seed", "seed-password"
 # Launchplane removes the login by itself at the next move: no container holds it.
 MAKE_SEED_LOGIN = f"""
@@ -38,6 +40,20 @@ if not env["ir.attachment"].search([("name", "=", {ATTACHMENT!r})]):
 LEAD, LEAD_FILE = "Invented lead of the copy watch", "invented-lead.txt"
 LEAD_BYTES: bytes = b"invented bytes of the lead's attachment\n"
 WRITTEN = "Written "
+# The watch's product once its lead is written: its check reads the lead's own attachment, and its releases update a module.
+UPDATING = TK.model_copy(
+    update={
+        "odoo": TK_UPDATING.odoo
+        and TK_UPDATING.odoo.model_copy(update={"attachment": LEAD_FILE, "sha256": hashlib.sha256(LEAD_BYTES).hexdigest()})
+    }
+)
+# Run by Odoo's own shell in an instance: the lead and its attachment as that instance's Odoo reads them.
+WITNESS = f"""
+import hashlib, json
+lead, file = env["crm.lead"].search([("name", "=", {LEAD!r})]), env["ir.attachment"].search([("name", "=", {LEAD_FILE!r})])
+print("witness=" + json.dumps({{"lead": lead.id, "team": lead.team_id.id, "type": lead.type, "attachment": file.id,
+    "attached_to": f"{{file.res_model}},{{file.res_id}}", "sha256": hashlib.sha256(file.raw).hexdigest()}}))
+"""
 # Odoo's own first login, which a lane seeded by hand keeps.
 ADMIN_LOGIN, ADMIN_PASSWORD = "admin", "admin"
 # Run in a container of the database image that can only read the two volumes of a copy and reaches no network: the
@@ -67,8 +83,8 @@ def serve_recorded_git_host() -> None:
         f"systemctl stop {GIT_HOST_UNIT} 2>/dev/null; systemctl reset-failed {GIT_HOST_UNIT} 2>/dev/null; "
         f"systemd-run --quiet --unit={GIT_HOST_UNIT} --uid=launchplane --working-directory=/opt/launchplane "
         "--setenv=PYTHONPATH=/opt/launchplane /opt/launchplane/.venv/bin/python -m tests.recorded_git_host && "
-        f"mkdir -p {DROP_IN.rsplit('/', 1)[0]} && "
-        f"printf '[Service]\\nEnvironment=LAUNCHPLANE_GIT_HOST=http://127.0.0.1:{PORT}\\n' > {DROP_IN} && "
+        f"for each in {DROP_INS}; do mkdir -p ${{each%/*}} && "
+        f"printf '[Service]\\nEnvironment=LAUNCHPLANE_GIT_HOST=http://127.0.0.1:{PORT}\\n' > $each; done && "
         "systemctl daemon-reload && systemctl restart launchplane"
     )
     wait_for(launchplane_answers, seconds=30)
@@ -76,16 +92,16 @@ def serve_recorded_git_host() -> None:
 
 def stop_recorded_git_host() -> None:
     on_control(
-        f"rm -f {DROP_IN}; systemctl daemon-reload; systemctl stop {GIT_HOST_UNIT} 2>/dev/null; systemctl restart launchplane"
+        f"rm -f {DROP_INS}; systemctl daemon-reload; systemctl stop {GIT_HOST_UNIT} 2>/dev/null; systemctl restart launchplane"
     )
     wait_for(launchplane_answers, seconds=30)
 
 
-def describe(product: str) -> None:
+def describe(product: str, description: Product = TK) -> None:
     file = f"/var/lib/launchplane/products/{product}.json"
     on_control(
         f"install -d -o launchplane /var/lib/launchplane/products && cat > {file} && chmod 644 {file}",
-        given=TK.model_dump_json(exclude_defaults=True),
+        given=description.model_dump_json(exclude_defaults=True),
     )
 
 
@@ -133,8 +149,9 @@ class SignedIn:
         return self.ask(f"/web/dataset/call_kw/{model}/{method}", model=model, method=method, args=list(arguments), kwargs=named)
 
     def make_lead(self) -> None:
+        team = self.call("crm.team", "search", [], limit=1)[0]
         leads = self.call("crm.lead", "search", [("name", "=", LEAD)]) or self.call(
-            "crm.lead", "create", [{"name": LEAD, "type": "lead"}]
+            "crm.lead", "create", [{"name": LEAD, "type": "lead", "team_id": team}]
         )
         if not self.call("ir.attachment", "search", [("name", "=", LEAD_FILE)]):
             file = {"name": LEAD_FILE, "res_model": "crm.lead", "res_id": leads[0], "raw": base64.b64encode(LEAD_BYTES).decode()}
@@ -142,6 +159,32 @@ class SignedIn:
 
     def write(self, text: str) -> None:
         self.call("crm.lead", "create", [{"name": f"{WRITTEN}{text}", "type": "lead"}])
+
+    # The one record the update watch follows: which lead, on which team, of what type, and its attachment, linked and read.
+    def witness(self) -> dict[str, Any]:
+        [lead] = self.call("crm.lead", "search_read", [("name", "=", LEAD)], fields=["type", "team_id"])
+        [file] = self.call("ir.attachment", "search_read", [("name", "=", LEAD_FILE)], fields=["res_model", "res_id", "raw"])
+        return {
+            "lead": lead["id"],
+            "team": lead["team_id"][0],
+            "type": lead["type"],
+            "attachment": file["id"],
+            "attached_to": f"{file['res_model']},{file['res_id']}",
+            "sha256": hashlib.sha256(base64.b64decode(file["raw"]["content"])).hexdigest(),
+        }
+
+    # Where under `filestore/app` of the lane's files volume Odoo keeps the bytes of the lead's attachment.
+    def stored_as(self) -> str:
+        [file] = self.call("ir.attachment", "search_read", [("name", "=", LEAD_FILE)], fields=["store_fname"])
+        return file["store_fname"]
+
+    # The first scheduled job, made due long ago. No instance of a lane runs scheduled jobs, so it must stay due.
+    def due_job(self, *, make_due: bool = False) -> dict[str, object]:
+        [job] = self.call("ir.cron", "search_read", [], fields=["cron_name", "nextcall", "lastcall"], order="id", limit=1)
+        if make_due:
+            self.call("ir.cron", "write", [job["id"]], {"nextcall": "2020-01-01 00:00:00"})
+            return self.due_job()
+        return job
 
     # The lead's type, the SHA-256 of its attachment's bytes as Odoo reads them from its file, and each lead written since.
     def read(self) -> dict[str, str]:
@@ -162,6 +205,12 @@ def read_lane(product: str, lane: str) -> dict[str, str]:
     [data_set] = [each for each in running["data_sets"] if each["data_set"] == instance["data_set"]]
     volumes = ",".join((*data_set["volumes"], *data_set["files"]))
     return {"instance": instance["container"], "build": instance["build"], "volumes": volumes} | SignedIn(product, lane).read()
+
+
+# The same record read by the Odoo of one instance, which need not receive visitors.
+def witness_in(container: str) -> dict[str, Any]:
+    said = on_scratch(f"docker exec --interactive {container} {SERVER} shell --no-http --log-level=error", given=WITNESS)
+    return json.loads(next(line for line in said.splitlines() if line.startswith("witness=")).removeprefix("witness="))
 
 
 def copies_of(product: str, lane: str) -> list[dict[str, Any]]:

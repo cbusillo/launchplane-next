@@ -193,6 +193,11 @@ class Judged:
         found = self.lane.data_set(data_set)
         return set() if found is None else {network.name for network in found.networks}
 
+    # Beside the data set the lane serves from, one no instance runs against is kept, and its server is meant to be stopped.
+    def is_kept_offline(self, data_set: str) -> bool:
+        used = {instance.data_set for instance in self.lane.instances}
+        return self.serving is not None and data_set not in used
+
     # Where the product keeps files: its data set's files volume, mounted in the instance.
     def files_mounts(self, data_set: str | None) -> tuple[Mount, ...]:
         found, path = self.lane.data_set(data_set), None if self.product is None else self.product.run.files
@@ -295,11 +300,13 @@ def doubled_parts(found: DataSet) -> list[str]:
     return [f"{len(names)} {kind} ({', '.join(names)})" for kind, names in parts.items() if len(names) > 1]
 
 
-def database_state_findings(part: str, database: DataSetDatabase, of: Judged) -> list[Found]:
+def database_state_findings(part: str, database: DataSetDatabase, of: Judged, kept_offline: bool) -> list[Found]:
     subject = database.container
     if of.stopped_is_meant and database.state == InstanceState.STOPPED and database.exit_code != 0:
         sentence = f"{part} did not stop cleanly: it exited with code {database.exit_code}, so it was killed or it crashed"
         return [Found(Weight.FAULT, subject, Kind.KILLED, sentence)]
+    if kept_offline and (database.state, database.exit_code) == (InstanceState.STOPPED, 0):
+        return []
     if of.stopped_is_meant or database.state != InstanceState.RUNNING:
         return state_findings(part, database, of, Weight.UNFINISHED)
     if database.accepts_connections is None:
@@ -318,7 +325,7 @@ def database_findings(found: DataSet, database: DataSetDatabase, of: Judged) -> 
         own = tuple(Mount(source=volume, path=DATA_PATH) for volume in found.volumes) if of.product.database is not None else ()
         mounted = mount_findings(part, subject, database.mounts, own)
     return [
-        *database_state_findings(part, database, of),
+        *database_state_findings(part, database, of, of.is_kept_offline(found.data_set)),
         *attachment_findings(part, subject, database.networks, names, of.lane),
         *mounted,
     ]
