@@ -533,11 +533,11 @@ def test_while_a_release_is_copying_the_card_says_its_new_copy_is_being_made_and
     read: list[dict[str, str]] = []
     edit = PretendProxy.edit
 
-    def read_the_card_as_the_freeze_begins(proxy: PretendProxy, web_address: str, *sent: Any) -> str:  # noqa: ANN401 as edit takes them
+    def read_the_card_as_the_freeze_begins(freezing: PretendProxy, web_address: str, *sent: Any) -> str:  # noqa: ANN401 as edit takes them
         if sent[-1] == BACK_SOON and not read:
-            status = Lanes(proxy.host, proxy, lambda _product: TK_UPDATING, read_unfinished=record.unfinished).read_status()
+            status = Lanes(freezing.host, freezing, lambda _product: TK_UPDATING, read_unfinished=record.unfinished).read_status()
             read.append(data_set_rows(status))
-        return edit(proxy, web_address, *sent)
+        return edit(freezing, web_address, *sent)
 
     monkeypatch.setattr(PretendProxy, "edit", read_the_card_as_the_freeze_begins)
     kept, _, proxy = worked(record)
