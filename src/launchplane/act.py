@@ -515,6 +515,8 @@ class Lanes:
         except ContainerHostRefused as error:
             if isinstance(action, steps.CopyVolume):
                 return steps.CopyRefused(action.destination, str(error))
+            if isinstance(action, steps.DeleteDataSet):
+                return steps.DeletionRefused(action.found.data_set, str(error))
             if not self.proxy.read().route_of(web_address).in_maintenance:
                 raise
             raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error

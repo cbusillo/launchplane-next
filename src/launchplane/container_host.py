@@ -86,9 +86,11 @@ BACKGROUND_SERVICE_DEADLINE_MARGIN_SECONDS = 15
 POLL_SECONDS = 0.5
 # How long one volume may take to copy. Its lane shows the back soon page for that long.
 COPY_DEADLINE_SECONDS = 300
+# debian:trixie-slim. Its cp hands each file to the kernel to copy, which shares the blocks where the file system can.
+COPIER_IMAGE = "debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0"
 # Everything in the volume as it is, then every byte read again from both: a file the copy lacks or has too many fails it.
 # The copy is written where the database image keeps its one volume, so the copier is given no other volume to write.
-COPY_COMMAND = ["sh", "-c", f"cp -a /from/. {DATA_PATH}/ && diff -r /from {DATA_PATH} && sync"]
+COPY_COMMAND = ["sh", "-c", f"cp -a --reflink=auto /from/. {DATA_PATH}/ && diff -r --no-dereference /from {DATA_PATH} && sync"]
 type RestartPolicy = Literal["always", "unless-stopped"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
@@ -423,6 +425,9 @@ class ContainerHost:
         with attempting(f"Making the {part} volume of the data set {data_set}", self.address):
             copy = {} if copy_of is None else {COPY_OF_LABEL: copy_of}
             labels = data_set_labels(product, lane, data_set) | marks | copy | stamp_of(generation)
+            # Fetched while the lane still serves, not behind the back soon page.
+            if copy_of is not None:
+                self.ensure_image(COPIER_IMAGE)
             self.client.volumes.create(f"launchplane-data-{data_set}-{part}", labels=labels)
 
     # Whether anything can still write the volume is asked at the moment of the copy, of every container on the host.
@@ -434,7 +439,7 @@ class ContainerHost:
                 names = ", ".join(sorted(str(each.name) for each in writers))
                 raise ContainerHostRefused(f"{names} runs with the volume {copy.source} mounted, so it was not copied.")
             copier = self.client.containers.create(
-                copy.image,
+                COPIER_IMAGE,
                 COPY_COMMAND,
                 name=f"{copy.destination}-copier",
                 labels=data_set_labels(copy.product, copy.lane, copy.data_set) | {PART_LABEL: "copier"},
@@ -498,12 +503,13 @@ class ContainerHost:
         with attempting(f"Deleting the data set {found.data_set}", self.address):
             for part in (*found.databases, *found.copies):
                 self.retire_container(part.container)
-            for volume in (*found.volumes, *found.files):
-                with suppress(NotFound):
-                    self.client.volumes.get(volume).remove()
             for network in found.networks:
                 with suppress(NotFound):
                     self.client.networks.get(network.name).remove()
+            # Last, since a copy is known as one by its volumes: one Docker refuses to delete whole is still read as a copy.
+            for volume in (*found.volumes, *found.files):
+                with suppress(NotFound):
+                    self.client.volumes.get(volume).remove()
 
     # A database server is retired with nobody told: only a command for a lane's instance or background service has a line.
     def retire_container(self, container: str, by: Witness = NOBODY) -> None:

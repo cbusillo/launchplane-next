@@ -66,9 +66,9 @@ def begin_step(copying: Copying) -> steps.Action | Stop:
 
 
 def copy_step(copying: Copying) -> steps.Action:
-    lane, copy, database = copying.lane, copying.copy, copying.product.database
+    lane, copy = copying.lane, copying.copy
     source = None if copy is None else lane.data_set(copy.copy_of)
-    if copy is None or source is None or database is None:
+    if copy is None or source is None or copying.product.database is None:
         return GiveUp("The copy this request began, or the data set it is a copy of, is not on the host.")
     copied_now = {each.destination for each in copying.done if isinstance(each, CopyVolume)}
     left = sorted(each.container for each in copy.copies if each.volume not in copied_now)
@@ -86,7 +86,7 @@ def copy_step(copying: Copying) -> steps.Action:
             f"The volumes of the copy {copy.data_set} ({', '.join(destinations)}) are not one fresh volume, still to be "
             f"written, for each volume of {source.data_set} ({', '.join(sources)})."
         )
-    return CopyVolume(lane.product, lane.lane, copy.data_set, *to_copy[0], database.image)
+    return CopyVolume(lane.product, lane.lane, copy.data_set, *to_copy[0])
 
 
 def bring_back(copying: Copying) -> steps.Action | Wait:
