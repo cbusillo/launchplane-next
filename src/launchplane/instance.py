@@ -109,7 +109,6 @@ class DataSetDatabase(BaseModel):
     unheld_logins: Answered[tuple[str, ...]] = None
 
 
-# A container that copies into one `volume` of a copy. It `finished` once it exited with code 0.
 class VolumeCopy(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -131,7 +130,6 @@ class DataSet(BaseModel):
     files: tuple[str, ...] = ()
     # Stamped on the first part of it that is made: its network, or the volumes of a copy.
     generation: Stamp = None
-    # The data set its volumes say they are a copy of.
     copy_of: str | None = None
     copies: tuple[VolumeCopy, ...] = ()
 

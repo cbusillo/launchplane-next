@@ -389,3 +389,47 @@ def test_a_data_set_is_not_deleted_while_a_copy_of_it_is_on_the_host_and_goes_on
     lanes.retire("site", "testing", copied_to)
     lanes.retire("site", "testing", "data-1")
     assert (proxy.host.actions[-2:], proxy.host.data_sets) == ([f"delete {copied_to}", "delete data-1"], {})
+
+
+def test_a_start_docker_refuses_once_while_the_lane_is_brought_back_keeps_the_request_working_until_the_lane_serves(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = PretendProxy(PretendHost())
+    lanes = Lanes(proxy.host, proxy, lambda _product: TK, numbered_names(), read_unfinished=record.unfinished)
+    lanes.move(BUILD_A, EARLIER, 1)
+    web_part, start = proxy.written[WEB_ADDRESS], proxy.host.start_database
+    refusals = iter(["500 Server Error: Internal Server Error"])
+
+    def refused_once(container: str) -> None:
+        if (refusal := next(refusals, None)) is not None:
+            raise ContainerHostRefused(f"Starting the database {container} was refused: {refusal}")
+        start(container)
+
+    monkeypatch.setattr(proxy.host, "start_database", refused_once)
+    request = record.write(Asked(product="site", lane="testing", work=Work.COPY), CALLER, None)
+    worker = Worker(record, lanes, NO_SECRETS)
+    assert worker.work_next()
+    waiting = kept_of(record, request.id)
+    assert (waiting.stands, proxy.written[WEB_ADDRESS]) == (Stands.WORKING, BACK_SOON)
+    assert "was refused: 500 Server Error" in (waiting.error or "") and "tried again until it is back" in (waiting.error or "")
+    assert worker.work_next()
+    ended = kept_of(record, request.id)
+    assert (ended.stands, ended.answer and ended.answer["outcome"], proxy.loaded_to(WEB_ADDRESS)) == (
+        Stands.DONE,
+        "copied",
+        web_part,
+    )
+
+
+def test_a_refusal_before_the_back_soon_page_shows_fails_the_request_with_the_lane_still_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lanes, proxy, web_part = serving()
+
+    def refuse(*_volume: object) -> None:
+        raise ContainerHostRefused("Making the database volume was refused: no space left on device")
+
+    monkeypatch.setattr(proxy.host, "create_data_set_volume", refuse)
+    with pytest.raises(ContainerHostRefused, match="no space left"):
+        lanes.copy("site", "testing", GENERATION, first())
+    assert (proxy.host.actions, proxy.loaded_to(WEB_ADDRESS)) == ([], web_part)

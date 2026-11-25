@@ -179,7 +179,6 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StopPart: lambda host, _proxy, step, by: host.stop_part(step.container, by),
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
-    steps.StartStopped: lambda host, _proxy, step, by: host.start_part(step.container, by),
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
 }
 
@@ -427,14 +426,13 @@ class Lanes:
             witness,
         )
 
-    # While the copy is made the lane is judged as one in maintenance is, and the planner judges it again to bring it back.
     def copy(self, product: str, lane: str, generation: str, witness: Witness = NOBODY) -> CopyResult:
         description = self.read_product(product)
         fresh = self.name_fresh(LaneBuild(product=product, lane=lane, build="")).data_set
         return settle(
             *self.judging(product, lane, description, Work.COPY),
             lambda judged, done, cancel: copying.decide(copying.Copying(judged, description, generation, fresh, done), cancel),
-            partial(self.take, behind_back_soon=True),
+            self.take_for_a_copy,
             witness,
         )
 
@@ -482,8 +480,12 @@ class Lanes:
         if isinstance(action, steps.RemoveLogins):
             unread = self.host.remove_unheld_logins(action.database, witness)
             return action if unread is None else steps.LoginsUnread(action.database, str(unread))
-        if isinstance(action, steps.StartStopped | steps.CopyVolume):
-            return self.taken_or_refused(action, witness)
+        if isinstance(action, steps.StartStopped):
+            try:
+                self.host.start_part(action.container, witness)
+            except ContainerHostRefused as error:
+                return steps.StartRefused(action.container, str(error))
+            return action
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
@@ -492,15 +494,17 @@ class Lanes:
         TAKE[type(action)](self.host, self.proxy, action, witness)
         return action
 
-    # Docker's no to a start or to a copy is an answer, and its planner goes on from it.
-    def taken_or_refused(self, action: steps.StartStopped | steps.CopyVolume, witness: Witness) -> Event:
+    # Behind the back soon page Docker's no ends nothing: a copy refused is given up, and any other step is tried again
+    # from a later reading until the lane is back. Before the page shows, a refusal fails the request as any does.
+    def take_for_a_copy(self, action: Action, witness: Witness) -> Event:
         try:
-            TAKE[type(action)](self.host, self.proxy, action, witness)
+            return self.take(action, witness, behind_back_soon=True)
         except ContainerHostRefused as error:
             if isinstance(action, steps.CopyVolume):
                 return steps.CopyRefused(action.destination, str(error))
-            return steps.StartRefused(action.container, str(error))
-        return action
+            if isinstance(action, steps.CreateDataSetVolume) or (isinstance(action, steps.EditRoute) and action.to == BACK_SOON):
+                raise
+            raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error
 
     def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:
         edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)

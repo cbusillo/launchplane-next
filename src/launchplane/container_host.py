@@ -425,8 +425,7 @@ class ContainerHost:
             labels = data_set_labels(product, lane, data_set) | marks | copy | stamp_of(generation)
             self.client.volumes.create(f"launchplane-data-{data_set}-{part}", labels=labels)
 
-    # A copy is of a volume nothing can write: checked here, at the moment of the copy, of every container on the host.
-    # The copier reaches no network, and Docker keeps it as the account of what was read, what was written and how it ended.
+    # Whether anything can still write the volume is asked at the moment of the copy, of every container on the host.
     def copy_volume(self, copy: CopyVolume) -> None:
         with attempting(f"Copying the volume {copy.source} to {copy.destination}", self.address):
             mounted: Filters = {"volume": copy.source, "status": "running"}

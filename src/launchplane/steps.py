@@ -76,7 +76,6 @@ class CopyOutcome(StrEnum):
     NOT_COPIED = "not copied"
 
 
-# `data_set` is the one the lane runs against, and `copied_to` the copy the request made of it, whole or not.
 class CopyResult(Result):
     outcome: CopyOutcome
     container_receiving_visitors: str | None
@@ -128,7 +127,6 @@ class CreateDataSetVolume:
     lane: str
     data_set: str
     files: bool = False
-    # The data set a volume of a copy is to be a copy of, written on it as it is made.
     copy_of: str | None = None
     generation: str | None = None
 
@@ -137,7 +135,6 @@ class CreateDataSetVolume:
         return "files volume" if self.files else "database volume"
 
 
-# One volume copied into the fresh volume of a copy, by a container of `image` that can only read `source`.
 @dataclass(frozen=True)
 class CopyVolume:
     product: str
@@ -148,7 +145,6 @@ class CopyVolume:
     image: str
 
 
-# The copy is not gone on with, and its lane is brought back as it was.
 @dataclass(frozen=True)
 class GiveUp:
     why: str

@@ -345,8 +345,7 @@ def database_part(summary: DockerContainerSummary, details: Mapping[str, DockerC
     )
 
 
-# Docker's own account of one copier: the volume it could write, and whether it ran to its end with no error. Its state
-# is read from its description: the list can still say running just after it has exited.
+# Its state is read from its description: the list can still say running just after it has exited.
 def volume_copy(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails]) -> VolumeCopy:
     written = [mount.name or mount.source for mount in summary.mounts if mount.writable]
     state = described(summary, details, "copier").state

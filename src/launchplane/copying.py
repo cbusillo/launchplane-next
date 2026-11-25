@@ -7,8 +7,7 @@ from launchplane.product import Product
 from launchplane.steps import CopyOutcome, CopyResult, CopyVolume, Done, GiveUp, Stop, Wait
 
 
-# One copy of a lane's data: one reading of the host, and what this attempt has done. The copy is the data set stamped
-# with the request's generation. Its volumes say which data set it is a copy of, and that is the one brought back.
+# What an attempt after a kill must know is on the host: the copy is stamped with the request, and names what it copies.
 @dataclass(frozen=True)
 class Copying:
     judged: Judgement
@@ -30,7 +29,6 @@ class Copying:
         copy = self.copy
         return copy is not None and copy.is_whole_copy
 
-    # Why this attempt stopped copying. What an earlier attempt gave up for is read from what it left on the host.
     @property
     def given_up(self) -> str | None:
         refused = (GiveUp, steps.CopyRefused)
@@ -50,8 +48,7 @@ class Copying:
         return Done(result)
 
 
-# While the proxy still sends visitors to it, the instance to bring back and its data set are read, and written on the
-# volumes of the copy as they are made. Only then is the web address changed.
+# Which instance comes back can be read only while the proxy still sends visitors to it.
 def begin_step(copying: Copying) -> steps.Action | Stop:
     lane, copy, active = copying.lane, copying.copy, copying.lane.active
     source = None if active is None else lane.data_set(active.data_set)
@@ -68,8 +65,6 @@ def begin_step(copying: Copying) -> steps.Action | Stop:
     return steps.EditRoute(lane.web_address, BACK_SOON, lane.route.installed)
 
 
-# Behind the back soon page: everything of the lane is stopped, the database server last and cleanly, and then each
-# volume is copied. Anything else gives the copy up, and a copy another attempt began is never gone on with.
 def copy_step(copying: Copying) -> steps.Action:
     lane, copy, database = copying.lane, copying.copy, copying.product.database
     source = None if copy is None else lane.data_set(copy.copy_of)
@@ -94,8 +89,6 @@ def copy_step(copying: Copying) -> steps.Action:
     return CopyVolume(lane.product, lane.lane, copy.data_set, *to_copy[0], database.image)
 
 
-# The lane comes back as the end of maintenance brings one back: its database server, its one instance with the login
-# it has, the check, and only then the web address. While it cannot, the request waits and is taken up again.
 def bring_back(copying: Copying) -> steps.Action | Wait:
     lane, copy = copying.lane, copying.copy
     # A copier still reading would go on reading a volume that is being written again.
@@ -110,7 +103,6 @@ def bring_back(copying: Copying) -> steps.Action | Wait:
     return Wait(step.reason) if isinstance(step, Stop) else step
 
 
-# Out of maintenance, the copy has not begun or the lane is back. A copy begun is never begun again by its request.
 def open_step(copying: Copying, cancel: steps.Cancel | None) -> plan.Step[CopyResult] | plan.StepBack:
     lane, copy = copying.lane, copying.copy
     if plan.is_turned_back(cancel) and copy is not None and copying.is_whole:
