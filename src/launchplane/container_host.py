@@ -58,7 +58,7 @@ from launchplane.docker_answers import (
     sent,
     tar_of,
 )
-from launchplane.host_logins import HostLogins
+from launchplane.host_logins import Filters, HostLogins
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_of
 from launchplane.instance import (
     LANE_NETWORK,
@@ -429,7 +429,8 @@ class ContainerHost:
     # The copier reaches no network, and Docker keeps it as the account of what was read, what was written and how it ended.
     def copy_volume(self, copy: CopyVolume) -> None:
         with attempting(f"Copying the volume {copy.source} to {copy.destination}", self.address):
-            writers = self.client.containers.list(filters={"volume": copy.source, "status": "running"})
+            mounted: Filters = {"volume": copy.source, "status": "running"}
+            writers = self.client.containers.list(filters=mounted)
             if writers:
                 names = ", ".join(sorted(str(each.name) for each in writers))
                 raise ContainerHostRefused(f"{names} runs with the volume {copy.source} mounted, so it was not copied.")

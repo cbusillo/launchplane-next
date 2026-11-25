@@ -1,3 +1,4 @@
+import builtins
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,6 +36,7 @@ from tests.pretend_host import (
     numbered_names,
     on_data,
 )
+from tests.recording_docker import as_docker_client
 from tests.test_act import BUILD_A
 from tests.test_container_host import DATA_SET_LABELS, container, read
 from tests.test_worker import CALLER, kept_of
@@ -105,7 +107,7 @@ def frozen_by_this_request(given: Given, product: Product = WITH_A_DATABASE, don
     return Copying(judge(reading, product, Work.COPY), product, GENERATION, "fresh", done)
 
 
-def web(state: InstanceState) -> Any:  # noqa: ANN401 a part of a given lane
+def web_part(state: InstanceState) -> Any:  # noqa: ANN401 a part of a given lane
     return on_data(lane_instance("web", "b", state), "d1")
 
 
@@ -118,23 +120,25 @@ IN_MAINTENANCE = (BACK_SOON, BACK_SOON)
 
 
 def test_a_writer_that_still_runs_is_stopped_before_anything_is_copied() -> None:
-    given = Given((web(RUNNING),), IN_MAINTENANCE, data_sets=(data_set_named("d1"), copy_of_d1()))
+    given = Given((web_part(RUNNING),), IN_MAINTENANCE, data_sets=(data_set_named("d1"), copy_of_d1()))
     assert decide(frozen_by_this_request(given)) == StopPart("web")
 
 
 def test_a_database_server_that_did_not_stop_cleanly_is_never_copied() -> None:
-    given = Given((web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED, exit_code=137), copy_of_d1()))
+    given = Given((web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED, exit_code=137), copy_of_d1()))
     step = decide(frozen_by_this_request(given))
     assert isinstance(step, GiveUp) and "did not stop cleanly: it exited with code 137" in step.why
 
 
 def test_each_volume_is_copied_from_the_data_set_the_copy_names_once_everything_is_stopped() -> None:
-    given = Given((web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1()))
+    given = Given((web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1()))
     assert decide(frozen_by_this_request(given)) == CopyVolume("site", "testing", "d2", "volume-d1", "volume-d2", "postgres:18")
 
 
 def test_a_copy_whose_volume_is_a_volume_of_what_it_copies_is_given_up_before_anything_is_written() -> None:
-    given = Given((web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(volumes=("volume-d1",))))
+    given = Given(
+        (web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(volumes=("volume-d1",)))
+    )
     step = decide(frozen_by_this_request(given))
     assert isinstance(step, GiveUp) and "are not one fresh volume, still to be written, for each volume of d1" in step.why
 
@@ -143,7 +147,7 @@ def test_a_copy_another_attempt_began_is_given_up_and_never_gone_on_with() -> No
     half = VolumeCopy(container="volume-d2-copier", volume="volume-d2", finished=True, stopped=True)
     files = {"files": ("files-d1",)}
     given = Given(
-        (web(STOPPED),),
+        (web_part(STOPPED),),
         IN_MAINTENANCE,
         data_sets=(data_set_named("d1", STOPPED).model_copy(update=files), copy_of_d1(files=("files-d2",), copies=(half,))),
     )
@@ -153,7 +157,7 @@ def test_a_copy_another_attempt_began_is_given_up_and_never_gone_on_with() -> No
 
 def test_a_copier_still_running_is_stopped_before_the_volume_it_reads_is_written_again() -> None:
     running = VolumeCopy(container="volume-d2-copier", volume="volume-d2", finished=False, stopped=False)
-    given = Given((web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(copies=(running,))))
+    given = Given((web_part(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1(copies=(running,))))
     assert decide(frozen_by_this_request(given), Cancel()) == StopPart("volume-d2-copier")
 
 
@@ -302,16 +306,16 @@ class Copier:
 
 
 class Copiers:
-    def __init__(self, writers: list[object], exit_code: int = 0) -> None:
+    def __init__(self, writers: builtins.list[object], exit_code: int = 0) -> None:
         self.writers, self.exit_code = writers, exit_code
-        self.made: list[tuple[object, ...]] = []
+        self.made: builtins.list[tuple[object, ...]] = []
         self.asked: dict[str, object] = {}
 
-    def list(self, filters: dict[str, object]) -> list[object]:
+    def list(self, filters: dict[str, object]) -> builtins.list[object]:
         self.asked = filters
         return self.writers
 
-    def create(self, image: str, command: list[str], **options: object) -> Copier:
+    def create(self, image: str, command: builtins.list[str], **options: object) -> Copier:
         self.made.append((image, command, options["volumes"], options["network_mode"]))
         return Copier(self.exit_code)
 
@@ -321,7 +325,7 @@ COPY = CopyVolume("shop", "testing", "d2", "source", "copy", "postgres:18-alpine
 
 def test_the_copier_can_only_read_what_it_copies_reaches_no_network_and_writes_the_fresh_volume_alone() -> None:
     copiers = Copiers([])
-    ContainerHost(SimpleNamespace(containers=copiers), "test").copy_volume(COPY)  # pyright: ignore[reportArgumentType]
+    ContainerHost(as_docker_client(SimpleNamespace(containers=copiers)), "test").copy_volume(COPY)
     mounted = {"source": {"bind": "/from", "mode": "ro"}, "copy": {"bind": DATA_PATH, "mode": "rw"}}
     assert copiers.made == [("postgres:18-alpine", COPY_COMMAND, mounted, "none")]
     assert copiers.asked == {"volume": "source", "status": "running"}
@@ -330,14 +334,14 @@ def test_the_copier_can_only_read_what_it_copies_reaches_no_network_and_writes_t
 def test_a_volume_a_running_container_has_mounted_is_refused_and_no_copier_is_made() -> None:
     copiers = Copiers([SimpleNamespace(name="a-writer")])
     with pytest.raises(ContainerHostRefused, match="a-writer runs with the volume source mounted"):
-        ContainerHost(SimpleNamespace(containers=copiers), "test").copy_volume(COPY)  # pyright: ignore[reportArgumentType]
+        ContainerHost(as_docker_client(SimpleNamespace(containers=copiers)), "test").copy_volume(COPY)
     assert copiers.made == []
 
 
 def test_a_copier_that_ends_with_an_error_is_a_refusal_with_what_it_wrote_to_its_log() -> None:
     copiers = Copiers([], exit_code=1)
     with pytest.raises(ContainerHostRefused, match="ended with code 1: cp: lost"):
-        ContainerHost(SimpleNamespace(containers=copiers), "test").copy_volume(COPY)  # pyright: ignore[reportArgumentType]
+        ContainerHost(as_docker_client(SimpleNamespace(containers=copiers)), "test").copy_volume(COPY)
 
 
 def worked(record: Record, refused: set[str]) -> tuple[Any, Lanes]:

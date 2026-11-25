@@ -35,12 +35,13 @@ if not env["ir.attachment"].search([("name", "=", {ATTACHMENT!r})]):
     env.cr.commit()
 """
 # What the copy watch reads before and after: an invented lead with one attachment, and each lead written since.
-LEAD, LEAD_FILE, LEAD_BYTES = "Invented lead of the copy watch", "invented-lead.txt", b"invented bytes of the lead's attachment\n"
+LEAD, LEAD_FILE = "Invented lead of the copy watch", "invented-lead.txt"
+LEAD_BYTES: bytes = b"invented bytes of the lead's attachment\n"
 WRITTEN = "Written "
 # Odoo's own first login, which a lane seeded by hand keeps.
 ADMIN_LOGIN, ADMIN_PASSWORD = "admin", "admin"
 # Run in a container of the database image that can only read the two volumes of a copy and reaches no network: the
-# database is copied once more, into the container itself, and a server started there answers. The copy is not written.
+# database is copied once more, into the container itself, where a server is started and answers. The copy is not written.
 # noinspection SqlResolve
 READ_COPY = """
 cp -a /from/. /var/lib/postgresql/ && su postgres -c "pg_ctl --wait --silent --log=/tmp/log start" >&2 || exit 1
@@ -117,6 +118,7 @@ class SignedIn:
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
         self.ask("/web/session/authenticate", db="app", login=ADMIN_LOGIN, password=ADMIN_PASSWORD)
 
+    # noinspection HttpUrlsUsage
     def ask(self, path: str, **given: object) -> Any:  # noqa: ANN401 whatever Odoo answers
         body = json.dumps({"jsonrpc": "2.0", "params": given}).encode()
         headers = {"Host": self.web_address, "Content-Type": "application/json"}

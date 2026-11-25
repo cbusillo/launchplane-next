@@ -27,7 +27,8 @@ class Copying:
 
     @property
     def is_whole(self) -> bool:
-        return self.copy is not None and self.copy.is_whole_copy
+        copy = self.copy
+        return copy is not None and copy.is_whole_copy
 
     # Why this attempt stopped copying. What an earlier attempt gave up for is read from what it left on the host.
     @property
@@ -36,12 +37,12 @@ class Copying:
         return next((each.why if isinstance(each, GiveUp) else each.report for each in self.done if isinstance(each, refused)), None)
 
     def answer(self) -> Done[CopyResult]:
-        lane, copy = self.lane, self.copy
+        lane, copy, active = self.lane, self.copy, self.lane.active
         left = "A copy was begun by an attempt of this request that did not finish it, and is never gone on with."
         result = CopyResult(
             outcome=CopyOutcome.COPIED if self.is_whole else CopyOutcome.NOT_COPIED,
             container_receiving_visitors=lane.route.sends_visitors_to,
-            data_set=None if lane.active is None else lane.active.data_set,
+            data_set=None if active is None else active.data_set,
             copied_to=None if copy is None else copy.data_set,
             error=None if self.is_whole else f"{self.given_up or left} What was copied is kept, and no instance is started on it.",
         )
