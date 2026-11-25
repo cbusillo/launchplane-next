@@ -38,15 +38,14 @@ class Copying:
 
     def answer(self) -> Done[CopyResult]:
         lane, copy, active = self.lane, self.copy, self.lane.active
+        kept = "What was copied is kept, and no instance is started on it. Asking again makes a new copy."
         left = "A copy was begun by an attempt of this request that did not finish it, and is never gone on with."
         result = CopyResult(
             outcome=CopyOutcome.COPIED if self.is_whole else CopyOutcome.NOT_COPIED,
             container_receiving_visitors=lane.route.sends_visitors_to,
             data_set=None if active is None else active.data_set,
             copied_to=None if copy is None else copy.data_set,
-            error=None
-            if self.is_whole
-            else f"{self.given_up or left} What was copied is kept, and no instance is started on it. Asking again makes a new copy.",
+            error=None if self.is_whole else f"{self.given_up or left} {kept}",
         )
         return Done(result)
 
