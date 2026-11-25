@@ -53,7 +53,7 @@ MOVE = f"/lanes/{PRODUCT}/{LANE}/move"
 NEXT = {"run": LATER_RUN}
 SAMPLED_EVERY = 0.05
 SHA256 = UPDATING.odoo.sha256 if UPDATING.odoo else ""
-# What the points before left for the points after: the witness as first read, and each write made since.
+# What the points before left for the points after: the witness as first read, and each write made after it.
 kept: dict[str, Any] = {"written": []}
 PSQL = "psql --username=postgres --dbname=app --quiet --tuples-only --no-align --set=ON_ERROR_STOP=1"
 # noinspection SqlResolve
@@ -63,8 +63,6 @@ $$ begin raise exception 'the update watch lets no lead become an opportunity on
 create trigger refuse_the_pipeline before update of type on crm_lead
 for each row when (new.type = 'opportunity') execute function refuse_the_pipeline();
 """
-# noinspection SqlResolve
-STORED_AS = "select store_fname from ir_attachment where name = :'file'"
 # By the scratch host's own clock: when the web address first answered as the back soon page, and when it first answered
 # with success after that.
 SAMPLE = (
@@ -76,7 +74,7 @@ SAMPLE = (
 )
 
 
-def said(point: str, **observed: object) -> None:
+def said(point: str, **observed: Any) -> None:  # noqa: ANN401 whatever was observed
     print(f"\n{point}", *(f"  {name.replace('_', ' ')}: {value}" for name, value in observed.items()), sep="\n")  # noqa: T201
 
 
@@ -126,7 +124,7 @@ def write(text: str) -> None:
     kept["written"].append(f"{WRITTEN}{text}")
 
 
-# The original instance, build and volumes serve the lead as first read, still a lead, with every write made since.
+# The original instance, build and volumes serve the lead as first read, still a lead, with every write made after it.
 def original_serves_everything_written() -> dict[str, str]:
     lane = read_lane(PRODUCT, LANE)
     assert {name: lane[name] for name in ("instance", "build", "volumes")} == kept["serving"], lane
@@ -176,6 +174,7 @@ def test_1_the_original_serves_the_lead_on_its_team_with_its_attachment_s_bytes(
     serving, witness = read_lane(PRODUCT, LANE), SignedIn(PRODUCT, LANE).witness()
     kept["serving"] = {name: serving[name] for name in ("instance", "build", "volumes")}
     kept["witness"] = witness
+    kept["stored_as"] = SignedIn(PRODUCT, LANE).stored_as()
     said("1. Original", card=card(), **kept["serving"], witness=witness)
     assert (card()["reads"], card()["web_address"], card()["instances"]) == (["good"], ["answering"], [["running", "active"]])
     assert (serving["build"], len(serving["volumes"].split(","))) == (build_of(RUN), 2)
@@ -247,10 +246,9 @@ def test_4_a_check_that_fails_on_the_updated_copy_leaves_no_switch_and_the_origi
         )
         assert updated == kept["witness"] | {"type": "opportunity"}
         assert "The data is copied, and the new build is updated and then checked on the copy." in checking["note"]
-        server = f"{PRODUCT}-{LANE}-database-{copy['data_set']}"
-        stored = on_scratch(f"docker exec --interactive {server} {PSQL} --set=file={LEAD_FILE}", given=STORED_AS)
-        damage = f"printf damaged > /files/filestore/app/{stored.strip()}"
+        damage = f"printf damaged > /files/filestore/app/{kept['stored_as']}"
         on_scratch(f"docker run --rm --network none --volume {copy['files'][0]}:/files busybox:1.37 sh -c '{damage}'")
+        # noinspection HttpUrlsUsage
         answers = on_scratch(f"docker exec launchplane-proxy wget -q -O /dev/null http://{candidate}/web/login && echo 200")
         said("4. Check fails: the attachment's file damaged on the copy alone", candidate_at_web_login=answers.strip())
         assert answers.strip() == "200"

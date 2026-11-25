@@ -37,7 +37,7 @@ LATER = "01900000-0000-7000-8000-00000000000c"
 UPDATE = "timeout 600 /odoo/odoo-bin --update tk_website --stop-after-init --no-http"
 
 
-# One lane of TK on build a, serving, whose releases update a module.
+# One lane of TK on its first build, serving, whose releases update a module.
 def serving() -> tuple[Lanes, PretendProxy, str]:
     proxy = PretendProxy(PretendHost())
     lanes = lanes_on(proxy, TK_UPDATING)
@@ -117,7 +117,12 @@ def test_an_update_that_fails_puts_visitors_back_on_the_original_instance_and_da
 
 def test_a_candidate_that_fails_its_check_after_the_update_is_never_switched_to_and_the_original_comes_back() -> None:
     lanes, proxy, old = serving()
-    proxy.while_checking = lambda container: proxy.failing_its_kind.add(container) if container != old else None
+
+    def fail_the_candidate(container: str) -> None:
+        if container != old:
+            proxy.failing_its_kind.add(container)
+
+    proxy.while_checking = fail_the_candidate
     outcome, error = given_up(lanes, proxy, old)
     assert (outcome, "The check of its kind failed" in error) == (Outcome.CHECK_FAILED, True)
     assert len([each for each in proxy.host.actions if each.startswith("update ")]) == 1
@@ -262,6 +267,10 @@ def worked(record: Record, change: Callable[[PretendProxy], None] = lambda _prox
     return kept_of(record, request.id), lanes, proxy
 
 
+def fail_the_update(of: PretendProxy) -> None:
+    of.host.updates_that_fail.add(BUILD_B.build)
+
+
 def note_on_the_card(lanes: Lanes, kept: Kept) -> str:
     [note] = [row.note for card in cards(lanes.read_status()) for row in card.rows if row.name == f"Request {kept.id}"]
     return note or ""
@@ -289,7 +298,7 @@ def test_a_release_on_a_copy_ends_done_as_switched_once_with_one_update_and_its_
 def test_a_failed_update_ends_the_request_failed_with_no_switch_and_its_card_says_what_failed_and_that_the_lane_serves(
     record: Record,
 ) -> None:
-    kept, lanes, _ = worked(record, lambda proxy: proxy.host.updates_that_fail.add(BUILD_B.build))
+    kept, lanes, _ = worked(record, fail_the_update)
     assert (kept.stands, kept.answer and kept.answer["outcome"], kept.release_verdict) == (
         Stands.FAILED,
         "not updated",
@@ -305,9 +314,9 @@ def test_a_failed_update_ends_the_request_failed_with_no_switch_and_its_card_say
 def test_while_the_original_cannot_come_back_the_request_stays_working_and_its_card_says_what_failed_and_what_comes_next(
     record: Record,
 ) -> None:
-    def fail_the_update_and_the_original(proxy: PretendProxy) -> None:
-        proxy.host.updates_that_fail.add(BUILD_B.build)
-        proxy.failing = {proxy.written[WEB_ADDRESS]}
+    def fail_the_update_and_the_original(of: PretendProxy) -> None:
+        of.host.updates_that_fail.add(BUILD_B.build)
+        of.failing = {of.written[WEB_ADDRESS]}
 
     kept, lanes, proxy = worked(record, fail_the_update_and_the_original)
     assert (kept.stands, proxy.written[WEB_ADDRESS]) == (Stands.WORKING, BACK_SOON)
@@ -315,6 +324,22 @@ def test_while_the_original_cannot_come_back_the_request_stays_working_and_its_c
     note = note_on_the_card(lanes, kept)
     assert "update the data of " in note and "ended with code 1." in note
     assert "Nothing is switched: Launchplane is bringing the original instance back on its own data." in note
+
+
+def test_once_switched_the_card_of_a_request_still_at_work_says_so_and_never_that_the_original_is_coming_back(
+    record: Record,
+) -> None:
+    proxy = PretendProxy(PretendHost())
+    lanes = Lanes(proxy.host, proxy, lambda _product: TK_UPDATING, numbered_names(), read_unfinished=record.unfinished)
+    lanes.move(BUILD_A, EARLIER, 1)
+    old = proxy.written[WEB_ADDRESS]
+    request = record.write(Asked(product="site", lane="testing", work=Work.MOVE, build=BUILD_B.build), CALLER, None)
+    proxy.host.killed_after = len(proxy.host.actions) + 15
+    with pytest.raises(LaunchplaneKilled):
+        Worker(record, lanes, NO_SECRETS).work_next()
+    kept = kept_of(record, request.id)
+    assert proxy.host.actions[-1] == f"retire {old}" and [each.did for each in kept.events if each.error] == [f"retire {old}"]
+    assert "Visitors are switched to the new build on the updated copy." in note_on_the_card(lanes, kept)
 
 
 def test_a_copy_asked_for_by_itself_keeps_every_line_on_its_card(record: Record) -> None:

@@ -97,8 +97,9 @@ def decide(move: Move, cancel: steps.Cancel | None = None) -> Decided:
     refused = any(isinstance(each, steps.CheckRefused) for each in move.done)
     if move.gate.verdict is Verdict.ABANDONED or plan.is_turned_back(cancel) or refused:
         return plan.decide_move(move, cancel)
-    began = of.copy is not None and bool(of.copy.copies)
-    if (why := given_up(move) or (NOT_FINISHED if began else None)) is not None:
+    copy = of.copy
+    why = given_up(move) or (NOT_FINISHED if copy is not None and copy.copies else None)
+    if why is not None:
         return not_updated(move, why)
     receiving = move.instance(route.written)
     if receiving is None or receiving.build == move.target.build:

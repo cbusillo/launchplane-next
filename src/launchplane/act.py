@@ -162,7 +162,7 @@ def fresh_names(target: LaneBuild) -> FreshNames:
 
 
 # A lost reply is no answer: only what the command itself answered says the update failed.
-def update_refused(host: InstanceHost, action: steps.Update) -> steps.UpdateRefused | None:
+def run_update(host: InstanceHost, action: steps.Update) -> steps.UpdateRefused | None:
     ran = host.run_in(action.container, [*action.command])
     if ran.succeeded:
         return None
@@ -191,7 +191,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
-    steps.Update: lambda host, _proxy, step, _by: update_refused(host, step),
+    steps.Update: lambda host, _proxy, step, _by: run_update(host, step),
 }
 
 

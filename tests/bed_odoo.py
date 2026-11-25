@@ -161,7 +161,7 @@ class SignedIn:
         self.call("crm.lead", "create", [{"name": f"{WRITTEN}{text}", "type": "lead"}])
 
     # The one record the update watch follows: which lead, on which team, of what type, and its attachment, linked and read.
-    def witness(self) -> dict[str, object]:
+    def witness(self) -> dict[str, Any]:
         [lead] = self.call("crm.lead", "search_read", [("name", "=", LEAD)], fields=["type", "team_id"])
         [file] = self.call("ir.attachment", "search_read", [("name", "=", LEAD_FILE)], fields=["res_model", "res_id", "raw"])
         return {
@@ -172,6 +172,11 @@ class SignedIn:
             "attached_to": f"{file['res_model']},{file['res_id']}",
             "sha256": hashlib.sha256(base64.b64decode(file["raw"]["content"])).hexdigest(),
         }
+
+    # Where under `filestore/app` of the lane's files volume Odoo keeps the bytes of the lead's attachment.
+    def stored_as(self) -> str:
+        [file] = self.call("ir.attachment", "search_read", [("name", "=", LEAD_FILE)], fields=["store_fname"])
+        return file["store_fname"]
 
     # The first scheduled job, made due long ago. No instance of a lane runs scheduled jobs, so it must stay due.
     def due_job(self, *, make_due: bool = False) -> dict[str, object]:
@@ -203,7 +208,7 @@ def read_lane(product: str, lane: str) -> dict[str, str]:
 
 
 # The same record read by the Odoo of one instance, which need not receive visitors.
-def witness_in(container: str) -> dict[str, object]:
+def witness_in(container: str) -> dict[str, Any]:
     said = on_scratch(f"docker exec --interactive {container} {SERVER} shell --no-http --log-level=error", given=WITNESS)
     return json.loads(next(line for line in said.splitlines() if line.startswith("witness=")).removeprefix("witness="))
 
