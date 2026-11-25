@@ -61,7 +61,7 @@ A copy is whole when each of its volumes was written by one copier whose descrip
 ## Known and not fixed
 
 - **Nothing deletes a copy but a retire of its lane that names it.** Each call leaves one, also one that was not finished.
-- **The back soon page shows for much longer than the copy takes.** Most of it is Odoo starting again and its check. See the measurements.
+- **The back soon page shows for much longer than the copy takes.** Most of it is Odoo starting again and its check. See the measurements, and [those of a release that updates](odoo.md#measured), which copies the same way.
 - **A copier has 300 s for a volume,** chosen with nothing measured at real size. When it runs out, the request stays `working`, its next attempt stops the copier, gives the copy up and brings the lane back.
 - **A clean stop is read from the database server's exit code,** as maintenance reads it, not from PostgreSQL's own control file.
 - **`diff -r` compares names and bytes,** not owners, modes or times. `cp -a` keeps them.

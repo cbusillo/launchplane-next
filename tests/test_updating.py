@@ -173,6 +173,17 @@ def test_a_request_asked_after_a_failed_one_makes_a_fresh_copy_and_switches() ->
     assert proxy.host.data_sets[used or ""].generation == LATER
 
 
+def test_a_second_release_copies_the_copy_the_lane_now_serves_from_and_leaves_both_earlier_data_sets_offline() -> None:
+    lanes, proxy, _ = serving()
+    lanes.move(BUILD_B, GENERATION, 1, first())
+    first_copy = copy_on(proxy).data_set
+    result = lanes.move(BUILD_A, LATER, 1, Witness(generation=LATER, attempt=1))
+    second = proxy.host.data_sets[result.data_set or ""]
+    assert (result.outcome, second.copy_of, second.generation) == (Outcome.SWITCHED, first_copy, LATER)
+    assert [proxy.host.data_sets[each].databases[0].state for each in ("data-1", first_copy)] == [STOPPED, STOPPED]
+    assert [each.condition for each in lanes.read_status().lanes] == [Condition.GOOD]
+
+
 def test_the_serving_build_asked_again_copies_nothing_and_updates_nothing() -> None:
     lanes, proxy, _ = serving()
     result = lanes.move(BUILD_A, GENERATION, 1, first())

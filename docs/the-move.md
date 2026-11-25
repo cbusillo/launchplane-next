@@ -488,7 +488,7 @@ uv run python -m tests.bed_odoo tear-down watch-copy
 
 ### The update watch
 
-[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, then one that switches. It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes about PLACEHOLDER minutes and puts the bed back. Both blocks paste into zsh as they stand.
+[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, then one that switches. It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes about four minutes and puts the bed back. Both blocks paste into zsh as they stand.
 
 ```zsh
 cd /Users/cbusillo/Developer/launchplane-next
@@ -508,6 +508,38 @@ while true; do
   sleep 1
 done
 ```
+
+The test prints one block for each point below as it reaches it, and the page shows the card `watch-update · testing` at the same moment. It first brings the lane up on TK's first build, seeded as in [the TK watch](#the-tk-watch), writes one invented lead on a sales team with one attachment through Odoo at the web address, and then describes the product with `"update": ["tk_website"]` and with that attachment as the one [the check](odoo.md#the-check) reads. That takes about two minutes, with nothing printed. Where a point must be read between two of Launchplane's steps, the test runs Launchplane [able to be held](#holding-a-move-and-interrupting-it) and holds it there; the last two points run the plain service.
+
+1. **Original.** `instance`, `build` and `volumes` are what `/running` has for the web address: `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` on `launchplane-data-…-database` and `…-files`. `witness` is the record to follow, read through Odoo at the web address: `lead` and `team`, both IDs, `type: lead`, the `attachment` ID, `attached_to: crm.lead,` and the lead's ID, and `sha256: 2663df39…`, the hash of the attachment's bytes.
+
+   **The card** reads `good`, its web address `answering`, and `Instance 1` is `running` and `active`. The second window prints `visitor 200` with `…@sha256:0e2ad09f…` and the data set.
+
+2. **Frozen and copied.** The move to run `45291692474` is answered `202`, and its request reads `working`. A visitor gets `503`, the back soon page. Launchplane is held where both volumes are copied and nothing is started on the copy. `the copy` is read from the copy's own two volumes alone, in a container with no network: two volumes that point 1 did not show, `lead: lead`, and the same `attachment` hash.
+
+   **The card** has the pills `in maintenance` and `work under way`, its web address `shows the back soon page`, and `Instance 1` is `stopped`. The request is `working`, and its note is: `Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build is started on the copy and its update runs there. Every line is in GET /requests/<id>.`
+
+3. **Update fails.** With the candidate started on the copy and the update not yet sent, the test adds a trigger to the copy's database alone that refuses any lead becoming an opportunity, and lets Launchplane go. TK's real module update runs, and its migration fails on that trigger. Launchplane is held once more, about to start the original's database server again, and a visitor still gets `503`.
+
+   **The card, recovering:** the request is `working`, and its note names the step, `update the data of` the candidate, that it `ended with code 255`, `The last error in its log: psycopg2.errors.RaiseException: the update watch lets no lead become an opportunity on this copy`, and then `Nothing is switched: Launchplane is bringing the original instance back on its own data.`
+
+   **Restored:** the request is `failed`, `not updated`, and the gate's answer for it is `none`: it has no line that begins `switch`. `error` is the sentence above, `Nothing was switched, and the lane serves from its own data again. What was copied is kept offline, and asking again makes a new copy.`, and the last 20 lines the update wrote. The card reads `good` and `answering`, and its note is that error in one paragraph. The test then writes a lead through Odoo at the web address and prints the lane: the `instance`, `build` and `volumes` of point 1, `lead: lead`, the same `attachment`, and `written: Written after the update failed`.
+
+4. **Check fails.** The same move again, on a fresh copy, held once the update has run and before the check. First the witness is read by the candidate's own Odoo, on the updated copy that no visitor reaches: the same `lead`, `team`, `attachment` and `attached_to` as in point 1, `type: opportunity`, and the same `sha256`. Then the test overwrites that attachment's file in the copy's files volume, and asks the candidate for `/web/login` through the proxy's container: `200`. Let go, the check reads the attachment through Odoo and fails.
+
+   **The card** reads `good` and `answering` again, with the original `running` and `active`. The request is `failed`, `check failed`, with no `switch`, and its note is the check's own sentence: the candidate `answers the proxy, and the check of its kind, run in it, failed: The attachment invented-lead.txt of the database app must be there once with the SHA-256 2663df39…. Read through Odoo from its file, it has:` another hash. At the web address the lead is still a `lead` with its bytes, the write of point 3 is there, and a new one, `Written after the check failed`, reads back.
+
+5. **Killed during the update.** The same move a third time, on the plain service. As soon as the update's process shows in the candidate, Launchplane is killed as `kill -9` does, and systemd starts it again. The request is taken up, finds its lane behind the back soon page with an update it knows nothing of, removes the candidate and with it the update still running in it, and brings the original back.
+
+   **The card** reads `good` and `answering`. The request is `failed`, `not updated`, its attempts `interrupted` and `failed`, with no `switch`, and its note says why in one paragraph: `An earlier attempt of this request put the lane behind the back soon page and did not finish, so whether its update ran is not known and its copy is not used. Nothing was switched, and the lane serves from its own data again. What was copied is kept offline, and asking again makes a new copy.` The lead, its bytes and both earlier writes are at the web address, and `Written after the kill` reads back.
+
+6. **Successful switch and retry.** The same move a fourth time, sent with an `Idempotency-Key` and left alone. The card goes from `in maintenance` and `work under way`, with the notes of point 2 and then `The data is copied, and the new build is updated and then checked on the copy…`, to `good` and `answering` with `…@sha256:f0b8a27b…` `running` and `active`, and the second window goes from `visitor 503` to `visitor 200` with that build and a new data set. The request is `done`, `switched`: one line `update the data of`, one line `switch`, and the gate's answer `committed`. Its note: `Visitors are on the new build and the updated copy. Every line is in GET /requests/<id>.`
+
+   `witness`, now read at the same web address, is the record of point 1 as an `opportunity`: the same `lead`, `team`, `attachment`, `attached_to` and `sha256`. `written` has the three writes of points 3 to 5. The first line of the block is [the measured time](odoo.md#measured) from the first back soon answer to the new instance's first answer. The test also holds that the scheduled job it made due before the move is still due and has not run, that the new instance has only the copy's files volume mounted and only networks with no way out, and that the data set it replaced still has both volumes, with its database server `exited` with code 0.
+
+   Then it writes once more, sends the same move with the same key, and asks for the serving build again without a key: `the key answers request` the request that switched, and the new request is `unchanged` with `0 lines`. Neither the update nor the switch ran again, and the write is there. The card stays `good`.
+
+Afterwards the test retires the lane with each copy and its data set, and takes Launchplane off the recorded git host.
 
 ### The login watch
 

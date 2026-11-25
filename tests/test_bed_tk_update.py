@@ -237,9 +237,16 @@ def test_4_a_check_that_fails_on_the_updated_copy_leaves_no_switch_and_the_origi
         assert status == 202, asked
         wait_until_stopped_at("before.proxy.check_instance", seconds=180)
         candidate, copy = candidate_of(asked), copy_of(asked)
-        updated = witness_in(candidate)
-        said("4. Updated, before the check: the witness read by the candidate's own Odoo", candidate=candidate, witness=updated)
+        updated, checking = witness_in(candidate), card(asked["id"])
+        said(
+            "4. Updated, before the check: the witness read by the candidate's own Odoo",
+            candidate=candidate,
+            witness=updated,
+            visitor=site_status(),
+            note=checking["note"],
+        )
         assert updated == kept["witness"] | {"type": "opportunity"}
+        assert "The data is copied, and the new build is updated and then checked on the copy." in checking["note"]
         server = f"{PRODUCT}-{LANE}-database-{copy['data_set']}"
         stored = on_scratch(f"docker exec --interactive {server} {PSQL} --set=file={LEAD_FILE}", given=STORED_AS)
         damage = f"printf damaged > /files/filestore/app/{stored.strip()}"
