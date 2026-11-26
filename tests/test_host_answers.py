@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from launchplane import plan, steps
 from launchplane.act import Lanes, Stopped, Waiting
 from launchplane.api import create_app
-from launchplane.instance import BACK_SOON, HostNetwork, Mount, Unread
+from launchplane.instance import BACK_SOON, DataSetUse, HostNetwork, Mount, Unread
 from launchplane.judge import Work
 from launchplane.record import Asked, Kept, Record, Stands
 from launchplane.telling import LOOKS, NAMED, named
@@ -324,7 +324,7 @@ CHANGING = (
     steps.CreateDatabase("site", "testing", "d1", "network", "volume", "image"),
     steps.CopyVolume("site", "testing", "d2", "volume", "copy"),
     steps.GiveUp("The database did not stop cleanly."),
-    steps.Update("a", ("update",)),
+    steps.Update(BUILD_A, "a", DataSetUse("d1", "network", "database"), ("update",)),
     steps.StartDatabase("database"),
     steps.DeleteDataSet(D1),
     steps.StartInstance(BUILD_A, "a"),

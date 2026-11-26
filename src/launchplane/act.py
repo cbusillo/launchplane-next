@@ -83,7 +83,8 @@ class InstanceHost(Protocol):
     def retire_instance(self, container: str, by: Witness) -> None: ...
     def remove_unheld_logins(self, database: str, by: Witness) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
-    def run_in(self, container: str, command: list[str]) -> CommandResult: ...
+    def restarts(self, container: str) -> int: ...
+    def run_once(self, update: steps.Update, by: Witness, /) -> CommandResult: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -157,13 +158,20 @@ class Status:
     cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
 
 
+# Only the process that was started is switched to. One Docker started in its place may answer where the first did not.
+NOT_THE_FIRST = (
+    "{container} answers and passed its check, but its first process ended and Docker has started it again {restarts} "
+    "time(s) since it was started, so what answers is not what was started and it is not switched to."
+)
+
+
 def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
 
 # A lost reply is no answer: only what the command itself answered says the update failed.
-def run_update(host: InstanceHost, action: steps.Update) -> steps.UpdateRefused | None:
-    ran = host.run_in(action.container, [*action.command])
+def run_update(host: InstanceHost, action: steps.Update, by: Witness) -> steps.UpdateRefused | None:
+    ran = host.run_once(action, by)
     if ran.succeeded:
         return None
     why = f"The update of the data, run in {action.container}, ended with code {ran.exit_code}."
@@ -191,7 +199,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
-    steps.Update: lambda host, _proxy, step, _by: run_update(host, step),
+    steps.Update: lambda host, _proxy, step, by: run_update(host, step, by),
 }
 
 
@@ -559,6 +567,8 @@ class Lanes:
     def check(self, check: steps.Check, *, with_log: bool) -> Event:
         try:
             self.proxy.check_instance(check.container, check.health_path, check.command)
+            if check.first_process and (restarts := self.host.restarts(check.container)):
+                raise CheckFailed(NOT_THE_FIRST.format(container=check.container, restarts=restarts))
         except CheckFailed as error:
             return steps.CheckRefused(check.container, self.refusal(error, check.container, with_log=with_log))
         return check

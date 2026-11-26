@@ -24,6 +24,8 @@ PORT = int(os.environ.get("LAUNCHPLANE_RECORDED_GIT_HOST_PORT", "8702"))
 ASKED = re.compile(rf"/repos/{REPOSITORY}/actions/(?:runs/(?P<run>\d+)(?P<artifacts>/artifacts)?|artifacts/(?P<artifact>\d+)/zip)")
 SIGNED = re.compile(r"/signed/(?P<artifact>\d+)")
 SIGNATURE = "sig=a-signature-anyone-may-download-with"
+# Builds made on the bed itself, by a run number GitHub never gave: `{"<run>": "<image>@<digest>"}`, read once at the start.
+BED_BUILDS = Path("/var/lib/launchplane/bed-builds.json")
 
 
 def recorded(run: int, name: str) -> Any:  # noqa: ANN401 whatever GitHub answered
@@ -44,6 +46,23 @@ def zipped(manifest: object) -> bytes:
 # What the git host answers for each run, by run number. A test changes a copy to make a run GitHub never had.
 def answers() -> dict[int, dict[str, Any]]:
     return {run: {name: recorded(run, name) for name in ("run", "artifacts", "manifest")} for run in (RUN, LATER_RUN)}
+
+
+# A build made on the bed is answered as the later run is, under its own numbers, publishing that image.
+def made_on_the_bed(run: int, build: str) -> dict[str, Any]:
+    recorded_as = answers()[LATER_RUN]
+    repository, digest = build.split("@")
+    artifacts = [each | {"id": run} for each in recorded_as["artifacts"]["artifacts"]]
+    return {
+        "run": recorded_as["run"] | {"id": run},
+        "artifacts": recorded_as["artifacts"] | {"artifacts": artifacts},
+        "manifest": recorded_as["manifest"] | {"image": {"repository": repository, "digest": digest}},
+    }
+
+
+def bed_builds() -> dict[int, dict[str, Any]]:
+    builds: dict[str, str] = json.loads(BED_BUILDS.read_text()) if BED_BUILDS.exists() else {}
+    return {int(run): made_on_the_bed(int(run), build) for run, build in builds.items()}
 
 
 def serve(runs: dict[int, dict[str, Any]], port: int) -> ThreadingHTTPServer:
@@ -79,4 +98,4 @@ def serve(runs: dict[int, dict[str, Any]], port: int) -> ThreadingHTTPServer:
 
 
 if __name__ == "__main__":
-    serve(answers(), PORT).serve_forever()
+    serve(answers() | bed_builds(), PORT).serve_forever()

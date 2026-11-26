@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, cast
@@ -7,13 +8,15 @@ import pytest
 from docker.errors import ImageNotFound
 from requests import ConnectionError
 
-from launchplane.container_host import ContainerHost
+from launchplane.container_host import RUN_ONCE_DEADLINE_SECONDS, ContainerHost
 from launchplane.data_set import RULES_AS_READ
 from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.instance import DataSet, DataSetUse, LaneBuild
-from launchplane.odoo import FILES_PATH
+from launchplane.odoo import FILES_PATH, UPDATE_DEADLINE_SECONDS
 from launchplane.proxy import CheckFailed
-from tests.odoo_product import TK
+from launchplane.steps import Update
+from tests.odoo_product import TK, TK_UPDATING
+from tests.pretend_host import GENERATION
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker, as_docker_client
 from tests.test_container_host import (
     DATA_SET_LABELS,
@@ -79,9 +82,18 @@ def test_deleting_a_data_set_deletes_its_files_with_its_database() -> None:
     assert docker.volumes.made == {}
 
 
-# What Docker was asked to make the one web part from.
-def made_from(target: LaneBuild, use: DataSetUse | None) -> tuple[list[str] | None, dict[str, object]]:
-    docker = RecordingDocker()
+def start(host: ContainerHost, target: LaneBuild, use: DataSetUse | None) -> None:
+    host.start_instance(target, WEB, use)
+
+
+# What Docker was asked to make the one part from, as `run` asks the host for it.
+def made_from(
+    target: LaneBuild,
+    use: DataSetUse | None,
+    run: Callable[[ContainerHost, LaneBuild, Any], object] = start,
+    docker: RecordingDocker | None = None,
+) -> tuple[list[str] | None, dict[str, object]]:
+    docker = docker or RecordingDocker()
     host = database_made(docker)
     docker.containers.by_name[DATABASE].answers = [
         ExecResult(0, json.dumps(RULES_AS_READ).encode()),
@@ -95,7 +107,7 @@ def made_from(target: LaneBuild, use: DataSetUse | None) -> tuple[list[str] | No
         return create(_image, _command, **options)
 
     docker.containers.create = create_and_keep
-    host.start_instance(target, WEB, use)
+    run(host, target, use)
     return asked[0]
 
 
@@ -111,6 +123,67 @@ def test_a_build_that_starts_by_itself_is_given_no_command_user_or_volume_also_o
     command, options = made_from(TARGET, ON_D1)
     assert (command, options["user"], options["volumes"]) == (None, None, {})
     assert set(cast("dict[str, str]", options["environment"])) == {"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"}
+
+
+UPDATE = [*TK_UPDATING.update]
+UPDATER = f"{WEB}-update"
+
+
+def update(host: ContainerHost, target: LaneBuild, use: DataSetUse) -> CommandResult:
+    return host.run_once(Update(target, UPDATER, use, (*UPDATE,), GENERATION))
+
+
+def test_the_update_is_run_by_the_build_as_its_instance_runs_on_the_data_set_s_network_alone_and_is_never_started_again() -> None:
+    command, options = made_from(TARGET.model_copy(update={"run": TK.run}), ON_D1, update)
+    given = cast("dict[str, str]", options["environment"])
+    assert (command, options["user"], options["restart_policy"]) == (UPDATE, "ubuntu", {"Name": "no"})
+    assert (options["network"], list(cast("dict[str, object]", options["networking_config"]))) == (
+        DATA_SET_NETWORK,
+        [DATA_SET_NETWORK],
+    )
+    assert options["volumes"] == {FILES_VOLUME: {"bind": FILES_PATH, "mode": "rw"}}
+    assert (given["ODOO_MAX_CRON_THREADS"], given["PGUSER"], bool(given["PGPASSWORD"])) == ("0", "i_update", True)
+    assert cast("dict[str, str]", options["labels"])["launchplane.generation"] == GENERATION
+
+
+@pytest.mark.parametrize("exit_code", [0, 124])
+def test_what_is_run_once_is_waited_for_to_its_end_answers_with_its_exit_code_and_is_then_removed(
+    exit_code: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker, answered = RecordingDocker(), list[CommandResult]()
+
+    def exit_with_the_code(waited_for: RecordingContainer, timeout: int) -> dict[str, int]:
+        waited_for.calls.append(f"wait {timeout} s")
+        return {"StatusCode": exit_code}
+
+    def update_and_keep(host: ContainerHost, target: LaneBuild, use: DataSetUse) -> None:
+        answered.append(update(host, target, use))
+
+    monkeypatch.setattr(RecordingContainer, "wait", exit_with_the_code)
+    made_from(TARGET, ON_D1, update_and_keep, docker)
+    ran = docker.containers.by_name[UPDATER]
+    assert ([each.exit_code for each in answered], ran.removed) == ([exit_code], True)
+    assert ran.calls == ["start", f"wait {RUN_ONCE_DEADLINE_SECONDS} s", "logs 20", "stop within 30 s", "remove"]
+
+
+def test_what_runs_the_update_is_marked_and_read_as_an_update_and_not_as_a_web_part() -> None:
+    _, options = made_from(TARGET, ON_D1, update)
+    assert cast("dict[str, str]", options["labels"])["launchplane.part"] == "update"
+    update_listed = listed(UPDATER, "update", [DATA_SET_NETWORK]) | {"State": "running"}
+    [found] = read([update_listed], [network(True, QUIET_OPTIONS)], []).instances
+    assert (found.container, found.is_update) == (UPDATER, True)
+
+
+def test_how_often_docker_started_a_container_again_is_read_from_docker() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    docker.containers.by_name[DATABASE].restart_count = 2
+    assert host.restarts(DATABASE) == 2
+
+
+def test_an_update_ends_itself_before_the_host_stops_waiting_for_what_is_run_once() -> None:
+    assert UPDATE[:2] == ["timeout", str(UPDATE_DEADLINE_SECONDS)]
+    assert UPDATE_DEADLINE_SECONDS < RUN_ONCE_DEADLINE_SECONDS
 
 
 @dataclass

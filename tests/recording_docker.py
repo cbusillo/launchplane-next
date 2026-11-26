@@ -36,6 +36,7 @@ class RecordingContainer:
     answers: list[ExecResult] = field(default_factory=list[ExecResult])
     # Which of start, stop and remove Docker refuses for it.
     refuses: set[str] = field(default_factory=set[str])
+    restart_count: int = 0
 
     def sent(self, command: str, call: str) -> None:
         self.calls.append(call)
@@ -55,7 +56,7 @@ class RecordingContainer:
     @property
     def attrs(self) -> dict[str, Any]:
         state = {"Running": True, "Restarting": False, "Paused": False, "StartedAt": STARTED, "ExitCode": 0}
-        return {"Name": f"/{self.name}", "Config": {"Env": self.environment}, "State": state}
+        return {"Name": f"/{self.name}", "Config": {"Env": self.environment}, "State": state, "RestartCount": self.restart_count}
 
     @property
     def listed(self) -> dict[str, Any]:
@@ -75,6 +76,11 @@ class RecordingContainer:
     def start(self) -> None:
         self.sent("start", "start")
         self.status = "running"
+
+    def wait(self, timeout: int) -> dict[str, int]:
+        self.calls.append(f"wait {timeout} s")
+        self.status = "exited"
+        return {"StatusCode": 0}
 
     def stop(self, timeout: int) -> None:
         self.sent("stop", f"stop within {timeout} s")

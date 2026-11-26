@@ -73,7 +73,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
-from launchplane.steps import CopyVolume
+from launchplane.steps import CopyVolume, Update
 from launchplane.telling import NOBODY, Said, Witness
 
 DOCKER_API_VERSION = "1.47"
@@ -91,12 +91,16 @@ COPIER_IMAGE = "debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af67
 # Everything in the volume as it is, then every byte read again from both: a file the copy lacks or has too many fails it.
 # The copy is written where the database image keeps its one volume, so the copier is given no other volume to write.
 COPY_COMMAND = ["sh", "-c", f"cp -a --reflink=auto /from/. {DATA_PATH}/ && diff -r --no-dereference /from {DATA_PATH} && sync"]
-type RestartPolicy = Literal["always", "unless-stopped"]
+# How long the host waits for what is run once. A command that must end sooner ends itself.
+RUN_ONCE_DEADLINE_SECONDS = 900
+type RestartPolicy = Literal["always", "unless-stopped", "no"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
 # The states Docker gives a container that a stop finds stopped.
 STOPPED = ("created", "exited", "dead")
 ALWAYS_RUNS: RestartPolicy = "always"
+# Docker never starts a container with this policy again, whatever becomes of it or of the host.
+RUNS_ONCE: RestartPolicy = "no"
 
 type Lane = tuple[str, str]
 
@@ -364,7 +368,7 @@ class ContainerHost:
 
     def run_part(
         self, options: RunOptions, use: DataSetUse | None, login_on: Callable[[DataSetUse], dict[str, str]], by: Witness
-    ) -> None:
+    ) -> Container:
         if LANE_NETWORK in options.networks:
             self.ensure_network(LANE_NETWORK, quiet=True)
         ready = options if use is None else on_data_set(options, use, login_on(use))
@@ -373,17 +377,37 @@ class ContainerHost:
             made = self.create(ready)
         with sent(by, "start", ready.container):
             made.start()
+        return made
+
+    @staticmethod
+    def instance_options(
+        target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, part: Part = "web"
+    ) -> RunOptions:
+        networks, run = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network], target.run
+        files = {} if use is None or use.files is None or run.files is None else {use.files: run.files}
+        options = part_options(target, container, part, networks, [*run.command] or None)
+        stamped = replace(options, labels=options.labels | stamp_of(generation), volumes=files, user=run.user)
+        return replace(stamped, environment=dict(run.environment))
 
     def start_instance(
         self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
     ) -> None:
-        networks, run = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network], target.run
-        files = {} if use is None or use.files is None or run.files is None else {use.files: run.files}
         with attempting(f"Starting the instance {container} from build {target.build}", self.address):
-            options = part_options(target, container, "web", networks, [*run.command] or None)
-            stamped = replace(options, labels=options.labels | stamp_of(generation), volumes=files, user=run.user)
-            ready = replace(stamped, environment=dict(run.environment))
+            ready = self.instance_options(target, container, use, generation)
             self.run_part(ready, use, lambda on: self.logins.make(container, on, by), by)
+
+    # The build, run once to its end as an instance of it runs on the data set: its settings, its files and a login. It is
+    # on the data set's network alone, where no visitor is sent. Once it has ended and answered, it is removed.
+    def run_once(self, update: Update, by: Witness = NOBODY) -> CommandResult:
+        target, container, use = update.target, update.container, update.use
+        with attempting(f"Running {update.command[0]} of build {target.build} once in {container}", self.address):
+            as_instance = self.instance_options(target, container, use, update.generation, "update")
+            once = replace(as_instance, networks={use.network: []}, command=[*update.command], restart=RUNS_ONCE)
+            ran = self.run_part(once, use, lambda on: self.logins.make(container, on, by), by)
+            exit_code = ran.wait(timeout=RUN_ONCE_DEADLINE_SECONDS)["StatusCode"]
+            output = ran.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip()
+            self.retire_container(container, by)
+        return CommandResult(exit_code=exit_code, output=output)
 
     def start_background_service(
         self,
@@ -536,6 +560,12 @@ class ContainerHost:
         with attempting(f"Removing the logins no container holds from the database {database}", self.address):
             self.logins.remove(database, unheld, by)
         return None
+
+    # How often Docker has started the container again by itself since it was started: its first process is the one
+    # that runs only while this is 0.
+    def restarts(self, container: str) -> int:
+        with attempting(f"Reading how often Docker started {container} again", self.address):
+            return checked(DOCKER_CONTAINER_DETAILS, self.describe(container), f"description of {container}").restart_count
 
     def read_log_tail(self, container: str) -> str:
         with attempting(f"Reading the log of {container}", self.address):

@@ -69,6 +69,8 @@ class RunningInstance(BaseModel):
     generation: Stamp = None
     # The image it runs, where its build names a digest and the host has another image for that digest, or none.
     other_image: str | None = None
+    # The build run once to update a copy of the lane's data. It is no web part: it answers nobody and is sent nobody.
+    is_update: bool = False
 
 
 class RunningBackgroundService(BaseModel):

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from launchplane.act import Status
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import BACK_SOON, DataSet, InstanceState, PartOfLane, Verdict
+from launchplane.instance import BACK_SOON, DataSet, InstanceState, PartOfLane, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Kind, Shown, Standing, WebAddressJudged, Work
 from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancel_won, how_cancelled, how_replaced
 from launchplane.steps import Outcome
@@ -179,22 +179,51 @@ def with_lines(note: str, request: Request, *, only_sent: bool = False) -> str:
     return f"{note} Its lines: {'; '.join(lines)}." if lines else note
 
 
-COPYING = (
-    "Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build is "
-    "started on the copy and its update runs there."
+NOT_SWITCHED = "Visitors get the back soon page, and nothing is switched."
+COPYING = f"A copy of the lane's data is being made. It has no network of its own yet, so nothing runs on it. {NOT_SWITCHED}"
+COPIED = f"The lane's data is copied. The copy is not updated, and nothing of the new build is started on it. {NOT_SWITCHED}"
+UPDATING = f"The lane's data is copied, and the new build is updating the copy. No web part of it is started. {NOT_SWITCHED}"
+UPDATE_STOPPED = (
+    "The container of the update is on the host and does not run. How the update ended is not recorded yet, and no web "
+    f"part of the new build is started. {NOT_SWITCHED}"
 )
-UPDATING = (
-    "The data is copied, and the new build is updated and then checked on the copy. If both pass, visitors are switched "
-    "to it. If not, the original instance comes back on its own data."
-)
+UPDATED = f"The update of the copy ended well. No web part of the new build is started on it yet. {NOT_SWITCHED}"
+CHECKING = f"The copy is updated, and the new build runs on it. It has not passed its check. {NOT_SWITCHED}"
+CHECKED = f"The copy is updated, and the new build runs on it and passed its check. {NOT_SWITCHED}"
 COMING_BACK = "Nothing is switched: Launchplane is bringing the original instance back on its own data."
-SWITCHED = "Visitors are switched to the new build on the updated copy. The instance it replaces is retired next."
+ROUTE_WRITTEN = (
+    "The route is written to the new build on the updated copy. The proxy is not yet seen to send visitors there, so "
+    "they may still get the back soon page."
+)
+SWITCHED = "The proxy sends visitors to the new build on the updated copy."
 EVERY_LINE = "Every line is in GET /requests/{id}."
 
 
-# A move that put its lane behind the back soon page has too many lines for a card. Its note is where it is and what
-# comes next, told from its own lines, and the lines are in the request.
-def frozen_note(request: Kept) -> str | None:
+# Where a release on a copy is before its switch: what it has on the host now, and what its lines say has ended.
+def copy_phase(request: Kept, instances: Sequence[RunningInstance]) -> str:
+    own = [each for each in instances if each.generation == request.generation]
+    told = [line.did for line in request.events if line.error is None]
+    if any(each.is_update for each in own):
+        return UPDATING if any(each.is_update and each.state is InstanceState.RUNNING for each in own) else UPDATE_STOPPED
+    if any(each.state is InstanceState.RUNNING for each in own):
+        return CHECKED if any(each.startswith("check ") for each in told) else CHECKING
+    if any(each.startswith("update the data of ") for each in told):
+        return UPDATED
+    return COPIED if any(each.startswith("make the network of the data set") for each in told) else COPYING
+
+
+# A route that is written sends nobody anywhere until the proxy has loaded it, which the line after the switch says.
+def switch_phase(lines: Sequence[Event]) -> str | None:
+    switched = next((number for number, line in enumerate(lines) if line.did.startswith("switch ") and line.is_own), None)
+    if switched is None:
+        return None
+    served = any(line.did.startswith("wait for the proxy to load the route") and line.error is None for line in lines[switched:])
+    return SWITCHED if served else ROUTE_WRITTEN
+
+
+# A move that put its lane behind the back soon page has too many lines for a card. Its note is where it is, told from
+# what is on the host and from what its own lines say has happened, and the lines are in the request.
+def frozen_note(request: Kept, instances: Sequence[RunningInstance]) -> str | None:
     lines = request.events
     froze = any(line.action is not None and line.action.to == BACK_SOON for line in lines)
     if request.work is not Work.MOVE or not froze:
@@ -202,12 +231,12 @@ def frozen_note(request: Kept) -> str | None:
     stopped = next((line for line in lines if line.error is not None or line.did.startswith("give the copy up")), None)
     if request.stands in ENDED:
         paragraph = in_one_line(request.error) if request.error else "Visitors are on the new build and the updated copy."
-    elif any(line.did.startswith("switch ") and line.is_own for line in lines):
-        paragraph = SWITCHED
+    elif (switching := switch_phase(lines)) is not None:
+        paragraph = switching
     elif stopped is not None:
         paragraph = f"{in_one_line(': '.join(filter(None, (stopped.did, stopped.error)))).rstrip('.')}. {COMING_BACK}"
     else:
-        paragraph = UPDATING if any(line.did.startswith("make the network of the data set") for line in lines) else COPYING
+        paragraph = copy_phase(request, instances)
     again = "" if request.stands in ENDED else taken_up(request)
     return f"{again}{paragraph.rstrip('.')}. {EVERY_LINE.format(id=request.id)}"
 
@@ -232,8 +261,10 @@ def being_cancelled(request: Kept, decided: Mapping[int, GateAnswer | None]) -> 
     return f" To be cancelled by {request.cancel_asked_by}: {CANCEL_AT_THE_GATE[None if answer is None else answer.verdict]}"
 
 
-def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> str | None:
-    if isinstance(request, Kept) and request.cancel_asked_at is None and (frozen := frozen_note(request)) is not None:
+def request_note(
+    request: Request, decided: Mapping[int, GateAnswer | None], instances: Sequence[RunningInstance] = ()
+) -> str | None:
+    if isinstance(request, Kept) and request.cancel_asked_at is None and (frozen := frozen_note(request, instances)) is not None:
         return frozen
     if request.stands is Stands.CANCELLED:
         # What a cancel put back is in its own note, so only the lines of what it sent are added.
@@ -252,13 +283,15 @@ def request_note(request: Request, decided: Mapping[int, GateAnswer | None]) -> 
     return None
 
 
-def request_rows(requests: Sequence[Request], decided: Mapping[int, GateAnswer | None]) -> list[Row]:
+def request_rows(
+    requests: Sequence[Request], decided: Mapping[int, GateAnswer | None], instances: Sequence[RunningInstance] = ()
+) -> list[Row]:
     return [
         Row(
             name=f"Request {request.id}",
             value=[Piece(text=asked_for(request))],
             pills=[Pill(text=request.stands, tone=STANDS_TONE.get(request.stands, Standing.WRONG))],
-            note=request_note(request, decided),
+            note=request_note(request, decided, instances),
         )
         for request in sorted(requests, key=lambda each: each.id)
     ]
@@ -317,7 +350,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 pills=[Pill(text=entry.says, tone=entry.standing)],
                 note=entry.error,
             ),
-            *request_rows(requests, status.cancels_decided),
+            *request_rows(requests, status.cancels_decided, instances),
             *([] if judged is None else finding_rows(judged, failed)),
             *[
                 part_row("Background service", "build", each.build, each.container, [state_pill(each.state, each.container)])
@@ -325,7 +358,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
             ],
             *[
                 part_row(
-                    f"Instance {number}",
+                    "Update" if each.is_update else f"Instance {number}",
                     "build",
                     each.build,
                     each.container,

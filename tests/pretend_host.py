@@ -48,7 +48,7 @@ from launchplane.instance import (
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.steps import CopyResult, CopyVolume, FreshNames, MaintenanceResult, MoveResult, RetireResult, Verb
+from launchplane.steps import CopyResult, CopyVolume, FreshNames, MaintenanceResult, MoveResult, RetireResult, Update, Verb
 from launchplane.telling import NOBODY, Said, Witness
 
 WEB_ADDRESS = "testing.site.test"
@@ -94,6 +94,10 @@ class PretendHost:
         # The builds whose update ends with an error, and those whose update runs and whose reply never comes.
         self.updates_that_fail: set[str | None] = set()
         self.updates_unanswered: set[str | None] = set()
+        # How often Docker has started each container again by itself.
+        self.restarted: dict[str, int] = {}
+        # Called once an update has ended, while its container is still on the host.
+        self.once_the_update_ended: Callable[[], None] = lambda: None
         # The commands Docker does, once, and whose reply never comes.
         self.replies_lost: set[str] = set()
         # Each login a database server was sent the making or the removing of.
@@ -337,12 +341,26 @@ class PretendHost:
                 del self.instances[container]
             self.record(f"retire {container}")
 
-    def run_in(self, container: str, command: list[str]) -> CommandResult:
+    # What runs once is on the host as an instance of its build for as long as it runs, and is removed once it answered.
+    def run_once(self, update: Update, by: Witness = NOBODY) -> CommandResult:
+        target, container, use, command = update.target, update.container, update.use, update.command
+        self.change_login(by, "make", use.database_container, login_of(container))
+        with self.command(by, "make", container), self.command(by, "start", container):
+            self.place(target, container, use=use, generation=update.generation)
+            alone = {"is_update": True, "networks": (use.network,)}
+            self.instances[container] = self.instances[container].model_copy(update=alone)
         self.record(f"update {container} with {' '.join(command)}")
-        build = self.instances[container].build
-        if build in self.updates_unanswered:
+        if target.build in self.updates_unanswered:
             raise ContainerHostError(f"Running {command[0]} in {container} on test failed: the reply was lost")
-        return CommandResult(exit_code=1, output="module not found") if build in self.updates_that_fail else CommandResult(0, "")
+        self.change_part(container, InstanceState.STOPPED)
+        self.once_the_update_ended()
+        with self.command(by, "stop", container, already=True), self.command(by, "remove", container):
+            del self.instances[container]
+        failed = target.build in self.updates_that_fail
+        return CommandResult(exit_code=1, output="module not found") if failed else CommandResult(0, "")
+
+    def restarts(self, container: str) -> int:
+        return self.restarted.get(container, 0)
 
     def read_log_tail(self, container: str) -> str:
         part = self.background_services.get(container) or self.instances[container]

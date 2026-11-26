@@ -31,8 +31,9 @@ def given_up(move: Move) -> str | None:
     return next(whys, None)
 
 
-# The copy has a network and a server only from here, where something is to run on it. The update runs once, in the
-# candidate and before its check, and nothing of the data set copied is within its reach.
+# The copy has a network and a server only from here, where something is to run on it. The update runs once and to its
+# end before the candidate is started, so the new build never serves from data it has not updated. Nothing of the data
+# set copied is within reach of either.
 def candidate_step(move: Move, copy: DataSet) -> steps.Action | Stop:
     lane = move.lane
     source = lane.data_set(copy.copy_of)
@@ -47,12 +48,12 @@ def candidate_step(move: Move, copy: DataSet) -> steps.Action | Stop:
     if not isinstance(use, DataSetUse):
         return use or Stop(f"{lane.product} describes no database for the copy {copy.data_set} to be served by.")
     candidate = move.candidate
-    if candidate is None:
+    if candidate is not None:
+        step = plan.switch_or_check(replace(move, judged=judged), candidate)
+        return replace(step, first_process=True) if isinstance(step, steps.Check) else step
+    if any(isinstance(each, steps.Update) for each in move.done):
         return steps.StartInstance(move.target, move.fresh.container, use, move.generation)
-    update = steps.Update(candidate.container, move.product.update)
-    if update not in move.done:
-        return update
-    return plan.switch_or_check(replace(move, judged=judged), candidate)
+    return steps.Update(move.target, f"{move.fresh.container}-update", use, move.product.update, move.generation)
 
 
 # What the release started on the copy goes first, through the gate, and the copy's server stops. Then the lane comes

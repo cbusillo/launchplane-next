@@ -274,16 +274,19 @@ def stamp_findings(subject: str, stamp: Stamp) -> list[Found]:
 
 
 def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
-    part, subject = f"The instance {instance.container}", instance.container
+    part, subject = f"The {'update' if instance.is_update else 'instance'} {instance.container}", instance.container
     serves = of.serving is not None and of.serving.container == subject
     active, other = of.lane.active, instance.other_image
     beside = active is not None and active.container != subject
+    # An update is on its data set's network alone: nobody is sent to it.
+    of_the_lane: set[str] = set() if instance.is_update else {LANE_NETWORK}
+    networks = of_the_lane | of.network_names(instance.data_set)
     return [
         *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
         *stamp_findings(subject, instance.generation),
         *state_findings(part, instance, of, Weight.WRONG if serves else Weight.UNFINISHED),
         *data_set_label_findings(part, instance, of),
-        *attachment_findings(part, subject, instance.networks, {LANE_NETWORK} | of.network_names(instance.data_set), of.lane),
+        *attachment_findings(part, subject, instance.networks, networks, of.lane),
         *mount_findings(part, subject, instance.mounts, of.files_mounts(instance.data_set)),
         *([Found(Weight.UNFINISHED, subject, Kind.BESIDE, f"{part} runs beside the active one")] if beside else []),
         *([Found(Weight.FAULT, subject, Kind.NOT_ITS_BUILD, f"{part} runs {other}, which is not its build")] if other else []),
@@ -542,9 +545,10 @@ def route_findings(lane: LaneReading) -> list[Found]:
 
 # In maintenance no instance receives visitors, and a lane's one instance is the one that will again.
 def serving_instance(lane: LaneReading) -> RunningInstance | None:
-    if lane.active is not None or not lane.route.in_maintenance or len(lane.instances) != 1:
+    web = [each for each in lane.instances if not each.is_update]
+    if lane.active is not None or not lane.route.in_maintenance or len(web) != 1:
         return lane.active
-    return lane.instances[0]
+    return web[0]
 
 
 def everything_found(lane: LaneReading, product: Product | ProductError, work: Work | WorkUnread | None) -> list[Found]:

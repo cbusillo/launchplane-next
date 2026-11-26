@@ -85,7 +85,7 @@ CHANGES: dict[type, Callable[[Any], str | None]] = {
     StopDatabase: lambda step: f"stopped {step.container}",
     CopyVolume: lambda step: f"copied the volume {step.source} to {step.destination}",
     GiveUp: lambda step: f"gave the copy up: {step.why}",
-    Update: lambda step: f"updated the data of {step.container}",
+    Update: lambda step: f"updated the data of {step.use.data_set}",
     Switched: lambda step: f"wrote the route to {step.container}" if step.won else None,
 }
 
