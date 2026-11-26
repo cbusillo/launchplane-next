@@ -230,7 +230,7 @@ def test_2_and_3_an_update_that_fails_on_the_copy_leaves_no_switch_and_the_origi
             the_copy=in_the_copy,
         )
         assert (frozen["reads"], frozen["web_address"]) == (["in maintenance", "work under way"], ["shows the back soon page"])
-        assert "Once both volumes are copied, the new build updates the copy, and is started on it only once" in frozen["note"]
+        assert "A copy of the lane's data is being made. It has no network of its own yet" in frozen["note"]
         assert ([each["finished"] for each in copy["copies"]], copy["networks"], copy["databases"]) == ([True, True], [], [])
         assert (in_the_copy["lead"], in_the_copy["attachment"]) == ("lead", SHA256)
         assert not set(in_the_copy["volumes"].split(",")) & set(kept["serving"]["volumes"].split(","))
@@ -277,7 +277,7 @@ def test_4_a_check_that_fails_on_the_updated_copy_leaves_no_switch_and_the_origi
             note=checking["note"],
         )
         assert updated == kept["witness"] | {"type": "opportunity"}
-        assert "The copy is updated, and the new build is started on it and is being checked." in checking["note"]
+        assert "The copy is updated, and the new build runs on it. It has not passed its check." in checking["note"]
         damage = f"printf damaged > /files/filestore/app/{kept['stored_as']}"
         on_scratch(f"docker run --rm --network none --volume {copy['files'][0]}:/files busybox:1.37 sh -c '{damage}'")
         # noinspection HttpUrlsUsage
@@ -540,16 +540,28 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
         copy, updating = copy_of(asked), card(asked["id"])
         said("9. Copied, before the update", visitor=site_status("/"), card=updating, of_the_release=containers_of(asked))
         assert (updating["reads"], site_status("/"), containers_of(asked)) == (["in maintenance", "work under way"], "503", [])
-        assert "The data is copied. The new build updates the copy next, and is started on it only once" in updating["note"]
+        assert "The lane's data is copied. The copy is not updated, and nothing of the new build is started" in updating["note"]
 
-        hold("before.host.start_instance")
+        hold("before.host.retire_container")
         let_go("before.host.run_once")
-        during = cards_until_stopped_at("before.host.start_instance", asked["id"])
+        during = cards_until_stopped_at("before.host.retire_container", asked["id"])
         running = [each for each in during if ["running"] in each["updates"]]
         said("9. While the update runs", cards_read=len(during), of_them_with_the_update_running=len(running), card=running[0])
         assert {tuple(each["reads"]) for each in during} == {("in maintenance", "work under way")}, during
-        assert all("the new build is updating the copy. Nothing of the new build is started" in each["note"] for each in running)
+        assert all("the new build is updating the copy. No web part of it is started." in each["note"] for each in running)
         assert (running[0]["instances"], running[0]["updates"]) == ([["stopped"]], [["running"]])
+
+        ended_not_removed = card(asked["id"])
+        said("9. The update has ended, and its container is not yet removed", card=ended_not_removed)
+        assert (ended_not_removed["reads"], ended_not_removed["updates"]) == (["in maintenance", "work under way"], [["stopped"]])
+        assert (
+            "The container of the update is on the host and does not run. How the update ended is not recorded yet"
+            in (ended_not_removed["note"])
+        )
+
+        hold("before.host.start_instance")
+        let_go("before.host.retire_container")
+        wait_until_stopped_at("before.host.start_instance", seconds=120)
         committed, between = in_database(copy["data_set"], READ_THE_FIELD), card(asked["id"])
         said("9. Updated, before the first web start: the card", card=between)
         assert (between["reads"], between["instances"], between["updates"]) == (
@@ -557,7 +569,7 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
             [["stopped"]],
             [],
         )
-        assert "The copy is updated. The new build is started on it next, and then checked." in between["note"]
+        assert "The update of the copy ended well. No web part of the new build is started on it yet." in between["note"]
         said(
             "9. Updated, before the first web start: the field read over a connection of its own",
             field_in_the_copy=committed,
@@ -585,7 +597,22 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
             note=checking["note"],
         )
         assert (first.split()[:3], site_status("/")) == ([f"/{candidate}", "running", "restarts=0"], "503")
-        assert "The copy is updated, and the new build is started on it and is being checked." in checking["note"]
+        assert "The copy is updated, and the new build runs on it. It has not passed its check." in checking["note"]
+
+        hold("proxy-delivery")
+        hold("before.proxy.await_route")
+        let_go("before.proxy.check_instance")
+        wait_until_stopped_at("before.proxy.await_route", seconds=120)
+        written = card(asked["id"])
+        said(
+            "9. The route is written, and the proxy has not loaded it",
+            switch_lines=lines_of(ask(f"/requests/{asked['id']}")[1], "switch "),
+            visitor=site_status("/"),
+            note=written["note"],
+        )
+        assert (len(lines_of(ask(f"/requests/{asked['id']}")[1], "switch ")), site_status("/")) == (1, "503")
+        assert "The route is written to the new build on the updated copy. The proxy is not yet seen to send" in written["note"]
+        assert "The proxy sends visitors to the new build" not in written["note"]
         let_go()
         ended = request_ended(asked["id"])
     after, lane_card = read_fixture_lane(), card(ended["id"])

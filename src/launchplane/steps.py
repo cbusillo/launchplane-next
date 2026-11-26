@@ -184,6 +184,8 @@ class Check:
     container: str
     health_path: str = "/"
     command: tuple[str, ...] = ()
+    # Asked of the candidate of a release that updates alone: it also fails if Docker has started it again since.
+    first_process: bool = field(default=False, compare=False)
 
 
 # The update of the product's kind, run once to its end by the build in `container`, on a copy of the lane's data and

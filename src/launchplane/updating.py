@@ -49,7 +49,8 @@ def candidate_step(move: Move, copy: DataSet) -> steps.Action | Stop:
         return use or Stop(f"{lane.product} describes no database for the copy {copy.data_set} to be served by.")
     candidate = move.candidate
     if candidate is not None:
-        return plan.switch_or_check(replace(move, judged=judged), candidate)
+        step = plan.switch_or_check(replace(move, judged=judged), candidate)
+        return replace(step, first_process=True) if isinstance(step, steps.Check) else step
     if any(isinstance(each, steps.Update) for each in move.done):
         return steps.StartInstance(move.target, move.fresh.container, use, move.generation)
     return steps.Update(move.target, f"{move.fresh.container}-update", use, move.product.update, move.generation)

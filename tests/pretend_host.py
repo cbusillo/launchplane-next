@@ -96,6 +96,8 @@ class PretendHost:
         self.updates_unanswered: set[str | None] = set()
         # How often Docker has started each container again by itself.
         self.restarted: dict[str, int] = {}
+        # Called once an update has ended, while its container is still on the host.
+        self.once_the_update_ended: Callable[[], None] = lambda: None
         # The commands Docker does, once, and whose reply never comes.
         self.replies_lost: set[str] = set()
         # Each login a database server was sent the making or the removing of.
@@ -350,6 +352,8 @@ class PretendHost:
         self.record(f"update {container} with {' '.join(command)}")
         if target.build in self.updates_unanswered:
             raise ContainerHostError(f"Running {command[0]} in {container} on test failed: the reply was lost")
+        self.change_part(container, InstanceState.STOPPED)
+        self.once_the_update_ended()
         with self.command(by, "stop", container, already=True), self.command(by, "remove", container):
             del self.instances[container]
         failed = target.build in self.updates_that_fail

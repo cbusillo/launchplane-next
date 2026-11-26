@@ -179,46 +179,50 @@ def with_lines(note: str, request: Request, *, only_sent: bool = False) -> str:
     return f"{note} Its lines: {'; '.join(lines)}." if lines else note
 
 
-COPYING = (
-    "Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build "
-    "updates the copy, and is started on it only once that update has ended well."
+NOT_SWITCHED = "Visitors get the back soon page, and nothing is switched."
+COPYING = f"A copy of the lane's data is being made. It has no network of its own yet, so nothing runs on it. {NOT_SWITCHED}"
+COPIED = f"The lane's data is copied. The copy is not updated, and nothing of the new build is started on it. {NOT_SWITCHED}"
+UPDATING = f"The lane's data is copied, and the new build is updating the copy. No web part of it is started. {NOT_SWITCHED}"
+UPDATE_STOPPED = (
+    "The container of the update is on the host and does not run. How the update ended is not recorded yet, and no web "
+    f"part of the new build is started. {NOT_SWITCHED}"
 )
-COPIED = (
-    "The data is copied. The new build updates the copy next, and is started on it only once that update has ended well. "
-    "If it does not, the original instance comes back on its own data."
+UPDATED = f"The update of the copy ended well. No web part of the new build is started on it yet. {NOT_SWITCHED}"
+CHECKING = f"The copy is updated, and the new build runs on it. It has not passed its check. {NOT_SWITCHED}"
+CHECKED = f"The copy is updated, and the new build runs on it and passed its check. {NOT_SWITCHED}"
+COMING_BACK = "Nothing is switched: Launchplane is bringing the original instance back on its own data."
+ROUTE_WRITTEN = (
+    "The route is written to the new build on the updated copy. The proxy is not yet seen to send visitors there, so "
+    "they may still get the back soon page."
 )
-UPDATING = (
-    "The data is copied, and the new build is updating the copy. Nothing of the new build is started on it until the "
-    "update has ended well. If it does not, the original instance comes back on its own data."
-)
-UPDATED = (
-    "The copy is updated. The new build is started on it next, and then checked. If that fails, the original instance "
-    "comes back on its own data."
-)
-CHECKING = (
-    "The copy is updated, and the new build is started on it and is being checked. If it passes, visitors are switched "
-    "to it. If not, the original instance comes back on its own data."
-)
+SWITCHED = "The proxy sends visitors to the new build on the updated copy."
+EVERY_LINE = "Every line is in GET /requests/{id}."
 
 
-# Where a release on a copy is, by what it has on the host now: its update, its candidate, or neither yet.
+# Where a release on a copy is before its switch: what it has on the host now, and what its lines say has ended.
 def copy_phase(request: Kept, instances: Sequence[RunningInstance]) -> str:
-    own = [each for each in instances if each.generation == request.generation and each.state is InstanceState.RUNNING]
-    if own:
-        return UPDATING if own[0].is_update else CHECKING
-    told = [line.did for line in request.events]
+    own = [each for each in instances if each.generation == request.generation]
+    told = [line.did for line in request.events if line.error is None]
+    if any(each.is_update for each in own):
+        return UPDATING if any(each.is_update and each.state is InstanceState.RUNNING for each in own) else UPDATE_STOPPED
+    if any(each.state is InstanceState.RUNNING for each in own):
+        return CHECKED if any(each.startswith("check ") for each in told) else CHECKING
     if any(each.startswith("update the data of ") for each in told):
         return UPDATED
     return COPIED if any(each.startswith("make the network of the data set") for each in told) else COPYING
 
 
-COMING_BACK = "Nothing is switched: Launchplane is bringing the original instance back on its own data."
-SWITCHED = "Visitors are switched to the new build on the updated copy. The instance it replaces is retired next."
-EVERY_LINE = "Every line is in GET /requests/{id}."
+# A route that is written sends nobody anywhere until the proxy has loaded it, which the line after the switch says.
+def switch_phase(lines: Sequence[Event]) -> str | None:
+    switched = next((number for number, line in enumerate(lines) if line.did.startswith("switch ") and line.is_own), None)
+    if switched is None:
+        return None
+    served = any(line.did.startswith("wait for the proxy to load the route") and line.error is None for line in lines[switched:])
+    return SWITCHED if served else ROUTE_WRITTEN
 
 
-# A move that put its lane behind the back soon page has too many lines for a card. Its note is where it is and what
-# comes next, told from its own lines, and the lines are in the request.
+# A move that put its lane behind the back soon page has too many lines for a card. Its note is where it is, told from
+# what is on the host and from what its own lines say has happened, and the lines are in the request.
 def frozen_note(request: Kept, instances: Sequence[RunningInstance]) -> str | None:
     lines = request.events
     froze = any(line.action is not None and line.action.to == BACK_SOON for line in lines)
@@ -227,8 +231,8 @@ def frozen_note(request: Kept, instances: Sequence[RunningInstance]) -> str | No
     stopped = next((line for line in lines if line.error is not None or line.did.startswith("give the copy up")), None)
     if request.stands in ENDED:
         paragraph = in_one_line(request.error) if request.error else "Visitors are on the new build and the updated copy."
-    elif any(line.did.startswith("switch ") and line.is_own for line in lines):
-        paragraph = SWITCHED
+    elif (switching := switch_phase(lines)) is not None:
+        paragraph = switching
     elif stopped is not None:
         paragraph = f"{in_one_line(': '.join(filter(None, (stopped.did, stopped.error)))).rstrip('.')}. {COMING_BACK}"
     else:

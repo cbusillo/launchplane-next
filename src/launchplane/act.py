@@ -567,7 +567,7 @@ class Lanes:
     def check(self, check: steps.Check, *, with_log: bool) -> Event:
         try:
             self.proxy.check_instance(check.container, check.health_path, check.command)
-            if restarts := self.host.restarts(check.container):
+            if check.first_process and (restarts := self.host.restarts(check.container)):
                 raise CheckFailed(NOT_THE_FIRST.format(container=check.container, restarts=restarts))
         except CheckFailed as error:
             return steps.CheckRefused(check.container, self.refusal(error, check.container, with_log=with_log))
