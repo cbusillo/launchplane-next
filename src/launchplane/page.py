@@ -11,6 +11,7 @@ from launchplane.instance import BACK_SOON, DataSet, InstanceState, PartOfLane, 
 from launchplane.judge import Condition, Finding, Judgement, Kind, Shown, Standing, WebAddressJudged, Work
 from launchplane.record import ENDED, Event, Kept, Request, Stands, how_cancel_won, how_cancelled, how_replaced
 from launchplane.steps import Outcome
+from launchplane.updating import why_kept
 
 TONE = {
     Condition.GOOD: Standing.GOOD,
@@ -270,6 +271,21 @@ def without_a_server(found: DataSet) -> str:
     return f" is {whole} of {found.copy_of}, kept offline: no instance is started on it"
 
 
+GOES = "An old copy: the next release that switches deletes it."
+BEING_MADE = "A request at work on the lane is making it."
+
+
+# Said only of a lane with an instance receiving visitors. A copy is old only where no request at work made it.
+def kept_notes(judged: Judgement | None, requests: Sequence[Kept]) -> dict[str, str]:
+    if judged is None or judged.lane.active is None:
+        return {}
+    at_work = {each.generation for each in requests if each.stands is Stands.WORKING}
+    return {
+        found.data_set: why_kept(judged.lane, found) or (BEING_MADE if found.generation in at_work else GOES)
+        for found in judged.lane.data_sets
+    }
+
+
 def part_row(name: str, made_from: str, build: str | None, container: str, pills: list[Pill]) -> Row:
     built = code("not marked") if build is None else Piece(text=build, drawn_as="build")
     return Row(name=name, value=[Piece(text=f"{made_from} "), built], pills=pills, note=container)
@@ -289,6 +305,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
     receiving = [Pill(text="active", tone=Standing.GOOD)]
     requests = [each for each in shown_requests(status) if (each.product, each.lane) == (entry.product, entry.lane)]
     failed = failed_check(requests)
+    kept = kept_notes(judged, requests)
     return Card(
         title=f"{entry.product} · {entry.lane or 'no lane'}" if entry.product else "A web address with no instance on the host",
         pills=[] if judged is None else lane_pills(judged, failed),
@@ -317,12 +334,20 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                 for number, each in enumerate(instances, start=1)
             ],
             *[
-                Row(name="Data set", value=[code(found.data_set), Piece(text=without_a_server(found))])
+                Row(
+                    name="Data set", value=[code(found.data_set), Piece(text=without_a_server(found))], note=kept.get(found.data_set)
+                )
                 for found in data_sets
                 if not found.databases
             ],
             *[
-                part_row("Data set", "image", each.image, each.container, [state_pill(each.state, each.container)])
+                part_row(
+                    "Data set",
+                    "image",
+                    each.image,
+                    " ".join(filter(None, (each.container, kept.get(found.data_set)))),
+                    [state_pill(each.state, each.container)],
+                )
                 for found in data_sets
                 for each in found.databases
             ],

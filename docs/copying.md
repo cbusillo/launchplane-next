@@ -20,7 +20,7 @@ It reads the host and the proxy again before every step and takes the first of t
 6. **Bring the lane back** as [ending maintenance](maintenance.md#out-of-maintenance) does: the database server, the one instance, its check, with [the check of its kind](odoo.md#the-check) for an Odoo product, its background service, and last the route.
 7. **Answer.**
 
-**The copier.** Each volume is copied by a container of the data set's database image, named `<the copy's volume>-copier`. It has the volume it copies mounted read-only, the copy's volume as its only other mount, and no network. It runs `cp -a`, then `diff -r` over both, then `sync`, so a file the copy lacks, has too many, or has other bytes for fails it. Before it is made, Docker is asked for every running container that has the volume to be copied mounted, whatever its labels, and one such container refuses the copy. A copier has 300 s. It is not removed: Docker's description of it is the account of what was read, what was written and how it ended.
+**The copier.** Each volume is copied by a container named `<the copy's volume>-copier`, of one image that Launchplane names by digest: `debian:trixie-slim`, for its GNU `cp`. It has the volume it copies mounted read-only, the copy's volume as its only other mount, and no network. It runs `cp -a --reflink=auto`, which hands each file to the kernel to copy, so the file system shares the blocks where it can and copies them where it cannot. Either way the copy is then proved as before: `diff -r` reads every byte of both, so a file the copy lacks, has too many, or has other bytes for fails it, and `sync` follows. No cheaper proof is as strong: names, sizes and times do not show a byte that differs, and a checksum reads every byte as well. The image is fetched when the copy's first volume is made, while the lane still serves. Before it is made, Docker is asked for every running container that has the volume to be copied mounted, whatever its labels, and one such container refuses the copy. A copier has 300 s. It is not removed: Docker's description of it is the account of what was read, what was written and how it ended.
 
 **Giving up.** A database server that exited with another code than 0, a part that does not read as stopped, a back soon page that is not running, a copier Docker refused or that ended with an error, a copy another attempt began, or a copy's volumes that are not one fresh volume for each volume copied: each gives the copy up. The request writes the line `give the copy up:` with why, stops a copier that still runs, and takes step 6. A copy is never gone on with by another attempt than the one that began it, and never begun twice by one request.
 
@@ -56,22 +56,46 @@ A copy is whole when each of its volumes was written by one copier whose descrip
 - The page shows a copy as `is a whole copy of <data set>, kept offline: no instance is started on it`, or `is a copy, not whole, of <data set>`. Neither is a finding: the lane stays `good`.
 - A copy has no network and no database server.
 - A [move](data-sets.md#a-move-with-data) never starts an instance on a copy made by this call, whole or not. A lane whose only data set is such a copy is given a new, empty data set, and the copy is left as it is.
-- A copy is kept until [a retire names it](data-sets.md#retiring-a-lane-with-data). A data set that has a copy is not deleted before the copy: the copiers hold its volumes as what they read, and the retire answers `503` naming the copy.
+- A copy is kept until a release of its lane switches, or [a retire names it](data-sets.md#retiring-a-lane-with-data). A retire does not delete a data set that has a copy before the copy: the copiers hold its volumes as what they read, and the retire answers `503` naming the copy.
+
+## Old copies go
+
+When a release has switched and has nothing else left to do, it deletes the lane's older copies before it answers. This is every [move](the-move.md) the gate has committed, whether or not it copied. The lane and the proxy are read again before each deletion, and the lane keeps:
+
+| The card says | Which data set |
+| --- | --- |
+| `Kept: the lane serves from it.` | The one the instance receiving visitors runs against. |
+| `Kept: the last release replaced it.` | The one the serving data set is a copy of, by its label `launchplane.copy-of`, where the release that made that copy also started the instance that serves. |
+| `Kept: the lane's data was copied from it by an earlier release.` | The same data set, once a later release has switched and kept the lane's data. |
+| `Kept: it is no copy, and a release deletes only copies.` | Any other data set that is not labelled as a copy, such as the one a lane began on. |
+| `Kept: a part of the lane runs against it.` | A copy an instance or a background service still runs against. |
+
+Every other copy of the lane is deleted, whole or not: one asked for by itself, and one a release that gave up left. Each has its own line, `delete the data set <name>`, and is gone from the card and from `GET /running` with it. Its database server, its copiers, its network and its volumes go, the volumes last. The copiers of a copy made from it go too, since they hold its volumes and Docker deletes no volume a container holds; what they copied has served since, or is deleted as well.
+
+**A deletion Docker refuses, or does not answer,** is written on its line with Docker's own words or with what failed, and asked for once more. After the second, the copy is left, and the release ends `switched` as it would have. The next release of the lane that switches finds the copy on the host and deletes it then. Until one has, the card says of it `An old copy: the next release that switches deletes it.` Of a copy that a request still at work on the lane is making, it says `A request at work on the lane is making it.` A copy left half deleted, such as one whose database server is gone and whose network Docker would not remove, is a finding on the card and nothing more: a later release copies, updates and switches as if it were not there, and then deletes what is left of it.
+
+Nothing marks a data set as kept by a person yet (cbusillo/launchplane-next#49), so none is kept for that. While no instance of the lane receives visitors, nothing is deleted. A release that does not switch deletes nothing.
 
 ## Known and not fixed
 
-- **Nothing deletes a copy but a retire of its lane that names it.** Each call leaves one, also one that was not finished.
+- **A copy is on the host until a release of its lane switches.** A lane that is copied and never released keeps each copy, also one that was not finished, until a retire names it.
+- **The data set a lane began on is never deleted by a release.** It is no copy. After a second release it is neither served from nor what the last release replaced, and it stays until a retire names it.
+- **A copy the next release would delete cannot be kept.** No mark says a person wants one.
+- **A restart just as Docker removed a copy's last volume loses that deletion's line.** The line is written once Docker has answered. Launchplane killed in between, or a reply lost there, leaves a release that ends `switched` with the copy gone and no `delete the data set` line for it.
+- **An old copy Docker twice refuses to delete, or does not answer for, waits for the next release that switches.** Nothing tries in between, and nobody is told but by the request's lines.
+- **The data set the last release replaced loses its copiers when the copy it was made from is deleted.** It has served, and nothing reads whether it is whole after that.
+- **The copier's image comes from Docker Hub,** the first time a host copies. A host that cannot fetch it fails the request before anything is stopped.
+- **Every byte is still read twice to prove a copy,** shared or not. See the measurements for what that costs beside the copy itself.
 - **The back soon page shows for much longer than the copy takes.** Most of it is Odoo starting again and its check. See the measurements, and [those of a release that updates](odoo.md#measured), which copies the same way.
 - **A copier has 300 s for a volume,** chosen with nothing measured at real size. When it runs out, the request stays `working`, its next attempt stops the copier, gives the copy up and brings the lane back.
 - **A clean stop is read from the database server's exit code,** as maintenance reads it, not from PostgreSQL's own control file.
 - **`diff -r` compares names and bytes,** not owners, modes or times. `cp -a` keeps them.
-- **The copier needs `cp`, `diff` and `sync` in the database image.** `postgres:18-alpine` has them.
 - **An unclean database stop followed by a kill just after the route back is written can freeze the lane a second time.** The copy was given up before any copier was made, and once the server has started again the host no longer shows why. The request, taken up again, finds no copier, begins the copy again, and can end `copied`. A copy that got as far as a copier is never begun again.
 - **A web part that exits just as the route back loads can be answered `copied`.** The check passes behind the back soon page, and the request's last reading does not ask again whether the instance runs or the web address answers. The lane then shows as wrong on the status page.
 - **Pruning unused Docker volumes during an interrupted copy can make a half copy read as whole.** Between the two volumes the copy's files volume is empty and no container holds it, so `docker volume prune --all` would remove it. Not tried. The copy then has one volume and one finished copier, which is what whole means. [A release that updates](odoo.md#a-release-that-updates) starts nothing on such a copy: it also holds the copy to one volume for each volume of the data set copied.
 - **A request whose lane cannot be brought back keeps its lane for as long as that lasts.** Nobody is told.
-- **Volumes are copied whole.** Whether PostgreSQL 18 or the file system can copy without copying every byte is not measured (README, open question 13).
-- **Untried:** a product with a background service on the real host, a lane with more than one earlier copy, and a volume too large for 300 s.
+- **Whether blocks are shared is the host's to decide,** and Launchplane does not read whether they were. The data set's own charged size grows by the copy's size even where the pool shares the blocks (cbusillo/launchplane-next#65).
+- **Untried on the test bed:** a product with a background service, a volume too large for 300 s, a deletion Docker refuses, and a third release on a lane, which deletes a copy that the copy before the serving one was made from. The last two are held by `tests/test_updating.py` against a pretend host.
 
 ## Measured
 
@@ -85,6 +109,24 @@ On November 24, on the scratch host, with TK's build `sha256:0e2ad09f…` seeded
 | The back soon page, from the route to it to the route back | 10.2 to 11.9 s. Odoo starting and its check are 6.6 s of it |
 | A kill between the two volumes, to the lane back | 13 to 14 s after the request began |
 | `tests/test_bed_copy.py`, 2 tests | 2 min 12 s |
+
+On November 25, on the scratch host, the copier before and the copier now, each run twice by hand as Launchplane runs it: the source read-only, a fresh volume, no network. The PostgreSQL directory was made with `initdb` by `postgres:18-alpine`, filled with 6,500,000 invented rows and stopped cleanly. TK's volumes were a whole copy of a seeded lane. `Written` is what the scratch container's own ZFS dataset counted as written while the copy ran, read from `/proc/spl/kstat/zfs/guests/` inside the container.
+
+| What was copied | Copier | `cp` | `diff -r` | Written |
+| --- | --- | --- | --- | --- |
+| A PostgreSQL 18 data directory, 986 files, 1,081,753,146 bytes | before, BusyBox `cp -a` | 2.74 s, 2.02 s | 4.48 s, 7.33 s | 1,083,564,288 and 1,084,170,142 bytes |
+| | now, GNU `cp -a --reflink=auto` | 1.19 s, 0.64 s | 2.59 s, 1.86 s | 1,658,617 and 1,858,699 bytes |
+| TK's database volume, 3,242 files, 141,194,222 bytes | before | 0.49 s, 0.50 s | 0.58 s, 0.70 s | 141,868,469 and 141,703,566 bytes |
+| | now | 0.26 s, 0.49 s | 0.30 s, 0.32 s | 746,683 and 745,823 bytes |
+| TK's files volume, 110 files, 4,580,852 bytes | before | 0.06 s, 0.06 s | 0.05 s, 0.06 s | 5,048,148 and 5,039,958 bytes |
+| | now | 0.06 s, 0.07 s | 0.05 s, 0.06 s | 475,259 and 467,278 bytes |
+
+- With nothing copied, the same dataset counted 1.7 MB written in 40 s beside the PostgreSQL runs, and 31 MB and 1.9 MB beside TK's, whose lane was serving.
+- **The pool's `bcloneused` and `bclonesaved` were not read.** They are properties of the pool `guests` on the Proxmox host, which the builder holds no key to. On that host, `zpool get -Hp bcloneused,bclonesaved guests` before and after a copy gives them. cbusillo/launchplane-next#65 read them for the same two ways of copying on the other scratch container: the pool's saved bytes rose by the copy's size with GNU `cp`, and by nothing with BusyBox's.
+- `df` in the scratch container grew by about 543 MB for each copy of the PostgreSQL directory, shared or not: the dataset is charged for a copy either way.
+- The comparison costs two to three times the copy. Through Launchplane, from the first back soon answer to both of TK's volumes confirmed: 3.8 s, one run, where it was 3.9 to 4.2 s.
+- Fetching the copier's image by digest, through Launchplane, on a scratch host that did not have it: 1.0 s.
+- Not measured: a volume of real size. OPW's files are about 110 GB, and a copier has 300 s.
 
 ## On the test bed
 

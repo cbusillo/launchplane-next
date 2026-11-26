@@ -1,20 +1,22 @@
 from collections.abc import Callable
+from dataclasses import replace
+from typing import Any
 
 import pytest
 
-from launchplane.act import Cancelled, Lanes, Waiting
+from launchplane.act import Cancelled, Lanes, Status, Waiting
 from launchplane.docker_answers import ContainerHostError, ContainerHostRefused
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import BACK_SOON, InstanceState, Verdict
+from launchplane.instance import BACK_SOON, DataSet, InstanceState, Verdict
 from launchplane.judge import Condition, Work
 from launchplane.page import cards
 from launchplane.plan import lane_data_set
 from launchplane.record import Asked, Kept, Record, Stands
-from launchplane.steps import CopyVolume, Outcome, Stop
+from launchplane.steps import CopyVolume, FreshNames, Outcome, Stop
 from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
-from tests.odoo_product import TK_UPDATING
+from tests.odoo_product import TK, TK_UPDATING
 from tests.pretend_host import (
     EARLIER,
     GENERATION,
@@ -194,7 +196,7 @@ def test_a_request_asked_after_a_failed_one_makes_a_fresh_copy_and_switches() ->
     proxy.host.updates_that_fail = set()
     result = lanes.move(BUILD_B, LATER, 1, Witness(generation=LATER, attempt=1))
     used = proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)].data_set
-    assert (result.outcome, len(proxy.host.data_sets)) == (Outcome.SWITCHED, 3)
+    assert (result.outcome, sorted(proxy.host.data_sets)) == (Outcome.SWITCHED, sorted(["data-1", used or ""]))
     assert proxy.host.data_sets[used or ""].generation == LATER
 
 
@@ -366,3 +368,181 @@ def test_a_copy_asked_for_by_itself_keeps_every_line_on_its_card(record: Record)
     kept, lanes = copy_worked(record, set())
     [note] = [row.note for card in cards(lanes.read_status()) for row in card.rows if row.name == f"Request {kept.id}"]
     assert "Its lines: make the database volume of the data set" in (note or "")
+
+
+def copy_generation(number: int) -> str:
+    return f"01900000-0000-7000-8000-0000000000{number:02}"
+
+
+# One serving lane of TK with three whole copies of its data, each asked for by itself, and the release that comes next.
+def released_with_three_old_copies(record: Record) -> tuple[Kept, Lanes, PretendProxy, list[str]]:
+    def copy_three_times(of: PretendProxy) -> None:
+        fresh = FreshNames("site-testing-old", "old")
+        asking = Lanes(
+            of.host, of, lambda _product: TK_UPDATING, lambda _target: replace(fresh, data_set=f"old-{len(of.host.data_sets)}")
+        )
+        for number in range(3):
+            generation = copy_generation(number)
+            assert asking.copy("site", "testing", generation, Witness(generation=generation, attempt=1)).error is None
+
+    kept, lanes, proxy = worked(record, copy_three_times)
+    return kept, lanes, proxy, ["old-1", "old-2", "old-3"]
+
+
+def deleted(kept: Kept) -> list[tuple[str, str | None]]:
+    return [(each.did, each.error) for each in kept.events if each.did.startswith("delete the data set ")]
+
+
+def test_a_release_that_switched_leaves_what_the_lane_serves_from_and_what_it_replaced_and_deletes_each_older_copy_with_a_line(
+    record: Record,
+) -> None:
+    kept, lanes, proxy, old = released_with_three_old_copies(record)
+    serving_from = proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)].data_set or ""
+    assert (kept.stands, sorted(proxy.host.data_sets)) == (Stands.DONE, sorted(["data-1", serving_from]))
+    assert deleted(kept) == [(f"delete the data set {each}", None) for each in old]
+    notes = {row.note for card in cards(lanes.read_status()) for row in card.rows if row.name == "Data set"}
+    assert notes == {
+        f"database-{serving_from} Kept: the lane serves from it.",
+        "database-data-1 Kept: the last release replaced it.",
+    }
+
+
+def test_until_a_release_switches_the_card_says_of_an_old_copy_that_the_next_one_deletes_it() -> None:
+    lanes, _, _ = serving()
+    lanes.copy("site", "testing", GENERATION, first())
+    notes = [row.note for card in cards(lanes.read_status()) for row in card.rows if row.name == "Data set"]
+    assert notes == ["An old copy: the next release that switches deletes it.", "database-data-1 Kept: the lane serves from it."]
+
+
+def test_a_release_that_fails_deletes_nothing_and_the_copy_it_made_is_kept_until_one_switches(record: Record) -> None:
+    kept, _, proxy = worked(record, fail_the_update)
+    assert (kept.stands, deleted(kept), len(proxy.host.data_sets)) == (Stands.FAILED, [], 2)
+
+
+NO_ANSWERS = {
+    "refused": ContainerHostRefused("Deleting the data set on test was refused: volume is in use"),
+    "not answered": ContainerHostError("Deleting the data set on test failed: Read timed out."),
+}
+
+
+@pytest.mark.parametrize("no", NO_ANSWERS.values(), ids=NO_ANSWERS.keys())
+def test_an_old_copy_docker_will_not_or_does_not_delete_is_asked_for_twice_never_holds_the_switched_release_and_goes_with_the_next(
+    record: Record, monkeypatch: pytest.MonkeyPatch, no: ContainerHostError
+) -> None:
+    def refuse(_host: PretendHost, _found: DataSet) -> None:
+        raise no
+
+    with monkeypatch.context() as refusing:
+        refusing.setattr(PretendHost, "delete_data_set", refuse)
+        kept, lanes, proxy, old = released_with_three_old_copies(record)
+    assert (kept.stands, kept.answer and kept.answer["outcome"], kept.error) == (Stands.DONE, "switched", None)
+    assert [did for did, error in deleted(kept) if error == str(no)] == [
+        f"delete the data set {each}" for each in old for _ in range(2)
+    ]
+    assert (set(old) < set(proxy.host.data_sets), record.unfinished()) == (True, [])
+    lanes.move(BUILD_A, LATER, 1, Witness(generation=LATER, attempt=1))
+    assert not set(old) & set(proxy.host.data_sets)
+
+
+def test_an_old_copy_is_deleted_with_the_copiers_of_the_copy_made_from_it_which_still_hold_its_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lanes, proxy, _ = serving()
+    gone: list[DataSet] = []
+    delete = proxy.host.delete_data_set
+
+    def note_and_delete(found: DataSet) -> None:
+        gone.append(found)
+        delete(found)
+
+    monkeypatch.setattr(proxy.host, "delete_data_set", note_and_delete)
+    lanes.move(BUILD_B, GENERATION, 1, first())
+    first_copy = copy_on(proxy)
+    second = lanes.move(BUILD_A, LATER, 1, Witness(generation=LATER, attempt=1)).data_set or ""
+    readers = {each.container for each in proxy.host.data_sets[second].copies}
+    assert (gone, readers) == ([], {f"{each}-copier" for each in (f"volume-{second}", f"files-{second}")})
+    third = lanes.move(BUILD_B, copy_generation(9), 1, Witness(generation=copy_generation(9), attempt=1)).data_set or ""
+    assert [each.data_set for each in gone] == [first_copy.data_set]
+    assert readers < {each.container for each in gone[0].copies}
+    assert sorted(proxy.host.data_sets) == sorted(["data-1", second, third])
+
+
+def test_an_old_copy_left_half_deleted_with_no_database_server_never_keeps_the_next_release_from_updating_and_switching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lanes, proxy, old = serving()
+    proxy.host.updates_that_fail = {BUILD_B.build}
+    given_up(lanes, proxy, old)
+    proxy.host.updates_that_fail = set()
+    half = copy_on(proxy).data_set
+
+    def remove_the_server_and_refuse_the_network(_host: PretendHost, found: DataSet) -> None:
+        proxy.host.data_sets[found.data_set] = proxy.host.data_sets[found.data_set].model_copy(update={"databases": ()})
+        raise ContainerHostRefused(f"Deleting the data set {found.data_set} on test was refused: network has active endpoints")
+
+    with monkeypatch.context() as refusing:
+        refusing.setattr(PretendHost, "delete_data_set", remove_the_server_and_refuse_the_network)
+        switched = lanes.move(BUILD_B, LATER, 1, Witness(generation=LATER, attempt=1))
+    assert (switched.outcome, proxy.host.data_sets[half].databases, len(proxy.host.data_sets[half].networks)) == (
+        Outcome.SWITCHED,
+        (),
+        1,
+    )
+    again = copy_generation(9)
+    result = lanes.move(BUILD_A, again, 1, Witness(generation=again, attempt=1))
+    assert (result.outcome, sorted(proxy.host.data_sets)) == (
+        Outcome.SWITCHED,
+        sorted(["data-1", switched.data_set or "", result.data_set or ""]),
+    )
+
+
+# The sentence under each data set of the card, by data set: a row with a server names its container before it.
+def data_set_rows(status: Status) -> dict[str, str]:
+    rows = [row for card in cards(status) for row in card.rows if row.name == "Data set"]
+    with_a_server = [(row.note or "").removeprefix("database-").split(" ", 1) for row in rows if row.value[0].drawn_as != "code"]
+    without = [(row.value[0].text, row.note or "") for row in rows if row.value[0].drawn_as == "code"]
+    return dict([*((name, note) for name, note in with_a_server), *without])
+
+
+def data_set_notes(lanes: Lanes) -> dict[str, str]:
+    return data_set_rows(lanes.read_status())
+
+
+def test_after_a_release_that_kept_the_lane_s_data_the_card_no_longer_says_the_last_release_replaced_what_it_was_copied_from() -> (
+    None
+):
+    lanes, proxy, _ = serving()
+    copied_to = lanes.move(BUILD_B, GENERATION, 1, first()).data_set or ""
+    assert data_set_notes(lanes) == {copied_to: "Kept: the lane serves from it.", "data-1": "Kept: the last release replaced it."}
+    keeping = Lanes(proxy.host, proxy, lambda _product: TK, lambda _target: FreshNames("site-testing-later", "data-later"))
+    kept = keeping.move(BUILD_A, LATER, 1, Witness(generation=LATER, attempt=1))
+    assert (kept.outcome, kept.data_set, sorted(proxy.host.data_sets)) == (
+        Outcome.SWITCHED,
+        copied_to,
+        sorted(["data-1", copied_to]),
+    )
+    assert data_set_notes(keeping) == {
+        copied_to: "Kept: the lane serves from it.",
+        "data-1": "Kept: the lane's data was copied from it by an earlier release.",
+    }
+
+
+def test_while_a_release_is_copying_the_card_says_its_new_copy_is_being_made_and_never_that_it_is_an_old_copy(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[dict[str, str]] = []
+    edit = PretendProxy.edit
+
+    def read_the_card_as_the_freeze_begins(freezing: PretendProxy, web_address: str, *sent: Any) -> str:  # noqa: ANN401 as edit takes them
+        if sent[-1] == BACK_SOON and not read:
+            status = Lanes(freezing.host, freezing, lambda _product: TK_UPDATING, read_unfinished=record.unfinished).read_status()
+            read.append(data_set_rows(status))
+        return edit(freezing, web_address, *sent)
+
+    monkeypatch.setattr(PretendProxy, "edit", read_the_card_as_the_freeze_begins)
+    kept, _, proxy = worked(record)
+    serving_from = proxy.host.instances[proxy.loaded_to(WEB_ADDRESS)].data_set or ""
+    assert (kept.stands, read) == (
+        Stands.DONE,
+        [{"data-1": "Kept: the lane serves from it.", serving_from: "A request at work on the lane is making it."}],
+    )

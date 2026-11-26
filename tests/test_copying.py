@@ -1,11 +1,12 @@
 import builtins
+import re
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from launchplane.act import Cancelled, Lanes, Stopped, Waiting
-from launchplane.container_host import COPY_COMMAND, ContainerHost
+from launchplane.container_host import COPIER_IMAGE, COPY_COMMAND, ContainerHost
 from launchplane.copying import Copying, decide
 from launchplane.data_set import DATA_PATH
 from launchplane.docker_answers import ContainerHostRefused
@@ -132,7 +133,7 @@ def test_a_database_server_that_did_not_stop_cleanly_is_never_copied() -> None:
 
 def test_each_volume_is_copied_from_the_data_set_the_copy_names_once_everything_is_stopped() -> None:
     given = Given((lane_web(STOPPED),), IN_MAINTENANCE, data_sets=(data_set_named("d1", STOPPED), copy_of_d1()))
-    assert decide(frozen_by_this_request(given)) == CopyVolume("site", "testing", "d2", "volume-d1", "volume-d2", "postgres:18")
+    assert decide(frozen_by_this_request(given)) == CopyVolume("site", "testing", "d2", "volume-d1", "volume-d2")
 
 
 def test_a_copy_whose_volume_is_a_volume_of_what_it_copies_is_given_up_before_anything_is_written() -> None:
@@ -320,15 +321,24 @@ class Copiers:
         return Copier(self.exit_code)
 
 
-COPY = CopyVolume("shop", "testing", "d2", "source", "copy", "postgres:18-alpine")
+COPY = CopyVolume("shop", "testing", "d2", "source", "copy")
 
 
 def test_the_copier_can_only_read_what_it_copies_reaches_no_network_and_writes_the_fresh_volume_alone() -> None:
     copiers = Copiers([])
     ContainerHost(as_docker_client(SimpleNamespace(containers=copiers)), "test").copy_volume(COPY)
     mounted = {"source": {"bind": "/from", "mode": "ro"}, "copy": {"bind": DATA_PATH, "mode": "rw"}}
-    assert copiers.made == [("postgres:18-alpine", COPY_COMMAND, mounted, "none")]
+    assert copiers.made == [(COPIER_IMAGE, COPY_COMMAND, mounted, "none")]
     assert copiers.asked == {"volume": "source", "status": "running"}
+
+
+def test_the_copier_is_named_by_digest_so_no_tag_moved_elsewhere_changes_what_copies_a_lane_s_data() -> None:
+    assert re.fullmatch(r"[a-z./]+@sha256:[0-9a-f]{64}", COPIER_IMAGE)
+
+
+def test_the_copier_asks_for_shared_blocks_where_it_can_and_still_reads_every_byte_of_both_again() -> None:
+    copy, compare, flush = COPY_COMMAND[2].split(" && ")
+    assert (copy.split()[:3], compare.split()[:2], flush) == (["cp", "-a", "--reflink=auto"], ["diff", "-r"], "sync")
 
 
 def test_a_volume_a_running_container_has_mounted_is_refused_and_no_copier_is_made() -> None:

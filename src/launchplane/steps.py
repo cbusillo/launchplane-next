@@ -143,7 +143,6 @@ class CopyVolume:
     data_set: str
     source: str
     destination: str
-    image: str
 
 
 @dataclass(frozen=True)
@@ -353,6 +352,11 @@ class UpdateRefused(Refused):
 
 # Docker answered that it will not remove the part.
 class RemovalRefused(Refused):
+    pass
+
+
+# Docker would not delete an old copy of a lane whose release has switched, or gave no answer.
+class DeletionRefused(Refused):
     pass
 
 

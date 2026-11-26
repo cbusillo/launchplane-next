@@ -436,7 +436,7 @@ C=$(stands $R | cut -d' ' -f3); uv run python -m tests.bed_odoo show-copy watch-
 
 2. **A whole copy.** The loop prints what a visitor gets beside how the request stands, once a second: `200 working`, then `503 working` for about 11 s, the back soon page, then `200 done copied` and the copy's name. The last command reads the copy from its own two volumes and nothing else, in a container that reaches no network: `data_set` is the copy, its `volumes` are two that step 1 did not show, and `lead`, `attachment` and `written` are as in step 1.
 
-   **The card,** while the loop prints `503`: the pills `in maintenance` and `work under way`, the web address `shows the back soon page`, and the request `working` with what it has done so far, ending in a `stop` or in `copy the volume` and the two volumes' names. A row `Found` says a part still running in a lane in maintenance, `under way`, and the copy's row says `is a copy, not whole, of` the lane's data set. **Afterwards** it reads `good` and `answering` again. The request is `done`: `It ended as done.` and its lines, from `make the database volume of the data set` through the two `copy the volume … to …` to `send testing.watch-copy.test to` the instance, `: done`. There is no `switch` among them. A new row says the copy `is a whole copy of` the lane's data set, `kept offline: no instance is started on it`.
+   **The card,** while the loop prints `503`: the pills `in maintenance` and `work under way`, the web address `shows the back soon page`, and the request `working` with what it has done so far, ending in a `stop` or in `copy the volume` and the two volumes' names. A row `Found` says a part still running in a lane in maintenance, `under way`, and the copy's row says `is a copy, not whole, of` the lane's data set. **Afterwards** it reads `good` and `answering` again. The request is `done`: `It ended as done.` and its lines, from `make the database volume of the data set` through the two `copy the volume … to …` to `send testing.watch-copy.test to` the instance, `: done`. There is no `switch` among them. A new row says the copy `is a whole copy of` the lane's data set, `kept offline: no instance is started on it`, and under it `An old copy: the next release that switches deletes it.` The serving data set's row has `Kept: the lane serves from it.` after its server's name.
 
 ```
 uv run python -m tests.bed_odoo write watch-copy testing 'after the copy'
@@ -488,7 +488,7 @@ uv run python -m tests.bed_odoo tear-down watch-copy
 
 ### The update watch
 
-[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, then one that switches. It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes about four minutes and puts the bed back. Both blocks paste into zsh as they stand.
+[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, each with a copy it gave up, then one that switches and [deletes those three copies](copying.md#old-copies-go). It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes about four minutes and puts the bed back. The three blocks paste into zsh as they stand.
 
 ```zsh
 cd /Users/cbusillo/Developer/launchplane-next
@@ -506,6 +506,21 @@ while true; do
   curl -sS -o /dev/null -w 'visitor %{http_code}  ' -H 'Host: testing.watch-update.test' http://docker-lp-scratch.shiny/web/login
   curl -fsS http://launchplane.shiny:8700/running | python3 -c 'import json,sys; r=json.load(sys.stdin); print(next((i["build"]+" "+i["data_set"] for i in r["instances"] if i["receives_visitors_for"]=="testing.watch-update.test"),"no instance receives visitors"))'
   sleep 1
+done
+```
+
+In a third zsh window, this block prints the lane's data sets every two seconds: each `Data set` row of the card with the sentence under it, the data sets `GET /running` answers for the lane, and how many volumes of the lane the scratch container has. Stop it with Ctrl-C.
+
+```zsh
+while true; do
+  curl -fsS http://launchplane.shiny:8700/running | python3 -c 'import json,sys
+r=json.load(sys.stdin)
+for card in r["cards"]:
+    for row in card["rows"] if card["title"]=="watch-update · testing" else []:
+        if row["name"]=="Data set": print("card:", "".join(piece["text"] for piece in row["value"])[:70], "|", row["note"])
+print("api: ", sorted(each["data_set"] for each in r["data_sets"] if each["product"]=="watch-update"))'
+  ssh root@docker-lp-scratch.shiny 'echo "scratch: $(docker volume ls -q --filter label=launchplane.product=watch-update | wc -l) volumes"'
+  echo; sleep 2
 done
 ```
 
@@ -536,6 +551,10 @@ The test prints one block for each point below as it reaches it, and the page sh
 6. **Successful switch and retry.** The same move a fourth time, sent with an `Idempotency-Key` and left alone. The card goes from `in maintenance` and `work under way`, with the notes of point 2 and then `The data is copied, and the new build is updated and then checked on the copy…`, to `good` and `answering` with `…@sha256:f0b8a27b…` `running` and `active`, and the second window goes from `visitor 503` to `visitor 200` with that build and a new data set. The request is `done`, `switched`: one line `update the data of`, one line `switch`, and the gate's answer `committed`. Its note: `Visitors are on the new build and the updated copy. Every line is in GET /requests/<id>.`
 
    `witness`, now read at the same web address, is the record of point 1 as an `opportunity`: the same `lead`, `team`, `attachment`, `attached_to` and `sha256`. `written` has the three writes of points 3 to 5. The first line of the block is [the measured time](odoo.md#measured) from the first back soon answer to the new instance's first answer. The test also holds that the scheduled job it made due before the move is still due and has not run, that the new instance has only the copy's files volume mounted and only networks with no way out, and that the data set it replaced still has both volumes, with its database server `exited` with code 0.
+
+   **The older copies are gone.** Each of the three releases that failed left its copy with a stopped database server. Just before this move the third window prints four `card:` lines, each the image of a data set's server and then its container: the serving one with `Kept: the lane serves from it.`, and three with `An old copy: the next release that switches deletes it.` Under them `api:` has four names, and the scratch container `8 volumes`. While the move runs there are five and `10`, with no sentence while no instance receives visitors, and a copy that has no server yet reads `is a copy, not whole, of` the serving data set. Once it has switched, for a moment all five have a sentence, the fifth `Kept: the last release replaced it.` Then two `card:` lines are left, `Kept: the lane serves from it.` for the new data set and `Kept: the last release replaced it.` for the one of point 1, `api:` has those two names, and the scratch container `4 volumes`.
+
+   The test prints the same under `6. The older copies are gone`: three lines `delete the data set` and a name, the card's two sentences, and the four volumes left, two for each data set kept. While Launchplane is killed in point 5 the third window prints an error once.
 
    Then it writes once more, sends the same move with the same key, and asks for the serving build again without a key: `the key answers request` the request that switched, and the new request is `unchanged` with `0 lines`. Neither the update nor the switch ran again, and the write is there. The card stays `good`.
 

@@ -96,6 +96,7 @@ def card(request: int | None = None) -> dict[str, Any]:
         "instances": [[pill["text"] for pill in row["pills"]] for name, row in rows.items() if name.startswith("Instance")],
         "request": [pill["text"] for pill in rows.get(f"Request {request}", {}).get("pills", [])],
         "note": rows.get(f"Request {request}", {}).get("note"),
+        "data_sets": [row["note"] for row in found["rows"] if row["name"] == "Data set"],
     }
 
 
@@ -302,6 +303,7 @@ def test_6_an_uninterrupted_release_updates_once_switches_once_and_keeps_everyth
         f"docker exec {PRODUCT}-{LANE}-database-{old_database.split('-')[2]} {PSQL} --command \"select pg_database_size('app')\""
     ).strip()
     files = size_of(old_files)
+    old_copies = sorted(each["data_set"] for each in copies_of(PRODUCT, LANE))
     key = {"Idempotency-Key": f"watch-update-after-{ask('/requests')[1]['ended'][0]['id']}"}
     sampled: list[str] = []
     sampling = threading.Thread(target=lambda: sampled.append(on_scratch(SAMPLE)))
@@ -347,6 +349,22 @@ def test_6_an_uninterrupted_release_updates_once_switches_once_and_keeps_everyth
     assert (used["generation"], [each["source"] for each in instance["mounts"]]) == (ended["generation"], used["files"])
     assert [quiet[each] for each in instance["networks"]] == [True, True]
     assert (old["files"], [(each["state"], each["exit_code"]) for each in old["databases"]]) == ([old_files], [("stopped", 0)])
+
+    gone = lines_of(ended, "delete the data set ")
+    volumes = on_scratch(f"docker volume ls --quiet --filter label=launchplane.product={PRODUCT}").split()
+    said(
+        "6. The older copies are gone",
+        deleted=gone,
+        data_sets_on_the_card=lane_card["data_sets"],
+        volumes_on_the_scratch_host=volumes,
+    )
+    assert (len(old_copies), sorted(gone)) == (3, [f"delete the data set {each}" for each in old_copies])
+    assert sorted(each["data_set"] for each in of_this_lane(running["data_sets"])) == sorted([used["data_set"], old["data_set"]])
+    assert sorted(volumes) == sorted([*used["volumes"], *used["files"], *old["volumes"], *old["files"]])
+    assert sorted(each.split(" ", 1)[1] for each in lane_card["data_sets"]) == [
+        "Kept: the lane serves from it.",
+        "Kept: the last release replaced it.",
+    ]
 
     write("after the switch")
     replayed = ask(MOVE, NEXT, headers=key)[1]
