@@ -111,20 +111,20 @@ def data_set_of(product: str, lane: str) -> str:
 
 
 # Odoo as the kind runs it, once, on the lane's own database and files, from the build the lane will run.
-def odoo_on(data_set: str, *arguments: str) -> str:
+def odoo_on(data_set: str, build: str, *arguments: str) -> str:
     settings = dict(TK.run.environment) | client_environment(SEED_LOGIN, SEED_PASSWORD)
     given = [argument for name, value in settings.items() for argument in ("--env", f"{name}={value}")]
     on = ["--network", f"launchplane-data-{data_set}", "--volume", f"launchplane-data-{data_set}-files:{FILES_PATH}", "--user", USER]
-    return shlex.join(["docker", "run", "--rm", "--interactive", *on, *given, build_of(RUN), SERVER, *arguments])
+    return shlex.join(["docker", "run", "--rm", "--interactive", *on, *given, build, SERVER, *arguments])
 
 
-def seed(product: str, lane: str, modules: list[str] = MODULES, *, attachment: bool = True) -> None:
+def seed(product: str, lane: str, modules: list[str] = MODULES, *, attachment: bool = True, build: str = build_of(RUN)) -> None:
     data_set = data_set_of(product, lane)
     psql = "psql --username=postgres --dbname=app --quiet --set=ON_ERROR_STOP=1"
     on_scratch(f"docker exec --interactive {product}-{lane}-database-{data_set} {psql}", given=MAKE_SEED_LOGIN)
-    on_scratch(odoo_on(data_set, "--init", ",".join(modules), "--stop-after-init", "--no-http", "--log-level=warn"))
+    on_scratch(odoo_on(data_set, build, "--init", ",".join(modules), "--stop-after-init", "--no-http", "--log-level=warn"))
     if attachment:
-        on_scratch(odoo_on(data_set, "shell", "--no-http", "--log-level=error"), given=MAKE_ATTACHMENT)
+        on_scratch(odoo_on(data_set, build, "shell", "--no-http", "--log-level=error"), given=MAKE_ATTACHMENT)
 
 
 # A person signed in at a lane's web address, so what is read and written goes through Odoo as its own pages do.

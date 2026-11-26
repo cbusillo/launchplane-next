@@ -83,7 +83,9 @@ class InstanceHost(Protocol):
     def retire_instance(self, container: str, by: Witness) -> None: ...
     def remove_unheld_logins(self, database: str, by: Witness) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
-    def run_in(self, container: str, command: list[str]) -> CommandResult: ...
+    def run_once(
+        self, to: LaneBuild, name: str, on: DataSetUse, run: list[str], stamp: str | None, by: Witness, /
+    ) -> CommandResult: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -162,8 +164,8 @@ def fresh_names(target: LaneBuild) -> FreshNames:
 
 
 # A lost reply is no answer: only what the command itself answered says the update failed.
-def run_update(host: InstanceHost, action: steps.Update) -> steps.UpdateRefused | None:
-    ran = host.run_in(action.container, [*action.command])
+def run_update(host: InstanceHost, action: steps.Update, by: Witness) -> steps.UpdateRefused | None:
+    ran = host.run_once(action.target, action.container, action.use, [*action.command], action.generation, by)
     if ran.succeeded:
         return None
     why = f"The update of the data, run in {action.container}, ended with code {ran.exit_code}."
@@ -191,7 +193,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
-    steps.Update: lambda host, _proxy, step, _by: run_update(host, step),
+    steps.Update: lambda host, _proxy, step, by: run_update(host, step, by),
 }
 
 

@@ -186,11 +186,15 @@ class Check:
     command: tuple[str, ...] = ()
 
 
-# The update of the product's kind, run once in a candidate on a copy of the lane's data.
+# The update of the product's kind, run once to its end by the build in `container`, on a copy of the lane's data and
+# before any instance is started there.
 @dataclass(frozen=True)
 class Update:
+    target: LaneBuild
     container: str
+    use: DataSetUse
     command: tuple[str, ...]
+    generation: str | None = None
 
 
 # The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.

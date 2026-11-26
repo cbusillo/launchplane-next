@@ -76,6 +76,11 @@ class RecordingContainer:
         self.sent("start", "start")
         self.status = "running"
 
+    def wait(self, timeout: int) -> dict[str, int]:
+        self.calls.append(f"wait {timeout} s")
+        self.status = "exited"
+        return {"StatusCode": 0}
+
     def stop(self, timeout: int) -> None:
         self.sent("stop", f"stop within {timeout} s")
         self.status = "exited"

@@ -180,11 +180,15 @@ def with_lines(note: str, request: Request, *, only_sent: bool = False) -> str:
 
 
 COPYING = (
-    "Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build is "
-    "started on the copy and its update runs there."
+    "Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build "
+    "updates the copy, and is started on it only once that update has ended well."
 )
 UPDATING = (
-    "The data is copied, and the new build is updated and then checked on the copy. If both pass, visitors are switched "
+    "The data is copied, and the new build is updating the copy. Nothing of the new build is started on it until the "
+    "update has ended well. If it does not, the original instance comes back on its own data."
+)
+CHECKING = (
+    "The copy is updated, and the new build is started on it and is being checked. If it passes, visitors are switched "
     "to it. If not, the original instance comes back on its own data."
 )
 COMING_BACK = "Nothing is switched: Launchplane is bringing the original instance back on its own data."
@@ -206,6 +210,8 @@ def frozen_note(request: Kept) -> str | None:
         paragraph = SWITCHED
     elif stopped is not None:
         paragraph = f"{in_one_line(': '.join(filter(None, (stopped.did, stopped.error)))).rstrip('.')}. {COMING_BACK}"
+    elif any(line.did.startswith("update the data of ") for line in lines):
+        paragraph = CHECKING
     else:
         paragraph = UPDATING if any(line.did.startswith("make the network of the data set") for line in lines) else COPYING
     again = "" if request.stands in ENDED else taken_up(request)

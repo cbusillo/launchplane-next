@@ -337,12 +337,26 @@ class PretendHost:
                 del self.instances[container]
             self.record(f"retire {container}")
 
-    def run_in(self, container: str, command: list[str]) -> CommandResult:
+    # What runs once is on the host as an instance of its build for as long as it runs, and is removed once it answered.
+    def run_once(
+        self,
+        target: LaneBuild,
+        container: str,
+        use: DataSetUse,
+        command: list[str],
+        generation: str | None = None,
+        by: Witness = NOBODY,
+    ) -> CommandResult:
+        self.change_login(by, "make", use.database_container, login_of(container))
+        with self.command(by, "make", container), self.command(by, "start", container):
+            self.place(target, container, use=use, generation=generation)
         self.record(f"update {container} with {' '.join(command)}")
-        build = self.instances[container].build
-        if build in self.updates_unanswered:
+        if target.build in self.updates_unanswered:
             raise ContainerHostError(f"Running {command[0]} in {container} on test failed: the reply was lost")
-        return CommandResult(exit_code=1, output="module not found") if build in self.updates_that_fail else CommandResult(0, "")
+        with self.command(by, "stop", container, already=True), self.command(by, "remove", container):
+            del self.instances[container]
+        failed = target.build in self.updates_that_fail
+        return CommandResult(exit_code=1, output="module not found") if failed else CommandResult(0, "")
 
     def read_log_tail(self, container: str) -> str:
         part = self.background_services.get(container) or self.instances[container]

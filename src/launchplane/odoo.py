@@ -53,7 +53,7 @@ class Odoo(BaseModel):
     def run(self) -> Run:
         return Run((SERVER,), SETTINGS | {"ODOO_ADDONS_PATH": ",".join(self.addons_path)}, USER, FILES_PATH)
 
-    # Run in the candidate, beside its server: with its login, its files and no way out, and no scheduled job is run.
+    # Run by the build before its server is started: with a login, the files and no way out, and no scheduled job is run.
     @property
     def update_command(self) -> tuple[str, ...]:
         modules = ",".join(self.update)
