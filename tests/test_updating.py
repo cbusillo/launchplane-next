@@ -8,12 +8,12 @@ from launchplane.act import Cancelled, Lanes, Status, Waiting
 from launchplane.data_set import login_of
 from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.gate import Answer as GateAnswer
-from launchplane.instance import BACK_SOON, DataSet, DataSetUse, InstanceState, LaneBuild, Verdict
+from launchplane.instance import BACK_SOON, DataSet, DataSetUse, InstanceState, Verdict
 from launchplane.judge import Condition, Work
 from launchplane.page import CHECKING, cards
 from launchplane.plan import lane_data_set
 from launchplane.record import Asked, Kept, Record, Stands
-from launchplane.steps import CopyVolume, FreshNames, Outcome, Stop
+from launchplane.steps import CopyVolume, FreshNames, Outcome, Stop, Update
 from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
@@ -103,9 +103,9 @@ def test_while_the_update_is_pending_the_candidate_s_web_has_never_started_and_o
     before: list[list[str]] = []
     run_once = proxy.host.run_once
 
-    def note_what_started_and_update(*given: Any, **named: Any) -> CommandResult:  # noqa: ANN401 as run_once takes them
+    def note_what_started_and_update(update: Update, by: Witness) -> CommandResult:
         before.append(started(proxy, old))
-        return run_once(*given, **named)
+        return run_once(update, by)
 
     monkeypatch.setattr(proxy.host, "run_once", note_what_started_and_update)
     result = lanes.move(BUILD_B, GENERATION, 1, first())
@@ -128,9 +128,9 @@ def test_the_candidate_and_its_update_reach_only_the_copy_s_network_and_files(mo
     updated_on: list[DataSetUse] = []
     run_once = proxy.host.run_once
 
-    def note_and_update(target: LaneBuild, container: str, use: DataSetUse, *given: Any) -> CommandResult:  # noqa: ANN401
-        updated_on.append(use)
-        return run_once(target, container, use, *given)
+    def note_and_update(update: Update, by: Witness) -> CommandResult:
+        updated_on.append(update.use)
+        return run_once(update, by)
 
     monkeypatch.setattr(proxy.host, "run_once", note_and_update)
     lanes.move(BUILD_B, GENERATION, 1, first())

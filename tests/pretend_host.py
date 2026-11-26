@@ -48,7 +48,7 @@ from launchplane.instance import (
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.steps import CopyResult, CopyVolume, FreshNames, MaintenanceResult, MoveResult, RetireResult, Verb
+from launchplane.steps import CopyResult, CopyVolume, FreshNames, MaintenanceResult, MoveResult, RetireResult, Update, Verb
 from launchplane.telling import NOBODY, Said, Witness
 
 WEB_ADDRESS = "testing.site.test"
@@ -338,18 +338,11 @@ class PretendHost:
             self.record(f"retire {container}")
 
     # What runs once is on the host as an instance of its build for as long as it runs, and is removed once it answered.
-    def run_once(
-        self,
-        target: LaneBuild,
-        container: str,
-        use: DataSetUse,
-        command: list[str],
-        generation: str | None = None,
-        by: Witness = NOBODY,
-    ) -> CommandResult:
+    def run_once(self, update: Update, by: Witness = NOBODY) -> CommandResult:
+        target, container, use, command = update.target, update.container, update.use, update.command
         self.change_login(by, "make", use.database_container, login_of(container))
         with self.command(by, "make", container), self.command(by, "start", container):
-            self.place(target, container, use=use, generation=generation)
+            self.place(target, container, use=use, generation=update.generation)
         self.record(f"update {container} with {' '.join(command)}")
         if target.build in self.updates_unanswered:
             raise ContainerHostError(f"Running {command[0]} in {container} on test failed: the reply was lost")

@@ -14,6 +14,7 @@ from launchplane.docker_answers import CommandResult, ContainerHostError, Contai
 from launchplane.instance import DataSet, DataSetUse, LaneBuild
 from launchplane.odoo import FILES_PATH, UPDATE_DEADLINE_SECONDS
 from launchplane.proxy import CheckFailed
+from launchplane.steps import Update
 from tests.odoo_product import TK, TK_UPDATING
 from tests.pretend_host import GENERATION
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker, as_docker_client
@@ -129,7 +130,7 @@ UPDATER = f"{WEB}-update"
 
 
 def update(host: ContainerHost, target: LaneBuild, use: DataSetUse) -> CommandResult:
-    return host.run_once(target, UPDATER, use, UPDATE, GENERATION)
+    return host.run_once(Update(target, UPDATER, use, (*UPDATE,), GENERATION))
 
 
 def test_the_update_is_run_by_the_build_as_its_instance_runs_on_the_data_set_s_network_alone_and_is_never_started_again() -> None:

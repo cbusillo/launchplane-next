@@ -158,4 +158,20 @@ On November 25, on the scratch host, a release from that build to `sha256:f0b8a2
 | A release whose update fails, from the first back soon answer to the original answering again | Not measured |
 | `tests/test_bed_tk_update.py`, 5 tests | 4 min 7 s and 4 min 11 s, and 7 min 18 s under that load |
 
+Later on November 25, on the scratch host, the same release once more, from the same seed, before and after the update was moved in front of the candidate's start. Both revisions copy with [the copier that shares blocks](copying.md#measured). Each time is from the first back soon answer at the web address to the first answer of the new instance there, with `/web/login` asked every 0.05 s from the scratch host itself. The load average is the scratch host's, from other work and from the watch's own.
+
+| | `f891a17`: the candidate started, the update run beside it | `5caec07`: the update run to its end, then the candidate started |
+| --- | --- | --- |
+| Load average 4 to 7 | 21.1 s and 20.4 s | Not measured |
+| Load average 8 to 12 | 27.4 s | 36.4 s, 31.8 s and 35.9 s |
+| Of that, the update, by the request's lines | 8.2 s, 6.8 s and 9.2 s | 12.8 s, 9.9 s and 13.9 s, from the start of its container to its end |
+| Of that, the check | 5.9 s, 6.1 s and 7.8 s | 11.8 s, 11.9 s and 11.2 s |
+
+The check now begins when the candidate does, so it waits for Odoo to start, which used to happen while the update ran. The two orders were not measured again at the lower load.
+
+| | |
+| --- | --- |
+| A release of [the watch's fixture](the-move.md#the-update-watch) whose update fails, from the first back soon answer at `/` to the original answering there again, on `5caec07` | 28.5 s, 31.4 s and 27.3 s, at load average 8 to 12 |
+| `tests/test_bed_tk_update.py`, 9 tests | 10 min 33 s and 10 min 32 s |
+
 How long an interruption is acceptable is not decided (README, open question 2).

@@ -83,9 +83,7 @@ class InstanceHost(Protocol):
     def retire_instance(self, container: str, by: Witness) -> None: ...
     def remove_unheld_logins(self, database: str, by: Witness) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
-    def run_once(
-        self, to: LaneBuild, name: str, on: DataSetUse, run: list[str], stamp: str | None, by: Witness, /
-    ) -> CommandResult: ...
+    def run_once(self, update: steps.Update, by: Witness, /) -> CommandResult: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -165,7 +163,7 @@ def fresh_names(target: LaneBuild) -> FreshNames:
 
 # A lost reply is no answer: only what the command itself answered says the update failed.
 def run_update(host: InstanceHost, action: steps.Update, by: Witness) -> steps.UpdateRefused | None:
-    ran = host.run_once(action.target, action.container, action.use, [*action.command], action.generation, by)
+    ran = host.run_once(action, by)
     if ran.succeeded:
         return None
     why = f"The update of the data, run in {action.container}, ended with code {ran.exit_code}."

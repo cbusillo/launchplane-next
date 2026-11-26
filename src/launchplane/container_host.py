@@ -73,7 +73,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
-from launchplane.steps import CopyVolume
+from launchplane.steps import CopyVolume, Update
 from launchplane.telling import NOBODY, Said, Witness
 
 DOCKER_API_VERSION = "1.47"
@@ -396,18 +396,11 @@ class ContainerHost:
 
     # The build, run once to its end as an instance of it runs on the data set: its settings, its files and a login. It is
     # on the data set's network alone, where no visitor is sent. Once it has ended and answered, it is removed.
-    def run_once(
-        self,
-        target: LaneBuild,
-        container: str,
-        use: DataSetUse,
-        command: list[str],
-        generation: str | None = None,
-        by: Witness = NOBODY,
-    ) -> CommandResult:
-        with attempting(f"Running {command[0]} of build {target.build} once in {container}", self.address):
-            as_instance = self.instance_options(target, container, use, generation)
-            once = replace(as_instance, networks={use.network: []}, command=command, restart=RUNS_ONCE)
+    def run_once(self, update: Update, by: Witness = NOBODY) -> CommandResult:
+        target, container, use = update.target, update.container, update.use
+        with attempting(f"Running {update.command[0]} of build {target.build} once in {container}", self.address):
+            as_instance = self.instance_options(target, container, use, update.generation)
+            once = replace(as_instance, networks={use.network: []}, command=[*update.command], restart=RUNS_ONCE)
             ran = self.run_part(once, use, lambda on: self.logins.make(container, on, by), by)
             exit_code = ran.wait(timeout=RUN_ONCE_DEADLINE_SECONDS)["StatusCode"]
             output = ran.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip()
