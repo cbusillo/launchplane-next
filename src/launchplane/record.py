@@ -601,10 +601,13 @@ class PostgresRecord(Record):
         with self.session("looking for the next requests") as session:
             return [Request.model_validate(row) for row in session.execute(Sql.NEXT_UP).fetchall()]
 
+    def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
+        return self.turn_held(product, lane)
+
     # A lane's turn is a lock held by a connection of its own, so it is let go when the work ends or this Launchplane dies,
     # and never apart from the work. What is given asks that connection whether it still holds the lock.
     @contextmanager
-    def turn(self, product: str, lane: str) -> Generator[Held | None]:
+    def turn_held(self, product: str, lane: str) -> Generator[Held | None]:
         try:
             connection = psycopg.connect(self.database, autocommit=True)
         except psycopg.Error as error:
