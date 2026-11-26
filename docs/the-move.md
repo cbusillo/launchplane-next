@@ -488,7 +488,7 @@ uv run python -m tests.bed_odoo tear-down watch-copy
 
 ### The update watch
 
-[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, each with a copy it gave up, then one that switches and [deletes those three copies](copying.md#old-copies-go). Then the same lane is made again from two builds made on the bed, where the new build's start reads a field only its own update adds: one release whose update fails, and one whose update is committed before the first web process of the new build is started. It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes about eleven minutes and puts the bed back. The three blocks paste into zsh as they stand.
+[A release that updates](odoo.md#a-release-that-updates), on the lane `testing` of `watch-update`: three releases that fail and leave the original serving, each with a copy it gave up, then one that switches and [deletes those three copies](copying.md#old-copies-go). Then the same lane is made again from two builds made on the bed, where the new build's start reads a field only its own update adds: one release whose update fails, and one whose update is committed before the first web process of the new build is started. It is `tests/test_bed_tk_update.py`, which asks every move through the API as any caller does, makes its faults on the scratch container alone, and prints each observation as it happens. It takes eight to eleven minutes and puts the bed back. The three blocks paste into zsh as they stand.
 
 ```zsh
 cd /Users/cbusillo/Developer/launchplane-next
@@ -582,8 +582,6 @@ The test prints one block for each point below as it reaches it, and the page sh
 10. **Restarted, and a fresh database.** The test restarts the serving container with `docker restart`: its bootstrap runs again, on the updated database, and `website: 200` with the card `good`. Then it initializes the lane `fresh` of the same product with the new build alone, as point 7's lane was with the old one: `website: 200` at `fresh.watch-update.test`, the card `watch-update · fresh` reads `good` and `answering`, and that database has the column too.
 
 Afterwards the test retires both lanes with each copy and its data set, removes the two builds, and takes Launchplane off the recorded git host.
-
-**The same fixture on the order before this one.** On `f891a17`, which started the candidate first and ran the update beside it, the fixture's release was held with the candidate started and the update not yet sent. The candidate's bootstrap ended with `psycopg2.errors.UndefinedColumn: column website.lp_greeting does not exist`, Docker started the container again, and the update, run in a container that then stopped under it, ended with code 137: the request ended `failed`, `not updated`, with the original serving. Left alone, the same release switched there, because the update happened to add the column before the bootstrap read it.
 
 ### The login watch
 

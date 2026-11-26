@@ -160,18 +160,20 @@ On November 25, on the scratch host, a release from that build to `sha256:f0b8a2
 
 Later on November 25, on the scratch host, the same release once more, from the same seed, before and after the update was moved in front of the candidate's start. Both revisions copy with [the copier that shares blocks](copying.md#measured). Each time is from the first back soon answer at the web address to the first answer of the new instance there, with `/web/login` asked every 0.05 s from the scratch host itself. The load average is the scratch host's, from other work and from the watch's own.
 
-| | `f891a17`: the candidate started, the update run beside it | `5caec07`: the update run to its end, then the candidate started |
+| | `f891a17`: the candidate started, the update run beside it | `5caec07` and `d0c7dd2`, which differ in no step: the update run to its end, then the candidate started |
 | --- | --- | --- |
-| Load average 4 to 7 | 21.1 s and 20.4 s | Not measured |
-| Load average 8 to 12 | 27.4 s | 36.4 s, 31.8 s and 35.9 s |
-| Of that, the update, by the request's lines | 8.2 s, 6.8 s and 9.2 s | 12.8 s, 9.9 s and 13.9 s, from the start of its container to its end |
-| Of that, the check | 5.9 s, 6.1 s and 7.8 s | 11.8 s, 11.9 s and 11.2 s |
+| Load average 4 to 7 | 21.1 s and 20.4 s | 23.7 s, one run, on `d0c7dd2` |
+| Load average 8 to 12 | 27.4 s | 36.4 s, 31.8 s and 35.9 s, on `5caec07` |
+| Of that, the update, by the request's lines, in the order of the times above | 8.2 s, 6.8 s and 9.2 s | 6.4 s, then 12.8 s, 9.9 s and 13.9 s, from the start of its container to its end |
+| Of that, the check | 5.9 s, 6.1 s and 7.8 s | 9.0 s, then 11.8 s, 11.9 s and 11.2 s |
 
-The check now begins when the candidate does, so it waits for Odoo to start, which used to happen while the update ran. The two orders were not measured again at the lower load.
+The check now begins when the candidate does, so it waits for Odoo to start, which used to happen while the update ran.
 
 | | |
 | --- | --- |
-| A release of [the watch's fixture](the-move.md#the-update-watch) whose update fails, from the first back soon answer at `/` to the original answering there again, on `5caec07` | 28.5 s, 31.4 s and 27.3 s, at load average 8 to 12 |
-| `tests/test_bed_tk_update.py`, 9 tests | 10 min 33 s and 10 min 32 s |
+| A release of [the watch's fixture](the-move.md#the-update-watch) whose update fails, from the first back soon answer at `/` to the original answering there again | 28.5 s, 31.4 s and 27.3 s on `5caec07`, at load average 8 to 12. 21.3 s on `d0c7dd2`, at 6 to 7 |
+| `tests/test_bed_tk_update.py`, 9 tests | 10 min 33 s and 10 min 32 s at the higher load, 8 min 13 s at the lower |
+
+The fixture's release was also asked of `f891a17`, held with the candidate started and the update not yet sent. The candidate's bootstrap ended with `psycopg2.errors.UndefinedColumn: column website.lp_greeting does not exist`, Docker started the container again, and the update, run in a container that then stopped under it, ended with code 137: the request ended `failed`, `not updated`, with the original serving. Left alone, the same release switched there, because the update happened to add the column before the bootstrap read it.
 
 How long an interruption is acceptable is not decided (README, open question 2).
