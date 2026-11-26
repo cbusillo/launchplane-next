@@ -130,6 +130,8 @@ def cards_read_during_a_release(record: Record, monkeypatch: pytest.MonkeyPatch)
     record_action, start_instance = proxy.host.record, proxy.host.start_instance
 
     def read_while_the_update_runs(action: str) -> None:
+        if action.startswith("await "):
+            read_the_card("copied, before the update")
         if action.startswith("update "):
             read_the_card("while the update runs")
         record_action(action)
@@ -154,6 +156,14 @@ def test_while_the_update_runs_the_card_shows_it_as_an_update_that_runs_and_neve
     pills, parts, note = cards_read_during_a_release(record, monkeypatch)["while the update runs"]
     assert (pills, parts) == (["in maintenance", "work under way"], ["Instance 1: stopped", "Update: running"])
     assert "the new build is updating the copy. Nothing of the new build is started on it until" in note
+
+
+def test_once_the_data_is_copied_and_before_the_update_runs_the_card_says_the_update_comes_next_and_not_that_it_runs(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pills, parts, note = cards_read_during_a_release(record, monkeypatch)["copied, before the update"]
+    assert (pills, parts) == (["in maintenance", "work under way"], ["Instance 1: stopped"])
+    assert "The data is copied. The new build updates the copy next" in note
 
 
 def test_after_the_update_and_before_the_candidate_is_started_the_card_says_it_is_started_next_and_not_that_it_is_checked(

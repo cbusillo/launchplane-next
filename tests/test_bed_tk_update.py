@@ -540,7 +540,7 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
         copy, updating = copy_of(asked), card(asked["id"])
         said("9. Copied, before the update", visitor=site_status("/"), card=updating, of_the_release=containers_of(asked))
         assert (updating["reads"], site_status("/"), containers_of(asked)) == (["in maintenance", "work under way"], "503", [])
-        assert "the new build is updating the copy. Nothing of the new build is started on it until" in updating["note"]
+        assert "The data is copied. The new build updates the copy next, and is started on it only once" in updating["note"]
 
         hold("before.host.start_instance")
         let_go("before.host.run_once")

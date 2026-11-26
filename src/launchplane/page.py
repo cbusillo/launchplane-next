@@ -183,6 +183,10 @@ COPYING = (
     "Visitors get the back soon page while the lane's data is copied. Once both volumes are copied, the new build "
     "updates the copy, and is started on it only once that update has ended well."
 )
+COPIED = (
+    "The data is copied. The new build updates the copy next, and is started on it only once that update has ended well. "
+    "If it does not, the original instance comes back on its own data."
+)
 UPDATING = (
     "The data is copied, and the new build is updating the copy. Nothing of the new build is started on it until the "
     "update has ended well. If it does not, the original instance comes back on its own data."
@@ -202,7 +206,10 @@ def copy_phase(request: Kept, instances: Sequence[RunningInstance]) -> str:
     own = [each for each in instances if each.generation == request.generation and each.state is InstanceState.RUNNING]
     if own:
         return UPDATING if own[0].is_update else CHECKING
-    return UPDATED if any(line.did.startswith("update the data of ") for line in request.events) else COPYING
+    told = [line.did for line in request.events]
+    if any(each.startswith("update the data of ") for each in told):
+        return UPDATED
+    return COPIED if any(each.startswith("make the network of the data set") for each in told) else COPYING
 
 
 COMING_BACK = "Nothing is switched: Launchplane is bringing the original instance back on its own data."
