@@ -115,6 +115,77 @@ def test_while_the_update_is_pending_the_candidate_s_web_has_never_started_and_o
     assert after_the_update[:3] == [f"start {new}", f"check {new}/web/login", f"route {new}"]
 
 
+# The lane's card as it reads at each moment a release on a copy passes: its pills, its rows of parts, the request's note.
+def cards_read_during_a_release(record: Record, monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[list[str], list[str], str]]:
+    read: dict[str, tuple[list[str], list[str], str]] = {}
+    proxy = PretendProxy(PretendHost())
+    lanes = Lanes(proxy.host, proxy, lambda _product: TK_UPDATING, numbered_names(), read_unfinished=record.unfinished)
+
+    def read_the_card(moment: str) -> None:
+        [card] = cards(lanes.read_status())
+        parts = [f"{row.name}: {row.pills[0].text}" for row in card.rows if row.name.startswith(("Instance", "Update"))]
+        [note] = [row.note or "" for row in card.rows if row.name.startswith("Request ")]
+        read.setdefault(moment, ([pill.text for pill in card.pills], parts, note))
+
+    record_action, start_instance = proxy.host.record, proxy.host.start_instance
+
+    def read_while_the_update_runs(action: str) -> None:
+        if action.startswith("update "):
+            read_the_card("while the update runs")
+        record_action(action)
+
+    def read_before_the_start(*given: Any, **named: Any) -> None:  # noqa: ANN401 as start_instance takes them
+        read_the_card("after the update, before the start")
+        start_instance(*given, **named)
+
+    lanes.move(BUILD_A, EARLIER, 1)
+    request = record.write(Asked(product="site", lane="testing", work=Work.MOVE, build=BUILD_B.build), CALLER, None)
+    monkeypatch.setattr(proxy.host, "record", read_while_the_update_runs)
+    monkeypatch.setattr(proxy.host, "start_instance", read_before_the_start)
+    proxy.while_checking = lambda _container: read_the_card("while the candidate is checked")
+    assert Worker(record, lanes, NO_SECRETS).work_next()
+    assert kept_of(record, request.id).stands is Stands.DONE
+    return read
+
+
+def test_while_the_update_runs_the_card_shows_it_as_an_update_that_runs_and_never_as_a_wrong_instance(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pills, parts, note = cards_read_during_a_release(record, monkeypatch)["while the update runs"]
+    assert (pills, parts) == (["in maintenance", "work under way"], ["Instance 1: stopped", "Update: running"])
+    assert "the new build is updating the copy. Nothing of the new build is started on it until" in note
+
+
+def test_after_the_update_and_before_the_candidate_is_started_the_card_says_it_is_started_next_and_not_that_it_is_checked(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pills, parts, note = cards_read_during_a_release(record, monkeypatch)["after the update, before the start"]
+    assert (pills, parts) == (["in maintenance", "work under way"], ["Instance 1: stopped"])
+    assert "The copy is updated. The new build is started on it next, and then checked." in note
+
+
+def test_the_card_says_the_new_build_is_being_checked_only_while_its_candidate_runs_on_the_host(
+    record: Record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pills, parts, note = cards_read_during_a_release(record, monkeypatch)["while the candidate is checked"]
+    assert (pills, sorted(parts)) == (["in maintenance", "work under way"], ["Instance 1: stopped", "Instance 2: running"])
+    assert CHECKING in note
+
+
+def test_a_candidate_docker_started_again_after_its_first_process_ended_fails_its_check_and_the_original_comes_back() -> None:
+    lanes, proxy, old = serving()
+
+    def crash_and_start_again(container: str) -> None:
+        if container != old:
+            proxy.host.restarted[container] = 1
+
+    proxy.while_checking = crash_and_start_again
+    outcome, error = given_up(lanes, proxy, old)
+    assert outcome is Outcome.CHECK_FAILED
+    assert "its first process ended and Docker has started it again 1 time(s) since it was started" in error
+    assert [each for each in proxy.host.actions if each.startswith("route ")] == [f"route {old}"]
+
+
 def test_what_ran_the_update_is_gone_before_the_candidate_starts_and_held_a_login_of_its_own_on_the_copy() -> None:
     lanes, proxy, _ = serving()
     result = lanes.move(BUILD_B, GENERATION, 1, first())
@@ -413,24 +484,6 @@ def test_once_switched_the_card_of_a_request_still_at_work_says_so_and_never_tha
     kept = kept_of(record, request.id)
     assert proxy.host.actions[-1] == f"retire {old}" and [each.did for each in kept.events if each.error] == [f"retire {old}"]
     assert "Visitors are switched to the new build on the updated copy." in note_on_the_card(lanes, kept)
-
-
-@pytest.mark.parametrize(
-    ("killed_at", "says"),
-    [("update ", "the new build is updating the copy. Nothing of the new build is started on it until"), ("check ", CHECKING)],
-)
-def test_the_card_says_the_copy_is_being_updated_until_the_candidate_is_started_and_only_then_that_it_is_checked(
-    record: Record, killed_at: str, says: str
-) -> None:
-    proxy = PretendProxy(PretendHost())
-    lanes = Lanes(proxy.host, proxy, lambda _product: TK_UPDATING, numbered_names(), read_unfinished=record.unfinished)
-    lanes.move(BUILD_A, EARLIER, 1)
-    request = record.write(Asked(product="site", lane="testing", work=Work.MOVE, build=BUILD_B.build), CALLER, None)
-    proxy.host.killed_after = len(proxy.host.actions) + (11 if killed_at == "update " else 13)
-    with pytest.raises(LaunchplaneKilled):
-        Worker(record, lanes, NO_SECRETS).work_next()
-    assert proxy.host.actions[-1].startswith(killed_at)
-    assert says in note_on_the_card(lanes, kept_of(record, request.id))
 
 
 def test_a_copy_asked_for_by_itself_keeps_every_line_on_its_card(record: Record) -> None:

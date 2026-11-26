@@ -380,10 +380,12 @@ class ContainerHost:
         return made
 
     @staticmethod
-    def instance_options(target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None) -> RunOptions:
+    def instance_options(
+        target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None, part: Part = "web"
+    ) -> RunOptions:
         networks, run = [LANE_NETWORK] if use is None else [LANE_NETWORK, use.network], target.run
         files = {} if use is None or use.files is None or run.files is None else {use.files: run.files}
-        options = part_options(target, container, "web", networks, [*run.command] or None)
+        options = part_options(target, container, part, networks, [*run.command] or None)
         stamped = replace(options, labels=options.labels | stamp_of(generation), volumes=files, user=run.user)
         return replace(stamped, environment=dict(run.environment))
 
@@ -399,7 +401,7 @@ class ContainerHost:
     def run_once(self, update: Update, by: Witness = NOBODY) -> CommandResult:
         target, container, use = update.target, update.container, update.use
         with attempting(f"Running {update.command[0]} of build {target.build} once in {container}", self.address):
-            as_instance = self.instance_options(target, container, use, update.generation)
+            as_instance = self.instance_options(target, container, use, update.generation, "update")
             once = replace(as_instance, networks={use.network: []}, command=[*update.command], restart=RUNS_ONCE)
             ran = self.run_part(once, use, lambda on: self.logins.make(container, on, by), by)
             exit_code = ran.wait(timeout=RUN_ONCE_DEADLINE_SECONDS)["StatusCode"]
@@ -558,6 +560,12 @@ class ContainerHost:
         with attempting(f"Removing the logins no container holds from the database {database}", self.address):
             self.logins.remove(database, unheld, by)
         return None
+
+    # How often Docker has started the container again by itself since it was started: its first process is the one
+    # that runs only while this is 0.
+    def restarts(self, container: str) -> int:
+        with attempting(f"Reading how often Docker started {container} again", self.address):
+            return checked(DOCKER_CONTAINER_DETAILS, self.describe(container), f"description of {container}").restart_count
 
     def read_log_tail(self, container: str) -> str:
         with attempting(f"Reading the log of {container}", self.address):

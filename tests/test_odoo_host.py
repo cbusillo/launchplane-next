@@ -166,6 +166,21 @@ def test_what_is_run_once_is_waited_for_to_its_end_answers_with_its_exit_code_an
     assert ran.calls == ["start", f"wait {RUN_ONCE_DEADLINE_SECONDS} s", "logs 20", "stop within 30 s", "remove"]
 
 
+def test_what_runs_the_update_is_marked_and_read_as_an_update_and_not_as_a_web_part() -> None:
+    _, options = made_from(TARGET, ON_D1, update)
+    assert cast("dict[str, str]", options["labels"])["launchplane.part"] == "update"
+    update_listed = listed(UPDATER, "update", [DATA_SET_NETWORK]) | {"State": "running"}
+    [found] = read([update_listed], [network(True, QUIET_OPTIONS)], []).instances
+    assert (found.container, found.is_update) == (UPDATER, True)
+
+
+def test_how_often_docker_started_a_container_again_is_read_from_docker() -> None:
+    docker = RecordingDocker()
+    host = database_made(docker)
+    docker.containers.by_name[DATABASE].restart_count = 2
+    assert host.restarts(DATABASE) == 2
+
+
 def test_an_update_ends_itself_before_the_host_stops_waiting_for_what_is_run_once() -> None:
     assert UPDATE[:2] == ["timeout", str(UPDATE_DEADLINE_SECONDS)]
     assert UPDATE_DEADLINE_SECONDS < RUN_ONCE_DEADLINE_SECONDS

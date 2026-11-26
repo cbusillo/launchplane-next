@@ -83,6 +83,7 @@ class InstanceHost(Protocol):
     def retire_instance(self, container: str, by: Witness) -> None: ...
     def remove_unheld_logins(self, database: str, by: Witness) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
+    def restarts(self, container: str) -> int: ...
     def run_once(self, update: steps.Update, by: Witness, /) -> CommandResult: ...
 
 
@@ -155,6 +156,13 @@ class Status:
     cancels: list[Kept] = field(default_factory=list[Kept])
     # What the gate answers for each move being worked that a cancel was asked of. None is a gate that gave no answer.
     cancels_decided: dict[int, GateAnswer | None] = field(default_factory=dict[int, GateAnswer | None])
+
+
+# Only the process that was started is switched to. One Docker started in its place may answer where the first did not.
+NOT_THE_FIRST = (
+    "{container} answers and passed its check, but its first process ended and Docker has started it again {restarts} "
+    "time(s) since it was started, so what answers is not what was started and it is not switched to."
+)
 
 
 def fresh_names(target: LaneBuild) -> FreshNames:
@@ -559,6 +567,8 @@ class Lanes:
     def check(self, check: steps.Check, *, with_log: bool) -> Event:
         try:
             self.proxy.check_instance(check.container, check.health_path, check.command)
+            if restarts := self.host.restarts(check.container):
+                raise CheckFailed(NOT_THE_FIRST.format(container=check.container, restarts=restarts))
         except CheckFailed as error:
             return steps.CheckRefused(check.container, self.refusal(error, check.container, with_log=with_log))
         return check

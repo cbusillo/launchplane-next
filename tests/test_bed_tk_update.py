@@ -11,6 +11,7 @@ held only to be looked at where a point must be read between two of its steps. W
 
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -20,6 +21,7 @@ from tests.bed import (
     ask,
     ask_and_wait,
     hold,
+    holds,
     kill_launchplane,
     launchplane_held,
     let_go,
@@ -113,10 +115,20 @@ def card(request: int | None = None, lane: str = LANE) -> dict[str, Any]:
         "reads": [pill["text"] for pill in found["pills"]],
         "web_address": [pill["text"] for pill in rows["Web address"]["pills"]],
         "instances": [[pill["text"] for pill in row["pills"]] for name, row in rows.items() if name.startswith("Instance")],
+        "updates": [[pill["text"] for pill in row["pills"]] for name, row in rows.items() if name == "Update"],
         "request": [pill["text"] for pill in rows.get(f"Request {request}", {}).get("pills", [])],
         "note": rows.get(f"Request {request}", {}).get("note"),
         "data_sets": [row["note"] for row in found["rows"] if row["name"] == "Data set"],
     }
+
+
+# The card read again and again until Launchplane is stopped at the hold, so also while it works toward it.
+def cards_until_stopped_at(point: str, request: int, seconds: float = 180) -> list[dict[str, Any]]:
+    read, deadline = list[dict[str, Any]](), time.monotonic() + seconds
+    while point not in holds()["stopped_at"]:
+        assert time.monotonic() < deadline, f"waited {seconds} s to be stopped at {point}"
+        read.append(card(request))
+    return read
 
 
 def lines_of(request: dict[str, Any], begins: str) -> list[str]:
@@ -285,8 +297,8 @@ def test_4_a_check_that_fails_on_the_updated_copy_leaves_no_switch_and_the_origi
 
 
 def update_runs_in(product: str) -> bool:
-    web = f"docker ps --quiet --filter label=launchplane.product={product} --filter label=launchplane.part=web"
-    return "found" in on_scratch(f"for each in $({web}); do docker top $each | grep -q -- --update && echo found; done; true")
+    ran = f"docker ps --quiet --filter label=launchplane.product={product} --filter label=launchplane.part=update"
+    return "found" in on_scratch(f"for each in $({ran}); do docker top $each | grep -q -- --update && echo found; done; true")
 
 
 def test_5_a_kill_during_the_update_gives_that_copy_up_and_the_original_serves_every_write(lane: None) -> None:
@@ -532,8 +544,20 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
 
         hold("before.host.start_instance")
         let_go("before.host.run_once")
-        wait_until_stopped_at("before.host.start_instance", seconds=180)
-        committed = in_database(copy["data_set"], READ_THE_FIELD)
+        during = cards_until_stopped_at("before.host.start_instance", asked["id"])
+        running = [each for each in during if ["running"] in each["updates"]]
+        said("9. While the update runs", cards_read=len(during), of_them_with_the_update_running=len(running), card=running[0])
+        assert {tuple(each["reads"]) for each in during} == {("in maintenance", "work under way")}, during
+        assert all("the new build is updating the copy. Nothing of the new build is started" in each["note"] for each in running)
+        assert (running[0]["instances"], running[0]["updates"]) == ([["stopped"]], [["running"]])
+        committed, between = in_database(copy["data_set"], READ_THE_FIELD), card(asked["id"])
+        said("9. Updated, before the first web start: the card", card=between)
+        assert (between["reads"], between["instances"], between["updates"]) == (
+            ["in maintenance", "work under way"],
+            [["stopped"]],
+            [],
+        )
+        assert "The copy is updated. The new build is started on it next, and then checked." in between["note"]
         said(
             "9. Updated, before the first web start: the field read over a connection of its own",
             field_in_the_copy=committed,
