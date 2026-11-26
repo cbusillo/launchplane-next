@@ -11,10 +11,10 @@ import pytest
 
 from tests.bed import (
     SCRATCH_ADDRESS,
-    ask,
     kill_launchplane_and_end_the_request_working_on,
     move_lane,
     needs_test_bed,
+    read_running,
     retire,
     wait_for,
 )
@@ -63,12 +63,6 @@ def request_in_flight(seconds: int) -> Generator[SlowRequest]:
         yield request
     finally:
         thread.join()
-
-
-def read_running() -> dict[str, Any]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return body
 
 
 def lane_seen(running: dict[str, Any]) -> LaneSeen:

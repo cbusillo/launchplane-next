@@ -1,6 +1,6 @@
 import threading
 from collections.abc import Generator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -156,11 +156,8 @@ class PretendRecord(Record):
                 oldest.setdefault((each.product, each.lane), each)
         return sorted(oldest.values(), key=lambda request: request.id)
 
-    def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
-        return self.turn_held(product, lane)
-
     @contextmanager
-    def turn_held(self, product: str, lane: str) -> Generator[Held | None]:
+    def turn(self, product: str, lane: str) -> Generator[Held | None]:
         self.reach("taking a lane's turn")
         holder = object()
         with self.writing:

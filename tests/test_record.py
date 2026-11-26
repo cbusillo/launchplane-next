@@ -439,13 +439,13 @@ def test_the_migration_to_route_lines_leaves_an_ended_request_and_an_interrupted
     )
     not_kept = f"{ended.error} What the gate answered for its cancel was not kept."
     assert request_note(ended, {}) == f"{not_kept} Its lines: {'; '.join(lines_of(ended))}."
-    assert (removed.is_credited, removed.is_unanswered, lines_of(interrupted)) == (False, False, [removed.did])
+    assert (removed.is_credited, removed.has_no_answer, lines_of(interrupted)) == (False, False, [removed.did])
     assert [each.id for each in postgres_record.ended_lately()] == [1]
     attempt = begun(postgres_record, 2)
     postgres_record.complete(attempt, postgres_record.about_to(attempt, "remove the route", Sent(web_address="x", to=None)), Reply())
     taken_up = postgres_record.read(2)
     assert taken_up is not None and [each.ended for each in taken_up.attempts] == ["interrupted", "interrupted", None]
-    assert [each.is_unanswered for each in taken_up.events] == [False, True]
+    assert [each.has_no_answer for each in taken_up.events] == [False, True]
 
 
 def test_the_migration_that_ends_the_limit_leaves_a_request_that_needed_a_person_to_be_taken_up_again(

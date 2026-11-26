@@ -31,7 +31,6 @@ class RecordingContainer:
     removed: bool = False
     status: str = "created"
     calls: list[str] = field(default_factory=list[str])
-    restart_policy: str = ""
     # What each command run in it answers, in the order they are run; a command past the end is refused.
     answers: list[ExecResult] = field(default_factory=list[ExecResult])
     # Which of start, stop and remove Docker refuses for it.
@@ -115,7 +114,6 @@ class RecordingContainers:
             dict(cast("dict[str, str]", options["labels"])),
             [f"{key}={value}" for key, value in given.items()],
             self.files_by_volume.setdefault(volume, {}),
-            restart_policy=cast("dict[str, str]", options["restart_policy"])["Name"],
         )
         self.by_name[name] = made
         return made

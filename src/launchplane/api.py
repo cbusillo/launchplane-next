@@ -62,7 +62,7 @@ SECONDS_BETWEEN_READS = 0.1
 TEXT_ALONE = Builds()
 
 
-class InstanceAnswer(RunningInstance):
+class InstanceAnswer(RunningInstance, frozen=True):
     receives_visitors_for: str | None
 
 

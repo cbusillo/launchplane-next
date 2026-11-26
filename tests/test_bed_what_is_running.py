@@ -3,11 +3,10 @@ import socket
 import time
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from typing import Any
 
 import pytest
 
-from tests.bed import CONTROL_ADDRESS, ask, needs_test_bed, on_scratch, remove_product_copies
+from tests.bed import CONTROL_ADDRESS, ask, needs_test_bed, on_scratch, read_running, remove_product_copies
 
 PRODUCT = "test-bed-placed"
 AWKWARD_BUILD = 'build "1", with a comma'
@@ -15,14 +14,8 @@ AWKWARD_BUILD = 'build "1", with a comma'
 pytestmark = needs_test_bed
 
 
-def ask_what_is_running() -> tuple[int, dict[str, Any]]:
-    return ask("/running")
-
-
 def copies_by_lane() -> dict[str, dict[str, str]]:
-    status, body = ask_what_is_running()
-    assert status == 200, body
-    return {copy["lane"]: copy for copy in body["instances"] if copy["product"] == PRODUCT}
+    return {copy["lane"]: copy for copy in read_running()["instances"] if copy["product"] == PRODUCT}
 
 
 def place_copy(lane: str, build: str) -> None:
@@ -67,7 +60,7 @@ def test_the_running_call_follows_the_host_through_stop_start_and_a_second_lane(
 def test_an_unreachable_scratch_container_is_an_error_within_seconds_not_an_empty_answer() -> None:
     with control_cut_off_from_scratch():
         started = time.monotonic()
-        status, body = ask_what_is_running()
+        status, body = ask("/running")
         seconds = time.monotonic() - started
     assert status == 503, body
     assert seconds < 8

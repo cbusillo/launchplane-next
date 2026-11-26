@@ -6,7 +6,18 @@ from typing import Any
 
 import pytest
 
-from tests.bed import SCRATCH_ADDRESS, ask, ask_and_wait, kill_once, move_lane, needs_test_bed, on_scratch, retire, wait_for
+from tests.bed import (
+    SCRATCH_ADDRESS,
+    ask,
+    ask_and_wait,
+    kill_once,
+    move_lane,
+    needs_test_bed,
+    on_scratch,
+    read_running,
+    retire,
+    wait_for,
+)
 from tests.test_bed_data_set import (
     BUILD_A,
     BUILD_B,
@@ -18,11 +29,10 @@ from tests.test_bed_data_set import (
     build_pretend_product,
     database_of,
     environment_of,
+    lane_on_a,
     lane_view,
     logins_on,
-    move,
     place_description,
-    read_running,
     retire_lane_and_its_data,
     rows_read,
     web_address_of,
@@ -107,12 +117,7 @@ def pretend_product() -> Iterator[None]:
     retire_lane_and_its_data(LANE)
 
 
-@pytest.fixture
-def ledger() -> Iterator[LaneView]:
-    retire_lane_and_its_data(LANE)
-    move(BUILD_A)
-    yield lane_view()
-    retire_lane_and_its_data(LANE)
+ledger = lane_on_a
 
 
 @pytest.fixture

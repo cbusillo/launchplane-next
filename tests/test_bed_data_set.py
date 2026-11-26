@@ -27,6 +27,7 @@ from tests.bed import (
     on_control,
     on_scratch,
     on_scratch_with_bytes,
+    read_running,
     request_ended,
     request_loop,
     retire,
@@ -98,12 +99,6 @@ def place_description(product: str, description: dict[str, Any]) -> None:
         f"install -d -o launchplane /var/lib/launchplane/products && cat > {file} && chmod 644 {file}",
         given=json.dumps(description),
     )
-
-
-def read_running() -> dict[str, Any]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return body
 
 
 @dataclass(frozen=True)

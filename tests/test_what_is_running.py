@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from launchplane.act import Status
 from launchplane.api import create_app
 from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
-from launchplane.docker_answers import ContainerHostError, HostAnswers, on_host_from_answers
+from launchplane.docker_answers import ContainerHostError, Listed, container_summaries, on_host_from
 from launchplane.instance import (
     BACK_SOON,
     LANE_NETWORK,
@@ -54,7 +54,7 @@ def saved_container_list() -> object:
 
 
 def instances_from_answer(answer: object) -> list[RunningInstance]:
-    return on_host_from_answers(HostAnswers(answer, [], {"Volumes": None})).instances
+    return on_host_from(Listed(container_summaries(answer), {}), [], {"Volumes": None}, None).instances
 
 
 def refusing_host() -> ContainerHost:
@@ -69,10 +69,10 @@ def no_wake() -> None:
 type InstanceReader = Callable[[], list[RunningInstance]]
 
 
-def proxy_sending(routes: dict[str, str] | None, *, runs: bool = True, back_soon_runs: bool = True) -> ProxySeen:
+def proxy_sending(routes: dict[str, str] | None) -> ProxySeen:
     loaded = {web_address: LoadedRoute(container, RouteStatus.ENABLED) for web_address, container in (routes or {}).items()}
     written = {web_address: WrittenRoute(route.container, SINCE) for web_address, route in loaded.items()}
-    return ProxySeen(runs=runs, back_soon_runs=back_soon_runs, written=written, loaded=loaded if runs else {})
+    return ProxySeen(runs=True, back_soon_runs=True, written=written, loaded=loaded)
 
 
 def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: Mapping[str, str | None] | None = None) -> Status:
@@ -83,13 +83,10 @@ def status_of(instances: list[RunningInstance], proxy: ProxySeen, failures: Mapp
 
 
 def app_reading(
-    read: InstanceReader,
-    routes: dict[str, str] | None = None,
-    failures: Mapping[str, str | None] | None = None,
-    proxy: ProxySeen | None = None,
+    read: InstanceReader, routes: dict[str, str] | None = None, failures: Mapping[str, str | None] | None = None
 ) -> TestClient:
     def read_status() -> Status:
-        return status_of(read(), proxy or proxy_sending(routes), failures)
+        return status_of(read(), proxy_sending(routes), failures)
 
     return TestClient(create_app(read_status, PretendRecord(), no_wake, NO_SECRETS, LanesNeverAsked()))
 
@@ -100,40 +97,16 @@ def ask_running(read: InstanceReader) -> tuple[int, dict[str, Any]]:
 
 
 def test_a_saved_docker_answer_reads_as_instances_in_launchplane_terms() -> None:
+    rows = [
+        ("site-production", "production", "b2", InstanceState.RUNNING),
+        ("site-testing", "testing", "b3", InstanceState.STOPPED),
+        ("site-preview-7", "preview-7", "b4", InstanceState.PAUSED),
+        ("site-unmarked-lane", None, None, InstanceState.RUNNING),
+    ]
     instances = {instance.container: instance for instance in instances_from_answer(saved_container_list())}
     assert instances == {
-        "site-production": RunningInstance(
-            product="site",
-            lane="production",
-            build="b2",
-            container="site-production",
-            state=InstanceState.RUNNING,
-            networks=("bridge",),
-        ),
-        "site-testing": RunningInstance(
-            product="site",
-            lane="testing",
-            build="b3",
-            container="site-testing",
-            state=InstanceState.STOPPED,
-            networks=("bridge",),
-        ),
-        "site-preview-7": RunningInstance(
-            product="site",
-            lane="preview-7",
-            build="b4",
-            container="site-preview-7",
-            state=InstanceState.PAUSED,
-            networks=("bridge",),
-        ),
-        "site-unmarked-lane": RunningInstance(
-            product="site",
-            lane=None,
-            build=None,
-            container="site-unmarked-lane",
-            state=InstanceState.RUNNING,
-            networks=("bridge",),
-        ),
+        container: RunningInstance(product="site", lane=lane, build=build, container=container, state=state, networks=("bridge",))
+        for container, lane, build, state in rows
     }
 
 
@@ -174,7 +147,7 @@ def test_the_running_call_marks_the_instance_the_proxy_sends_visitors_to_and_no_
 
 
 def web_addresses_answer(
-    instances: list[RunningInstance], routes: dict[str, str], failures: Mapping[str, str | None] | None = None
+    instances: list[RunningInstance], routes: dict[str, str], failures: Mapping[str, str | None]
 ) -> dict[str, dict[str, Any]]:
     body = app_reading(lambda: instances, routes, failures).get("/running").json()
     return {entry["web_address"]: entry for entry in body["web_addresses"]}

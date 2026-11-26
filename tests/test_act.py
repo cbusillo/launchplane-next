@@ -310,23 +310,25 @@ def test_ending_maintenance_on_a_lane_not_in_maintenance_reads_no_container_at_a
     assert (result.outcome, proxy.host.lanes_read) == (MaintenanceOutcome.NOT_IN_MAINTENANCE, [])
 
 
+WORKING = Kept(
+    **MOVE_B.model_dump(),
+    id=1,
+    generation=GENERATION,
+    asked_by="the address 192.0.2.1",
+    asked_at=SINCE,
+    stands=Stands.WORKING,
+    ended_at=None,
+    answer=None,
+    error=None,
+    attempts=[],
+    events=[],
+)
+
+
 def test_a_request_taken_up_or_ended_while_the_host_is_read_is_at_work_on_what_was_read() -> None:
     proxy = PretendProxy(PretendHost())
     proxy.host.place(BUILD_A, "a")
-    working = Kept(
-        **MOVE_B.model_dump(),
-        id=1,
-        generation=GENERATION,
-        asked_by="the address 192.0.2.1",
-        asked_at=SINCE,
-        stands=Stands.WORKING,
-        ended_at=None,
-        answer=None,
-        error=None,
-        attempts=[],
-        events=[],
-    )
-    for reads in ([[working], []], [[], [working]]):
+    for reads in ([[WORKING], []], [[], [WORKING]]):
         lanes = Lanes(proxy.host, proxy, read_unfinished=iter(reads).__next__)
         assert [judged.work for judged in lanes.read_status().lanes] == [Work.MOVE]
 
@@ -340,25 +342,12 @@ def test_a_record_unread_on_either_reading_leaves_what_a_request_would_explain_n
     proxy.host.place(BUILD_A, "a")
     proxy.host.place(BUILD_B, "b")
     proxy.route(WEB_ADDRESS, "a")
-    working = Kept(
-        **MOVE_B.model_dump(),
-        id=1,
-        generation=GENERATION,
-        asked_by="the address 192.0.2.1",
-        asked_at=SINCE,
-        stands=Stands.WORKING,
-        ended_at=None,
-        answer=None,
-        error=None,
-        attempts=[],
-        events=[],
-    )
     readings = iter(range(2))
 
     def read_unfinished() -> list[Kept]:
         if next(readings) == failing:
             raise RecordError("Launchplane's record could not be reached while reading the requests not finished: refused.")
-        return [working]
+        return [WORKING]
 
     status = Lanes(proxy.host, proxy, read_unfinished=read_unfinished).read_status()
     [judged] = status.lanes

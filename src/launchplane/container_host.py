@@ -96,7 +96,6 @@ RUN_ONCE_DEADLINE_SECONDS = 900
 type RestartPolicy = Literal["always", "unless-stopped", "no"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
-# The states Docker gives a container that a stop finds stopped.
 STOPPED = ("created", "exited", "dead")
 ALWAYS_RUNS: RestartPolicy = "always"
 # Docker never starts a container with this policy again, whatever becomes of it or of the host.

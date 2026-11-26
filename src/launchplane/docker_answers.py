@@ -3,14 +3,14 @@ import tarfile
 import time
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
 import requests
 from docker.errors import APIError, DockerException
 from docker.models.containers import Container
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import AwareDatetime, BaseModel, Field, TypeAdapter, ValidationError
 
 from launchplane.instance import (
     DataSet,
@@ -125,24 +125,18 @@ def read_whole[Read](read_once: Callable[[], Read], address: str) -> Read:
     ) from torn
 
 
-class DockerAttachedNetworks(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerAttachedNetworks(BaseModel, extra="ignore", frozen=True):
     networks: dict[str, object] = Field(alias="Networks")
 
 
-class DockerMount(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerMount(BaseModel, extra="ignore", frozen=True):
     name: str | None = Field(default=None, alias="Name")
     source: str = Field(alias="Source")
     destination: str = Field(alias="Destination")
     writable: bool = Field(default=True, alias="RW")
 
 
-class DockerContainerSummary(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerContainerSummary(BaseModel, extra="ignore", frozen=True):
     names: list[str] = Field(alias="Names", min_length=1)
     image: str = Field(alias="Image")
     image_id: str = Field(default="", alias="ImageID")
@@ -156,37 +150,27 @@ class DockerContainerSummary(BaseModel):
         return self.names[0].removeprefix("/")
 
 
-class DockerNetworkSummary(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerNetworkSummary(BaseModel, extra="ignore", frozen=True):
     name: str = Field(alias="Name")
     internal: bool = Field(alias="Internal")
     options: dict[str, str] | None = Field(alias="Options")
     labels: dict[str, str] | None = Field(alias="Labels")
 
 
-class DockerVolumeSummary(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerVolumeSummary(BaseModel, extra="ignore", frozen=True):
     name: str = Field(alias="Name")
     labels: dict[str, str] = Field(alias="Labels")
 
 
-class DockerVolumeList(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerVolumeList(BaseModel, extra="ignore", frozen=True):
     volumes: list[DockerVolumeSummary] | None = Field(alias="Volumes")
 
 
-class DockerContainerConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerContainerConfig(BaseModel, extra="ignore", frozen=True):
     environment: list[str] | None = Field(alias="Env")
 
 
-class DockerContainerState(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerContainerState(BaseModel, extra="ignore", frozen=True):
     running: bool = Field(alias="Running")
     restarting: bool = Field(alias="Restarting")
     paused: bool = Field(alias="Paused")
@@ -195,18 +179,14 @@ class DockerContainerState(BaseModel):
     status: str = Field(default="", alias="Status")
 
 
-class DockerContainerDetails(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerContainerDetails(BaseModel, extra="ignore", frozen=True):
     name: str = Field(alias="Name")
     config: DockerContainerConfig = Field(alias="Config")
     state: DockerContainerState = Field(alias="State")
     restart_count: int = Field(default=0, alias="RestartCount")
 
 
-class DockerSystemTime(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
+class DockerSystemTime(BaseModel, extra="ignore", frozen=True):
     system_time: AwareDatetime = Field(alias="SystemTime")
 
 
@@ -363,7 +343,7 @@ def data_sets_from(
     databases: Iterable[tuple[DataSetKey, DataSetDatabase]],
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
-    copies: Iterable[tuple[DataSetKey, VolumeCopy]] = (),
+    copies: Iterable[tuple[DataSetKey, VolumeCopy]],
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
@@ -393,15 +373,6 @@ def data_sets_from(
     ]
 
 
-@dataclass(frozen=True)
-class HostAnswers:
-    containers: object
-    networks: object
-    volumes: object
-    details: list[object] = field(default_factory=list[object])
-    system: object = None
-
-
 def details_by_name(answers: list[object]) -> dict[str, DockerContainerDetails]:
     each = [checked(DOCKER_CONTAINER_DETAILS, answer, "description of a container") for answer in answers]
     return {details.name.removeprefix("/"): details for details in each}
@@ -418,11 +389,6 @@ class Listed:
 
 def container_summaries(containers: object) -> list[DockerContainerSummary]:
     return checked(DOCKER_CONTAINER_LIST, containers, "container list")
-
-
-def on_host_from_answers(answers: HostAnswers) -> OnHost:
-    found = Listed(container_summaries(answers.containers), details_by_name(answers.details))
-    return on_host_from(found, answers.networks, answers.volumes, answers.system)
 
 
 def on_host_from(found: Listed, networks: object, volumes: object, system: object) -> OnHost:

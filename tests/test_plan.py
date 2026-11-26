@@ -123,7 +123,6 @@ class Case:
     route: tuple[str | LoadedRoute | None, str | None]
     done: tuple[Event, ...]
     step: object
-    # Whether the routes file says it was renamed for this release.
     gate: GateAnswer = NO_VERDICT
 
 
@@ -304,9 +303,6 @@ def test_a_move_follows_the_gates_answer_and_never_the_routes_file_or_the_loaded
     step = next_move_step(replace(case, gate=gate))
     assert isinstance(step, Stop) if case.step is None else step == case.step
     assert isinstance(step, Wait) == (case.step is None and gate is not COMMITTED_TO_NEW)
-
-
-LEFT_BY_EARLIER = changed(NEW, generation=EARLIER)
 
 
 def test_an_earlier_winner_is_retired_only_once_this_release_is_committed_elsewhere_and_visitors_are_sent_there() -> None:

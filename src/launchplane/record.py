@@ -12,7 +12,7 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from launchplane.data_set import login_of
 from launchplane.instance import LaneRoute, Verdict, new_generation
@@ -113,9 +113,7 @@ ATTEMPTED = {
 }
 
 
-class Asked(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Asked(BaseModel, frozen=True):
     product: str
     lane: str
     work: Work
@@ -132,7 +130,7 @@ class Asked(BaseModel):
         return ATTEMPTED[self.work].format(lane=self.lane, product=self.product, build=self.build)
 
 
-class Request(Asked):
+class Request(Asked, frozen=True):
     id: int
     # The number of the release this request is: stamped on what it makes, and never given to another request.
     generation: str
@@ -207,10 +205,6 @@ class Event(BaseModel):
     def is_credited(self) -> bool:
         return self.action is not None and self.is_own
 
-    @property
-    def is_unanswered(self) -> bool:
-        return self.action is not None and self.has_no_answer
-
     # Whether a reading shows what only this line can have sent: a routes file stamped with the request and attempt that
     # sent it, or a container made under the request's generation, which also holds the login made for it. No container
     # shows who started, stopped or removed it, and nothing shows who removed a login.
@@ -221,7 +215,7 @@ class Event(BaseModel):
         return self.action is not None and (self.action.to, stamp) == (route.written, route.installed_by)
 
 
-class Kept(Request):
+class Kept(Request, frozen=True):
     # What the gate answered for a move's release when the move ended. None is no move, or one ended before this was kept.
     release_verdict: Verdict | None = None
     attempts: list[Attempt]
@@ -603,18 +597,14 @@ class PostgresRecord(Record):
             lambda session: with_history(session, self.gate, session.execute(Sql.ENDED_LATELY, shown).fetchall()),
         )
 
-    # The oldest request of each lane that takes one, oldest first.
     def next_up(self) -> list[Request]:
         with self.session("looking for the next requests") as session:
             return [Request.model_validate(row) for row in session.execute(Sql.NEXT_UP).fetchall()]
 
-    def turn(self, product: str, lane: str) -> AbstractContextManager[Held | None]:
-        return self.turn_held(product, lane)
-
     # A lane's turn is a lock held by a connection of its own, so it is let go when the work ends or this Launchplane dies,
     # and never apart from the work. What is given asks that connection whether it still holds the lock.
     @contextmanager
-    def turn_held(self, product: str, lane: str) -> Generator[Held | None]:
+    def turn(self, product: str, lane: str) -> Generator[Held | None]:
         try:
             connection = psycopg.connect(self.database, autocommit=True)
         except psycopg.Error as error:

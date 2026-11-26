@@ -3,7 +3,7 @@ from launchplane.product import Database, Product
 from tests.recorded_git_host import IMAGE, REPOSITORY, WORKFLOW
 
 ADDONS_PATH = ["/opt/project/addons", "/opt/project/addons/shared", "/opt/launchplane/addons", "/odoo/addons", "/odoo/odoo/addons"]
-# As TK's manifest for the recorded run lists them.
+# As TK's manifest for the recorded run listed them.
 MODULES = [
     "launchplane_settings",
     "disable_odoo_online",

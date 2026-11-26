@@ -162,6 +162,26 @@ class UnexpectedAnswer(Exception):
     pass
 
 
+def read_running() -> dict[str, Any]:
+    status, body = ask("/running")
+    assert status == 200, body
+    return body
+
+
+# The Server header of a whole answer of success to one visit of the web address.
+def server_answering(web_address: str) -> str:
+    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
+    try:
+        connection.request("GET", "/", headers={"Host": web_address})
+        response = connection.getresponse()
+        response.read()
+        if response.status != 200:
+            raise UnexpectedAnswer(f"status {response.status}")
+        return response.getheader("Server", "")
+    finally:
+        connection.close()
+
+
 @dataclass
 class RequestLoop:
     request_once: Callable[[], str]

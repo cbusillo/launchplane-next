@@ -16,7 +16,7 @@ from tests.given_secrets import NO_SECRETS
 from tests.pretend_host import WEB_ADDRESS, LanesNeverAsked, LaunchplaneKilled
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker
 from tests.test_act import BUILD_B, lane_brought_up_with_a
-from tests.test_command_lines import Told, killed_before_it_answered, killed_once_it_wrote
+from tests.test_command_lines import Told, killed_before_it_answered, killed_once_it_wrote, not_written
 from tests.test_container_host import DATABASE, DROP_REFUSED, LINK, ROLES, TARGET, WEB, database_made, given_to, holding_a_login
 from tests.test_host_answers import DATABASE as SERVER
 from tests.test_host_answers import MOVE_A, RETIRE, worker_on
@@ -160,9 +160,6 @@ def test_each_login_is_sent_to_the_server_only_once_its_line_is_written_and_the_
 
 
 def test_a_login_whose_line_cannot_be_written_is_neither_made_nor_removed() -> None:
-    def not_written(did: str, _command: Sent | Command) -> Answered:
-        raise Interrupted(f"The attempt has ended in the record, so it was not written and not done: {did}")
-
     told = Told()
     server = server_with_two_logins_left(told, ROLES, RULES, ExecResult(0, b'["i_aaaaaaaaaaaa"]'))
     asked_before = len(server.calls)

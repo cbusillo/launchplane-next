@@ -88,10 +88,6 @@ def lane(tmp_path: Path) -> Lane:
     return Lane(host, Gate(host, "proxy", PurePosixPath(tmp_path)), tmp_path / "routes" / f"{WEB}.yml")
 
 
-def test_a_generation_nothing_was_asked_for_has_no_verdict_and_asking_changes_nothing(lane: Lane) -> None:
-    assert (lane.gate.verdict(WEB, GENERATION), lane.staged(), lane.route.exists()) == (NONE, [], False)
-
-
 def test_a_switch_renames_the_routes_file_to_its_candidate_and_the_generation_is_committed_to_it_for_good(lane: Lane) -> None:
     assert lane.switch("b") == committed("b")
     assert (lane.route.read_text(), lane.gate.verdict(WEB, GENERATION), lane.renames) == ("to b", committed("b"), 1)
@@ -230,7 +226,9 @@ def test_a_folder_that_cannot_be_looked_in_gives_no_answer_and_is_never_taken_as
 
 def test_asking_for_a_verdict_where_nothing_was_ever_kept_answers_none_and_makes_nothing(lane: Lane) -> None:
     before = sorted(each.name for each in lane.host.folder.iterdir())
-    assert (lane.gate.verdict(WEB, GENERATION), sorted(each.name for each in lane.host.folder.iterdir())) == (NONE, before)
+    asked = lane.gate.verdict(WEB, GENERATION)
+    left = sorted(each.name for each in lane.host.folder.iterdir())
+    assert (asked, left, lane.staged(), lane.route.exists()) == (NONE, before, [], False)
 
 
 def test_a_gate_path_that_exists_and_is_no_folder_gives_no_answer_and_is_never_taken_as_none(lane: Lane) -> None:

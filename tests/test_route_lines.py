@@ -50,13 +50,13 @@ def test_a_line_is_written_before_its_change_is_sent_and_only_the_attempt_that_i
     read_at = datetime(2026, 11, 21, 10, tzinfo=UTC)
     record.complete(second, line, Reply(read_back_at=read_at))
     [read_back] = kept_of(record, request.id).events
-    assert (written.action, written.outcome, written.is_unanswered, written.is_credited) == (
+    assert (written.action, written.outcome, written.has_no_answer, written.is_credited) == (
         Sent(web_address=WEB_ADDRESS, to="a"),
         None,
         True,
         False,
     )
-    assert (read_back.outcome, read_back.error, read_back.is_credited, read_back.is_unanswered) == (
+    assert (read_back.outcome, read_back.error, read_back.is_credited, read_back.has_no_answer) == (
         Reply(read_back_at=read_at),
         "the reply was lost",
         True,
@@ -140,7 +140,7 @@ def test_a_route_one_attempt_installed_is_not_put_down_to_the_line_of_an_earlier
     kept = kept_of(record, request.id)
     never_ran, installed = route_lines(kept)
     assert (never_ran.did, never_ran.attempt, installed.attempt) == (installed.did, 1, 2)
-    assert (kept.stands, never_ran.is_unanswered, installed.is_credited, credited(kept)) == (
+    assert (kept.stands, never_ran.has_no_answer, installed.is_credited, credited(kept)) == (
         Stands.DONE,
         True,
         True,
@@ -192,7 +192,7 @@ def test_a_route_as_asked_that_another_hand_installed_is_not_put_down_to_the_req
     assert worker.work_next() is True
     kept = kept_of(record, request.id)
     [line] = route_lines(kept)
-    assert (kept.stands, (kept.answer or {})["outcome"], line.is_unanswered, credited(kept)) == (
+    assert (kept.stands, (kept.answer or {})["outcome"], line.has_no_answer, credited(kept)) == (
         Stands.DONE,
         "not in maintenance",
         True,

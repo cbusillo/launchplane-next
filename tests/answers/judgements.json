@@ -135,84 +135,39 @@
    "parts: new good, old on purpose, old-background-service wrong, database-d1 good"
   ]
  },
- "a database attached to an outside network": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 is attached to bridge, which it must not be",
-   "wrong | attached or mounted where it must not be | The database database-d1 can reach out through bridge",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 is attached to bridge, which it must not be",
-   "wrong | attached or mounted where it must not be | The database database-d1 can reach out through bridge",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ]
- },
- "a database with another data set's volume mounted too": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ]
- },
- "a database with nothing mounted": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ]
- },
- "a database with its volume mounted where its data is not kept": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
-   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
-   "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ]
- },
- "a database with its volume mounted twice": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /copy, which it must not have",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /copy, which it must not have",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ]
- },
- "a database on a network that is not its data set's": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 is attached to network-d2, which it must not be",
-   "wrong | attached or mounted where it must not be | The database database-d1 is not attached to network-d1",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The database database-d1 is attached to network-d2, which it must not be",
-   "wrong | attached or mounted where it must not be | The database database-d1 is not attached to network-d1",
-   "parts: new good, new-background-service good, database-d1 wrong"
-  ]
- },
+ "a database attached to an outside network": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The database database-d1 is attached to bridge, which it must not be",
+  "wrong | attached or mounted where it must not be | The database database-d1 can reach out through bridge",
+  "parts: new good, new-background-service good, database-d1 wrong"
+ ],
+ "a database with another data set's volume mounted too": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The database database-d1 has volume-d2 mounted at /var/lib/postgresql, which it must not have",
+  "parts: new good, new-background-service good, database-d1 wrong"
+ ],
+ "a database with nothing mounted": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+  "parts: new good, new-background-service good, database-d1 wrong"
+ ],
+ "a database with its volume mounted where its data is not kept": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /somewhere-else, which it must not have",
+  "wrong | attached or mounted where it must not be | The database database-d1 does not have volume-d1 mounted at /var/lib/postgresql",
+  "parts: new good, new-background-service good, database-d1 wrong"
+ ],
+ "a database with its volume mounted twice": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The database database-d1 has volume-d1 mounted at /copy, which it must not have",
+  "parts: new good, new-background-service good, database-d1 wrong"
+ ],
+ "a database on a network that is not its data set's": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The database database-d1 is attached to network-d2, which it must not be",
+  "wrong | attached or mounted where it must not be | The database database-d1 is not attached to network-d1",
+  "parts: new good, new-background-service good, database-d1 wrong"
+ ],
  "a background service that keeps restarting": {
   "at rest": [
    "wrong",
@@ -225,44 +180,22 @@
    "parts: new good, new-background-service on purpose, database-d1 good"
   ]
  },
- "an active instance that can reach out": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
-   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
-   "parts: new wrong, new-background-service good, database-d1 good"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
-   "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
-   "parts: new wrong, new-background-service good, database-d1 good"
-  ]
- },
- "an active instance on another data set's network": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
-   "parts: new wrong, new-background-service good, database-d1 good, database-d2 good"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
-   "parts: new wrong, new-background-service good, database-d1 good, database-d2 good"
-  ]
- },
- "an active instance with a volume mounted": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The instance new has volume-d2 mounted at /data, which it must not have",
-   "parts: new wrong, new-background-service good, database-d1 good"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The instance new has volume-d2 mounted at /data, which it must not have",
-   "parts: new wrong, new-background-service good, database-d1 good"
-  ]
- },
+ "an active instance that can reach out": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The instance new is attached to bridge, which it must not be",
+  "wrong | attached or mounted where it must not be | The instance new can reach out through bridge",
+  "parts: new wrong, new-background-service good, database-d1 good"
+ ],
+ "an active instance on another data set's network": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The instance new is attached to network-d2, which it must not be",
+  "parts: new wrong, new-background-service good, database-d1 good, database-d2 good"
+ ],
+ "an active instance with a volume mounted": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The instance new has volume-d2 mounted at /data, which it must not have",
+  "parts: new wrong, new-background-service good, database-d1 good"
+ ],
  "an active instance that is stopped": {
   "at rest": [
    "wrong",
@@ -319,30 +252,16 @@
    "parts: new good, new-background-service on purpose, second on purpose, database-d1 good"
   ]
  },
- "a background service with a volume mounted": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The background service new-background-service has v mounted at /data, which it must not have",
-   "parts: new good, new-background-service wrong, database-d1 good"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The background service new-background-service has v mounted at /data, which it must not have",
-   "parts: new good, new-background-service wrong, database-d1 good"
-  ]
- },
- "a background service labelled for another data set": {
-  "at rest": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The background service new-background-service says it runs against the data set d2, not d1",
-   "parts: new good, new-background-service wrong, database-d1 good"
-  ],
-  "at work": [
-   "wrong",
-   "wrong | attached or mounted where it must not be | The background service new-background-service says it runs against the data set d2, not d1",
-   "parts: new good, new-background-service wrong, database-d1 good"
-  ]
- },
+ "a background service with a volume mounted": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The background service new-background-service has v mounted at /data, which it must not have",
+  "parts: new good, new-background-service wrong, database-d1 good"
+ ],
+ "a background service labelled for another data set": [
+  "wrong",
+  "wrong | attached or mounted where it must not be | The background service new-background-service says it runs against the data set d2, not d1",
+  "parts: new good, new-background-service wrong, database-d1 good"
+ ],
  "a background service of another build": {
   "at rest": [
    "wrong",
@@ -409,18 +328,11 @@
    "parts: new good, new-background-service good, database-d1 on purpose"
   ]
  },
- "a database that was not asked whether it accepts connections": {
-  "at rest": [
-   "could not be read",
-   "could not be read | not asked whether it accepts connections | The database database-d1 was not asked whether it accepts connections",
-   "parts: new good, new-background-service good, database-d1 could not be read"
-  ],
-  "at work": [
-   "could not be read",
-   "could not be read | not asked whether it accepts connections | The database database-d1 was not asked whether it accepts connections",
-   "parts: new good, new-background-service good, database-d1 could not be read"
-  ]
- },
+ "a database that was not asked whether it accepts connections": [
+  "could not be read",
+  "could not be read | not asked whether it accepts connections | The database database-d1 was not asked whether it accepts connections",
+  "parts: new good, new-background-service good, database-d1 could not be read"
+ ],
  "a database that is stopped": {
   "at rest": [
    "unfinished",
@@ -531,18 +443,11 @@
    "parts: new good, new-background-service good, database-d1 on purpose"
   ]
  },
- "logins that could not be read": {
-  "at rest": [
-   "could not be read",
-   "could not be read | logins could not be read | The logins of the database database-d1 could not be read: psql: no such database",
-   "parts: new good, new-background-service good, database-d1 could not be read"
-  ],
-  "at work": [
-   "could not be read",
-   "could not be read | logins could not be read | The logins of the database database-d1 could not be read: psql: no such database",
-   "parts: new good, new-background-service good, database-d1 could not be read"
-  ]
- },
+ "logins that could not be read": [
+  "could not be read",
+  "could not be read | logins could not be read | The logins of the database database-d1 could not be read: psql: no such database",
+  "parts: new good, new-background-service good, database-d1 could not be read"
+ ],
  "a lane retired with its data set kept": {
   "at rest": [
    "unfinished",
@@ -890,16 +795,9 @@
    "parts: old on purpose"
   ]
  },
- "a lane whose description cannot be read": {
-  "at rest": [
-   "could not be read",
-   "could not be read | could not be read | The description of site is not one Launchplane reads.",
-   "parts: new could not be read, new-background-service could not be read, database-d1 could not be read"
-  ],
-  "at work": [
-   "could not be read",
-   "could not be read | could not be read | The description of site is not one Launchplane reads.",
-   "parts: new could not be read, new-background-service could not be read, database-d1 could not be read"
-  ]
- }
+ "a lane whose description cannot be read": [
+  "could not be read",
+  "could not be read | could not be read | The description of site is not one Launchplane reads.",
+  "parts: new could not be read, new-background-service could not be read, database-d1 could not be read"
+ ]
 }

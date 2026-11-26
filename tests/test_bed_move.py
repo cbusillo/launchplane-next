@@ -1,26 +1,24 @@
-import http.client
-from collections.abc import Callable, Generator, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from functools import partial
 from typing import Any
 
 import pytest
 
 from launchplane.proxy import PROXY_NAME, instance_url, route_file_of, route_text
 from tests.bed import (
-    SCRATCH_ADDRESS,
-    RequestLoop,
-    UnexpectedAnswer,
     ask,
     kill_launchplane,
     kill_launchplane_and_end,
     move_lane,
     needs_test_bed,
     on_scratch,
+    read_running,
     request_ended,
+    request_loop,
     retire,
+    server_answering,
     wait_for,
 )
-from tests.bed import request_loop as request_loop_of
 
 pytestmark = needs_test_bed
 
@@ -32,25 +30,7 @@ BUILD_B = "nginx:1.31.8-alpine"
 BUILD_C = "hashicorp/http-echo:1.0"
 ANSWER_A = "nginx/1.30.6"
 ANSWER_B = "nginx/1.31.8"
-
-
-def server_answering() -> str:
-    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
-    try:
-        connection.request("GET", "/", headers={"Host": NAME})
-        response = connection.getresponse()
-        response.read()
-        if response.status != 200:
-            raise UnexpectedAnswer(f"status {response.status}")
-        return response.getheader("Server", "")
-    finally:
-        connection.close()
-
-
-@contextmanager
-def request_loop() -> Generator[RequestLoop]:
-    with request_loop_of(server_answering) as loop:
-        yield loop
+VISIT = partial(server_answering, NAME)
 
 
 def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -> None:
@@ -60,15 +40,11 @@ def write_route_without_launchplane_keeping_every_loaded_route(copy_name: str) -
 
 
 def lane_copies() -> dict[str, dict[str, Any]]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return {copy["build"]: copy for copy in body["instances"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE)}
+    return {copy["build"]: copy for copy in read_running()["instances"] if (copy["product"], copy["lane"]) == (PRODUCT, LANE)}
 
 
 def lane_name_answer() -> dict[str, Any]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return next(entry for entry in body["web_addresses"] if entry["web_address"] == NAME)
+    return next(entry for entry in read_running()["web_addresses"] if entry["web_address"] == NAME)
 
 
 def serving_builds() -> list[str]:
@@ -112,7 +88,7 @@ def lane_serving_a() -> Iterator[None]:
 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_moving_to_a_new_build_switches_the_name_without_failing_a_request() -> None:
-    with request_loop() as loop:
+    with request_loop(VISIT) as loop:
         status, body = move(BUILD_B)
     assert (status, body["outcome"]) == (200, "switched"), body
     assert loop.failures == []
@@ -143,7 +119,7 @@ def test_asking_for_a_finished_move_again_changes_nothing() -> None:
 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_build_that_fails_its_check_switches_nothing_and_leaves_no_copy() -> None:
-    with request_loop() as loop:
+    with request_loop(VISIT) as loop:
         status, body = move(BUILD_C)
     assert (status, body["outcome"]) == (422, "check failed"), body
     assert "Connection refused" in body["error"]
@@ -154,7 +130,7 @@ def test_a_build_that_fails_its_check_switches_nothing_and_leaves_no_copy() -> N
 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_move_killed_before_the_switch_is_taken_up_again_and_finished_with_nobody_asking() -> None:
-    with request_loop() as loop:
+    with request_loop(VISIT) as loop:
         request = request_ended(kill_launchplane_once_build_b_has_started(lambda _request: kill_launchplane()))
     assert (request["stands"], request["answer"]["outcome"]) == ("done", "switched"), request
     assert [attempt["ended"] for attempt in request["attempts"]] == ["interrupted", "done"]
@@ -165,7 +141,7 @@ def test_a_move_killed_before_the_switch_is_taken_up_again_and_finished_with_nob
 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_move_that_failed_before_the_switch_is_finished_by_asking_again() -> None:
-    with request_loop() as loop:
+    with request_loop(VISIT) as loop:
         kill_launchplane_once_build_b_has_started()
         assert sorted(lane_copies()) == [BUILD_A, BUILD_B]
         assert serving_builds() == [BUILD_A]
@@ -178,7 +154,7 @@ def test_a_move_that_failed_before_the_switch_is_finished_by_asking_again() -> N
 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_move_that_failed_before_the_switch_is_repaired_by_asking_for_the_serving_build() -> None:
-    with request_loop() as loop:
+    with request_loop(VISIT) as loop:
         kill_launchplane_once_build_b_has_started()
         status, body = move(BUILD_A)
     assert (status, body["outcome"], [each.split()[0] for each in body["did"]]) == (200, "repaired", ["stop", "remove"]), body
@@ -189,7 +165,7 @@ def test_a_move_that_failed_before_the_switch_is_repaired_by_asking_for_the_serv
 
 @pytest.mark.usefixtures("lane_serving_a")
 def test_a_route_written_but_not_yet_loaded_when_launchplane_asks_is_waited_for_not_deleted() -> None:
-    with request_loop() as loop:
+    with request_loop(VISIT) as loop:
         kill_launchplane_once_build_b_has_started()
         wait_for(copy_of_build_b_answers_the_proxy, seconds=30)
         write_route_without_launchplane_keeping_every_loaded_route(lane_copies()[BUILD_B]["container"])
@@ -206,9 +182,8 @@ def test_two_lanes_whose_product_and_lane_join_to_the_same_text_each_keep_their_
         for product, lane in lanes:
             status, body = move(BUILD_A, product, lane)
             assert (status, body["outcome"]) == (200, "switched"), body
-        status, body = ask("/running")
-        assert status == 200, body
-        serving_copies = {(copy["product"], copy["lane"]): copy["receives_visitors_for"] for copy in body["instances"]}
+        instances = read_running()["instances"]
+        serving_copies = {(copy["product"], copy["lane"]): copy["receives_visitors_for"] for copy in instances}
         assert {lane: serving_copies.get(lane) for lane in lanes} == {
             (product, lane): f"{lane}.{product}.test" for product, lane in lanes
         }

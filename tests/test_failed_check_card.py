@@ -16,9 +16,6 @@ NOT_ANSWERING = (
     "http://site-testing-1:80/web/login did not answer the proxy with success within 20 s: HTTP/1.1 500 INTERNAL SERVER ERROR"
 )
 ODOO_LOG = """\
-  File "/odoo/odoo/orm/registry.py", line 239, in new
-    contextvars.Context().run(
-  File "/odoo/odoo/modules/loading.py", line 350, in load_modules
     raise ImportError(f"Database {cr.dbname} not initialized, you can force it with `-i base`")
 ImportError: Database app not initialized, you can force it with `-i base`
 2026-11-24 14:36:17,597 1 INFO app odoo.http.server: 172.16.1.8 - "GET /web/login HTTP/1.1" 500 265 11 0.002 0.002 -
@@ -114,12 +111,8 @@ def test_a_proxy_that_stopped_after_a_failed_check_is_not_drawn_as_that_failed_m
 
 
 def test_a_lane_no_failed_move_explains_still_reads_as_left_unfinished() -> None:
-    [card] = cards(Lanes(*lane_with_a_stray_instance()).read_status())
+    proxy = Given((OLD, NEW), ("old", "old")).proxy()
+    [card] = cards(Lanes(proxy.host, proxy).read_status())
     found = [row for row in card.rows if row.name == "Found"]
     assert ([pill.text for pill in card.pills], [pill.text for pill in found[-1].pills]) == (["unfinished"], ["left unfinished"])
     assert found[-1].note == "No call is at work on this lane. Asking for a build again finishes what was left unfinished."
-
-
-def lane_with_a_stray_instance() -> tuple[PretendHost, PretendProxy]:
-    proxy = Given((OLD, NEW), ("old", "old")).proxy()
-    return proxy.host, proxy

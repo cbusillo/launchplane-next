@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 LANE_NETWORK = "launchplane-lanes"
 LANE_DOMAIN = "test"
@@ -20,17 +20,13 @@ class InstanceState(StrEnum):
     STOPPED = "stopped"
 
 
-class Mount(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Mount(BaseModel, frozen=True):
     source: str
     path: str
 
 
 # No answer: the question was put and what came back cannot be used. Never taken for nothing there.
-class Unread(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Unread(BaseModel, frozen=True):
     asked: str
     why: str
 
@@ -55,9 +51,7 @@ type Answered[Value] = Value | Unread | Conflicting[Value] | None
 type Stamp = Answered[str]
 
 
-class RunningInstance(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class RunningInstance(BaseModel, frozen=True):
     product: str
     lane: str | None
     build: str | None
@@ -73,9 +67,7 @@ class RunningInstance(BaseModel):
     is_update: bool = False
 
 
-class RunningBackgroundService(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class RunningBackgroundService(BaseModel, frozen=True):
     product: str
     lane: str | None
     build: str | None
@@ -89,16 +81,12 @@ class RunningBackgroundService(BaseModel):
     generation: Stamp = None
 
 
-class HostNetwork(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class HostNetwork(BaseModel, frozen=True):
     name: str
     is_quiet: bool
 
 
-class DataSetDatabase(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class DataSetDatabase(BaseModel, frozen=True):
     container: str
     state: InstanceState
     networks: tuple[str, ...]
@@ -111,18 +99,14 @@ class DataSetDatabase(BaseModel):
     unheld_logins: Answered[tuple[str, ...]] = None
 
 
-class VolumeCopy(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class VolumeCopy(BaseModel, frozen=True):
     container: str
     volume: str
     finished: bool
     stopped: bool
 
 
-class DataSet(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class DataSet(BaseModel, frozen=True):
     product: str
     lane: str | None
     data_set: str
@@ -152,9 +136,7 @@ class Run:
 
 
 # `run` is filled in from the product's description by the call that moves the lane.
-class LaneBuild(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class LaneBuild(BaseModel, frozen=True):
     product: str
     lane: str
     build: str
@@ -301,7 +283,6 @@ class LaneReading:
     def data_set(self, name: str | None) -> DataSet | None:
         return next((found for found in self.data_sets if found.data_set == name), None)
 
-    # The instances and background services stamped as made under a generation, by container.
     def made_by(self, generation: str) -> set[str]:
         return {part.container for part in (*self.instances, *self.background_services) if part.generation == generation}
 

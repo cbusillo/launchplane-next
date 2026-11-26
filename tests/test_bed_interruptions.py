@@ -27,6 +27,7 @@ from tests.bed import (
     move_lane,
     needs_test_bed,
     on_scratch,
+    read_running,
     request_ended,
     request_loop,
     retire,
@@ -36,14 +37,10 @@ from tests.bed import (
 from tests.held_launchplane import M3_BIN
 from tests.test_bed_data_set import DESCRIPTION, build_pretend_product, place_description
 from tests.test_bed_gate import ScratchHost
+from tests.test_interruptions import CANCEL, CANCEL_THEN_KILL, CANCELS, INTERRUPTIONS, KILL, KILL_THEN_CANCEL, TOO_LATE
 
 pytestmark = needs_test_bed
 
-CANCEL, KILL = "a cancel", "a kill"
-KILL_THEN_CANCEL, CANCEL_THEN_KILL = "a kill, then a cancel", "a cancel, then a kill"
-INTERRUPTIONS = (CANCEL, KILL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
-CANCELS = (CANCEL, KILL_THEN_CANCEL, CANCEL_THEN_KILL)
-TOO_LATE = "already renamed for this release"
 THE_RENAME = "proxy.switch"
 TURN, TAKE_UP, GATE_ANSWER = "before.record.turn", "before.record.take_up", "after.lanes.abandon"
 UNTOUCHED = "untouched"
@@ -159,14 +156,8 @@ def answering(lane: Lane) -> str:
         connection.close()
 
 
-def running() -> dict[str, Any]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return body
-
-
 def instances_of(lane: Lane) -> list[dict[str, Any]]:
-    return [each for each in running()["instances"] if (each["product"], each["lane"]) == (lane.product, lane.lane)]
+    return [each for each in read_running()["instances"] if (each["product"], each["lane"]) == (lane.product, lane.lane)]
 
 
 def builds_of(lane: Lane) -> list[str]:
@@ -174,7 +165,7 @@ def builds_of(lane: Lane) -> list[str]:
 
 
 def data_sets_of(lane: Lane) -> list[str]:
-    return [each["data_set"] for each in running()["data_sets"] if (each["product"], each["lane"]) == (lane.product, lane.lane)]
+    return [each["data_set"] for each in read_running()["data_sets"] if (each["product"], each["lane"]) == (lane.product, lane.lane)]
 
 
 # The gate itself, asked from the test as Launchplane asks it. Asking changes nothing.
@@ -472,7 +463,7 @@ NEVER_STARTED = "kennethreitz/httpbin@sha256:599fe5e5073102dbb0ee3dbb65f049dab44
 
 
 def request_row_of(lane: Lane, request: int) -> tuple[list[str], str]:
-    card = next(card for card in running()["cards"] if card["title"] == f"{lane.product} · {lane.lane}")
+    card = next(card for card in read_running()["cards"] if card["title"] == f"{lane.product} · {lane.lane}")
     row = next(row for row in card["rows"] if row["name"] == f"Request {request}")
     return [pill["text"] for pill in row["pills"]], row["note"]
 
@@ -891,7 +882,7 @@ def test_beginning_maintenance_whose_route_change_is_made_and_its_reply_lost_goe
         "in maintenance",
         ["unfinished", "done"],
     )
-    parts = [each for kind in ("instances", "background_services") for each in running()[kind] if each["lane"] == LEDGER.lane]
+    parts = [each for kind in ("instances", "background_services") for each in read_running()[kind] if each["lane"] == LEDGER.lane]
     assert (answering_or_back_soon(LEDGER), {each["state"] for each in parts if each["product"] == LEDGER.product}) == (
         BACK_SOON,
         {"stopped"},

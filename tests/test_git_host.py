@@ -13,7 +13,6 @@ from launchplane.act import Lanes
 from launchplane.api import create_app
 from launchplane.container_host import ContainerHost
 from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
-from launchplane.product import Product
 from launchplane.record import Record
 from tests.given_secrets import GivenSecrets
 from tests.odoo_product import TK
@@ -42,10 +41,7 @@ def builds_from() -> Iterator[Callable[[Runs], Builds]]:
 
 def test_a_publishing_run_is_the_image_its_manifest_names_by_digest(builds_from: Callable[[Runs], Builds]) -> None:
     builds = builds_from(answers())
-    assert (
-        builds.asked("tk", None, RUN)
-        == "ghcr.io/cbusillo/odoo-tenant-tk@sha256:" + "0e2ad09feaa7c0a190d47db94e49696b6a683dd437c9d31f58198ae65f12d0a4"
-    )
+    assert builds.asked("tk", None, RUN) == build_of(RUN)
     assert builds.asked("tk", None, LATER_RUN) == build_of(LATER_RUN) != build_of(RUN)
 
 
@@ -131,7 +127,7 @@ def test_a_build_given_as_text_is_refused_for_a_product_whose_builds_are_runs(bu
 
 
 def test_a_product_that_does_not_say_where_its_builds_come_from_names_an_image_and_never_a_run() -> None:
-    plain = Builds(lambda _product: Product())
+    plain = Builds()
     assert plain.asked("site", "site:a", None) == "site:a"
     for build, run in ((None, RUN), ("site:a", RUN), (None, None)):
         with pytest.raises(NotABuild, match=r'names its build as \{"build": "<image>"\}'):

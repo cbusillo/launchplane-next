@@ -30,7 +30,7 @@ The web address goes first so that no new request reaches an instance that is st
 | `deleted` | 200 | The data set named in the body was deleted by this request, and `deleted_data_set` names it, also when the attempt that sent the deletion never had its reply. Anything of the lane still running was retired first and is listed as for `retired`. |
 | `unchanged` | 200 | The lane had no route, no background service and no instance, and no data set of it was named. |
 
-The call is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as above when the retire ends.
+The call is kept as a [request](requests.md), and answers as above when the retire ends.
 
 A `503` means the host answered no, or the lane is not as it must be. It also answers a retire that named a data set the lane does not have and that no attempt of the request deleted: the rest of the retire was done, `error` names the data set, and nothing was deleted. Retiring stopped where it was, its request has failed, and it is safe to ask again. A host or proxy that could not be read, and a change that was sent and not answered, do not fail the request: it stays working, and its [next attempt](requests.md#the-workers) reads the host and finishes the retire. A removal of the route not answered is fenced first. A lane's requests are worked one at a time, in the order they came. A retire can be [cancelled](requests.md#cancelling) only before it has removed the route, its first change.
 

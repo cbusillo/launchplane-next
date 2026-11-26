@@ -21,17 +21,12 @@ class Said(StrEnum):
 type Answered = Callable[[Said | None, str | None], None]
 
 
-def not_written(_did: str, _web_address: str, _to: str | None) -> Answered:
-    return lambda _made, _error: None
-
-
 # Who a call works for. `hold` is asked before each action on the host and raises to stop the call without acting.
 # `cancel_asked` is asked between actions, and `refuse_cancel` is told why when the lane can no longer be put back.
 # `write` writes the line of a change of the route or of a command for a part before it is sent, and what it gives is
-# told the answer. `about_to` does so for a change of the route, from the web address and where it sends visitors.
-# `look` is shown the route of each reading and the containers read as made under `generation`, and nothing is decided
-# from what it does. `credit` is given each command Docker answered as done. `purpose` ends the line of a command sent
-# to put a lane back. `unmade` is whether a command of the step was not answered as done.
+# told the answer. `look` is shown the route of each reading and the containers read as made under `generation`, and
+# nothing is decided from what it does. `credit` is given each command Docker answered as done. `purpose` ends the line
+# of a command sent to put a lane back. `unmade` is whether a command of the step was not answered as done.
 @dataclass
 class Witness:
     tell: Tell = lambda _did, _error: None
@@ -40,16 +35,11 @@ class Witness:
     refuse_cancel: Callable[[str], None] = lambda _why: None
     generation: str = ""
     attempt: int = 0
-    about_to: Callable[[str, str, str | None], Answered] = not_written
     look: Callable[[LaneRoute, Collection[str]], None] = lambda _route, _made: None
     write: Callable[[str, Sent | Command], Answered] = lambda _did, _sent: lambda _made, _error: None
     credit: Callable[[Command], None] = lambda _command: None
     purpose: str = ""
     unmade: bool = False
-
-    def __post_init__(self) -> None:
-        if self.about_to is not_written:
-            self.about_to = lambda did, web_address, to: self.write(did, Sent(web_address=web_address, to=to))
 
     def __repr__(self) -> str:
         return f"the witness of attempt {self.attempt} of {self.generation or 'no request'}"
@@ -130,7 +120,6 @@ def named(action: Action) -> str:
     return NAMED[type(action)](action)
 
 
-# One line for a thing done, and the real error where it was refused.
 def told(action: Action, event: Event) -> tuple[str, str | None]:
     match event:
         case steps.Refused(report=report):
