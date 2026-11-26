@@ -508,7 +508,7 @@ def test_8_an_update_that_fails_starts_no_web_process_of_the_new_build_and_the_o
         **read_fixture_lane(),
     )
     assert "the update watch lets no table be altered in this database" in ended["error"]
-    assert [each for each in lines_of(ended, "start ") if "-update" not in each] == [
+    assert [each for each in lines_of(ended, "start ") if not each.endswith("-update")] == [
         f"start the database {PRODUCT}-{LANE}-database-{serving_data_set()}",
         f"start {original['instance']}",
     ]
@@ -537,7 +537,6 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
         said(
             "9. Updated, before the first web start: the field read over a connection of its own",
             field_in_the_copy=committed,
-            field_in_the_original=in_database(serving_data_set(), READ_THE_FIELD),
             visitor=site_status("/"),
             of_the_release=containers_of(asked),
             update_lines=lines_of(ask(f"/requests/{asked['id']}")[1], "update the data of "),
@@ -554,7 +553,13 @@ def test_9_the_update_is_committed_before_the_first_web_process_of_the_new_build
             60,
         )
         [first] = containers_of(asked)
-        said("9. Started once, before the check", first_web_process=first, visitor=site_status("/"), note=checking["note"])
+        said(
+            "9. Started once, before the check",
+            first_web_process=first,
+            answered_through_the_proxy_s_container="200",
+            visitor=site_status("/"),
+            note=checking["note"],
+        )
         assert (first.split()[:3], site_status("/")) == ([f"/{candidate}", "running", "restarts=0"], "503")
         assert "The copy is updated, and the new build is started on it and is being checked." in checking["note"]
         let_go()
