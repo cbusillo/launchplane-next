@@ -151,8 +151,8 @@ def test_what_is_run_once_is_waited_for_to_its_end_answers_with_its_exit_code_an
 ) -> None:
     docker, answered = RecordingDocker(), list[CommandResult]()
 
-    def exit_with_the_code(ran: RecordingContainer, timeout: int) -> dict[str, int]:
-        ran.calls.append(f"wait {timeout} s")
+    def exit_with_the_code(waited_for: RecordingContainer, timeout: int) -> dict[str, int]:
+        waited_for.calls.append(f"wait {timeout} s")
         return {"StatusCode": exit_code}
 
     def update_and_keep(host: ContainerHost, target: LaneBuild, use: DataSetUse) -> None:

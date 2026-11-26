@@ -411,13 +411,13 @@ ALLOW_THE_FIELD = "drop event trigger refuse_the_field; drop function refuse_the
 # noinspection SqlResolve
 READ_THE_FIELD = """
 select coalesce((select 'column ' || column_name || ', ' || data_type from information_schema.columns
-    where (table_name, column_name) = ('website', :'field')), 'no column ' || :'field');
+    where (table_name, column_name) = ('website', 'lp_greeting')), 'no column lp_greeting');
 """
+assert FIELD in READ_THE_FIELD
 
 
 def in_database(data_set: str, statements: str, lane: str = LANE) -> str:
-    asked = f"docker exec --interactive {PRODUCT}-{lane}-database-{data_set} {PSQL} --set=field={FIELD}"
-    return on_scratch(asked, given=statements).strip()
+    return on_scratch(f"docker exec --interactive {PRODUCT}-{lane}-database-{data_set} {PSQL}", given=statements).strip()
 
 
 def serving_data_set(lane: str = LANE) -> str:
