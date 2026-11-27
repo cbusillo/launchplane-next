@@ -4,6 +4,7 @@ from typing import Any
 
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
+    TESTING,
     DataSet,
     DataSetUse,
     InstanceState,
@@ -39,6 +40,8 @@ from launchplane.steps import (
     Event,
     FreshNames,
     GiveUp,
+    Initialize,
+    InitializeRefused,
     LoginsUnread,
     MoveResult,
     Outcome,
@@ -438,11 +441,10 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
     lane, candidate, done = move.lane, move.candidate, move.done
     if (wait := own_named_by_route(move)) is not None:
         return wait
-    refused = next((event for event in done if isinstance(event, CheckRefused)), None)
+    refused = next((event for event in done if isinstance(event, CheckRefused | InitializeRefused)), None)
     if refused is not None:
-        return (
-            Done(move.answer(outcome=Outcome.CHECK_FAILED, error=refused.report)) if candidate is None else discard(move, candidate)
-        )
+        outcome = Outcome.CHECK_FAILED if isinstance(refused, CheckRefused) else Outcome.NOT_INITIALIZED
+        return Done(move.answer(outcome=outcome, error=refused.report)) if candidate is None else discard(move, candidate)
     if (step := in_service(move)) is not None:
         return step
     if candidate is not None:
@@ -458,7 +460,19 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
     use = prepared(move.judged, data_set, move.fresh.data_set, move.product, done, move.generation)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    return StartInstance(move.target, move.fresh.container, use, move.generation)
+    first = None if use is None or receiving is not None else first_start_step(move, use)
+    return first or StartInstance(move.target, move.fresh.container, use, move.generation)
+
+
+# The kind's first start goes before the first web start on a data set no instance serves from, once in an attempt. It
+# is not decided here whether the data is to be initialized: what runs asks the data itself, and nothing the lane has or
+# lacks is taken for leave to. Only a testing lane is given a testing login.
+def first_start_step(move: Move, use: DataSetUse) -> Initialize | None:
+    command = move.product.first_start
+    if not command or any(isinstance(event, Initialize) for event in move.done):
+        return None
+    variable = move.product.test_password_variable if move.target.lane == TESTING else None
+    return Initialize(move.target, f"{move.fresh.container}-first-start", use, command, move.generation, variable)
 
 
 def switch_or_check(move: Move, candidate: RunningInstance) -> Action | Stop:

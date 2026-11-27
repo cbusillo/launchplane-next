@@ -18,7 +18,7 @@ from launchplane.data_set import client_environment
 from launchplane.odoo import FILES_PATH, SERVER, USER
 from launchplane.product import Product
 from tests.bed import SCRATCH_ADDRESS, ask, launchplane_answers, on_control, on_scratch, retire, wait_for
-from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TK, TK_UPDATING
+from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TK, TK_STARTING, TK_UPDATING
 from tests.recorded_git_host import LATER_RUN, PORT, RUN, build_of
 
 GIT_HOST_UNIT = "launchplane-recorded-git-host"
@@ -129,10 +129,10 @@ def seed(product: str, lane: str, modules: list[str] = MODULES, *, attachment: b
 
 # A person signed in at a lane's web address, so what is read and written goes through Odoo as its own pages do.
 class SignedIn:
-    def __init__(self, product: str, lane: str) -> None:
+    def __init__(self, product: str, lane: str, login: str = ADMIN_LOGIN, password: str = ADMIN_PASSWORD) -> None:
         self.web_address = f"{lane}.{product}.test"
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
-        self.ask("/web/session/authenticate", db="app", login=ADMIN_LOGIN, password=ADMIN_PASSWORD)
+        self.ask("/web/session/authenticate", db="app", login=login, password=password)
 
     # noinspection HttpUrlsUsage
     def ask(self, path: str, **given: object) -> Any:  # noqa: ANN401 whatever Odoo answers
@@ -227,6 +227,15 @@ def read_copy(copy: dict[str, Any]) -> dict[str, str]:
     return {"data_set": copy["data_set"], "volumes": ",".join((*copy["volumes"], *copy["files"]))} | read
 
 
+# The password of a lane's testing login, read where Launchplane keeps it and from nowhere else. It is never printed.
+def kept_password(product: str, lane: str) -> str:
+    return on_control(f"cat /var/lib/launchplane/secrets/{product}/{lane}/test-login")
+
+
+def forget_test_password(product: str) -> None:
+    on_control(f"rm -rf /var/lib/launchplane/secrets/{product}")
+
+
 # The description is what holds a lane to verified builds and to its check, so it outlives everything of the lane.
 def retire_with_its_data(product: str, lane: str) -> None:
     found = [each for each in ask("/running")[1]["data_sets"] if (each["product"], each["lane"]) == (product, lane)]
@@ -263,13 +272,14 @@ def main(do: str, product: str = "watch-tk", lane: str = "testing", text: str = 
     if do == "set-up":
         pull_builds()
         serve_recorded_git_host()
-        describe(product)
+        describe(product, TK_STARTING if text == "first-start" else TK)
     elif do == "seed":
         seed(product, lane)
     elif do == "tear-down":
         retire_with_its_data(product, lane)
         stop_recorded_git_host()
         on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
+        forget_test_password(product)
     else:
         raise SystemExit("python -m tests.bed_odoo set-up|seed|tear-down|lead|show|write|show-copy [product] [lane] [text or copy]")
     print(json.dumps({"done": do, "product": product, "builds": {str(RUN): build_of(RUN), str(LATER_RUN): build_of(LATER_RUN)}}))  # noqa: T201

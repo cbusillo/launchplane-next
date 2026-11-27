@@ -1,4 +1,6 @@
-from launchplane.odoo import Odoo
+import base64
+
+from launchplane.odoo import FirstStart, Odoo
 from launchplane.product import Database, Product
 from tests.recorded_git_host import IMAGE, REPOSITORY, WORKFLOW
 
@@ -35,3 +37,13 @@ TK = Product(
 )
 # The same product once its releases update a module on a copy of the lane's data.
 TK_UPDATING = TK.model_copy(update={"odoo": TK.odoo and TK.odoo.model_copy(update={"update": ["tk_website"]})})
+# The same product once an empty data set of it is initialized before its first web start. The name is invented.
+TEST_LOGIN = "lp-tester"
+TK_STARTING = TK.model_copy(
+    update={
+        "odoo": TK.odoo
+        and TK.odoo.model_copy(
+            update={"first_start": FirstStart(attachment=base64.b64encode(ATTACHMENT_BYTES), test_login=TEST_LOGIN)}
+        )
+    }
+)

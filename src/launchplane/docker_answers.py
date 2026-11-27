@@ -42,7 +42,8 @@ QUIET_GATEWAY_MODE = "isolated"
 MOST_READS = 3
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
-type Part = Literal["web", "update", "background-service", "database", "copier"]
+type Part = Literal["web", "update", "first-start", "background-service", "database", "copier"]
+PARTS: tuple[Part, ...] = ("web", "update", "first-start", "background-service", "database", "copier")
 
 INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
     "created": InstanceState.STOPPED,
@@ -220,7 +221,7 @@ def required_label(labels: dict[str, str], label: str, what: str) -> str:
 
 def part_of(summary: DockerContainerSummary) -> Part:
     part = summary.labels.get(PART_LABEL, "web")
-    if part not in ("web", "update", "background-service", "database", "copier"):
+    if part not in PARTS:
         raise ContainerHostError(f"The container {summary.name} is marked as the part {part}, which Launchplane does not know.")
     return part
 
@@ -254,6 +255,7 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         mounts=mounts_of(summary),
         generation=generation_in(summary.labels, summary.name),
         is_update=part_of(summary) == "update",
+        is_first_start=part_of(summary) == "first-start",
     )
 
 
@@ -395,9 +397,7 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
     every_network = checked(DOCKER_NETWORK_LIST, networks, "network list")
     volume_list = checked(DOCKER_VOLUME_LIST, volumes, "volume list").volumes or []
     marked_networks = [network for network in every_network if PRODUCT_LABEL in (network.labels or {})]
-    by_part: dict[Part, list[DockerContainerSummary]] = {
-        name: [] for name in ("web", "update", "background-service", "database", "copier")
-    }
+    by_part: dict[Part, list[DockerContainerSummary]] = {name: [] for name in PARTS}
     for summary in found.summaries:
         by_part[part_of(summary)].append(summary)
     details = found.details
@@ -408,7 +408,7 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
     databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
     copies = [(data_set_key(summary.labels, summary.name), volume_copy(summary, details)) for summary in by_part["copier"]]
     return OnHost(
-        instances=[instance_from(summary) for summary in (*by_part["web"], *by_part["update"])],
+        instances=[instance_from(summary) for summary in (*by_part["web"], *by_part["update"], *by_part["first-start"])],
         background_services=background_services,
         data_sets=data_sets_from(databases, marked_networks, volume_list, copies),
         networks=[network_from(network) for network in every_network],

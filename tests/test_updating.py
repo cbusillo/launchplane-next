@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -103,9 +103,9 @@ def test_while_the_update_is_pending_the_candidate_s_web_has_never_started_and_o
     before: list[list[str]] = []
     run_once = proxy.host.run_once
 
-    def note_what_started_and_update(update: Update, by: Witness) -> CommandResult:
+    def note_what_started_and_update(update: Update, by: Witness, given: Mapping[str, str]) -> CommandResult:
         before.append(started(proxy, old))
-        return run_once(update, by)
+        return run_once(update, by, given)
 
     monkeypatch.setattr(proxy.host, "run_once", note_what_started_and_update)
     result = lanes.move(BUILD_B, GENERATION, 1, first())
@@ -254,9 +254,9 @@ def test_the_candidate_and_its_update_reach_only_the_copy_s_network_and_files(mo
     updated_on: list[DataSetUse] = []
     run_once = proxy.host.run_once
 
-    def note_and_update(update: Update, by: Witness) -> CommandResult:
+    def note_and_update(update: Update, by: Witness, given: Mapping[str, str]) -> CommandResult:
         updated_on.append(update.use)
-        return run_once(update, by)
+        return run_once(update, by, given)
 
     monkeypatch.setattr(proxy.host, "run_once", note_and_update)
     lanes.move(BUILD_B, GENERATION, 1, first())

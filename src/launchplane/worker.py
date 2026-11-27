@@ -32,6 +32,7 @@ STOPPED = (*HOST_UNREAD, ProductError, Stopped)
 NOT_A_SUCCESS = {
     Outcome.CHECK_FAILED,
     Outcome.NOT_UPDATED,
+    Outcome.NOT_INITIALIZED,
     Outcome.BACKGROUND_SERVICE_FAILED,
     MaintenanceOutcome.DATABASE_KILLED,
     MaintenanceOutcome.WEB_PART_FAILED,

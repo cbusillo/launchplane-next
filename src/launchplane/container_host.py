@@ -1,7 +1,7 @@
 import os
 import threading
 import time
-from collections.abc import Callable, Set
+from collections.abc import Callable, Mapping, Set
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -73,7 +73,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
-from launchplane.steps import CopyVolume, Update
+from launchplane.steps import CopyVolume, Initialize, Update
 from launchplane.telling import NOBODY, Said, Witness
 
 DOCKER_API_VERSION = "1.47"
@@ -168,7 +168,8 @@ def part_options(target: LaneBuild, container: str, part: Part, networks: list[s
 
 
 def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> RunOptions:
-    labels = options.labels | {DATA_SET_LABEL: use.data_set, SECRET_VARIABLES_LABEL: CLIENT_PASSWORD_VARIABLE}
+    secret = ",".join(filter(None, [options.labels.get(SECRET_VARIABLES_LABEL), CLIENT_PASSWORD_VARIABLE]))
+    labels = options.labels | {DATA_SET_LABEL: use.data_set, SECRET_VARIABLES_LABEL: secret}
     return replace(options, labels=labels, environment=options.environment | login)
 
 
@@ -397,11 +398,16 @@ class ContainerHost:
 
     # The build, run once to its end as an instance of it runs on the data set: its settings, its files and a login. It is
     # on the data set's network alone, where no visitor is sent. Once it has ended and answered, it is removed.
-    def run_once(self, update: Update, by: Witness = NOBODY) -> CommandResult:
-        target, container, use = update.target, update.container, update.use
-        with attempting(f"Running {update.command[0]} of build {target.build} once in {container}", self.address):
-            as_instance = self.instance_options(target, container, use, update.generation, "update")
-            once = replace(as_instance, networks={use.network: []}, command=[*update.command], restart=RUNS_ONCE)
+    # Each variable `given` holds a secret of its lane, and is marked as one on the container.
+    def run_once(self, run: Update | Initialize, by: Witness = NOBODY, given: Mapping[str, str] | None = None) -> CommandResult:
+        target, container, use, given = run.target, run.container, run.use, given or {}
+        with attempting(f"Running {run.command[0]} of build {target.build} once in {container}", self.address):
+            part = "update" if isinstance(run, Update) else "first-start"
+            as_instance = self.instance_options(target, container, use, run.generation, part)
+            once = replace(as_instance, networks={use.network: []}, command=[*run.command], restart=RUNS_ONCE)
+            if given:
+                marked = once.labels | {SECRET_VARIABLES_LABEL: ",".join(given)}
+                once = replace(once, labels=marked, environment={**once.environment, **given})
             ran = self.run_part(once, use, lambda on: self.logins.make(container, on, by), by)
             exit_code = ran.wait(timeout=RUN_ONCE_DEADLINE_SECONDS)["StatusCode"]
             output = ran.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip()

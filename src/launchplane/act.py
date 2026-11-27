@@ -1,4 +1,4 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import astuple, dataclass, field, replace
 from datetime import UTC, datetime
@@ -84,7 +84,7 @@ class InstanceHost(Protocol):
     def remove_unheld_logins(self, database: str, by: Witness) -> Unread | None: ...
     def read_log_tail(self, container: str) -> str: ...
     def restarts(self, container: str) -> int: ...
-    def run_once(self, update: steps.Update, by: Witness, /) -> CommandResult: ...
+    def run_once(self, run: steps.Update | steps.Initialize, by: Witness, given: Mapping[str, str], /) -> CommandResult: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -109,6 +109,7 @@ class Proxy(Protocol):
 
 
 type ProductReader = Callable[[str], Product]
+type PasswordReader = Callable[[str, str], str]
 type KeptReader = Callable[[], list[Kept]]
 
 
@@ -169,13 +170,22 @@ def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
 
-# A lost reply is no answer: only what the command itself answered says the update failed.
-def run_update(host: InstanceHost, action: steps.Update, by: Witness) -> steps.UpdateRefused | None:
-    ran = host.run_once(action, by)
+# A lost reply is no answer: only what the command itself answered says it failed. `given` is each secret variable it holds.
+def run_once(host: InstanceHost, action: steps.Update | steps.Initialize, by: Witness, given: Mapping[str, str]) -> Event:
+    ran = host.run_once(action, by, given)
     if ran.succeeded:
-        return None
-    why = f"The update of the data, run in {action.container}, ended with code {ran.exit_code}."
-    return steps.UpdateRefused(action.container, plan.failure_report(why, "\n".join(ran.output.splitlines()[-LOG_TAIL_LINES:])))
+        return action
+    what, refused = ("update", steps.UpdateRefused) if isinstance(action, steps.Update) else ("first start", steps.InitializeRefused)
+    why = f"The {what} of the data, run in {action.container}, ended with code {ran.exit_code}."
+    return refused(action.container, plan.failure_report(why, "\n".join(ran.output.splitlines()[-LOG_TAIL_LINES:])))
+
+
+def start_stopped(host: InstanceHost, action: steps.StartStopped, by: Witness) -> steps.StartRefused | None:
+    try:
+        host.start_part(action.container, by)
+    except ContainerHostRefused as error:
+        return steps.StartRefused(action.container, str(error))
+    return None
 
 
 TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
@@ -199,7 +209,8 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.StopDatabase: lambda host, _proxy, step, _by: host.stop_database(step.container),
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
-    steps.Update: lambda host, _proxy, step, by: run_update(host, step, by),
+    steps.Update: lambda host, _proxy, step, by: run_once(host, step, by, {}),
+    steps.StartStopped: lambda host, _proxy, step, by: start_stopped(host, step, by),
 }
 
 
@@ -296,7 +307,9 @@ class Lanes:
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
         read_ended: KeptReader = lambda: [],
+        read_test_password: PasswordReader = lambda _product, _lane: "",
     ) -> None:
+        self.read_test_password = read_test_password
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
@@ -500,17 +513,13 @@ class Lanes:
         if isinstance(action, steps.RemoveLogins):
             unread = self.host.remove_unheld_logins(action.database, witness)
             return action if unread is None else steps.LoginsUnread(action.database, str(unread))
-        if isinstance(action, steps.StartStopped):
-            try:
-                self.host.start_part(action.container, witness)
-            except ContainerHostRefused as error:
-                return steps.StartRefused(action.container, str(error))
-            return action
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
             return self.discard(action, witness)
+        if isinstance(action, steps.Initialize):
+            return run_once(self.host, action, witness, self.test_login_of(action))
         refused = TAKE[type(action)](self.host, self.proxy, action, witness)
         return refused if isinstance(refused, steps.Refused) else action
 
@@ -531,6 +540,10 @@ class Lanes:
             if not self.proxy.read().route_of(web_address).in_maintenance:
                 raise
             raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error
+
+    def test_login_of(self, action: steps.Initialize) -> dict[str, str]:
+        variable, target = action.password_variable, action.target
+        return {} if variable is None else {variable: self.read_test_password(target.product, target.lane)}
 
     def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:
         edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)

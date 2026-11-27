@@ -24,7 +24,7 @@ from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
 from launchplane.instance import DataSet, HostNetwork, RunningBackgroundService, RunningInstance, Verdict
 from launchplane.judge import Condition, Finding, Judgement, Shown, Standing, WebAddressJudged, Work
 from launchplane.page import Card, cards
-from launchplane.product import ProductError, ProductFolder
+from launchplane.product import ProductError, ProductFolder, SecretFolder
 from launchplane.proxy import ProxyError, TraefikProxy
 from launchplane.record import (
     ENDED,
@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 SLUG = PathParameter(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
 UNREADABLE = (ContainerHostError, ProxyError, ProductError, Stopped)
 PRODUCTS_FOLDER = "/var/lib/launchplane/products"
+SECRETS_FOLDER = "/var/lib/launchplane/secrets"
 MOST_SECONDS_WAITED = 3600
 SECONDS_BETWEEN_READS = 0.1
 TEXT_ALONE = Builds()
@@ -563,7 +564,16 @@ def serve() -> None:
     proxy = TraefikProxy(host)
     products = ProductFolder(Path(os.environ.get("LAUNCHPLANE_PRODUCTS", PRODUCTS_FOLDER)))
     record = PostgresRecord(database(), host)
-    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_ended=record.ended_lately)
+    kept = SecretFolder(Path(os.environ.get("LAUNCHPLANE_SECRETS", SECRETS_FOLDER)), host.secrets.note)
+    kept.note_all()
+    lanes = Lanes(
+        host,
+        proxy,
+        products.read,
+        read_unfinished=record.unfinished,
+        read_ended=record.ended_lately,
+        read_test_password=kept.test_password,
+    )
     worker = Worker(record, lanes, host)
     worker.start()
     app = create_app(lanes.read_status, record, worker.wake, host, lanes, Builds(products.read))

@@ -12,10 +12,10 @@ from launchplane.container_host import RUN_ONCE_DEADLINE_SECONDS, ContainerHost
 from launchplane.data_set import RULES_AS_READ
 from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.instance import DataSet, DataSetUse, LaneBuild
-from launchplane.odoo import FILES_PATH, UPDATE_DEADLINE_SECONDS
+from launchplane.odoo import FILES_PATH, FIRST_START_DEADLINE_SECONDS, TEST_PASSWORD_VARIABLE, UPDATE_DEADLINE_SECONDS
 from launchplane.proxy import CheckFailed
-from launchplane.steps import Update
-from tests.odoo_product import TK, TK_UPDATING
+from launchplane.steps import Initialize, Update
+from tests.odoo_product import TK, TK_STARTING, TK_UPDATING
 from tests.pretend_host import GENERATION
 from tests.recording_docker import ExecResult, RecordingContainer, RecordingDocker, as_docker_client
 from tests.test_container_host import (
@@ -172,6 +172,37 @@ def test_what_runs_the_update_is_marked_and_read_as_an_update_and_not_as_a_web_p
     update_listed = listed(UPDATER, "update", [DATA_SET_NETWORK]) | {"State": "running"}
     [found] = read([update_listed], [network(True, QUIET_OPTIONS)], []).instances
     assert (found.container, found.is_update) == (UPDATER, True)
+
+
+def first_start(host: ContainerHost, target: LaneBuild, use: DataSetUse) -> CommandResult:
+    run = Initialize(target, f"{WEB}-first-start", use, TK_STARTING.first_start, GENERATION, TEST_PASSWORD_VARIABLE)
+    return host.run_once(run, given={TEST_PASSWORD_VARIABLE: "the lane's own"})
+
+
+def test_the_first_start_runs_once_on_the_data_set_s_network_alone_with_its_password_marked_as_a_secret() -> None:
+    command, options = made_from(TARGET.model_copy(update={"run": TK.run}), ON_D1, first_start)
+    given, labels = cast("dict[str, str]", options["environment"]), cast("dict[str, str]", options["labels"])
+    assert (command, options["user"], options["restart_policy"]) == ([*TK_STARTING.first_start], "ubuntu", {"Name": "no"})
+    assert list(cast("dict[str, object]", options["networking_config"])) == [DATA_SET_NETWORK]
+    assert options["volumes"] == {FILES_VOLUME: {"bind": FILES_PATH, "mode": "rw"}}
+    assert (given[TEST_PASSWORD_VARIABLE], given["PGUSER"], given["ODOO_MAX_CRON_THREADS"]) == ("the lane's own", "i_start", "0")
+    assert (labels["launchplane.part"], labels["launchplane.secret-variables"]) == (
+        "first-start",
+        f"{TEST_PASSWORD_VARIABLE},PGPASSWORD",
+    )
+
+
+def test_what_runs_the_first_start_is_marked_and_read_as_a_first_start_and_not_as_an_update_or_a_web_part() -> None:
+    docker = RecordingDocker()
+    made_from(TARGET.model_copy(update={"run": TK.run}), ON_D1, first_start, docker)
+    listed_once = listed(f"{WEB}-first-start", "first-start", [DATA_SET_NETWORK]) | {"State": "running"}
+    [found] = read([listed_once], [network(True, QUIET_OPTIONS)], []).instances
+    assert (found.is_first_start, found.is_update, found.called) == (True, False, "first start")
+
+
+def test_a_first_start_ends_itself_before_the_host_stops_waiting_for_what_is_run_once() -> None:
+    assert f"timeout {FIRST_START_DEADLINE_SECONDS} " in TK_STARTING.first_start[2]
+    assert FIRST_START_DEADLINE_SECONDS < RUN_ONCE_DEADLINE_SECONDS
 
 
 def test_how_often_docker_started_a_container_again_is_read_from_docker() -> None:

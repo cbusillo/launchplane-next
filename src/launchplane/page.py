@@ -85,11 +85,26 @@ def code(text: str) -> Piece:
     return Piece(text=text, drawn_as="code")
 
 
-# The last request taken up for the lane, where it is a move that ended because its new instance failed its check. Such a
-# move stopped nowhere part way: nothing was switched and the instance is gone. One that waits has changed nothing yet.
+# What a move that started nothing it left behind says of the lane it could not bring up, by how it ended.
+LEFT_NOTHING = {
+    Outcome.CHECK_FAILED: (
+        "Request {id} started an instance that failed its check, so nothing was switched and that instance is gone. "
+        "Asking for that build again fails the same way until what the check found is put right."
+    ),
+    Outcome.NOT_INITIALIZED: (
+        "Request {id} ran the first start of the lane's data, which failed, so no instance was started and nothing was "
+        "switched. Asking for that build again initializes the data set only if it is still empty: one the first start "
+        "left anything in is never initialized again, and is deleted by name with a retire."
+    ),
+}
+
+
+# The last request taken up for the lane, where it is a move that ended because its new instance failed its check or its
+# first start failed. Such a move stopped nowhere part way: nothing was switched and what it started is gone. One that
+# waits has changed nothing yet.
 def failed_check(requests: Sequence[Kept]) -> Kept | None:
     last = max((each for each in requests if each.attempts), key=lambda each: each.id, default=None)
-    failed = last is not None and (last.stands, (last.answer or {}).get("outcome")) == (Stands.FAILED, Outcome.CHECK_FAILED)
+    failed = last is not None and last.stands is Stands.FAILED and (last.answer or {}).get("outcome") in LEFT_NOTHING
     return last if failed else None
 
 
@@ -120,10 +135,8 @@ def finding_rows(judged: Judgement, failed: Kept | None) -> list[Row]:
         again = "Beginning maintenance again" if judged.lane.route.in_maintenance else "Asking for a build again"
         rows[-1].note = f"No call is at work on this lane. {again} finishes what was left unfinished."
     if failed and explained:
-        rows[judged.findings.index(explained[-1])].note = (
-            f"Request {failed.id} started an instance that failed its check, so nothing was switched and that instance is gone. "
-            "Asking for that build again fails the same way until what the check found is put right."
-        )
+        note = LEFT_NOTHING[Outcome((failed.answer or {})["outcome"])]
+        rows[judged.findings.index(explained[-1])].note = note.format(id=failed.id)
     return rows
 
 
@@ -358,7 +371,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
             ],
             *[
                 part_row(
-                    "Update" if each.is_update else f"Instance {number}",
+                    each.called.capitalize() if each.runs_once else f"Instance {number}",
                     "build",
                     each.build,
                     each.container,

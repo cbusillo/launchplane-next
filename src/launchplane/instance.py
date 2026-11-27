@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 LANE_NETWORK = "launchplane-lanes"
 LANE_DOMAIN = "test"
+# The one lane that is given a testing login.
+TESTING = "testing"
 BACK_SOON = "launchplane-back-soon"
 
 
@@ -65,6 +67,16 @@ class RunningInstance(BaseModel, frozen=True):
     other_image: str | None = None
     # The build run once to update a copy of the lane's data. It is no web part: it answers nobody and is sent nobody.
     is_update: bool = False
+    # The build run once on a data set before its first web start. It is no web part either.
+    is_first_start: bool = False
+
+    @property
+    def runs_once(self) -> bool:
+        return self.is_update or self.is_first_start
+
+    @property
+    def called(self) -> str:
+        return "update" if self.is_update else "first start" if self.is_first_start else "instance"
 
 
 class RunningBackgroundService(BaseModel, frozen=True):

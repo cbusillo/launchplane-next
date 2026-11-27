@@ -14,6 +14,7 @@ class Outcome(StrEnum):
     REPAIRED = "repaired"
     CHECK_FAILED = "check failed"
     NOT_UPDATED = "not updated"
+    NOT_INITIALIZED = "not initialized"
     BACKGROUND_SERVICE_FAILED = "background service failed"
 
 
@@ -199,6 +200,19 @@ class Update:
     generation: str | None = None
 
 
+# The first start of the product's kind, run once to its end by the build in `container`, on a data set no instance
+# serves from and before one is started there. It changes only data that is empty. On a testing lane it is given the
+# password of the lane's testing login in `password_variable`.
+@dataclass(frozen=True)
+class Initialize:
+    target: LaneBuild
+    container: str
+    use: DataSetUse
+    command: tuple[str, ...]
+    generation: str | None = None
+    password_variable: str | None = None
+
+
 # The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.
 @dataclass(frozen=True)
 class EditRoute:
@@ -355,6 +369,10 @@ class UpdateRefused(Refused):
     pass
 
 
+class InitializeRefused(Refused):
+    pass
+
+
 class RemovalRefused(Refused):
     pass
 
@@ -424,6 +442,7 @@ type Action = (
     | RemoveLogins
     | Check
     | Update
+    | Initialize
     | AwaitBackgroundService
     | StopPart
     | StopDatabase
