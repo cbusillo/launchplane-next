@@ -87,7 +87,7 @@ While no instance of the lane receives visitors, nothing is deleted. A release t
 - **The copier's image comes from Docker Hub,** the first time a host copies. A host that cannot fetch it fails the request before anything is stopped.
 - **Every byte is still read twice to prove a copy,** shared or not. See the measurements for what that costs beside the copy itself.
 - **On the small seeded TK lane, most of the interruption is Odoo starting again and its check.** At OPW's size, copying and comparing the files dominates. See the measurements, and [those of a release that updates](odoo.md#measured), which copies the same way.
-- **A copier has 300 s for a volume.** Both OPW-sized trials below ran out while comparing files. When it runs out, the request stays `working`, its next attempt stops the copier, gives the copy up and brings the lane back.
+- **A copier has 300 s for a volume.** Both OPW-sized releases below timed out while comparing files. Each left visitors in maintenance for about 349 s and ended `not updated`. The standalone copy call has yet to be timed at this size. When it runs out, the request stays `working`, its next attempt stops the copier, gives the copy up and brings the lane back.
 - **A clean stop is read from the database server's exit code,** as maintenance reads it, not from PostgreSQL's own control file.
 - **`diff -r` compares names and bytes,** not owners, modes or times. `cp -a` keeps them.
 - **An unclean database stop followed by a kill just after the route back is written can freeze the lane a second time.** The copy was given up before any copier was made, and once the server has started again the host no longer shows why. The request, taken up again, finds no copier, begins the copy again, and can end `copied`. A copy that got as far as a copier is never begun again.
@@ -135,7 +135,7 @@ The second bed used the November 19 intake's size/count table to generate 843,02
 
 All outages start at the first HTTP 503 and end at the first HTTP 200 at `/web/login` through the scratch host's visitor proxy. The observer waited 80 ms between completed requests. Trials ran sequentially with existing caches. Read and written are decimal MB from the ZFS counters for the scratch dataset and the trial datasets. They include cached reads. Pool change is the change in allocated bytes on the shared pool, taken from the sample nearest each phase boundary (about 0.8 s apart on the stock runs and 0.2 s on the hand-driven runs). Other users and delayed accounting can move that number in either direction. The counters do not attribute physical device traffic to one guest.
 
-**Today's release through the API.** Each cell gives the first and second run in order. The first had a fault set to damage the attachment when the module updated the copy. The second had the fault removed. Each ran from the same original into fresh volumes, with the first copy removed between runs. Launchplane waited 300 s for the files copier, gave up, and stopped it. The comparison continued during the stop. Both requests ended `not updated`, and the route returned to the original instance.
+**Today's release through the API.** Each cell gives the first and second run in order. The first had a fault set to damage the attachment when the module updated the copy. The second had the fault removed. Each ran from the same original into fresh volumes, with the first copy removed between runs. Launchplane waited 300 s for the files copier, gave up, and stopped it. The retry began about 5 s after the timeout. Stopping the copier used its 30 s Docker stop grace, during which the comparison continued. Both requests ended `not updated`, and the route returned to the original instance.
 
 | Phase | Seconds | Read (MB) | Written (MB) | Pool change (MB) |
 | --- | ---: | ---: | ---: | ---: |
@@ -147,11 +147,11 @@ All outages start at the first HTTP 503 and end at the first HTTP 200 at `/web/l
 | Restart and check original | 8.1 / 7.8 | 87.6 / 87.7 | 1.1 / 1.0 | 0.0 / 0.0 |
 | Total | 349.0 / 348.5 | 85,671.8 / 96,176.9 | 100.2 / 7.2 | 6,557.8 / 5,156.4 |
 
-The scratch dataset was charged an additional 118.8 and 117.7 GB across the two outages. The pool's net allocation rose by 6.6 and 5.2 GB. A host needs room under its dataset quota even when the copy shares file blocks.
+The first abandoned copy added 118.8 GB to the scratch dataset's charge, and the second added 117.7 GB. The pool's net allocation rose by 6.6 and 5.2 GB respectively. A failed release keeps its copy until an operator removes it or a later release switches and prunes it. Retrying with earlier copies still present can exhaust the dataset quota.
 
 **Storage snapshot and writable clone.** Before timing, the same stopped database and files were staged together on one data-only ZFS dataset, and the old build served from it. A visitor saw maintenance before either writer stopped. After PostgreSQL exited cleanly, the host snapshotted that dataset, mounted its writable clone and verified its origin. The test used Launchplane's database start, module update, web start, health and attachment checks, and proxy switch on the clone. The updated lead and padding rows were present on the serving candidate.
 
-The snapshot and clone commands took 0.376 and 0.182 s on the first run, and 0.021 and 0.037 s on the repeat. The repeat's newly mounted clone was charged 8,192 bytes and referenced 117,711,421,440 bytes. The table uses the repeat because the first run's storage sampler stopped when the clone appeared. This path was operated on the test bed by hand. Launchplane's installed copier still uses `cp` and `diff`.
+The snapshot and clone commands took 0.376 and 0.182 s on the first run, and 0.021 and 0.037 s on the repeat. The repeat's newly mounted clone was charged 8,192 bytes and referenced 117,711,421,440 bytes. The table uses the repeat because the first run's storage sampler stopped when the clone appeared. The timing assumes both volumes already occupy one independently cloneable dataset before the release. This path was operated on the test bed by hand. Launchplane's installed copier still uses `cp` and `diff`.
 
 | Phase | Seconds | Read (MB) | Written (MB) | Pool change (MB) |
 | --- | ---: | ---: | ---: | ---: |
@@ -166,7 +166,7 @@ The snapshot and clone commands took 0.376 and 0.182 s on the first run, and 0.0
 
 **What the same copier takes when allowed to finish.** The stock timeout prevented either API request from reaching its check. On the disposable lane, a hand-driven runner waited for the installed copier image's unchanged `cp`, `diff` and `sync` command to exit on both volumes. Each copy started with the same serving original and fresh destination directories on the same filesystem. Both runs used the same Launchplane update, kind check and proxy operations as the snapshot trial.
 
-The first run pointed the copied lead's attachment at a missing file. The check refused the candidate, and the original answered after **599.1 s** with the lead and attachment intact. The second served the updated candidate after **593.0 s**. Each cell gives the failed check first and the successful switch second. These are measured comparison runs under a longer wait. The installed API still gives up at 300 s per volume.
+The first run pointed the copied lead's attachment at a missing file. The check refused the candidate, and the original answered after **599.1 s** with the lead and attachment intact. The second served the updated candidate after **593.0 s**. Each cell gives the failed check first and the successful switch second. Each outcome was measured once on this bed. Cache state, storage load and the modules updated on production can change the interruption. These comparison runs used a longer wait. The installed API still gives up at 300 s per volume.
 
 | Phase | Seconds | Read (MB) | Written (MB) | Pool change (MB) |
 | --- | ---: | ---: | ---: | ---: |
