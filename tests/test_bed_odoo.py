@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import subprocess
 import time
@@ -28,20 +27,20 @@ from tests.bed import (
     wait_until_stopped_at,
 )
 from tests.bed_odoo import (
-    ADMIN_LOGIN,
-    ADMIN_PASSWORD,
     SignedIn,
+    attachment_read_by_the_tester,
     data_set_of,
+    default_admin_is_refused,
     describe,
     forget_test_password,
+    kept_password,
     pull_builds,
     retire_with_its_data,
     seed,
     serve_recorded_git_host,
     stop_recorded_git_host,
-    kept_password,
 )
-from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, ATTACHMENT_SHA256, TEST_LOGIN, TK_STARTING
+from tests.odoo_product import ATTACHMENT_BYTES, ATTACHMENT_SHA256, TEST_LOGIN, TK_STARTING
 from tests.recorded_git_host import LATER_RUN, RUN, build_of
 
 pytestmark = needs_test_bed
@@ -191,8 +190,12 @@ SITE_BUILD, SITE_ANSWERS = "nginx:1.30.6-alpine", "nginx/1.30.6"
 ROW = "Invented contact of the first-start watch"
 # How long each point stays on the page before the next one changes it.
 READING_SECONDS = 8
-# noinspection SqlResolve
-READ_ONLY = "alter database app set default_transaction_read_only = on"
+REFUSED = "the first-start watch lets no table be made in this database"
+REFUSE_THE_TABLES = f"""
+create function refuse_the_tables() returns event_trigger language plpgsql as
+$$ begin raise exception '{REFUSED}'; end $$;
+create event trigger refuse_the_tables on ddl_command_start when tag in ('CREATE TABLE') execute function refuse_the_tables();
+"""
 
 
 def said(point: str, **observed: Any) -> None:  # noqa: ANN401 whatever was observed
@@ -205,7 +208,8 @@ def visit(product: str, path: str = "/") -> str:
     return on_scratch(f"{asked} http://127.0.0.1{path}").strip()
 
 
-# The lane's card as the page draws it, or None where the page has none for it.
+# The lane's card as the page draws it, or None where the page has none for it. One with no web address is what a retire
+# that ended lately leaves for ten minutes.
 def card(product: str) -> dict[str, Any] | None:
     found = [each for each in ask("/running")[1]["cards"] if each["title"] == f"{product} · testing"]
     if not found:
@@ -213,7 +217,7 @@ def card(product: str) -> dict[str, Any] | None:
     rows = {row["name"]: row for row in found[0]["rows"]}
     return {
         "reads": [pill["text"] for pill in found[0]["pills"]],
-        "web_address": [pill["text"] for pill in rows["Web address"]["pills"]],
+        "web_address": [pill["text"] for pill in rows.get("Web address", {}).get("pills", [])],
         "found": [row["value"][0]["text"] for row in found[0]["rows"] if row["name"] == "Found"],
     }
 
@@ -223,8 +227,16 @@ def on_host(product: str) -> dict[str, list[str]]:
     return {
         "instances": [each["container"] for each in running["instances"] if each["product"] == product],
         "data_sets": [each["data_set"] for each in running["data_sets"] if each["product"] == product],
-        "routes": [each["web_address"] for each in running["web_addresses"] if each["web_address"] == f"testing.{product}.test"],
+        "visitors_sent_to": [
+            each["sends_to_container"]
+            for each in running["web_addresses"]
+            if each["web_address"] == f"testing.{product}.test" and each["sends_to_container"]
+        ],
     }
+
+
+def last_request(product: str) -> dict[str, Any]:
+    return ask(f"/requests/{max(each['id'] for each in ask('/requests')[1]['ended'] if each['product'] == product)}")[1]
 
 
 def first_starts(request: dict[str, Any]) -> list[str]:
@@ -233,16 +245,8 @@ def first_starts(request: dict[str, Any]) -> list[str]:
 
 # What a tester signed in at the lane's web address reads there: the declared attachment's bytes and each invented row.
 def read_signed_in(password: str) -> dict[str, Any]:
-    signed_in = SignedIn(ODOO, "testing", TEST_LOGIN, password)
-    [file] = signed_in.call("ir.attachment", "search_read", [("name", "=", ATTACHMENT)], fields=["raw"])
-    rows = signed_in.call("res.partner", "search_read", [("name", "=", ROW)], fields=["name"])
-    return {"attachment": base64.b64decode(file["raw"]["content"]), "rows": [each["id"] for each in rows]}
-
-
-def default_admin_is_refused() -> bool:
-    with pytest.raises(SystemExit, match="Access Denied"):
-        SignedIn(ODOO, "testing", ADMIN_LOGIN, ADMIN_PASSWORD)
-    return True
+    rows = SignedIn(ODOO, "testing", TEST_LOGIN, password).call("res.partner", "search_read", [("name", "=", ROW)], fields=["name"])
+    return {"attachment": attachment_read_by_the_tester(ODOO, "testing"), "rows": [each["id"] for each in rows]}
 
 
 def put_the_bed_back() -> None:
@@ -283,8 +287,8 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         cards=[card(SITE), card(ODOO)],
         on_the_host=[on_host(SITE), on_host(ODOO)],
     )
-    assert (card(SITE), card(ODOO), visit(SITE), visit(ODOO, "/web/login")) == (None, None, "404", "404")
-    assert on_host(SITE) == on_host(ODOO) == {"instances": [], "data_sets": [], "routes": []}
+    assert (visit(SITE), visit(ODOO, "/web/login")) == ("404", "404")
+    assert on_host(SITE) == on_host(ODOO) == {"instances": [], "data_sets": [], "visitors_sent_to": []}
 
     status, site = move_lane(SITE, "testing", SITE_BUILD)
     said(
@@ -302,9 +306,8 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
     status, odoo = ask(f"{move_odoo}?wait=230", {"run": RUN}, timeout=240, headers=key)
     took = time.monotonic() - started
     assert (status, odoo["outcome"], odoo["build"]) == (200, "switched", build_of(RUN)), odoo
-    [first] = [each for each in ask("/requests")[1]["ended"] if each["product"] == ODOO]
-    request = ask(f"/requests/{first['id']}")[1]
-    password = test_password(ODOO, "testing")
+    request = last_request(ODOO)
+    password = kept_password(ODOO, "testing")
     read = read_signed_in(password)
     said(
         "3. Odoo's first move, on its first request",
@@ -315,10 +318,13 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         card=card(ODOO),
         signed_in_as=TEST_LOGIN,
         attachment_read=hashlib.sha256(read["attachment"]).hexdigest(),
-        default_admin_refused=default_admin_is_refused(),
+        default_admin_refused=default_admin_is_refused(ODOO, "testing"),
     )
     assert (len(request["attempts"]), len(first_starts(request)), read) == (1, 1, {"attachment": ATTACHMENT_BYTES, "rows": []})
-    assert card(ODOO) == {"reads": ["good"], "web_address": ["answering"], "found": []}
+    assert (card(ODOO), default_admin_is_refused(ODOO, "testing")) == (
+        {"reads": ["good"], "web_address": ["answering"], "found": []},
+        True,
+    )
     for told in (str(odoo), str(request), str(ask("/running")[1])):
         assert password not in told
     assert on_scratch(f"docker exec {odoo['container_receiving_visitors']} printenv ODOO_MAX_CRON_THREADS").strip() == "0"
@@ -346,18 +352,19 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
     # With no instance and no route, the first start runs again and finds the data: nothing the lane lacks seeds over it.
     assert retire(ODOO, "testing")[0] == 200
     status, back = ask_and_wait(move_odoo, {"run": RUN})
-    brought_back = ask(f"/requests/{max(each['id'] for each in ask('/requests')[1]['ended'] if each['product'] == ODOO)}")[1]
+    brought_back = last_request(ODOO)
     said(
         "5. Retired with its data kept, and moved again",
         outcome=back["outcome"],
         first_start=first_starts(brought_back),
         data_sets=on_host(ODOO)["data_sets"],
         row=read_signed_in(password)["rows"],
-        password_is_the_same=test_password(ODOO, "testing") == password,
-        default_admin_refused=default_admin_is_refused(),
+        password_is_the_same=kept_password(ODOO, "testing") == password,
+        default_admin_refused=default_admin_is_refused(ODOO, "testing"),
         card=card(ODOO),
     )
     assert (status, back["outcome"], len(first_starts(brought_back))) == (200, "switched", 1)
+    assert (kept_password(ODOO, "testing"), default_admin_is_refused(ODOO, "testing")) == (password, True)
     assert (on_host(ODOO)["data_sets"], read_signed_in(password)) == (
         serving["data_sets"],
         {"attachment": ATTACHMENT_BYTES, "rows": [row]},
@@ -369,7 +376,8 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         assert status == 202, asked
         wait_until_stopped_at("before.host.run_once", seconds=120)
         server = f"{FAILING}-testing-database-{data_set_of(FAILING, 'testing')}"
-        on_scratch(f'docker exec {server} psql --username=postgres --dbname=app --quiet --command="{READ_ONLY}"')
+        psql = "psql --username=postgres --dbname=app --quiet --set=ON_ERROR_STOP=1"
+        on_scratch(f"docker exec --interactive {server} {psql}", given=REFUSE_THE_TABLES)
         let_go()
         failed = request_ended(asked["id"])
     said(
@@ -382,8 +390,8 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         card=card(FAILING),
     )
     assert (failed["stands"], failed["answer"]["outcome"], visit(FAILING, "/web/login")) == ("failed", "not initialized", "404")
-    assert "read-only transaction" in failed["error"]
-    assert (on_host(FAILING)["instances"], on_host(FAILING)["routes"]) == ([], [])
+    assert REFUSED in failed["error"]
+    assert (on_host(FAILING)["instances"], on_host(FAILING)["visitors_sent_to"]) == ([], [])
     assert [each["did"] for each in failed["events"] if each["did"].startswith(("start the instance", "switch "))] == []
     assert card(FAILING) == {"reads": ["move failed"], "web_address": ["not answering"], "found": ["No instance receives visitors"]}
-    assert test_password(FAILING, "testing") not in str(failed)
+    assert kept_password(FAILING, "testing") not in str(failed)

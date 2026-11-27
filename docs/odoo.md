@@ -2,7 +2,7 @@
 
 A product whose description has an `odoo` part is of the Odoo kind. Its lane runs a build Launchplane has verified, on a data set of its own: a database server and a files volume. The first product of the kind is TK, `cbusillo/odoo-tenant-tk`, on Odoo 20.
 
-A release to another build of a product that declares `update` is made on [a copy of the lane's data, updated before the switch](#a-release-that-updates). [A lane's data is also copied](copying.md) by a call of its own. The background service that runs Odoo's scheduled jobs, previews, backups, acceptance, going back after a switch and deleting the data set a release replaced are not built.
+A product that declares `first_start` has [its empty data set initialized before its first web start](#the-first-start), so its first move serves. A release to another build of a product that declares `update` is made on [a copy of the lane's data, updated before the switch](#a-release-that-updates). [A lane's data is also copied](copying.md) by a call of its own. The background service that runs Odoo's scheduled jobs, previews, backups, acceptance, going back after a switch and deleting the data set a release replaced are not built.
 
 ## The description
 
@@ -18,7 +18,8 @@ A release to another build of a product that declares `update` is made on [a cop
     "modules": ["launchplane_settings", "disable_odoo_online", "crm", "contacts", "website_crm", "website_livechat", "crm_livechat", "base_automation", "auth_passkey", "tk_website", "tk_listings"],
     "attachment": "launchplane-check",
     "sha256": "5b8e2378c01c9392fc415eb0d02888d76f0a04ea8dec78a3860b07181260ffb4",
-    "update": ["tk_website"]
+    "update": ["tk_website"],
+    "first_start": {"attachment": "aW52ZW50ZWQgYnl0ZXMgZm9yIHRoZSBxdWlldCBjaGVjawo=", "test_login": "lp-tester"}
   }
 }
 ```
@@ -30,8 +31,9 @@ A release to another build of a product that declares `update` is made on [a cop
 | `modules` | The modules the check requires installed. TK's are those its build manifest lists as `odoo_install_modules`. |
 | `attachment`, `sha256` | The name of one attachment in the lane's data, and the SHA-256 of its bytes. The check reads it. |
 | `update` | The modules a release to another build updates. It may be left out: such a product's releases run on the data the lane has, and nothing is copied or updated. |
+| `first_start` | What [the first start](#the-first-start) gives an empty data set: `attachment`, the bytes of the declared attachment in base64, and `test_login`, the name the administrator signs in with on the lane `testing`. It may be left out: such a product's first instance starts on the data set as it is. |
 
-`database` is as for [any lane with a database](data-sets.md) and must be there. Every other field of `odoo` but `update` is required, and a field Launchplane does not know makes the file unreadable.
+`database` is as for [any lane with a database](data-sets.md) and must be there. Every other field of `odoo` but `update` and `first_start` is required, and a field Launchplane does not know makes the file unreadable. So does a `first_start.attachment` whose bytes do not have the declared `sha256`.
 
 ## A build is a publishing run
 
@@ -72,6 +74,27 @@ A candidate must answer `health_path` with success for 3 s, as any instance. The
 
 A failure answers `check failed` with what the check read, the candidate is removed, and the lane keeps what it served. It fails this way on a database that has only `base` installed, although `/web/login` answers `200` there, and on an attachment whose file is gone, which Odoo reads as no bytes.
 
+## The first start
+
+A move of a product that declares `first_start`, on a lane where no instance receives visitors, runs the build once on the lane's data set before it starts the web part: in a container of its own named `<product>-<lane>-<12 hex digits>-first-start` and marked `launchplane.part=first-start`. It runs as [the update of a release](#a-release-that-updates) does: with the kind's settings, a login of its own to the data set's database server and the data set's files volume, on the data set's network alone, with no scheduled job and no way out, and Docker never starts it again. Launchplane waits for it to end, reads its exit code and its last 20 lines, and removes it. The first move of a new lane makes the data set first, so that is where it runs.
+
+**What it does is decided by the data and by nothing else.** It asks the database how many tables and indexes it holds.
+
+- **None:** it installs the declared modules with `timeout 600 /odoo/odoo-bin --init <modules> --stop-after-init --no-http`. Then, through Odoo's own shell and in one commit, it makes the declared attachment from the declared bytes and takes Odoo's default password off the administrator.
+- **Any:** it changes nothing and ends well. A database that lacks the attachment, a module or anything else is never initialized over. The web part then starts on it as it is, and [the check](#the-check) says what is missing.
+
+So a move of a lane retired with its data kept runs it too, and it leaves that data as it is. A move of a lane that serves does not run it.
+
+**The testing login.** On the lane named `testing`, and on no other, the administrator is given the name in `test_login` and a password Launchplane makes for that lane: 32 random bytes, made the first time the lane is initialized and the same from then on. Launchplane keeps it on the control machine in `/var/lib/launchplane/secrets/<product>/<lane>/test-login`, which only its own user reads, and `LAUNCHPLANE_SECRETS` names another folder. No call of the API gives it out: a person reads that file on the control machine. It is given to the first start in `LAUNCHPLANE_TEST_PASSWORD` and to nothing else, and is [cleaned from every answer, line and log](data-sets.md#no-secret-leaves-launchplane) as a database password is, also after Launchplane starts again. On any other lane the administrator gets a random password that is kept nowhere, so nobody signs in there with a password.
+
+**A first start that does not end with code 0** starts no web part: the move answers `not initialized`, `422`, with what it wrote last in `error`, nothing is switched, and the data set is kept. A password that cannot be kept stops the move before the first start is run, and the request fails saying so.
+
+| `outcome` | Status | Meaning |
+| --- | --- | --- |
+| `not initialized` | 422 | The first start failed. No web part of the build was ever started, and the web address is sent nowhere it was not sent before. `error` has the first start's exit code and last lines. |
+
+**On the page** the container shows as a row `First start` for as long as it is on the host, and in `GET /running` among the lane's `instances` with `is_first_start`. A lane whose last move answered `not initialized` reads `move failed`, as one whose check failed does.
+
 ## A release that updates
 
 A move of a lane that serves one build to another build, for a product that declares `update`, is made on a copy taken inside the release's own freeze. Nothing written to the lane after the copy can be lost, because nothing can be written: visitors get the back soon page from before the lane is stopped until the release switches or gives up. The first move of a new lane, and a move to the build already serving, copy and update nothing and are [the ordinary move](the-move.md).
@@ -103,14 +126,22 @@ It reads the host and the proxy before every step, asks [the gate](the-move.md#t
 
 The data set of an Odoo lane has a files volume beside the database's: `launchplane-data-<data set>-files`, labelled like the database volume and with `launchplane.part=files`. It is made after the database volume and before the server, shows in `GET /running` as the data set's `files`, and is deleted with the data set. An instance that does not have it mounted shows as wrong.
 
-**A new lane is seeded by hand, once.** Launchplane makes the data set and installs nothing in it. The first move of a new lane therefore answers `check failed` with Odoo's `Database app not initialized`, and leaves the data set. `python -m tests.bed_odoo seed <product> <lane>` then installs the declared modules with Odoo's own `--init` and makes the attachment, with invented data only, from a container on the data set's network that holds a login Launchplane removes at the next move.
+**A new lane of a product that declares no `first_start` is seeded by hand, once.** Launchplane makes the data set and installs nothing in it. The first move of such a lane answers `check failed` with Odoo's `Database app not initialized`, and leaves the data set. `python -m tests.bed_odoo seed <product> <lane>` then installs the declared modules with Odoo's own `--init` and makes the attachment, with invented data only, from a container on the data set's network that holds a login Launchplane removes at the next move. With `first_start` declared, nothing is done by hand: [the first start](#the-first-start) does it.
 
 ## Known and not fixed
 
 - **Launchplane on the test bed holds no key to GitHub.** The bed tests and the watch read the answers GitHub gave for two of TK's runs, served on the control container by `tests/recorded_git_host.py`. From the builder's Mac the same code read both runs from GitHub itself, 1.2 s a run. Granting the bed a key is Chris's.
 - **Launchplane cannot pull TK's image.** The image is private, and Launchplane sends Docker no registry login. The scratch host pulls with its own. A build that is not on the host fails the move with Docker's `No such image`. Launchplane also gives Docker 5 s to answer, and this pull took 36 s.
-- **The shared Odoo tools cannot start Odoo on a lane's login.** `run_odoo_startup.py` of `odoo-devkit` connects to the database `postgres`, which a lane's login is refused. It waited there until stopped, with 66 refusals in the server's log. So an instance runs Odoo's server directly, and none of that script's work is done: no install of missing modules, no website settings, no admin password. Its module update will meet the same refusal.
-- **A new lane cannot pass its first move.** The seed above is a person's work. The update of a release updates modules that are installed, and installs none.
+- **The shared Odoo tools cannot start Odoo on a lane's login.** `run_odoo_startup.py` of `odoo-devkit` connects to the database `postgres`, which a lane's login is refused. It waited there until stopped, with 66 refusals in the server's log. So an instance runs Odoo's server directly, and none of that script's work is done: no website settings, and no install of modules missing from data that is not empty. Its module update will meet the same refusal. [The first start](#the-first-start) is Launchplane's own, in `src/launchplane/odoo.py`, and does only what is said there.
+- **A new lane of a product that declares no `first_start` cannot pass its first move.** The seed above is a person's work. The update of a release updates modules that are installed, and installs none.
+- **A first start that failed after it made its first table is never run to its end.** Odoo commits module by module, so a first start that fails or is cut short part way leaves a database with tables, which the next one leaves as it is. Every move of that lane then answers `check failed`, with the missing modules or attachment named. The data set is deleted by name with a retire, and the next move makes a new one and initializes it. Launchplane does not tell such a database from one a person filled.
+- **A Launchplane killed while the first start runs leaves its container running.** The attempt that takes the request up removes it, cut short or not, and runs the first start again, which then finds whatever the first one committed. Untried on the test bed.
+- **The testing login is the lane's administrator.** It is Odoo's own first user, renamed, with every right. Which rights a tester should have is not decided.
+- **The password of a testing login is a file on the control machine, not encrypted and not backed up,** as Launchplane's database is not. It outlives the lane's data sets: a retire deletes none, and a new data set of the lane is given the same password. Nothing changes a password once it is made. Deleting the file makes the next first start of an empty data set make another, and changes nothing in a database that is already initialized.
+- **Which lane gets a testing login is told by its name,** `testing`. A preview is not yet made by Launchplane. A production lane of a product that declares `first_start` is initialized with an administrator nobody can sign in as, held by `tests/test_first_start.py` against a pretend host and untried on the test bed.
+- **The first start is run at every move of a lane no instance receives visitors on,** also where the data is years old. It then only asks the database what it holds, 0.2 s on the test bed, and its lines are in the request.
+- **The first start has 600 s to install the modules,** chosen with nothing measured beyond TK's 85 modules. Only the last 20 lines it wrote are kept.
+- **The first start installs with Odoo's own defaults,** demo data among them where Odoo's default is to load it. It sets no website, company or language.
 - **A build that needs its modules updated fails its check where the product declares no `update`.** TK's run 45359350705, four commits after the first, answered `500` at `/web/login` on data seeded from the first build. The lane kept serving.
 - **The check knows nothing of a product's records.** It requires the declared modules and the declared attachment's bytes. That a lead became an opportunity on its team is read by `tests/test_bed_tk_update.py`, on the updated copy before the switch and at the web address after it, and by nothing in Launchplane.
 - **A release that switched leaves the data set it replaced,** both volumes, its network and its stopped database server, until the next one switches. A retire cannot delete it while the copy made from it is on the host, which is what the lane serves. One that gave up leaves its copy the same way, and the next release that switches [deletes it](copying.md#old-copies-go).
@@ -126,7 +157,7 @@ The data set of an Odoo lane has a files volume beside the database's: `launchpl
 - **A lane with no instance receiving visitors and two data sets that each have a database server starts on neither.** After a release that updated, that is a lane retired and moved again: the move answers `503` until a retire has named the data set that is not wanted.
 - **A stopped database server of a data set no instance runs against is no longer a finding,** where the lane serves from another data set and the server stopped with exit code 0, also when nobody meant to stop it.
 - **Untried on the test bed:** a cancel while the back soon page shows, a refusal by Docker behind it, an update that runs out of time, a release that updates a product with a background service, and a second release on a lane that already serves from a copy. The cancel, the refusal and the second release are held by `tests/test_updating.py` against a pretend host.
-- **The admin password of a seeded lane is Odoo's default.** The lane is reachable only on the test bed's own network.
+- **The admin password of a lane seeded by hand is Odoo's default.** The lane is reachable only on the test bed's own network. A lane [the first start](#the-first-start) initialized refuses it.
 - **A move to the build already serving does not run the check again.** It answers `unchanged`. A file lost from the files volume while the lane serves is found only by the next release.
 - **Moves of one lane asked at the same moment are kept in the order the git host answers them,** not the order they were sent. Each is verified before it is written.
 - **The modules the check requires come from the description,** not from the manifest of the build being moved to, which lists them too.
@@ -177,5 +208,16 @@ The check now begins when the candidate does, so it waits for Odoo to start, whi
 | `tests/test_bed_tk_update.py`, 9 tests | 10 min 33 s and 10 min 32 s at the higher load, 8 min 13 s at the lower |
 
 The fixture's release was also asked of `f891a17`, held with the candidate started and the update not yet sent. The candidate's bootstrap ended with `psycopg2.errors.UndefinedColumn: column website.lp_greeting does not exist`, Docker started the container again, and the update, run in a container that then stopped under it, ended with code 137: the request ended `failed`, `not updated`, with the original serving. Left alone, the same release switched there, because the update happened to add the column before the bootstrap read it.
+
+On November 27, on the scratch host, the first move of a new lane of TK's build `sha256:0e2ad09f…` with `first_start` declared, by the request's lines:
+
+| | |
+| --- | --- |
+| The whole move, from asked to answered `switched` | 52.5 s, one run |
+| Of that, the network, two volumes and the database server until it accepts connections | 4.8 s |
+| Of that, the first start on the empty database: 85 modules, the attachment and the login | 35.5 s |
+| Of that, the web part from its start to its check passed | 8.7 s |
+| The first start on a database that holds data | 0.2 s. The move of the lane retired with its data kept: 11.7 s |
+| `tests/test_bed_odoo.py -k first_start_from_descriptions`, 1 test with 8 s of reading time after each of its 6 points | 2 min 37 s |
 
 How long an interruption is acceptable is not decided (README, open question 2).

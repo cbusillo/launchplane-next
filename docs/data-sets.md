@@ -83,7 +83,8 @@ Every answer of the API, headers and body, and every line of Launchplane's own l
 - A container's secrets are noted as it is described, before the next one is and before anything else is made of the list. So an error about the read itself, from that read or a later one, is cleaned of what was already found.
 - Launchplane also keeps, in memory only, every secret it has read or given out since it started. A log line is cleaned with those.
 - When the secrets cannot be read, no answer is made and nothing is moved: the call answers `503` with the reason. The page itself still opens. A container Launchplane cannot make sense of does not stop this read; only Docker not answering does.
-- A secret a product has changed before printing it, such as encoding it, is not recognised.
+- [The password of a lane's testing login](odoo.md#the-first-start) is in no container once the first start has ended. It is noted from its file as Launchplane starts, and again each time it is given.
+- A secret a product has changed before printing it, such as encoding it, is not recognised. Odoo keeps the password of a testing login as a hash, which is not cleaned.
 
 ## A move with data
 

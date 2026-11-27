@@ -45,6 +45,7 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, stopped and removed. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `not updated` | 422 | Only for [a release that updates](odoo.md#a-release-that-updates): nothing switched, and the lane serves from its own data again. |
+| `not initialized` | 422 | Only for a product that declares [a first start](odoo.md#the-first-start): it failed, so no instance was started and nothing switched. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.

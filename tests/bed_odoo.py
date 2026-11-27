@@ -1,4 +1,5 @@
-"""What the test bed needs before TK's real Odoo build runs as a lane, and the one-time seed of a lane's data.
+"""What the test bed needs before TK's real Odoo build runs as a lane, and the seed by hand of a lane whose product
+declares no first start.
 
 For tests/test_bed_odoo.py and for the watch in docs/the-move.md, which runs it as `python -m tests.bed_odoo`.
 Nothing here is Launchplane: the seed is a person's work on a new lane, done once, with invented data only.
@@ -18,7 +19,7 @@ from launchplane.data_set import client_environment
 from launchplane.odoo import FILES_PATH, SERVER, USER
 from launchplane.product import Product
 from tests.bed import SCRATCH_ADDRESS, ask, launchplane_answers, on_control, on_scratch, retire, wait_for
-from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TK, TK_STARTING, TK_UPDATING
+from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TEST_LOGIN, TK, TK_STARTING, TK_UPDATING
 from tests.recorded_git_host import LATER_RUN, PORT, RUN, build_of
 
 GIT_HOST_UNIT = "launchplane-recorded-git-host"
@@ -236,6 +237,21 @@ def forget_test_password(product: str) -> None:
     on_control(f"rm -rf /var/lib/launchplane/secrets/{product}")
 
 
+def default_admin_is_refused(product: str, lane: str) -> bool:
+    try:
+        SignedIn(product, lane)
+    except SystemExit as refused:
+        return "Access Denied" in str(refused)
+    return False
+
+
+# What the testing login reads once signed in at the lane's web address: the bytes of the declared attachment.
+def attachment_read_by_the_tester(product: str, lane: str) -> bytes:
+    signed_in = SignedIn(product, lane, TEST_LOGIN, kept_password(product, lane))
+    [file] = signed_in.call("ir.attachment", "search_read", [("name", "=", ATTACHMENT)], fields=["raw"])
+    return base64.b64decode(file["raw"]["content"])
+
+
 # The description is what holds a lane to verified builds and to its check, so it outlives everything of the lane.
 def retire_with_its_data(product: str, lane: str) -> None:
     found = [each for each in ask("/running")[1]["data_sets"] if (each["product"], each["lane"]) == (product, lane)]
@@ -261,18 +277,22 @@ def show(do: str, product: str, lane: str, text: str) -> bool:
         SignedIn(product, lane).write(text)
     elif do == "show-copy":
         shown(read_copy(next(each for each in copies_of(product, lane) if each["data_set"] == text)))
+    elif do == "sign-in":
+        read = hashlib.sha256(attachment_read_by_the_tester(product, lane)).hexdigest()
+        refused = "refused" if default_admin_is_refused(product, lane) else "signed in"
+        shown({f"signed in as {TEST_LOGIN}, attachment": read, f"{ADMIN_LOGIN} with Odoo's default password": refused})
     if do in ("lead", "write", "show"):
         shown(read_lane(product, lane))
-    return do in ("lead", "write", "show", "show-copy")
+    return do in ("lead", "write", "show", "show-copy", "sign-in")
 
 
 def main(do: str, product: str = "watch-tk", lane: str = "testing", text: str = "") -> None:
     if show(do, product, lane, text):
         return
-    if do == "set-up":
+    if do in ("set-up", "set-up-first-start"):
         pull_builds()
         serve_recorded_git_host()
-        describe(product, TK_STARTING if text == "first-start" else TK)
+        describe(product, TK if do == "set-up" else TK_STARTING)
     elif do == "seed":
         seed(product, lane)
     elif do == "tear-down":
@@ -281,7 +301,10 @@ def main(do: str, product: str = "watch-tk", lane: str = "testing", text: str = 
         on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
         forget_test_password(product)
     else:
-        raise SystemExit("python -m tests.bed_odoo set-up|seed|tear-down|lead|show|write|show-copy [product] [lane] [text or copy]")
+        raise SystemExit(
+            "python -m tests.bed_odoo set-up|set-up-first-start|seed|tear-down|lead|show|write|show-copy|sign-in "
+            "[product] [lane] [text or copy]"
+        )
     print(json.dumps({"done": do, "product": product, "builds": {str(RUN): build_of(RUN), str(LATER_RUN): build_of(LATER_RUN)}}))  # noqa: T201
 
 
