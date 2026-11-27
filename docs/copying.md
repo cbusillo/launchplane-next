@@ -1,6 +1,6 @@
 # A copy of a lane's data
 
-`POST /lanes/{product}/{lane}/copy` puts a serving lane behind the back soon page, copies its database volume and its files volume into a new data set while everything of the lane is stopped, and brings the same instance back on its own data. It takes no body. It is kept as a [request](requests.md) and answered `202` at once; with `?wait=<seconds>` it answers as below when it ends.
+`POST /lanes/{product}/{lane}/copy` puts a serving lane behind the back soon page, copies its database volume and its files volume into a new data set while everything of the lane is stopped, and brings the same instance back on its own data. It takes no body. It is kept as a [request](requests.md), and answers as below when it ends.
 
 Nothing uses the copy this call makes. No module is updated on it, no instance is started on it, visitors are never sent to it, and no release is committed. [A release that updates](odoo.md#a-release-that-updates) makes a copy of its own the same way, inside its own freeze, and never uses one made here: the copy's request changes the route twice, to the back soon page and back, and both are edits at [the gate](the-move.md#the-gate).
 
@@ -56,7 +56,7 @@ A copy is whole when each of its volumes was written by one copier whose descrip
 - The page shows a copy as `is a whole copy of <data set>, kept offline: no instance is started on it`, or `is a copy, not whole, of <data set>`. Neither is a finding: the lane stays `good`.
 - A copy has no network and no database server.
 - A [move](data-sets.md#a-move-with-data) never starts an instance on a copy made by this call, whole or not. A lane whose only data set is such a copy is given a new, empty data set, and the copy is left as it is.
-- A copy is kept until a release of its lane switches, or [a retire names it](data-sets.md#retiring-a-lane-with-data). A retire does not delete a data set that has a copy before the copy: the copiers hold its volumes as what they read, and the retire answers `503` naming the copy.
+- [A retire that names a data set](data-sets.md#retiring-a-lane-with-data) does not delete one that has a copy before the copy: the copiers hold its volumes as what they read, and the retire answers `503` naming the copy.
 
 ## Old copies go
 
@@ -74,13 +74,13 @@ Every other copy of the lane is deleted, whole or not: one asked for by itself, 
 
 **A deletion Docker refuses, or does not answer,** is written on its line with Docker's own words or with what failed, and asked for once more. After the second, the copy is left, and the release ends `switched` as it would have. The next release of the lane that switches finds the copy on the host and deletes it then. Until one has, the card says of it `An old copy: the next release that switches deletes it.` Of a copy that a request still at work on the lane is making, it says `A request at work on the lane is making it.` A copy left half deleted, such as one whose database server is gone and whose network Docker would not remove, is a finding on the card and nothing more: a later release copies, updates and switches as if it were not there, and then deletes what is left of it.
 
-Nothing marks a data set as kept by a person yet (cbusillo/launchplane-next#49), so none is kept for that. While no instance of the lane receives visitors, nothing is deleted. A release that does not switch deletes nothing.
+While no instance of the lane receives visitors, nothing is deleted. A release that does not switch deletes nothing.
 
 ## Known and not fixed
 
 - **A copy is on the host until a release of its lane switches.** A lane that is copied and never released keeps each copy, also one that was not finished, until a retire names it.
 - **The data set a lane began on is never deleted by a release.** It is no copy. After a second release it is neither served from nor what the last release replaced, and it stays until a retire names it.
-- **A copy the next release would delete cannot be kept.** No mark says a person wants one.
+- **A copy the next release would delete cannot be kept.** No mark says a person wants one (cbusillo/launchplane-next#49).
 - **A restart just as Docker removed a copy's last volume loses that deletion's line.** The line is written once Docker has answered. Launchplane killed in between, or a reply lost there, leaves a release that ends `switched` with the copy gone and no `delete the data set` line for it.
 - **An old copy Docker twice refuses to delete, or does not answer for, waits for the next release that switches.** Nothing tries in between, and nobody is told but by the request's lines.
 - **The data set the last release replaced loses its copiers when the copy it was made from is deleted.** It has served, and nothing reads whether it is whole after that.

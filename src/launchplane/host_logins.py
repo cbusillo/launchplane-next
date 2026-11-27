@@ -96,7 +96,6 @@ class HostLogins:
     def read_logins(self, database: str) -> list[str]:
         return self.read(database, "Reading the logins", READ_LOGINS, LOGINS_READ)
 
-    # The reads a removal stands on: which data set the server is of, its logins, and then who holds them.
     def unheld(self, database: str) -> list[str]:
         labels = self.client.containers.get(database).labels
         product, data_set = labels.get(PRODUCT_LABEL), labels.get(DATA_SET_LABEL)

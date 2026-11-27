@@ -242,7 +242,6 @@ class Discarded:
     kept: bool
 
 
-# A cancel carried to the gate.
 @dataclass(frozen=True)
 class Abandon:
     web_address: str
@@ -356,7 +355,6 @@ class UpdateRefused(Refused):
     pass
 
 
-# Docker answered that it will not remove the part.
 class RemovalRefused(Refused):
     pass
 

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from launchplane.instance import Run
 from launchplane.odoo import Odoo
@@ -12,21 +12,15 @@ class ProductError(Exception):
     pass
 
 
-class Database(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class Database(BaseModel, extra="forbid", frozen=True):
     image: str
 
 
-class BackgroundService(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class BackgroundService(BaseModel, extra="forbid", frozen=True):
     command: list[str] = Field(min_length=1)
 
 
-class Product(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class Product(BaseModel, extra="forbid", frozen=True):
     health_path: str = Field(default="/", pattern=r"^/[^\s]*$")
     database: Database | None = None
     background_service: BackgroundService | None = None

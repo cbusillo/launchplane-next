@@ -202,12 +202,13 @@ def test_each_command_for_a_part_reaches_docker_only_once_its_line_is_written_an
     assert not [value for value in given.values() for did in dids if value in did]
 
 
+def not_written(did: str, _command: Sent | Command) -> Answered:
+    raise Interrupted(f"The attempt has ended in the record, so it was not written and not done: {did}")
+
+
 def test_a_command_whose_line_cannot_be_written_is_not_sent() -> None:
     told = Told()
     host, part = a_part_running(told)
-
-    def not_written(did: str, _command: Sent | Command) -> Answered:
-        raise Interrupted(f"The attempt has ended in the record, so it was not written and not done: {did}")
 
     with pytest.raises(Interrupted):
         host.retire_instance(WEB, Witness(write=not_written))

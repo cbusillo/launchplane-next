@@ -15,6 +15,7 @@ from tests.bed import (
     move_lane,
     needs_test_bed,
     on_scratch,
+    read_running,
     request_ended,
     request_loop,
     retire,
@@ -36,23 +37,17 @@ IMPOSTOR, ANOTHER_VOLUME = "test-bed-answers-impostor", "test-bed-answers-anothe
 LONGER_THAN_A_REQUEST_IS_LEFT_BEFORE_IT_IS_TAKEN_UP_AGAIN = 12
 
 
-def running() -> dict[str, Any]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return body
-
-
 def of_lane(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [part for part in parts if (part["product"], part["lane"]) == (PRODUCT, LANE)]
 
 
 def judged() -> dict[str, Any]:
-    [lane] = of_lane(running()["lanes"])
+    [lane] = of_lane(read_running()["lanes"])
     return lane
 
 
 def retire_lane_and_its_data() -> None:
-    for data_set in of_lane(running()["data_sets"]):
+    for data_set in of_lane(read_running()["data_sets"]):
         status, body = retire(PRODUCT, LANE, data_set["data_set"])
         assert status == 200, body
     status, body = retire(PRODUCT, LANE)
@@ -91,7 +86,7 @@ def beats_written(database: str) -> int:
 
 @pytest.mark.usefixtures("lane_on_a")
 def test_a_repair_whose_login_read_is_refused_keeps_its_background_service_writing_and_ends_done_once_the_read_answers() -> None:
-    [data_set], [before] = of_lane(running()["data_sets"]), of_lane(running()["background_services"])
+    [data_set], [before] = of_lane(read_running()["data_sets"]), of_lane(read_running()["background_services"])
     [database] = data_set["databases"]
     on_scratch(f"docker rm --force {before['container']}")
     hold(WATCHED)
@@ -106,7 +101,7 @@ def test_a_repair_whose_login_read_is_refused_keeps_its_background_service_writi
         return "The logins of the database" in (now["error"] or "")
 
     wait_for(left_working_over_the_login_read, seconds=30)
-    [repaired] = of_lane(running()["background_services"])
+    [repaired] = of_lane(read_running()["background_services"])
     started, beats = container_id(repaired["container"]), beats_written(database["container"])
     time.sleep(LONGER_THAN_A_REQUEST_IS_LEFT_BEFORE_IT_IS_TAKEN_UP_AGAIN)
     kept, shown = read_between_attempts(asked["id"]), judged()
@@ -124,7 +119,7 @@ def test_a_repair_whose_login_read_is_refused_keeps_its_background_service_writi
 
 @pytest.mark.usefixtures("lane_on_a")
 def test_a_start_on_a_database_with_another_volume_ends_failed_with_its_data_kept_and_says_so_and_the_retire_after_it_ends() -> None:
-    [data_set] = of_lane(running()["data_sets"])
+    [data_set] = of_lane(read_running()["data_sets"])
     [database], [network], [volume] = data_set["databases"], data_set["networks"], data_set["volumes"]
     labels = " ".join(
         f"--label launchplane.{label}"
@@ -144,7 +139,7 @@ def test_a_start_on_a_database_with_another_volume_ends_failed_with_its_data_kep
         assert moved == 503 and f"has {ANOTHER_VOLUME} mounted" in failed["error"], failed
         assert f"The clean-up after it is not known to be whole: {not_read}" in failed["error"], failed
         assert (retired, answer["outcome"], [not_read in each for each in answer["logins_not_read"]]) == (200, "unchanged", [True])
-        assert (of_lane(running()["instances"]), on_scratch(f"docker volume ls --quiet --filter name={volume}").split()) == (
+        assert (of_lane(read_running()["instances"]), on_scratch(f"docker volume ls --quiet --filter name={volume}").split()) == (
             [],
             [volume],
         )
@@ -165,7 +160,7 @@ def read_between_attempts(request: int) -> dict[str, Any]:
 
 
 def states_of_the_lane() -> set[str]:
-    shown = running()
+    shown = read_running()
     databases = [database for data_set in of_lane(shown["data_sets"]) for database in data_set["databases"]]
     return {part["state"] for part in (*of_lane(shown["instances"]), *of_lane(shown["background_services"]), *databases)}
 
@@ -220,14 +215,14 @@ SECOND_ROUTERS = {
 def test_two_routers_on_one_web_address_show_as_one_conflict_naming_both_and_a_move_changes_nothing_until_there_is_one(
     name: str, target: str | None
 ) -> None:
-    [serving] = of_lane(running()["instances"])
+    [serving] = of_lane(read_running()["instances"])
     file = ROUTES_FOLDER / f"{name}.yaml"
     given = second_router(name, target or serving["container"])
     on_scratch(f"docker exec --interactive {PROXY_NAME} sh -c 'cat > {file}'", given=given)
     try:
         wait_for(lambda: judged()["condition"] == "conflicting", seconds=30)
         status, kept = ask_and_wait(f"/lanes/{PRODUCT}/{LANE}/move", {"build": BUILD_B}, timeout=25)
-        shown = running()
+        shown = read_running()
         [conflict] = [each["sentence"] for each in judged()["findings"] if each["shown"] == "conflicting"]
         [web_address] = [each for each in shown["web_addresses"] if each["web_address"] == WEB_ADDRESS]
         [card] = [each for each in shown["cards"] if each["title"] == f"{PRODUCT} · {LANE}"]

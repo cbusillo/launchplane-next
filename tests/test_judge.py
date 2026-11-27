@@ -226,9 +226,15 @@ def answered(name: str) -> dict[str, list[str]]:
     }
 
 
+# An answer pinned as one list is the answer in every mode.
+def pinned(name: str) -> dict[str, list[str]]:
+    kept: dict[str, list[str]] | list[str] = json.loads(PINNED.read_text())[name]
+    return kept if isinstance(kept, dict) else dict.fromkeys(work_done_on(name), kept)
+
+
 @pytest.mark.parametrize("name", CASES)
 def test_the_status_call_answers_this_for_the_lane_as_read(name: str) -> None:
-    assert answered(name) == json.loads(PINNED.read_text())[name]
+    assert answered(name) == pinned(name)
 
 
 def test_the_three_lists_of_sentences_are_the_findings_by_how_each_is_shown() -> None:

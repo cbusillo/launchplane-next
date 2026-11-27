@@ -1,21 +1,20 @@
-import http.client
 import sys
 import time
 from collections.abc import Iterator
-from typing import Any
+from functools import partial
 
 import pytest
 
 from tests.bed import (
-    SCRATCH_ADDRESS,
-    UnexpectedAnswer,
     ask,
     kill_launchplane,
     move_lane,
     needs_test_bed,
+    read_running,
     request_ended,
     request_loop,
     retire,
+    server_answering,
     wait_for,
 )
 
@@ -38,31 +37,12 @@ def lanes_on_a() -> Iterator[None]:
         assert retire(PRODUCT, lane)[0] == 200
 
 
-def server_answering() -> str:
-    connection = http.client.HTTPConnection(SCRATCH_ADDRESS, 80, timeout=5)
-    try:
-        connection.request("GET", "/", headers={"Host": f"{LANE}.{PRODUCT}.test"})
-        response = connection.getresponse()
-        response.read()
-        if response.status != 200:
-            raise UnexpectedAnswer(f"status {response.status}")
-        return response.getheader("Server", "")
-    finally:
-        connection.close()
-
-
-def running() -> dict[str, Any]:
-    status, body = ask("/running")
-    assert status == 200, body
-    return body
-
-
 def builds_of(lane: str) -> list[str]:
-    return [each["build"] for each in running()["instances"] if (each["product"], each["lane"]) == (PRODUCT, lane)]
+    return [each["build"] for each in read_running()["instances"] if (each["product"], each["lane"]) == (PRODUCT, lane)]
 
 
 def lanes_being_moved() -> set[str]:
-    return {each["lane"] for each in running()["lanes"] if each["product"] == PRODUCT and each["work"] == "moving"}
+    return {each["lane"] for each in read_running()["lanes"] if each["product"] == PRODUCT and each["work"] == "moving"}
 
 
 def both_lanes_are_being_moved() -> bool:
@@ -93,7 +73,7 @@ def test_two_lanes_asked_at_once_are_at_work_at_the_same_time_and_both_switch() 
 
 @pytest.mark.usefixtures("lanes_on_a")
 def test_a_move_cancelled_by_hand_before_the_switch_leaves_the_lane_as_it_was() -> None:
-    with request_loop(server_answering) as loop:
+    with request_loop(partial(server_answering, f"{LANE}.{PRODUCT}.test")) as loop:
         request = asked_to_move(LANE, BUILD_B)
         wait_for(build_b_is_being_checked, seconds=30)
         status, cancelled = ask(f"/requests/{request}/cancel?wait=60", {})
@@ -103,7 +83,7 @@ def test_a_move_cancelled_by_hand_before_the_switch_leaves_the_lane_as_it_was() 
         ["stop", "remove"],
     ), cancelled
     assert (loop.failures, loop.answers_in_order(), builds_of(LANE)) == ([], [ANSWER_A], [BUILD_A])
-    judged = next(each for each in running()["lanes"] if (each["product"], each["lane"]) == (PRODUCT, LANE))
+    judged = next(each for each in read_running()["lanes"] if (each["product"], each["lane"]) == (PRODUCT, LANE))
     assert (judged["condition"], ask(f"/requests/{request}/cancel", {})[0]) == ("good", 200), judged
 
 

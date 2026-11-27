@@ -42,6 +42,7 @@ from tests.pretend_host import SINCE, GateNeverAsked, PretendHost, PretendProxy
 from tests.pretend_record import PretendRecord
 from tests.recorded_git_host import RUN, SIGNATURE, answers, build_of, serve
 from tests.recording_docker import RecordingDocker
+from tests.test_git_host import nothing, pretend_record
 
 SECRET = "Zx3-secret_given-to-a-lane-0123456789abcdef"  # noqa: S105 a pretend one
 LEAK = f"wget: server returned error: HTTP/1.1 503 password={SECRET}"
@@ -132,8 +133,7 @@ class Asked(GateNeverAsked):
     def begin_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult:
         return self.maintenance(product, lane, witness)
 
-    def end_maintenance(self, product: str, lane: str, witness: Witness, /) -> MaintenanceResult:
-        return self.maintenance(product, lane, witness)
+    end_maintenance = begin_maintenance
 
 
 # Each request is worked within the call that asked for it, so the call answers with how it ended.
@@ -314,16 +314,10 @@ def test_a_line_logged_as_the_service_starts_is_cleaned_before_the_worker_or_the
         writing_through.extend(isinstance(handler, CleanedStream) for handler in logging.root.handlers)
         logging.getLogger("launchplane.worker").error("not an error Launchplane expects: %s", SECRET)
 
-    def record_in_memory(_database: str, _secrets: Secrets) -> PretendRecord:
-        return PretendRecord()
-
-    def serve_nothing(_server: uvicorn.Server) -> None:
-        pass
-
     monkeypatch.setattr(ContainerHost, "from_environment", lambda: host)
-    monkeypatch.setattr("launchplane.api.PostgresRecord", record_in_memory)
+    monkeypatch.setattr("launchplane.api.PostgresRecord", pretend_record)
     monkeypatch.setattr(Worker, "start", start_and_fail)
-    monkeypatch.setattr(uvicorn.Server, "run", serve_nothing)
+    monkeypatch.setattr(uvicorn.Server, "run", nothing)
     api.serve()
     written: str = capsys.readouterr().err
     assert (writing_through, SECRET in written, written.count(SECRET_REMOVED)) == ([True], False, 1)

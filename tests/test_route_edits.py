@@ -1,5 +1,6 @@
 import pytest
 
+from launchplane import steps
 from launchplane.docker_answers import ContainerHostError
 from launchplane.gate import DONE, LOST
 from launchplane.instance import BACK_SOON, InstanceState, OnHost
@@ -139,15 +140,15 @@ def test_a_change_the_gate_did_not_make_is_told_as_refused_and_the_lane_is_read_
     edit = proxy.edit
     told: list[tuple[str, Said | None, str | None]] = []
 
-    def about_to(did: str, _web_address: str, _to: str | None) -> Answered:
-        return lambda said, error: told.append((did, said, error))
+    def write(did: str, sent: steps.Sent | steps.Command) -> Answered:
+        return lambda said, error: told.append((did, said, error)) if isinstance(sent, steps.Sent) else None
 
     def not_the_route_read_once(web_address: str, generation: str, attempt: int, read: str, container: str | None) -> str:
         proxy.edit = edit
         return edit(web_address, generation, attempt, f"{read}, as it no longer is", container)
 
     proxy.edit = not_the_route_read_once
-    answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(about_to=about_to))
+    answer = lanes_on(proxy).begin_maintenance("site", "testing", Witness(write=write))
     switch = f"send {WEB_ADDRESS} to {BACK_SOON}"
     assert (answer.outcome, told[:2]) == (
         MaintenanceOutcome.IN_MAINTENANCE,

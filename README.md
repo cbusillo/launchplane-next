@@ -74,8 +74,6 @@ It never stores what is running now. That is always read from the host.
 
 It does not store what should be running either. That is worked out each time from what people decided and from the product's repository: production should run the build of the latest acceptance or of a hotfix the Director started after it, testing the latest build of the main branch, and a preview the latest build of its pull request. The status page compares that with what the host reports.
 
-The record of what Launchplane did is history. It never answers what is running.
-
 ## What Launchplane asks of a product
 
 Four commands, defined once per kind:

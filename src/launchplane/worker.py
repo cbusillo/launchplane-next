@@ -220,7 +220,6 @@ class Worker:
 
         return look
 
-    # What a call is given to say what it did, to ask before each action, and to ask between actions.
     def witness_of(self, request: Request, attempt: int, held: Held, *, again: bool) -> Witness:
         def tell(did: str, refusal: str | None) -> None:
             self.record.note(attempt, did, refusal)

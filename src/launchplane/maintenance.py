@@ -90,7 +90,7 @@ def decide_begin(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | No
     step = unread_route(lane, "put in maintenance", done) or route_step(judged, done)
     if step is not None:
         return step
-    if cancel is not None and is_turned_back(cancel):
+    if is_turned_back(cancel):
         return begin_step_back(judged)
     if not route.in_maintenance:
         if route.written is None and has_nothing(lane):
@@ -210,7 +210,7 @@ def decide_end(
     step = unread_route(lane, "brought out of maintenance", done) or route_step(judged, done)
     if step is not None:
         return step
-    if cancel is not None and is_turned_back(cancel):
+    if is_turned_back(cancel):
         return end_step_back(judged)
     answer = answer_for(lane.product, lane.lane, lane.route, MaintenanceOutcome.ENDED)
     if lane.route.in_maintenance:

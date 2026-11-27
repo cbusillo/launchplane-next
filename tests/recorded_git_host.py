@@ -1,8 +1,9 @@
 """A git host that answers what GitHub answered for two publishing runs of TK's `Build` workflow.
 
 The answers are in tests/answers/git_host, one folder per run: the run, its artifacts, and its manifest cut to what
-Launchplane reads. The manifest is zipped as GitHub hands it out. `python -m tests.recorded_git_host` serves them on
-the control container, so a bed test needs no key to GitHub and does not fail when GitHub drops the artifact.
+Launchplane reads. The later run is kept as what differs from the first. The manifest is zipped as GitHub hands it out.
+`python -m tests.recorded_git_host` serves them on the control container, so a bed test needs no key to GitHub and does
+not fail when GitHub drops the artifact.
 """
 
 import io
@@ -43,9 +44,19 @@ def zipped(manifest: object) -> bytes:
     return archive.getvalue()
 
 
+def run_answer(run: int) -> Any:  # noqa: ANN401 whatever GitHub answered
+    first = recorded(RUN, "run")
+    if run == RUN:
+        return first
+    differences = recorded(run, "run-differences")
+    return first | differences | {"head_commit": first["head_commit"] | differences["head_commit"]}
+
+
 # What the git host answers for each run, by run number. A test changes a copy to make a run GitHub never had.
 def answers() -> dict[int, dict[str, Any]]:
-    return {run: {name: recorded(run, name) for name in ("run", "artifacts", "manifest")} for run in (RUN, LATER_RUN)}
+    return {
+        run: {"run": run_answer(run)} | {name: recorded(run, name) for name in ("artifacts", "manifest")} for run in (RUN, LATER_RUN)
+    }
 
 
 # A build made on the bed is answered as the later run is, under its own numbers, publishing that image.

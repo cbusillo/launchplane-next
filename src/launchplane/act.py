@@ -224,7 +224,7 @@ def taken_and_told(action: Action, take: Take, witness: Witness, *, back: bool) 
 # error is no answer: only a later reading of the routes file says whether the change was made.
 def route_changed(action: steps.EditRoute | steps.Switch, take: Take, witness: Witness) -> Event:
     to = action.to if isinstance(action, steps.EditRoute) else action.container
-    answered = witness.about_to(named(action), action.web_address, to)
+    answered = witness.write(named(action), steps.Sent(web_address=action.web_address, to=to))
     try:
         event = take(action, witness)
     except (ContainerHostError, ProxyError) as error:

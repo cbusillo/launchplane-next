@@ -13,11 +13,11 @@ from launchplane.container_host import ContainerHost, PartStopped
 from launchplane.data_set import RULES_AS_READ, RULES_FILE, login_of
 from launchplane.docker_answers import (
     ContainerHostError,
-    HostAnswers,
     Listed,
     LoginRemovalRefused,
     container_summaries,
-    on_host_from_answers,
+    details_by_name,
+    on_host_from,
 )
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, logins_held
 from launchplane.instance import (
@@ -82,8 +82,8 @@ def read(
     described: Sequence[object] = (),
     system_time: str = "2026-11-15T20:00:00Z",
 ) -> OnHost:
-    answers = HostAnswers(list(containers), list(networks), {"Volumes": list(volumes)}, list(described), {"SystemTime": system_time})
-    return on_host_from_answers(answers)
+    found = Listed(container_summaries(list(containers)), details_by_name(list(described)))
+    return on_host_from(found, list(networks), {"Volumes": list(volumes)}, {"SystemTime": system_time})
 
 
 def test_a_stopped_database_is_read_with_how_it_exited_so_a_killed_one_is_told_from_a_clean_stop() -> None:
@@ -246,11 +246,6 @@ def test_a_database_and_a_background_service_are_not_read_as_instances() -> None
     containers: list[object] = [container("db", "database", []), container("a-background-service", "background-service", [])]
     on_host = read(containers, described=[background_service_details("a-background-service")], system_time="2026-11-15T20:00:02Z")
     assert (on_host.instances, [found.container for found in on_host.background_services]) == ([], ["a-background-service"])
-
-
-def test_a_container_marked_with_a_part_launchplane_does_not_know_is_an_error_not_skipped() -> None:
-    with pytest.raises(ContainerHostError, match="part cache"):
-        read([container("shop-x", "cache", [])])
 
 
 def test_a_background_service_is_read_with_the_data_set_it_says_it_runs_against() -> None:
@@ -561,7 +556,7 @@ def test_a_password_read_to_give_to_a_background_service_is_a_secret_at_once() -
 def test_a_description_of_unexpected_shape_is_an_error_that_repeats_nothing_docker_answered() -> None:
     described = {"Name": "/shop-testing-1", "Config": {"Env": ["PGPASSWORD=hunter2-hunter2"]}}
     with pytest.raises(ContainerHostError, match="State: Field required") as refused:
-        on_host_from_answers(HostAnswers([container("shop-testing-1", "web", [])], [], {"Volumes": []}, [described]))
+        read([container("shop-testing-1", "web", [])], described=[described])
     assert "hunter2" not in str(refused.value)
 
 

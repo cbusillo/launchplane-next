@@ -3,7 +3,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import Enum, StrEnum, auto
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from launchplane.data_set import DATA_PATH
 from launchplane.instance import (
@@ -131,9 +131,7 @@ class Found:
     sentence: str
 
 
-class Finding(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class Finding(BaseModel, frozen=True):
     subject: str
     kind: Kind
     sentence: str

@@ -8,9 +8,10 @@ import pytest
 
 from launchplane.docker_answers import CommandResult, ContainerHostError
 from launchplane.gate import GATE_FOLDER_NAME, Answer, Gate, GateError
-from launchplane.instance import Verdict, new_generation
+from launchplane.instance import new_generation
 from launchplane.proxy import INSTANCE_URL, PROXY_NAME, VOLUME_FOLDER, route_file_of, route_text
 from tests.bed import SCRATCH_SHELL, needs_test_bed, on_scratch, wait_for
+from tests.test_gate import ABANDONED, NONE, committed
 
 pytestmark = needs_test_bed
 
@@ -19,7 +20,6 @@ pytestmark = needs_test_bed
 WEB = "proof.gate-proof.test"
 ROUTE = route_file_of(WEB)
 GATE_FOLDER = VOLUME_FOLDER / GATE_FOLDER_NAME
-NONE, ABANDONED = Answer(Verdict.NONE), Answer(Verdict.ABANDONED)
 HELD_BIN = "/tmp/gate-proof-bin"  # noqa: S108 a folder inside the proxy's container
 AFTER_THE_RENAME, HOLD = "/tmp/gate-proof-after-the-rename", "/tmp/gate-proof-hold"  # noqa: S108
 LOCK_HELD = "/tmp/gate-proof-lock-held"  # noqa: S108
@@ -29,10 +29,6 @@ SYNC_HELD_AFTER_THE_RENAME = f"""#!/bin/sh
 case "$1" in *.yml) touch {AFTER_THE_RENAME}; while [ -e {HOLD} ]; do sleep 0.1; done ;; esac
 exec /bin/busybox sync "$@"
 """
-
-
-def committed(candidate: str) -> Answer:
-    return Answer(Verdict.COMMITTED, candidate)
 
 
 def in_proxy(command: str, flags: str = "") -> str:

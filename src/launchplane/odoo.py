@@ -1,6 +1,6 @@
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from launchplane.data_set import DATABASE_NAME
 from launchplane.instance import Run
@@ -36,9 +36,7 @@ if read != [want["sha256"]]:
 
 
 # What a product of the kind declares for itself. Its builds are runs of `workflow` in `repository`, published to `image`.
-class Odoo(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class Odoo(BaseModel, extra="forbid", frozen=True):
     repository: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
     workflow: str
     image: str

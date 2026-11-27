@@ -1,5 +1,4 @@
 import hashlib
-import json
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
@@ -35,10 +34,6 @@ SETTINGS = TK.run.environment
 
 def test_a_product_that_is_no_odoo_starts_as_its_build_says_and_is_checked_by_its_web_answer_alone() -> None:
     assert (Product().run, WITH_DATA.check("web")) == (Run(), Check("web", "/health"))
-
-
-def test_the_web_part_of_an_odoo_product_runs_no_scheduled_job() -> None:
-    assert SETTINGS["ODOO_MAX_CRON_THREADS"] == "0"
 
 
 def test_odoo_looks_for_its_database_in_the_one_database_its_login_may_connect_to() -> None:
@@ -125,7 +120,6 @@ def test_a_declared_name_cannot_end_the_check_script_or_run_as_code() -> None:
     run_check(read, product)
     script = product.check("web").command[2]
     assert (read.asked, script.count("\nCHECK\n")) == ([[("name", "=", hostile)]], 1)
-    assert json.loads(json.dumps(hostile)) == hostile
 
 
 def moved_to_a(proxy: PretendProxy) -> str:

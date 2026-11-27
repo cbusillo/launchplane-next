@@ -18,12 +18,8 @@ from launchplane.instance import Verdict
 #   <web address>.<generation>.fenced               "<attempt>": no attempt up to this one may arm
 #   <web address>.<generation>.abandoned            a cancel won
 #
-# The staged file is finished and made durable, then the mark that arms it, and then the routes file is put in place by
-# renaming the staged file. While a generation is armed, only that rename takes its staged file away. So armed with the
-# staged file there is none, and armed with the staged file gone is committed to that candidate: the rename proves
-# itself, with no write after it and no reply needed. Whatever takes permission away does it in this order: the
-# revocation is kept first, then the arming mark goes, then the staged file. A command cut short and sent again goes in
-# the same order, and at no moment is a generation armed with its staged file gone unless it was renamed.
+# Armed with the staged file gone is committed to that candidate, and nothing else is. The order every command keeps so
+# that this holds through a crash is in docs/the-move.md, under "The gate".
 #
 # A file that cannot be looked for is never taken as absent: the command fails, and its sender has no answer.
 GATE_FOLDER_NAME = "gate"

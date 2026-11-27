@@ -234,7 +234,6 @@ def login_step(judged: Judgement, done: tuple[Event, ...], needs: DataSet | None
     return Wait(f"{untold}. Everything else is done and stays as it is. The call ends once they are read.") if untold else None
 
 
-# Whether the call is putting its lane back: a cancel was asked of it and the host has not shown it too late.
 def is_turned_back(cancel: Cancel | None) -> bool:
     return cancel is not None and not cancel.refused
 
@@ -529,7 +528,7 @@ def decide_retire(
 ) -> Step[RetireResult] | StepBack:
     if (unread := unread_route(judged.lane, "retired", done)) is not None:
         return unread
-    if cancel is not None and is_turned_back(cancel):
+    if is_turned_back(cancel):
         return retire_step_back(judged, delete_data_set)
     return retire_step(judged, None if cancel else delete_data_set, done)
 

@@ -17,7 +17,7 @@ from launchplane.plan import lane_data_set
 from launchplane.product import Database, Product
 from launchplane.proxy import ProxyError
 from launchplane.record import Asked, Record, Stands
-from launchplane.steps import Cancel, CopyOutcome, CopyVolume, Event, GiveUp, StopPart
+from launchplane.steps import Cancel, CopyOutcome, CopyVolume, GiveUp, StopPart
 from launchplane.telling import Witness
 from launchplane.worker import Worker
 from tests.given_secrets import NO_SECRETS
@@ -101,11 +101,11 @@ def test_a_back_soon_route_the_proxy_has_not_loaded_stops_nothing_and_copies_not
     assert proxy.host.actions[2:] == ["show back soon"]
 
 
-def frozen_by_this_request(given: Given, product: Product = WITH_A_DATABASE, done: tuple[Event, ...] = ()) -> Copying:
+def frozen_by_this_request(given: Given) -> Copying:
     proxy = given.proxy()
     proxy.edited[WEB_ADDRESS] = (BACK_SOON, f"{BACK_SOON} {GENERATION} 1")
     reading = Reading(SINCE, proxy.read(), proxy.host.read()).lane("site", "testing")
-    return Copying(judge(reading, product, Work.COPY), product, GENERATION, "fresh", done)
+    return Copying(judge(reading, WITH_A_DATABASE, Work.COPY), WITH_A_DATABASE, GENERATION, "fresh", ())
 
 
 def lane_web(state: InstanceState) -> Any:  # noqa: ANN401 a part of a given lane

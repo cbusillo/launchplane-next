@@ -234,9 +234,11 @@ One more move, on the same lane, is [the login watch](#the-login-watch) by hand.
 
 `tests/test_interruptions.py` runs the same rows against the pretend host, whose proxy can hold a written route unloaded, and against the pretend record and PostgreSQL. It needs no test bed and takes seconds.
 
-### The maintenance watch
+### The held watches
 
-Ending maintenance, killed after its change of the route is on the host and before Launchplane has the reply. Every block pastes into zsh as it stands. The lane is the one `tests/test_bed_interruptions.py` uses, whose images and description are on the bed once that file has run. The page is `http://launchplane.shiny:8700/`.
+The maintenance, start and login watches each begin with the first block here and end with the second. Every block pastes into zsh as it stands. The lane is the one `tests/test_bed_interruptions.py` uses, whose images and description are on the bed once that file has run. The page is `http://launchplane.shiny:8700/`.
+
+The setup starts Launchplane with its calls able to be held, and brings up the lane `held` and the lane `untouched` beside it on build a:
 
 ```
 L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
@@ -245,6 +247,20 @@ ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-he
 until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
 curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
 curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
+```
+
+Putting the bed back retires each lane with its data set and starts the plain service:
+
+```
+for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
+ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
+```
+
+### The maintenance watch
+
+Ending maintenance, killed after its change of the route is on the host and before Launchplane has the reply. Paste [the setup](#the-held-watches) first, then:
+
+```
 curl -s -X POST "$L$P/held/maintenance/begin?wait=110"
 curl -s -X PUT "$H/holds/before.proxy.edit"
 R=$(curl -s -X POST "$L$P/held/maintenance/end" | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
@@ -285,24 +301,13 @@ curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"
 curl -s -X POST "$L$P/held/maintenance/end?wait=60"
 ```
 
-5. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
-
-```
-for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
-ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
-```
+5. **Put the bed back,** with [the block that does](#the-held-watches).
 
 ### The start watch
 
-A move, killed once the line for the start of its new background service is written and before the command is sent. Every block pastes into zsh as it stands. The lane, the page and the holding mode are those of [the maintenance watch](#the-maintenance-watch).
+A move, killed once the line for the start of its new background service is written and before the command is sent. Paste [the setup](#the-held-watches) first, then:
 
 ```
-L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
-P=/lanes/test-bed-gate-ledger; V=http://docker-lp-scratch.shiny/
-ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
-until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
-curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
-curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
 curl -s -X PUT "$H/holds/before.host.start_background_service"
 R=$(curl -s -X POST "$L$P/held/move" -H "$J" -d '{"build":"launchplane-test-ledger:b"}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
 until curl -s "$H/holds" | grep -q '"stopped_at": \["before.host.start_background_service"\]'; do sleep 1; done
@@ -335,12 +340,7 @@ curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouc
 
    The third command prints the attempts, `interrupted` then `done`, the outcome `switched`, and the request's account. In it `start` and the background service's name is there once. The last answers `pretend product b` and `pretend product a`. Look at the page now: the request's row is `done` and stays for 10 minutes, and among its lines are, in this order, the start as `: may have been sent, no answer`; a `stop` of the same container, `: found already as asked`, and its `remove`, `: done`, which is the second attempt clearing away the container that was made and never started; then its `make` and its `start` again, each `: done`. After them `retire` and the old instance's name, `, refused`, is the gate answering that an earlier release was switched to that instance, so it is not removed as something a failed move left. It is removed next as the instance this release replaced, visitors being on the new one by then: its `stop` and `remove` follow, each `: done`.
 
-4. **Put the bed back.** Each lane is retired with its data set, and the plain service started:
-
-```
-for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
-ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
-```
+4. **Put the bed back,** with [the block that does](#the-held-watches).
 
 ### The TK watch
 
@@ -591,15 +591,9 @@ Afterwards the test retires both lanes with each copy and its data set, removes 
 
 ### The login watch
 
-A move on a lane with data, killed once the login of its new instance is made and before the instance is. Every block pastes into zsh as it stands. The lane, the page and the holding mode are those of [the maintenance watch](#the-maintenance-watch).
+A move on a lane with data, killed once the login of its new instance is made and before the instance is. Paste [the setup](#the-held-watches) first, then:
 
 ```
-L=http://launchplane.shiny:8700; H=http://launchplane.shiny:8701; J='Content-Type: application/json'
-P=/lanes/test-bed-gate-ledger; V=http://docker-lp-scratch.shiny/
-ssh root@launchplane.shiny 'install -m 644 /opt/launchplane/tests/launchplane-held.service /etc/systemd/system/ && systemctl daemon-reload && systemctl stop launchplane && systemctl start launchplane-held'
-until curl -sf "$H/holds" >/dev/null && curl -sf "$L/requests" >/dev/null; do sleep 1; done
-curl -s -X POST "$L$P/held/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
-curl -s -X POST "$L$P/untouched/move?wait=110" -H "$J" -d '{"build":"launchplane-test-ledger:a"}'
 curl -s -X PUT "$H/holds/after.logins.make"
 R=$(curl -s -X POST "$L$P/held/move" -H "$J" -d '{"build":"launchplane-test-ledger:b"}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'); echo "request $R"
 until curl -s "$H/holds" | grep -q '"stopped_at": \["after.logins.make"\]'; do sleep 1; done
@@ -629,9 +623,4 @@ curl -s -H 'Host: held.test-bed-gate-ledger.test' "$V"; curl -s -H 'Host: untouc
 ssh root@docker-lp-scratch.shiny 'docker exec $(docker ps --quiet --filter label=launchplane.lane=held --filter label=launchplane.part=database) psql -U postgres -d app -Atc "select rolname from pg_roles where rolname like \$\$i\\_%\$\$ order by 1"; docker ps --filter label=launchplane.lane=held --filter label=launchplane.part=web --format "{{.Names}}"'
 ```
 
-4. **Put the bed back.** As in [the start watch](#the-start-watch):
-
-```
-for lane in held untouched; do D=$(curl -s "$L$P/$lane/retire?wait=110" -H "$J" -d '{}' | python3 -c 'import sys, json; print(json.load(sys.stdin)["kept_data_sets"][0])'); curl -s -X POST "$L$P/$lane/retire?wait=110" -H "$J" -d "{\"delete_data_set\": \"$D\"}"; done
-ssh root@launchplane.shiny 'systemctl stop launchplane-held && systemctl start launchplane'
-```
+4. **Put the bed back,** with [the block that does](#the-held-watches).
