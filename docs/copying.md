@@ -129,11 +129,11 @@ On November 25, on the scratch host, the copier before and the copier now, each 
 
 ### OPW-sized release
 
-On November 27, 2026, two releases through Launchplane ran out of time comparing the files. Visitors saw the back soon page for **349.0 and 348.5 s**, then the original build answered again. Neither request reached the module update or the candidate check. A hand-driven release using a writable ZFS clone served the new build after **18.6 and 18.0 s** on two runs.
+On November 27, 2026, two releases through Launchplane ran out of time comparing the files. Visitors saw the back soon page for **349.0 and 348.5 s**, then the original build answered again. Neither request reached the module update or the candidate check. A hand-driven release using a writable ZFS clone served the new build after **18.6 and 18.0 s** on two runs. With the same copier command allowed to finish by hand, the new build served after **593.0 s** and a failed candidate check returned the original after **599.1 s**.
 
 The second bed used the November 19 intake's size/count table to generate 843,024 files of independent random bytes, totaling 110,455,322,171 bytes. The Odoo fixture added its own small files and attachments. The stopped files volume held 843,133 files and 110,459,902,506 bytes. Its PostgreSQL cluster held 3,277 files and 1,268,771,902 bytes against a target of 1,268,299,891. The database contained a seeded TK install, one invented lead with an attachment, and 946,941 padding rows in an unlogged table outside the module. The new build updated `tk_website`, converting the lead to an opportunity. This measured OPW's data size with that module's work.
 
-All outages start at the first HTTP 503 and end at the first HTTP 200 at `/web/login` through the scratch host's visitor proxy. The observer waited 80 ms between completed requests. Read and written are decimal MB from the ZFS counters for the scratch dataset and the trial datasets. They include cached reads. Pool change is the change in allocated bytes on the shared pool, sampled at phase boundaries. Other users and delayed accounting can move that number in either direction. The counters do not attribute physical device traffic to one guest.
+All outages start at the first HTTP 503 and end at the first HTTP 200 at `/web/login` through the scratch host's visitor proxy. The observer waited 80 ms between completed requests. Trials ran sequentially with existing caches. Read and written are decimal MB from the ZFS counters for the scratch dataset and the trial datasets. They include cached reads. Pool change is the change in allocated bytes on the shared pool, taken from the sample nearest each phase boundary (about 0.8 s apart on the stock runs and 0.2 s on the hand-driven runs). Other users and delayed accounting can move that number in either direction. The counters do not attribute physical device traffic to one guest.
 
 **Today's release through the API.** Each cell gives the first and second run in order. The first had a fault set to damage the attachment when the module updated the copy. The second had the fault removed. Each ran from the same original into fresh volumes, with the first copy removed between runs. Launchplane waited 300 s for the files copier, gave up, and stopped it. The comparison continued during the stop. Both requests ended `not updated`, and the route returned to the original instance.
 
@@ -163,6 +163,25 @@ The snapshot and clone commands took 0.376 and 0.182 s on the first run, and 0.0
 | Check candidate | 8.4 | 69.8 | 26.2 | 0.0 |
 | Switch to candidate | 0.3 | 0.0 | 0.0 | 0.0 |
 | Total | 18.0 | 141.1 | 61.0 | 5.1 |
+
+**What the same copier takes when allowed to finish.** The stock timeout prevented either API request from reaching its check. On the disposable lane, a hand-driven runner waited for the installed copier image's unchanged `cp`, `diff` and `sync` command to exit on both volumes. Each copy started with the same serving original and fresh destination directories on the same filesystem. Both runs used the same Launchplane update, kind check and proxy operations as the snapshot trial.
+
+The first run pointed the copied lead's attachment at a missing file. The check refused the candidate, and the original answered after **599.1 s** with the lead and attachment intact. The second served the updated candidate after **593.0 s**. Each cell gives the failed check first and the successful switch second. These are measured comparison runs under a longer wait. The installed API still gives up at 300 s per volume.
+
+| Phase | Seconds | Read (MB) | Written (MB) | Pool change (MB) |
+| --- | ---: | ---: | ---: | ---: |
+| Stop original | 1.9 / 1.4 | 11.3 / 5.3 | 2.4 / 2.3 | 0.0 / 0.0 |
+| Copy and compare database | 3.5 / 3.0 | 2,538.8 / 2,546.6 | 1.7 / 2.1 | -1,161.7 / -2,837.8 |
+| Copy files | 200.0 / 214.1 | 2.0 / 89.1 | 0.7 / 0.3 | 6,144.9 / 3,509.0 |
+| Compare and sync files | 367.5 / 356.2 | 220,925.6 / 220,836.5 | 0.3 / 0.0 | -3,501.2 / -1,723.2 |
+| Start copied database | 0.9 / 1.0 | 1.4 / 9.2 | 1.4 / 1.5 | 0.0 / 0.0 |
+| Update module | 7.5 / 8.0 | 59.9 / 68.9 | 30.4 / 30.1 | 0.0 / 0.0 |
+| Start candidate | 0.5 / 0.5 | 4.0 / 2.3 | 1.4 / 1.1 | 0.0 / 0.0 |
+| Check candidate | 8.5 / 8.5 | 58.0 / 59.0 | 25.9 / 25.8 | 108.3 / 0.0 |
+| Retire refused candidate | 1.5 / — | 0.1 / — | 4.9 / — | 0.0 / — |
+| Restart, check and route to original | 7.4 / — | 83.5 / — | 0.9 / — | 0.0 / — |
+| Switch to candidate | — / 0.3 | — / 0.0 | — / 0.0 | — / 0.0 |
+| Total | 599.1 / 593.0 | 223,684.5 / 223,616.9 | 69.9 / 63.3 | 1,590.4 / -1,051.9 |
 
 ## On the test bed
 
