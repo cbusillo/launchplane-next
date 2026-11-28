@@ -281,7 +281,7 @@ class PretendHost:
         self.record(f"{'files' if files else 'volume'} {data_set}")
 
     # As Docker keeps it: the copier stays, and says whether it ran to its end. One that is refused wrote a part.
-    def initialize(self, step: Initialize, by: Witness) -> None:
+    def initialize(self, step: Initialize, _by: Witness) -> None:
         self.record(f"initialize {step.found.data_set}")
 
     def copy_volume(self, copy: CopyVolume) -> None:

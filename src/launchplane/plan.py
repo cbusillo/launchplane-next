@@ -480,11 +480,11 @@ def prepare_instance(move: Move, receiving: RunningInstance | None) -> Action | 
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     found = lane.data_set(data_set)
-    if found and found.first_start and isinstance(found.generation, str) and not was_initialized(move, found):
-        if found.generation == move.generation and odoo and odoo.first_start:
-            return Initialize(move.target, found, found.generation, odoo.initialize(found.data_set))
+    if found and found.first_start and isinstance(generation := found.generation, str) and not was_initialized(move, found):
+        if generation == move.generation and odoo and odoo.first_start:
+            return Initialize(move.target, found, generation, odoo.initialize(found.data_set))
         if found.initializer:
-            return Initialize(move.target, found, found.generation, ())
+            return Initialize(move.target, found, generation, ())
     return StartInstance(move.target, move.fresh.container, use, move.generation)
 
 

@@ -13,7 +13,7 @@ from launchplane.product import Product
 from launchplane.steps import Initialize, Stop
 from launchplane.telling import NOBODY, Witness
 from tests.bed_odoo import ADMIN_PASSWORD
-from tests.odoo_product import ATTACHMENT_BYTES, TK, first_start_product
+from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, TK, first_start_product
 from tests.pretend_host import D1, EARLIER, GENERATION, Given, lanes_on
 from tests.recording_docker import RecordingContainer, RecordingDocker
 from tests.test_container_host import read
@@ -47,7 +47,7 @@ def test_only_an_opted_in_first_move_initializes_before_web_and_repeats_leave_it
 def test_factory_password_is_gone_when_the_attachment_and_completion_row_commit() -> None:
     odoo = first_start_product().odoo
     assert odoo is not None
-    shell = odoo.initialize("one")[-1].split("<<'ODOO'\n")[1].removesuffix("ODOO\n")
+    transaction = odoo.initialize("one")[-1].split("<<'ODOO'\n")[1].removesuffix("ODOO\n")
     env = MagicMock()
     factory = SimpleNamespace(password=ADMIN_PASSWORD)
     attachment, parameters = Mock(), Mock()
@@ -56,11 +56,11 @@ def test_factory_password_is_gone_when_the_attachment_and_completion_row_commit(
 
     def commit() -> None:
         assert factory.password != ADMIN_PASSWORD
-        attachment.create.assert_called_once_with({"name": odoo.attachment, "raw": ATTACHMENT_BYTES})
+        attachment.create.assert_called_once_with({"name": ATTACHMENT, "raw": ATTACHMENT_BYTES})
         parameters.set_str.assert_called_once_with("launchplane.first_start", "one")
 
     env.cr.commit.side_effect = commit
-    exec(shell, {"env": env})  # noqa: S102 the actual Odoo shell input
+    exec(transaction, {"env": env})  # noqa: S102 run the transaction against the recording cursor
     env.cr.commit.assert_called_once()
     env.ref.assert_called_with("base.user_admin")
 
