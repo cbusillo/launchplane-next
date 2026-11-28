@@ -14,6 +14,7 @@ from tests.bed import (
     ask,
     ask_and_wait,
     hold,
+    kill_launchplane,
     launchplane_held,
     let_go,
     move_lane,
@@ -24,6 +25,7 @@ from tests.bed import (
     request_ended,
     retire,
     server_answering,
+    wait_for,
     wait_until_stopped_at,
 )
 from tests.bed_odoo import (
@@ -259,12 +261,13 @@ def put_the_bed_back() -> None:
         on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
 
 
+# Only the build the watch moves is asked for, and the watch fails where the scratch host has none: it never skips.
 @pytest.fixture
 def described() -> Iterator[None]:
     try:
-        pull_builds()
+        pull_builds(RUN)
     except subprocess.CalledProcessError as error:
-        pytest.skip(f"the scratch host does not have TK's builds and could not pull them: {error.stderr}")
+        pytest.fail(f"The scratch host does not have TK's build {build_of(RUN)} and could not pull it: {error.stderr}")
     serve_recorded_git_host()
     put_the_bed_back()
     describe(SITE, Product(health_path="/"))
@@ -395,3 +398,57 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
     assert [each["did"] for each in failed["events"] if each["did"].startswith(("start the instance", "switch "))] == []
     assert card(FAILING) == {"reads": ["move failed"], "web_address": ["not answering"], "found": ["No instance receives visitors"]}
     assert kept_password(FAILING, "testing") not in str(failed)
+
+
+# noinspection SqlResolve
+MODULES_INSTALLED = "select count(*) from ir_module_module where state = 'installed'"
+# noinspection SqlResolve
+MARKED_FINISHED = "select finished from launchplane.first_start"
+
+
+# What the lane's database answers, or nothing while it has no server, no such table or no answer.
+def in_odoos_database(statement: str) -> str:
+    psql = "psql --username=postgres --dbname=app --tuples-only --no-align"
+    try:
+        server = f"{ODOO}-testing-database-{data_set_of(ODOO, 'testing')}"
+        return on_scratch(f'docker exec {server} {psql} --command="{statement}"').strip()
+    except subprocess.CalledProcessError, ValueError:
+        return ""
+
+
+def modules_are_committed_and_the_first_start_is_not_finished() -> bool:
+    return in_odoos_database(MODULES_INSTALLED) not in ("", "0") and in_odoos_database(MARKED_FINISHED) == "f"
+
+
+@pytest.mark.usefixtures("described")
+def test_first_start_from_descriptions_cut_short_by_a_kill_of_launchplane_is_made_again_and_the_lane_serves() -> None:
+    status, asked = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
+    assert status == 202, asked
+    wait_for(modules_are_committed_and_the_first_start_is_not_finished, seconds=120)
+    cut_short_with = in_odoos_database(MODULES_INSTALLED)
+    kill_launchplane()
+
+    def taken_up_again_and_ended() -> bool:
+        return ask(f"/requests/{asked['id']}")[1]["stands"] != "working"
+
+    wait_for(taken_up_again_and_ended, seconds=240)
+    ended = ask(f"/requests/{asked['id']}")[1]
+    said(
+        "Killed while the first start ran, with modules committed and nothing seeded",
+        modules_installed_at_the_kill=cut_short_with,
+        request=ended["stands"],
+        outcome=(ended["answer"] or {}).get("outcome"),
+        attempts=[each["ended"] for each in ended["attempts"]],
+        first_start=first_starts(ended),
+        marked_finished=in_odoos_database(MARKED_FINISHED),
+        card=card(ODOO),
+        default_admin_refused=default_admin_is_refused(ODOO, "testing"),
+        attachment_read=hashlib.sha256(attachment_read_by_the_tester(ODOO, "testing")).hexdigest(),
+    )
+    assert (ended["stands"], ended["answer"]["outcome"], len(ended["attempts"])) == ("done", "switched", 2), ended
+    assert (in_odoos_database(MARKED_FINISHED), attachment_read_by_the_tester(ODOO, "testing")) == ("t", ATTACHMENT_BYTES)
+    assert (card(ODOO), default_admin_is_refused(ODOO, "testing")) == (
+        {"reads": ["good"], "web_address": ["answering"], "found": []},
+        True,
+    )
+    assert [each for each in parts_of(ODOO)["instances"] if each.endswith("-first-start")] == []

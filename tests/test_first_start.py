@@ -19,7 +19,7 @@ from launchplane.docker_answers import CommandResult
 from launchplane.host_secrets import HostSecrets
 from launchplane.instance import InstanceState, LaneBuild
 from launchplane.judge import Condition
-from launchplane.odoo import SERVER, TEST_PASSWORD_VARIABLE
+from launchplane.odoo import FILES_PATH, SERVER, TEST_PASSWORD_VARIABLE
 from launchplane.product import Product, ProductError, ProductFolder, SecretFolder
 from launchplane.record import Gate
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream
@@ -198,10 +198,16 @@ def test_a_description_whose_first_start_gives_other_bytes_than_its_check_reads_
         ProductFolder(tmp_path).read("site")
 
 
+# psql answers each question the first start asks from what the test says the database holds, and keeps each statement.
 PSQL = """#!/bin/sh
-echo "psql $*" >> "$CALLS"
-[ "$HELD" = unreadable ] && exit 2
-echo "$HELD"
+for asked; do :; done
+asked=${asked#--command=}
+case "$asked" in
+*to_regclass*) [ "$MARKED" = unreadable ] && exit 2; [ "$MARKED" = silent ] && exit 0; [ "$MARKED" = no ] && echo t || echo f ;;
+*"SELECT finished"*) [ "$MARKED" = unfinished-unreadable ] && exit 0; [ "$MARKED" = finished ] && echo t || echo f ;;
+*"count(*)"*) echo "$HELD" ;;
+*) echo "psql $asked" >> "$CALLS" ;;
+esac
 """
 TIMEOUT = """#!/bin/sh
 shift
@@ -213,9 +219,14 @@ echo "odoo $*" >> "$CALLS"
 [ "$1" = --init ] && exit "$INIT_ENDS"
 exit 0
 """
+MARK_IT = "psql CREATE SCHEMA launchplane; CREATE TABLE launchplane.first_start AS SELECT false AS finished"
+EMPTY_IT = "psql DROP SCHEMA public CASCADE; CREATE SCHEMA public"
+INSTALL = f"odoo --init {','.join(MODULES)} --stop-after-init --no-http"
+SEED = "odoo shell --no-http --log-level=error"
 
 
-# The first start as the kind's build runs it, with what it calls stood in for: psql answers how much the database holds.
+# The first start as the kind's build runs it, with what it calls stood in for. `calls` is each statement that changes
+# the database and each run of Odoo, in order.
 @dataclass
 class Ran:
     folder: Path
@@ -231,28 +242,34 @@ class Ran:
     def seed(self) -> str:
         return (self.folder / "seed").read_text()
 
+    @property
+    def files_kept(self) -> bool:
+        return (self.folder / "files" / "filestore" / "app" / "left").exists()
 
-def run_first_start(folder: Path, held: str, init_ends: int = 0) -> Ran:
+
+def run_first_start(folder: Path, marked: str = "no", held: str = "0", init_ends: int = 0) -> Ran:
+    folder.mkdir(exist_ok=True)
     for name, text in (("psql", PSQL), ("timeout", TIMEOUT), ("odoo-bin", ODOO)):
         (folder / name).write_text(text)
         (folder / name).chmod(0o755)
+    (folder / "files" / "filestore" / "app").mkdir(parents=True)
+    (folder / "files" / "filestore" / "app" / "left").touch()
     shell, flag, script = TK_STARTING.first_start
-    given = {"PATH": f"{folder}:{os.environ['PATH']}", "HELD": held, "INIT_ENDS": str(init_ends)}
+    given = {"PATH": f"{folder}:{os.environ['PATH']}", "MARKED": marked, "HELD": held, "INIT_ENDS": str(init_ends)}
     given |= {"CALLS": str(folder / "calls"), "SEED": str(folder / "seed")}
-    command = [shell, flag, script.replace(SERVER, str(folder / "odoo-bin"))]
-    ran = subprocess.run(command, env=given, capture_output=True, text=True, check=False)  # noqa: S603
+    script = script.replace(SERVER, str(folder / "odoo-bin")).replace(FILES_PATH, str(folder / "files"))
+    ran = subprocess.run([shell, flag, script], env=given, capture_output=True, text=True, check=False)  # noqa: S603
     return Ran(folder, ran.returncode, ran.stdout)
 
 
+# What the seed does through Odoo, in order: each record made or written, each statement, and the commit.
 @dataclass
 class OdooAsSeeded:
-    created: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
-    written: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
-    committed: list[bool] = field(default_factory=list[bool])
+    did: list[object] = field(default_factory=list[object])
 
     @property
     def cr(self) -> SimpleNamespace:
-        return SimpleNamespace(commit=lambda: self.committed.append(True))
+        return SimpleNamespace(execute=self.did.append, commit=lambda: self.did.append("commit"))
 
     def __getitem__(self, model: str) -> OdooAsSeeded:
         assert model == "ir.attachment"
@@ -263,53 +280,68 @@ class OdooAsSeeded:
         return self
 
     def create(self, values: dict[str, Any]) -> None:
-        self.created.append(values)
+        self.did.append(values)
 
     def write(self, values: dict[str, Any]) -> None:
-        self.written.append(values)
+        self.did.append(values)
 
 
-def seeded(script: str) -> OdooAsSeeded:
+def seeded(script: str) -> list[object]:
     odoo = OdooAsSeeded()
     exec(script, {"env": odoo})  # noqa: S102 the kind's own seed script
-    return odoo
+    return odoo.did
 
 
-def test_an_empty_database_gets_the_declared_modules_then_the_attachment_and_the_testing_login_in_one_commit(
+FINISH_IT = "UPDATE launchplane.first_start SET finished = true"
+
+
+def test_an_empty_database_is_marked_before_anything_is_installed_and_marked_finished_in_the_one_commit_of_its_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ran = run_first_start(tmp_path, held="0")
-    assert (ran.exit_code, [each.split(" --")[0] for each in ran.calls]) == (0, ["psql", "odoo", "odoo shell"])
-    assert ran.calls[1] == f"odoo --init {','.join(MODULES)} --stop-after-init --no-http"
+    ran = run_first_start(tmp_path)
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [MARK_IT, INSTALL, SEED], True)
     monkeypatch.setenv(TEST_PASSWORD_VARIABLE, "the lane's own")
-    odoo = seeded(ran.seed)
-    assert odoo.created == [{"name": ATTACHMENT, "raw": ATTACHMENT_BYTES, "mimetype": "application/octet-stream"}]
-    assert (odoo.written, odoo.committed) == ([{"login": TEST_LOGIN, "password": "the lane's own"}], [True])
+    attachment = {"name": ATTACHMENT, "raw": ATTACHMENT_BYTES, "mimetype": "application/octet-stream"}
+    assert seeded(ran.seed) == [attachment, {"login": TEST_LOGIN, "password": "the lane's own"}, FINISH_IT, "commit"]
 
 
 def test_a_lane_given_no_password_keeps_no_default_one_and_gets_no_testing_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(TEST_PASSWORD_VARIABLE, raising=False)
-    [signs_in] = seeded(run_first_start(tmp_path, held="0").seed).written
-    assert (list(signs_in), len(signs_in["password"]) >= 32) == (["password"], True)
+    first, again = (str(seeded(run_first_start(tmp_path / each).seed)[1]) for each in ("one", "two"))
+    assert (first.startswith("{'password': '"), len(first) >= 32 + len("{'password': ''}"), first != again) == (True, True, True)
+
+
+def test_a_first_start_cut_short_after_its_tables_were_made_is_made_again_from_nothing_and_then_finished(tmp_path: Path) -> None:
+    ran = run_first_start(tmp_path, marked="begun", held="734")
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [EMPTY_IT, INSTALL, SEED], False)
+    assert FINISH_IT in seeded(ran.seed)
+
+
+def test_a_database_whose_first_start_finished_is_left_as_it_is(tmp_path: Path) -> None:
+    ran = run_first_start(tmp_path, marked="finished", held="734")
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [], True)
 
 
 @pytest.mark.parametrize("held", ["1", "734"])
-def test_a_database_that_holds_anything_is_left_as_it_is_whatever_it_lacks(tmp_path: Path, held: str) -> None:
-    ran = run_first_start(tmp_path, held)
-    assert (ran.exit_code, len(ran.calls), ran.calls[0].startswith("psql ")) == (0, 1, True)
-    assert f"holds {held} tables and indexes already, so nothing was initialized in it" in ran.said
+def test_a_database_that_holds_anything_no_first_start_made_is_left_as_it_is_whatever_it_lacks(tmp_path: Path, held: str) -> None:
+    ran = run_first_start(tmp_path, held=held)
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [], True)
+    assert f"holds {held} tables and indexes no first start made, so nothing was initialized in it" in ran.said
 
 
-def test_a_database_that_cannot_be_asked_what_it_holds_is_not_initialized(tmp_path: Path) -> None:
-    ran = run_first_start(tmp_path, held="unreadable")
-    assert (ran.exit_code, len(ran.calls)) == (2, 1)
+@pytest.mark.parametrize(("marked", "ends"), [("unreadable", 2), ("silent", 1), ("unfinished-unreadable", 1)])
+def test_a_database_that_does_not_say_whether_it_is_marked_or_finished_is_never_emptied_or_initialized(
+    tmp_path: Path, marked: str, ends: int
+) -> None:
+    ran = run_first_start(tmp_path, marked=marked, held="734")
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (ends, [], True)
 
 
-def test_modules_that_do_not_install_end_the_first_start_before_anything_is_seeded(tmp_path: Path) -> None:
-    ran = run_first_start(tmp_path, held="0", init_ends=3)
-    assert (ran.exit_code, [each.split(" ")[1] for each in ran.calls]) == (3, ["--no-psqlrc", "--init"])
+def test_modules_that_do_not_install_end_the_first_start_before_anything_is_seeded_or_marked_finished(tmp_path: Path) -> None:
+    ran = run_first_start(tmp_path, init_ends=3)
+    assert (ran.exit_code, ran.calls) == (3, [MARK_IT, INSTALL])
 
 
 def test_what_runs_the_first_start_is_no_instance_and_is_no_finding_while_it_runs(bed: Bed) -> None:
@@ -333,7 +365,7 @@ def test_what_runs_the_first_start_is_no_instance_and_is_no_finding_while_it_run
     assert bed.host.is_in(bed.proxy.loaded_to(WEB_ADDRESS), InstanceState.RUNNING)
 
 
-def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_that_only_an_empty_data_set_is_initialized_again(bed: Bed) -> None:
+def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_that_asking_again_makes_its_data_again(bed: Bed) -> None:
     bed.host.updates_that_fail = {"site:b"}
     asking, _ = bed.asked_through_the_api()
     assert asking.post("/lanes/site/testing/move?wait=1", json={"build": "site:b"}).status_code == 422
@@ -344,4 +376,4 @@ def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_that_only_an_em
         ["move failed"],
     )
     assert found["note"].startswith("Request 1 ran the first start of the lane's data, which failed, so no instance was started")
-    assert "initializes the data set only if it is still empty" in found["note"]
+    assert "makes what that first start left again from nothing" in found["note"]

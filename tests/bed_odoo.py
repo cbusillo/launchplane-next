@@ -74,8 +74,8 @@ echo "written=$(ask "select coalesce(string_agg(name, ',' order by id), '') from
 
 
 # The scratch host pulls with its own login to the registry. Launchplane holds none, so it runs only what is there.
-def pull_builds() -> None:
-    for build in (build_of(RUN), build_of(LATER_RUN)):
+def pull_builds(*runs: int) -> None:
+    for build in map(build_of, runs or (RUN, LATER_RUN)):
         on_scratch(f"docker image inspect {build} >/dev/null 2>&1 || docker pull --quiet {build}")
 
 
