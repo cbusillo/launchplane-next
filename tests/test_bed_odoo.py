@@ -1,5 +1,6 @@
 import hashlib
 import subprocess
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -7,10 +8,21 @@ from typing import Any
 import pytest
 
 from launchplane.odoo import FILES_PATH, USER
-from tests.bed import ask, ask_and_wait, needs_test_bed, on_scratch, remove_product_copies, retire
-from tests.bed_odoo import data_set_of, describe, pull_builds, seed, serve_recorded_git_host, stop_recorded_git_host
+from launchplane.product import Product
+from tests.bed import ask, ask_and_wait, needs_test_bed, on_control, on_scratch, remove_product_copies, retire
+from tests.bed_odoo import (
+    SignedIn,
+    data_set_of,
+    describe,
+    pull_builds,
+    retire_with_its_data,
+    seed,
+    serve_recorded_git_host,
+    stop_recorded_git_host,
+)
 from tests.odoo_product import ATTACHMENT_SHA256
 from tests.recorded_git_host import LATER_RUN, RUN, build_of
+from tests.test_first_start import first_start_product
 
 pytestmark = needs_test_bed
 
@@ -152,3 +164,55 @@ def test_a_missing_attachment_file_fails_the_check_of_the_next_build_and_the_lan
     assert (instance["container"], instance["build"]) == (story.serving, build_of(RUN))
     with_the_file_back = move_to(LATER_RUN)
     assert (with_the_file_back["outcome"], with_the_file_back["build"]) == ("switched", build_of(LATER_RUN))
+
+
+SITE, ODOO, FAILING = "step78-website", "step78-odoo", "step78-refused"
+
+
+@pytest.fixture
+def described_first_starts() -> Iterator[None]:
+    serve_recorded_git_host()
+    try:
+        for product in (SITE, ODOO, FAILING):
+            retire_with_its_data(product, LANE)
+        describe(SITE, Product())
+        for product in (ODOO, FAILING):
+            describe(product, first_start_product())
+        yield
+    finally:
+        for product in (SITE, ODOO, FAILING):
+            retire_with_its_data(product, LANE)
+            on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
+        stop_recorded_git_host()
+
+
+@pytest.mark.usefixtures("described_first_starts")
+def test_first_start_from_descriptions() -> None:
+    print(f"Website at testing.{SITE}.test and Odoo at testing.{ODOO}.test/web/login", flush=True)  # noqa: T201
+    assert ask_and_wait(f"/lanes/{SITE}/testing/move", {"build": "nginx:1.30.6-alpine"})[0] == 200
+    page = on_scratch(f"curl -fsS -H 'Host: testing.{SITE}.test' http://127.0.0.1/")
+    assert "Welcome to nginx!" in page
+    print("Website serves its welcome page.", flush=True)  # noqa: T201
+    move = f"/lanes/{ODOO}/testing/move?wait=230"
+    headers = {"Idempotency-Key": str(uuid.uuid4())}
+    status, moved = ask(move, {"run": RUN}, 240, headers)
+    assert status == 200 and moved.get("outcome") == "switched", moved
+    container = moved["container_receiving_visitors"]
+    login_page = on_scratch(f"curl -fsS -H 'Host: testing.{ODOO}.test' http://127.0.0.1/web/login")
+    assert "password" in login_page
+    with pytest.raises(SystemExit, match="Access Denied"):
+        SignedIn(ODOO, LANE)
+    database = f"{ODOO}-{LANE}-database-{moved['data_set']}"
+    path = on_scratch(f'docker exec {database} psql -U postgres -d app -Atc "{STORED_FILE}"').strip()
+    digest = on_scratch(f"docker exec {container} sha256sum {FILES_PATH}/filestore/app/{path}").split()[0]
+    assert digest == ATTACHMENT_SHA256
+    print(f"Odoo serves its login page, refuses admin/admin, and its attachment reads back as {digest}.", flush=True)  # noqa: T201
+    assert ask(move, {"run": RUN}, 240, headers) == (200, moved)
+    _, again = ask(move, {"run": RUN}, 240)
+    assert (again["outcome"], again["data_set"], again["container_receiving_visitors"], again["did"]) == (
+        "unchanged",
+        moved["data_set"],
+        container,
+        [],
+    )
+    print(f"Both repeat asks kept {container} on {moved['data_set']}.", flush=True)  # noqa: T201

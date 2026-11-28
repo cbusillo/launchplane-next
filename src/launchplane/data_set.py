@@ -57,6 +57,16 @@ class Ask:
     in_one_transaction: bool = False
 
 
+FIRST_START_COMMITTED = Ask(
+    r"""SELECT to_regclass('public.ir_config_parameter') IS NOT NULL AS installed \gset
+\if :installed
+SELECT EXISTS (SELECT FROM public.ir_config_parameter WHERE key = 'launchplane.first_start' AND value = :'pair');
+\else
+SELECT false;
+\endif"""
+)
+SETTLE_WRITER = Ask("SELECT bool_and(pg_terminate_backend(pid, 5000)) IS NOT FALSE FROM pg_stat_activity WHERE usename = :'login';")
+
 READ_RULES = Ask(
     "SELECT coalesce(json_agg(json_build_array(type, database, user_name, address, auth_method, error) ORDER BY line_number), '[]') "
     "FROM pg_hba_file_rules;",

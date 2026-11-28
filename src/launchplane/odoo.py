@@ -1,6 +1,9 @@
+import hashlib
 import json
+import shlex
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import Base64Bytes, BaseModel, Field, model_validator
 
 from launchplane.data_set import DATABASE_NAME
 from launchplane.instance import Run
@@ -35,6 +38,10 @@ if read != [want["sha256"]]:
 """
 
 
+class FirstStart(BaseModel, extra="forbid", frozen=True):
+    attachment: Base64Bytes
+
+
 # What a product of the kind declares for itself. Its builds are runs of `workflow` in `repository`, published to `image`.
 class Odoo(BaseModel, extra="forbid", frozen=True):
     repository: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
@@ -46,6 +53,33 @@ class Odoo(BaseModel, extra="forbid", frozen=True):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     # The modules a release to another build updates, on a copy of the lane's data. With none, a release copies nothing.
     update: list[str] = []
+    first_start: FirstStart | None = None
+
+    @model_validator(mode="after")
+    def check_attachment_digest(self) -> Self:
+        if self.first_start and hashlib.sha256(self.first_start.attachment).hexdigest() != self.sha256:
+            raise ValueError("The first-start attachment must have the declared SHA-256.")
+        return self
+
+    def initialize(self, pair: str) -> tuple[str, ...]:
+        if self.first_start is None:
+            return ()
+        attachment = self.first_start.model_dump(mode="json")["attachment"]
+        install = shlex.join((SERVER, "--init", ",".join(self.modules), "--stop-after-init", "--no-http"))
+        script = f"""\
+set -eu
+entry=$(find {FILES_PATH} -mindepth 1 -printf x -quit)
+if [ -n "$entry" ]; then echo 'The files volume contains an entry. First start left it alone.'; exit 1; fi
+{install}
+exec {SERVER} shell --no-http --log-level=error <<'ODOO'
+import base64, secrets
+env["ir.attachment"].create({{"name": {self.attachment!r}, "raw": base64.b64decode({attachment!r})}})
+env.ref("base.user_admin").password = secrets.token_urlsafe(48)
+env["ir.config_parameter"].set_param("launchplane.first_start", {pair!r})
+env.cr.commit()
+ODOO
+"""
+        return "timeout", str(UPDATE_DEADLINE_SECONDS), "sh", "-c", script
 
     @property
     def run(self) -> Run:

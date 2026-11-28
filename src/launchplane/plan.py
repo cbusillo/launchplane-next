@@ -39,6 +39,7 @@ from launchplane.steps import (
     Event,
     FreshNames,
     GiveUp,
+    Initialize,
     LoginsUnread,
     MoveResult,
     Outcome,
@@ -163,7 +164,10 @@ def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: s
         return receiving.data_set
     # A copy kept offline is never the data a lane starts on by being there. One given a server may be what a release
     # switched to, so it counts.
-    names = sorted(data_set.data_set for data_set in lane.data_sets if data_set.copy_of is None or data_set.databases)
+    eligible = [pair for pair in lane.data_sets if not pair.set_aside]
+    if not eligible and lane.data_sets and not any(pair.first_start for pair in lane.data_sets):
+        return Stop("Every data set is set aside and this lane made none on first start. Retire the unwanted data by name.")
+    names = sorted(pair.data_set for pair in eligible if pair.copy_of is None or pair.databases)
     if len(names) > 1:
         return Stop(
             f"The lane has the data sets {', '.join(names)} and no instance receiving visitors that uses one, "
@@ -176,7 +180,13 @@ def step_toward_ready(found: DataSet, kinds: set[Kind], lane: LaneReading, image
     if Kind.NO_NETWORK in kinds:
         return CreateDataSetNetwork(lane.product, lane.lane, found.data_set, generation)
     if kinds & {Kind.NO_VOLUME, Kind.NO_FILES}:
-        return CreateDataSetVolume(lane.product, lane.lane, found.data_set, files=Kind.NO_VOLUME not in kinds)
+        return CreateDataSetVolume(
+            lane.product,
+            lane.lane,
+            found.data_set,
+            files=Kind.NO_VOLUME not in kinds,
+            generation=generation if found.first_start else None,
+        )
     if Kind.NO_DATABASE in kinds:
         return CreateDatabase(lane.product, lane.lane, found.data_set, found.networks[0].name, found.volumes[0], image)
     server = found.databases[0]
@@ -452,13 +462,31 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
         return finish(move, receiving)
     if (step := old_part_step(move, lane.route.written)) is not None:
         return step
-    data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)
+    return prepare_instance(move, receiving)
+
+
+def prepare_instance(move: Move, receiving: RunningInstance | None) -> Action | Stop:
+    lane, fresh = move.lane, move.fresh.data_set
+    odoo = move.product.odoo
+    if odoo and odoo.first_start:
+        number = 1
+        while lane.data_set(f"first-{move.generation}-{number}"):
+            number += 1
+        fresh = f"first-{move.generation}-{number}"
+    data_set = None if move.product.database is None else lane_data_set(lane, receiving, fresh)
     if isinstance(data_set, Stop):
         return data_set
-    use = prepared(move.judged, data_set, move.fresh.data_set, move.product, done, move.generation)
+    use = prepared(move.judged, data_set, fresh, move.product, move.done, move.generation)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
+    found = lane.data_set(data_set)
+    if found and found.first_start and found.generation == move.generation and odoo and not was_initialized(move, found):
+        return Initialize(move.target, found, move.generation, odoo.initialize(found.data_set))
     return StartInstance(move.target, move.fresh.container, use, move.generation)
+
+
+def was_initialized(move: Move, found: DataSet) -> bool:
+    return any(isinstance(step, Initialize) and step.found.data_set == found.data_set for step in move.done)
 
 
 def switch_or_check(move: Move, candidate: RunningInstance) -> Action | Stop:
@@ -505,6 +533,9 @@ def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
         return step
     if not any(isinstance(event, Abandon) for event in move.done):
         return Abandon(move.lane.web_address, move.generation)
+    for found in move.lane.data_sets:
+        if found.first_start and found.generation == move.generation and not found.set_aside and not was_initialized(move, found):
+            return Initialize(move.target, found, move.generation, ())
     put_back = put_back_or_what_is_left(move.judged, move.generation)
     return (login_step(move.judged, move.done) or put_back) if isinstance(put_back, Done) else put_back
 

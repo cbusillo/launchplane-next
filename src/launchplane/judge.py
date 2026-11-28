@@ -333,6 +333,8 @@ def database_findings(found: DataSet, database: DataSetDatabase, of: Judged) -> 
 
 
 def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
+    if found.set_aside and not any(each.data_set == found.data_set for each in of.lane.instances):
+        return []
     part, subject = f"The data set {found.data_set}", found.data_set
     missing = [
         (kind, word)
