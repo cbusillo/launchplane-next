@@ -93,6 +93,7 @@ NAMED: dict[type, Callable[[Any], str]] = {
     steps.Check: lambda step: f"check {step.container} at {step.health_path}",
     steps.Update: lambda step: f"update the data of {step.use.data_set} in {step.container}",
     steps.Initialize: lambda step: f"run the first start on the data set {step.use.data_set} in {step.container}",
+    steps.AwaitFirstStart: lambda step: f"wait for the first start {step.container} to end",
     steps.AwaitBackgroundService: lambda step: f"watch the background service {step.container} stay up",
     steps.StopPart: lambda step: f"stop {step.container}",
     steps.StopDatabase: lambda step: f"stop the database {step.container}",

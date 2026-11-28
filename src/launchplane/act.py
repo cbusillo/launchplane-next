@@ -85,6 +85,7 @@ class InstanceHost(Protocol):
     def read_log_tail(self, container: str) -> str: ...
     def restarts(self, container: str) -> int: ...
     def run_once(self, run: steps.Update | steps.Initialize, by: Witness, given: Mapping[str, str], /) -> CommandResult: ...
+    def await_once(self, container: str) -> None: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -211,6 +212,7 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
     steps.Update: lambda host, _proxy, step, by: run_once(host, step, by, {}),
     steps.StartStopped: lambda host, _proxy, step, by: start_stopped(host, step, by),
+    steps.AwaitFirstStart: observing()(lambda host, _proxy, step, _by: host.await_once(step.container)),
 }
 
 

@@ -22,6 +22,7 @@ from launchplane.steps import (
     Action,
     AwaitBackgroundService,
     AwaitDatabase,
+    AwaitFirstStart,
     AwaitRoute,
     BackgroundServiceRefused,
     Cancel,
@@ -452,6 +453,11 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
     receiving = move.instance(lane.route.written)
     if receiving is not None and is_fit(move.judged, receiving, move.target):
         return finish(move, receiving)
+    # A first start an attempt that was cut short left running is finishing its work, and stopping it would leave a
+    # database begun and not finished. So it is waited for, and goes once it has ended.
+    begun = next((each for each in lane.instances if each.is_first_start and each.state is InstanceState.RUNNING), None)
+    if begun is not None:
+        return AwaitFirstStart(begun.container)
     if (step := old_part_step(move, lane.route.written)) is not None:
         return step
     data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)

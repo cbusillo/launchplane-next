@@ -24,7 +24,7 @@ from launchplane.product import Product, ProductError, ProductFolder, SecretFold
 from launchplane.record import Gate
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream
 from launchplane.steps import Initialize, Outcome, Update
-from launchplane.telling import Witness
+from launchplane.telling import NOBODY, Witness
 from launchplane.worker import Worker
 from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, MODULES, TEST_LOGIN, TK, TK_STARTING
 from tests.pretend_host import GENERATION, WEB_ADDRESS, LaunchplaneKilled, PretendHost, PretendProxy, numbered_names
@@ -32,6 +32,7 @@ from tests.pretend_record import PretendRecord
 from tests.test_act import BUILD_A, BUILD_B
 
 LATER = "01900000-0000-7000-8000-00000000000c"
+OWN = "the lane's own"
 MADE_BEFORE_THE_FIRST_START = ("network", "database volume", "files volume", "database server", "server accepting connections")
 PRODUCTION = LaneBuild(product="site", lane="production", build="site:a")
 
@@ -220,7 +221,6 @@ echo "odoo $*" >> "$CALLS"
 exit 0
 """
 MARK_IT = "psql CREATE SCHEMA launchplane; CREATE TABLE launchplane.first_start AS SELECT false AS finished"
-EMPTY_IT = "psql DROP SCHEMA public CASCADE; CREATE SCHEMA public"
 INSTALL = f"odoo --init {','.join(MODULES)} --stop-after-init --no-http"
 SEED = "odoo shell --no-http --log-level=error"
 
@@ -247,7 +247,7 @@ class Ran:
         return (self.folder / "files" / "filestore" / "app" / "left").exists()
 
 
-def run_first_start(folder: Path, marked: str = "no", held: str = "0", init_ends: int = 0) -> Ran:
+def run_first_start(folder: Path, marked: str = "no", held: str = "0", init_ends: int = 0, password: str = "") -> Ran:
     folder.mkdir(exist_ok=True)
     for name, text in (("psql", PSQL), ("timeout", TIMEOUT), ("odoo-bin", ODOO)):
         (folder / name).write_text(text)
@@ -256,24 +256,44 @@ def run_first_start(folder: Path, marked: str = "no", held: str = "0", init_ends
     (folder / "files" / "filestore" / "app" / "left").touch()
     shell, flag, script = TK_STARTING.first_start
     given = {"PATH": f"{folder}:{os.environ['PATH']}", "MARKED": marked, "HELD": held, "INIT_ENDS": str(init_ends)}
-    given |= {"CALLS": str(folder / "calls"), "SEED": str(folder / "seed")}
+    given |= {"CALLS": str(folder / "calls"), "SEED": str(folder / "seed"), TEST_PASSWORD_VARIABLE: password}
     script = script.replace(SERVER, str(folder / "odoo-bin")).replace(FILES_PATH, str(folder / "files"))
     ran = subprocess.run([shell, flag, script], env=given, capture_output=True, text=True, check=False)  # noqa: S603
     return Ran(folder, ran.returncode, ran.stdout)
 
 
-# What the seed does through Odoo, in order: each record made or written, each statement, and the commit.
+# Odoo as the seed finds it, and what the seed does through it, in order: each record made or written, each statement
+# that changes anything, and the commit.
 @dataclass
 class OdooAsSeeded:
+    finished: bool = False
+    opens_with: str | None = None
     did: list[object] = field(default_factory=list[object])
+    answer: list[tuple[object]] = field(default_factory=list[tuple[object]])
 
     @property
     def cr(self) -> SimpleNamespace:
-        return SimpleNamespace(execute=self.did.append, commit=lambda: self.did.append("commit"))
+        return SimpleNamespace(execute=self.execute, fetchone=lambda: self.answer.pop(), commit=lambda: self.did.append("commit"))
+
+    def execute(self, statement: str, given: list[str] | None = None) -> None:
+        if statement == "SELECT finished FROM launchplane.first_start":
+            self.answer.append((self.finished,))
+        elif statement.startswith("SELECT password FROM res_users WHERE active AND login = "):
+            assert given == [TEST_LOGIN]
+            self.answer.append((self.opens_with and f"hash of {self.opens_with}",))
+        else:
+            self.did.append(statement)
 
     def __getitem__(self, model: str) -> OdooAsSeeded:
-        assert model == "ir.attachment"
+        assert model in ("ir.attachment", "res.users")
         return self
+
+    def _crypt_context(self) -> OdooAsSeeded:
+        return self
+
+    @staticmethod
+    def verify(password: str, kept: str) -> bool:
+        return kept == f"hash of {password}"
 
     def ref(self, name: str) -> OdooAsSeeded:
         assert name == "base.user_admin"
@@ -286,15 +306,15 @@ class OdooAsSeeded:
         self.did.append(values)
 
 
-def seeded(script: str) -> list[object]:
-    odoo = OdooAsSeeded()
+def seeded(script: str, odoo: OdooAsSeeded | None = None) -> list[object]:
+    odoo = odoo or OdooAsSeeded()
     exec(script, {"env": odoo})  # noqa: S102 the kind's own seed script
     return odoo.did
 
 
-# The mark is one row the first start made, so the statement names no row.
 # noinspection SqlResolve,SqlWithoutWhere
 FINISH_IT = "UPDATE launchplane.first_start SET finished = true"
+SIGNS_IN = {"login": TEST_LOGIN, "password": OWN}
 
 
 def test_an_empty_database_is_marked_before_anything_is_installed_and_marked_finished_in_the_one_commit_of_its_seed(
@@ -302,9 +322,9 @@ def test_an_empty_database_is_marked_before_anything_is_installed_and_marked_fin
 ) -> None:
     ran = run_first_start(tmp_path)
     assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [MARK_IT, INSTALL, SEED], True)
-    monkeypatch.setenv(TEST_PASSWORD_VARIABLE, "the lane's own")
+    monkeypatch.setenv(TEST_PASSWORD_VARIABLE, OWN)
     attachment = {"name": ATTACHMENT, "raw": ATTACHMENT_BYTES, "mimetype": "application/octet-stream"}
-    assert seeded(ran.seed) == [attachment, {"login": TEST_LOGIN, "password": "the lane's own"}, FINISH_IT, "commit"]
+    assert seeded(ran.seed) == [attachment, SIGNS_IN, FINISH_IT, "commit"]
 
 
 def test_a_lane_given_no_password_keeps_no_default_one_and_gets_no_testing_login(
@@ -315,35 +335,83 @@ def test_a_lane_given_no_password_keeps_no_default_one_and_gets_no_testing_login
     assert (list(first), len(first["password"]) >= 32, first != again) == (["password"], True, True)
 
 
-def test_a_first_start_cut_short_after_its_tables_were_made_is_made_again_from_nothing_and_then_finished(tmp_path: Path) -> None:
-    ran = run_first_start(tmp_path, marked="begun", held="734")
-    assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [EMPTY_IT, INSTALL, SEED], False)
-    assert FINISH_IT in seeded(ran.seed)
+def test_a_first_start_that_began_and_did_not_finish_is_never_written_over_and_fails_saying_what_to_do(tmp_path: Path) -> None:
+    ran = run_first_start(tmp_path, marked="begun", held="734", password=OWN)
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (1, [], True)
+    assert "began and did not finish. What it left there cannot be told from what a person has put there since" in ran.said
+    assert "Retire the lane naming this data set to delete" in ran.said
 
 
-def test_a_database_whose_first_start_finished_is_left_as_it_is(tmp_path: Path) -> None:
+def test_a_database_whose_first_start_finished_is_left_as_it_is_on_a_lane_with_no_testing_login(tmp_path: Path) -> None:
     ran = run_first_start(tmp_path, marked="finished", held="734")
     assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [], True)
 
 
+def test_a_testing_login_that_no_longer_opens_a_finished_database_with_the_password_kept_is_set_again_and_nothing_else_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = run_first_start(tmp_path, marked="finished", held="734", password=OWN)
+    assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [SEED], True)
+    monkeypatch.setenv(TEST_PASSWORD_VARIABLE, OWN)
+    lost = [OdooAsSeeded(finished=True, opens_with=each) for each in ("the one whose file was lost", None)]
+    assert [seeded(ran.seed, each) for each in lost] == [[SIGNS_IN, "commit"]] * 2
+    assert seeded(ran.seed, OdooAsSeeded(finished=True, opens_with=OWN)) == ["commit"]
+
+
 @pytest.mark.parametrize("held", ["1", "734"])
 def test_a_database_that_holds_anything_no_first_start_made_is_left_as_it_is_whatever_it_lacks(tmp_path: Path, held: str) -> None:
-    ran = run_first_start(tmp_path, held=held)
+    ran = run_first_start(tmp_path, held=held, password=OWN)
     assert (ran.exit_code, ran.calls, ran.files_kept) == (0, [], True)
     assert f"holds {held} tables and indexes no first start made, so nothing was initialized in it" in ran.said
 
 
 @pytest.mark.parametrize(("marked", "ends"), [("unreadable", 2), ("silent", 1), ("unfinished-unreadable", 1)])
-def test_a_database_that_does_not_say_whether_it_is_marked_or_finished_is_never_emptied_or_initialized(
+def test_a_database_that_does_not_say_whether_it_is_marked_or_finished_is_never_initialized(
     tmp_path: Path, marked: str, ends: int
 ) -> None:
-    ran = run_first_start(tmp_path, marked=marked, held="734")
+    ran = run_first_start(tmp_path, marked=marked, held="734", password=OWN)
     assert (ran.exit_code, ran.calls, ran.files_kept) == (ends, [], True)
 
 
 def test_modules_that_do_not_install_end_the_first_start_before_anything_is_seeded_or_marked_finished(tmp_path: Path) -> None:
     ran = run_first_start(tmp_path, init_ends=3)
     assert (ran.exit_code, ran.calls) == (3, [MARK_IT, INSTALL])
+
+
+def test_a_first_start_found_running_is_waited_for_and_never_stopped_before_the_move_goes_on(bed: Bed) -> None:
+    bed.host.killed_after = len(MADE_BEFORE_THE_FIRST_START) + 1
+    with pytest.raises(LaunchplaneKilled):
+        bed.lanes.move(BUILD_A, GENERATION, 1)
+    [left] = bed.host.instances
+    bed.host.change_part(left, InstanceState.RUNNING)
+    bed.host.killed_after, bed.host.actions = None, []
+    stopped_while_running: list[str] = []
+    stop = bed.host.retire_instance
+
+    def note_and_retire(container: str, by: Witness = NOBODY) -> None:
+        if bed.host.is_in(container, InstanceState.RUNNING):
+            stopped_while_running.append(container)
+        stop(container, by)
+
+    bed.host.retire_instance = note_and_retire
+    result = bed.lanes.move(BUILD_A, GENERATION, 2)
+    assert (bed.host.actions[:2], stopped_while_running) == ([f"await first start {left}", f"retire {left}"], [])
+    assert (result.outcome, len(bed.first_starts()), len(bed.web_starts())) == (Outcome.SWITCHED, 1, 1)
+
+
+def test_a_new_password_is_on_the_disk_under_its_name_before_anybody_is_given_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    fsync = os.fsync
+
+    def note_and_sync(opened: int) -> None:
+        order.append("synced")
+        fsync(opened)
+
+    monkeypatch.setattr(os, "fsync", note_and_sync)
+    SecretFolder(tmp_path, lambda _secrets: order.append("given")).test_password("site", "testing")
+    assert order == ["synced", "synced", "given"]
 
 
 def test_what_runs_the_first_start_is_no_instance_and_is_no_finding_while_it_runs(bed: Bed) -> None:
@@ -367,7 +435,7 @@ def test_what_runs_the_first_start_is_no_instance_and_is_no_finding_while_it_run
     assert bed.host.is_in(bed.proxy.loaded_to(WEB_ADDRESS), InstanceState.RUNNING)
 
 
-def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_that_asking_again_makes_its_data_again(bed: Bed) -> None:
+def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_how_its_data_set_is_made_anew(bed: Bed) -> None:
     bed.host.updates_that_fail = {"site:b"}
     asking, _ = bed.asked_through_the_api()
     assert asking.post("/lanes/site/testing/move?wait=1", json={"build": "site:b"}).status_code == 422
@@ -378,4 +446,4 @@ def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_that_asking_aga
         ["move failed"],
     )
     assert found["note"].startswith("Request 1 ran the first start of the lane's data, which failed, so no instance was started")
-    assert "makes what that first start left again from nothing" in found["note"]
+    assert "A data set it began in is never initialized again: retire the lane naming that data set to delete" in found["note"]

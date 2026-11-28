@@ -313,6 +313,7 @@ LOOKING = (
     steps.AwaitDatabase("database"),
     steps.Check("a"),
     steps.AwaitBackgroundService("a"),
+    steps.AwaitFirstStart("a"),
     steps.ReadLog("a"),
     steps.Abandon(WEB_ADDRESS, GENERATION),
 )

@@ -27,10 +27,11 @@ FIRST_START_DEADLINE_SECONDS = 600
 TEST_PASSWORD_VARIABLE = "LAUNCHPLANE_TEST_PASSWORD"  # noqa: S105 the name of the variable, not a password
 # Run by the build before its first web start. What there is to do is asked of the database itself, and of nothing else.
 # The first start marks a database as its own before it writes anything else to it, and marks it finished in the commit
-# that ends its work. One that holds anything and was never so marked is a person's, and is left as it is, whatever it
-# lacks. One marked and not finished was cut short before any web part started on it, and is made again from nothing.
+# that ends its work. It writes to an empty database alone, so nothing a person put anywhere is ever written over: one
+# that holds anything and was never marked is left as it is, whatever it lacks, and one marked and not finished fails the
+# move, since what an earlier first start left there cannot be told from what a person has put there since.
 # An empty one gets the declared modules, the declared attachment and an administrator nobody can sign in as with Odoo's
-# default password.
+# default password. In one that is finished, a testing login that does not open Odoo with the password given is set again.
 HELD_QUERY = "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace"
 MARK = "launchplane.first_start"
 FIRST_START = """\
@@ -46,31 +47,42 @@ t)
         exit 0
     fi
     ask "CREATE SCHEMA launchplane; CREATE TABLE {mark} AS SELECT false AS finished"
+    timeout {deadline} {server} --init {modules} --stop-after-init --no-http
     ;;
 ft)
-    echo "The first start of the database {database} finished earlier, so nothing was initialized in it."
-    exit 0
+    if [ -z "${{{password_variable}:-}}" ]; then
+        echo "The first start of the database {database} finished earlier, so nothing was initialized in it."
+        exit 0
+    fi
     ;;
 ff)
-    echo "An earlier first start of the database {database} did not finish, so what it left is made again."
-    ask "DROP SCHEMA public CASCADE; CREATE SCHEMA public"
-    rm -rf {files}/filestore
+    echo "An earlier first start of the database {database} began and did not finish. What it left there cannot be told \
+from what a person has put there since, so nothing was changed. Retire the lane naming this data set to delete, and the \
+next move makes a new one and initializes it."
+    exit 1
     ;;
 *)
     echo "The database {database} did not say whether a first start has marked it, so nothing was changed in it."
     exit 1
     ;;
 esac
-timeout {deadline} {server} --init {modules} --stop-after-init --no-http
 exec {server} shell --no-http --log-level=error <<'SEED'
 import base64, json, os, secrets
 want = json.loads({want!r})
-raw = base64.b64decode(want["bytes"])
-env["ir.attachment"].create({{"name": want["attachment"], "raw": raw, "mimetype": "application/octet-stream"}})
 password = os.environ.get("{password_variable}")
 signs_in = {{"login": want["test_login"], "password": password}} if password else {{"password": secrets.token_urlsafe(32)}}
-env.ref("base.user_admin").write(signs_in)
-env.cr.execute("UPDATE {mark} SET finished = true")
+env.cr.execute("SELECT finished FROM {mark}")
+if not env.cr.fetchone()[0]:
+    raw = base64.b64decode(want["bytes"])
+    env["ir.attachment"].create({{"name": want["attachment"], "raw": raw, "mimetype": "application/octet-stream"}})
+    env.ref("base.user_admin").write(signs_in)
+    env.cr.execute("UPDATE {mark} SET finished = true")
+else:
+    env.cr.execute("SELECT password FROM res_users WHERE active AND login = %s", [want["test_login"]])
+    kept = env.cr.fetchone()
+    if not (kept and kept[0] and env["res.users"]._crypt_context().verify(password, kept[0])):
+        env.ref("base.user_admin").write(signs_in)
+        print("The testing login did not open the database {database} with the password kept for its lane, and was set again.")
 env.cr.commit()
 SEED
 """
@@ -135,7 +147,6 @@ class Odoo(BaseModel, extra="forbid", frozen=True):
         script = FIRST_START.format(
             held_query=HELD_QUERY,
             mark=MARK,
-            files=FILES_PATH,
             database=DATABASE_NAME,
             deadline=FIRST_START_DEADLINE_SECONDS,
             server=SERVER,

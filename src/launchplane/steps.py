@@ -213,6 +213,12 @@ class Initialize:
     password_variable: str | None = None
 
 
+# A first start found running, which an attempt that was cut short began: it is waited for to its end, never stopped.
+@dataclass(frozen=True)
+class AwaitFirstStart:
+    container: str
+
+
 # The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.
 @dataclass(frozen=True)
 class EditRoute:
@@ -443,6 +449,7 @@ type Action = (
     | Check
     | Update
     | Initialize
+    | AwaitFirstStart
     | AwaitBackgroundService
     | StopPart
     | StopDatabase

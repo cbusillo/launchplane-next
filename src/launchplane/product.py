@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,14 @@ class ProductFolder:
             raise ProductError(f"The description of {product} in {path} is not one Launchplane reads: {error}") from error
 
 
+def on_disk(path: Path) -> None:
+    opened = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(opened)
+    finally:
+        os.close(opened)
+
+
 # The secrets Launchplane keeps for a lane, one file each, which only its own user reads. Each is told to `note` before
 # it is given to anyone, so nothing Launchplane answers, stores or logs carries it.
 @dataclass(frozen=True)
@@ -78,7 +87,8 @@ class SecretFolder:
     def note_all(self) -> None:
         self.note(path.read_text() for path in self.folder.glob("*/*/test-login"))
 
-    # The password of one lane's testing login: made the first time it is asked for, and the same from then on.
+    # The password of one lane's testing login: made the first time it is asked for, and the same from then on. A new
+    # one is on the disk, with the name it is found by, before anybody is given it.
     def test_password(self, product: str, lane: str) -> str:
         path = self.folder / product / lane / "test-login"
         try:
@@ -87,7 +97,9 @@ class SecretFolder:
                 fresh = path.with_name("test-login.new")
                 fresh.touch(mode=0o600)
                 fresh.write_text(new_password())
+                on_disk(fresh)
                 fresh.replace(path)
+                on_disk(path.parent)
             password = path.read_text()
         except OSError as error:
             raise ProductError(f"Keeping the password of the testing login of {lane} of {product} failed: {error}") from error

@@ -93,7 +93,8 @@ LEFT_NOTHING = {
     ),
     Outcome.NOT_INITIALIZED: (
         "Request {id} ran the first start of the lane's data, which failed, so no instance was started and nothing was "
-        "switched. Asking for that build again makes what that first start left again from nothing, and goes on from there."
+        "switched. A data set it began in is never initialized again: retire the lane naming that data set to delete, and "
+        "the next move makes a new one."
     ),
 }
 

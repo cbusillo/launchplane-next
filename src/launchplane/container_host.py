@@ -414,6 +414,12 @@ class ContainerHost:
             self.retire_container(container, by)
         return CommandResult(exit_code=exit_code, output=output)
 
+    def await_once(self, container: str) -> None:
+        with attempting(f"Waiting for {container} to end", self.address):
+            found = self.find_container(container)
+            if found is not None:
+                found.wait(timeout=RUN_ONCE_DEADLINE_SECONDS)
+
     def start_background_service(
         self,
         target: LaneBuild,

@@ -237,6 +237,14 @@ def parts_of(product: str) -> dict[str, list[str]]:
     }
 
 
+def the_lost_password_is_refused(lost: str) -> bool:
+    try:
+        SignedIn(ODOO, "testing", TEST_LOGIN, lost)
+    except SystemExit as refused:
+        return "Access Denied" in str(refused)
+    return False
+
+
 def last_request(product: str) -> dict[str, Any]:
     return ask(f"/requests/{max(each['id'] for each in ask('/requests')[1]['ended'] if each['product'] == product)}")[1]
 
@@ -373,6 +381,28 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         {"attachment": ATTACHMENT_BYTES, "rows": [row]},
     )
 
+    # The control machine loses the password after the seed is committed. The next first start finds that the login no
+    # longer opens Odoo with the password then kept, and sets it again: the row and the attachment stay.
+    forget_test_password(ODOO)
+    assert retire(ODOO, "testing")[0] == 200
+    status, anew = ask_and_wait(move_odoo, {"run": RUN})
+    replaced = kept_password(ODOO, "testing")
+    said(
+        "6. The password file lost, the lane retired with its data kept and moved again",
+        outcome=anew["outcome"],
+        password_is_another=replaced != password,
+        row=read_signed_in(replaced)["rows"],
+        the_lost_password_is_refused=the_lost_password_is_refused(password),
+        card=card(ODOO),
+    )
+    assert (status, anew["outcome"], replaced != password, the_lost_password_is_refused(password)) == (200, "switched", True, True)
+    assert (parts_of(ODOO)["data_sets"], read_signed_in(replaced)) == (
+        serving["data_sets"],
+        {"attachment": ATTACHMENT_BYTES, "rows": [row]},
+    )
+    for told in (str(anew), str(last_request(ODOO)), str(ask("/running")[1])):
+        assert replaced not in told
+
     with launchplane_held():
         hold("before.host.run_once")
         status, asked = ask(f"/lanes/{FAILING}/testing/move", {"run": RUN})
@@ -384,7 +414,7 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         let_go()
         failed = request_ended(asked["id"])
     said(
-        "6. A first start that fails",
+        "7. A first start that fails",
         request=failed["stands"],
         outcome=failed["answer"]["outcome"],
         error=failed["error"],
@@ -433,19 +463,27 @@ def test_first_start_from_descriptions_cut_short_by_a_kill_of_launchplane_is_mad
 
     wait_for(taken_up_again_and_ended, seconds=240)
     ended = ask(f"/requests/{asked['id']}")[1]
+    waited_for = [each["did"] for each in ended["events"] if each["did"].startswith("wait for the first start ")]
+    # A stop that found the container ended already stopped nothing.
+    stopped = [
+        each["did"] for each in ended["events"] if each["did"].startswith("stop ") and each["outcome"] and each["outcome"]["made"]
+    ]
     said(
-        "Killed while the first start ran, with modules committed and nothing seeded",
+        "8. Killed while the first start ran, with modules committed and nothing seeded",
         modules_installed_at_the_kill=cut_short_with,
         request=ended["stands"],
         outcome=ended["answer"] and ended["answer"]["outcome"],
         attempts=[each["ended"] for each in ended["attempts"]],
         first_start=first_starts(ended),
+        waited_for=waited_for,
+        stopped=stopped,
         marked_finished=in_odoos_database(MARKED_FINISHED),
         card=card(ODOO),
         default_admin_refused=default_admin_is_refused(ODOO, "testing"),
         attachment_read=hashlib.sha256(attachment_read_by_the_tester(ODOO, "testing")).hexdigest(),
     )
     assert (ended["stands"], ended["answer"]["outcome"], len(ended["attempts"])) == ("done", "switched", 2), ended
+    assert (len(waited_for), stopped) == (1, [])
     assert (in_odoos_database(MARKED_FINISHED), attachment_read_by_the_tester(ODOO, "testing")) == ("t", ATTACHMENT_BYTES)
     assert (card(ODOO), default_admin_is_refused(ODOO, "testing")) == (
         {"reads": ["good"], "web_address": ["answering"], "found": []},

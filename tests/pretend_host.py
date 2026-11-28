@@ -373,6 +373,10 @@ class PretendHost:
         failed = target.build in self.updates_that_fail
         return CommandResult(exit_code=1, output=self.failure_says) if failed else CommandResult(0, "")
 
+    def await_once(self, container: str) -> None:
+        self.record(f"await first start {container}")
+        self.change_part(container, InstanceState.STOPPED)
+
     def restarts(self, container: str) -> int:
         return self.restarted.get(container, 0)
 
