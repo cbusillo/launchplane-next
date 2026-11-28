@@ -141,6 +141,7 @@ class LaneBuild(BaseModel, frozen=True):
     lane: str
     build: str
     run: Run = Run()
+    published: bool = False
 
 
 @dataclass(frozen=True)

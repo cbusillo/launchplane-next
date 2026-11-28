@@ -58,6 +58,7 @@ from launchplane.docker_answers import (
     sent,
     tar_of,
 )
+from launchplane.host_images import HostImages
 from launchplane.host_logins import Filters, HostLogins
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_of
 from launchplane.instance import (
@@ -203,6 +204,7 @@ class ContainerHost:
         self.sleep = sleep
         self.clock = clock
         self.secrets = HostSecrets()
+        self.images = HostImages(client, address, self.secrets)
         self.logins = HostLogins(client, address, self.secrets)
         # Every lane shares the proxy, the back soon page and their networks. Each is looked for and made while this is
         # held and no longer, so two lanes that find one missing do not both make it.
@@ -322,12 +324,6 @@ class ContainerHost:
         except NotFound:
             return None
 
-    def ensure_image(self, image: str) -> None:
-        try:
-            self.client.images.get(image)
-        except ImageNotFound:
-            self.client.images.pull(image)
-
     def create_network(self, name: str, labels: dict[str, str] | None, *, quiet: bool) -> None:
         if quiet:
             options = {GATEWAY_MODE_OPTION: QUIET_GATEWAY_MODE}
@@ -371,7 +367,7 @@ class ContainerHost:
         if LANE_NETWORK in options.networks:
             self.ensure_network(LANE_NETWORK, quiet=True)
         ready = options if use is None else on_data_set(options, use, login_on(use))
-        self.ensure_image(ready.image)
+        self.client.images.get(ready.image)
         with sent(by, "make", ready.container):
             made = self.create(ready)
         with sent(by, "start", ready.container):
@@ -387,6 +383,9 @@ class ContainerHost:
         options = part_options(target, container, part, networks, [*run.command] or None)
         stamped = replace(options, labels=options.labels | stamp_of(generation), volumes=files, user=run.user)
         return replace(stamped, environment=dict(run.environment))
+
+    def prepare_build(self, target: LaneBuild) -> None:
+        self.images.ensure(target.build, published=target.published)
 
     def start_instance(
         self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
@@ -450,7 +449,7 @@ class ContainerHost:
             labels = data_set_labels(product, lane, data_set) | marks | copy | stamp_of(generation)
             # Fetched while the lane still serves, not behind the back soon page.
             if copy_of is not None:
-                self.ensure_image(COPIER_IMAGE)
+                self.images.ensure(COPIER_IMAGE)
             self.client.volumes.create(f"launchplane-data-{data_set}-{part}", labels=labels)
 
     # Whether anything can still write the volume is asked at the moment of the copy, of every container on the host.
@@ -480,7 +479,7 @@ class ContainerHost:
             throwaway_password = new_password()
             self.secrets.note([throwaway_password])
             options = database_options(product, lane, data_set, network, volume, image)
-            self.ensure_image(image)
+            self.images.ensure(image)
             self.start_set_up(self.create(replace(options, environment=server_environment(throwaway_password))))
 
     def start_database(self, container: str) -> None:
@@ -581,7 +580,7 @@ class ContainerHost:
                     self.ensure_network(helper.outside_network, quiet=False)
                 for network in helper.quiet_networks:
                     self.ensure_network(network, quiet=True)
-                self.ensure_image(helper.image)
+                self.images.ensure(helper.image)
                 self.create(helper_options(helper)).start()
             elif found.status != "running":
                 found.start()

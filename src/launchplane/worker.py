@@ -75,7 +75,8 @@ def carried_out(lanes: Carries, request: Request, attempt: int, witness: Witness
         case Work.MOVE:
             if request.build is None:
                 raise Stopped("The request names no build to move to. Nothing was changed.")
-            return lanes.move(LaneBuild(product=product, lane=lane, build=request.build), request.generation, attempt, witness)
+            target = LaneBuild(product=product, lane=lane, build=request.build, published=request.run is not None)
+            return lanes.move(target, request.generation, attempt, witness)
         case Work.RETIRE:
             return lanes.retire(product, lane, request.delete_data_set, witness)
         case Work.BEGIN_MAINTENANCE:

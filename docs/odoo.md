@@ -42,9 +42,21 @@ A release to another build of a product that declares `update` is made on [a cop
 - it has the artifact `artifact-manifest-<its attempt>`, which holds `artifact-manifest.json`. A merge-train run passes without publishing and has none
 - the manifest's `source_commit` is the run's commit, its `image.repository` is the described one, and its `image.digest` is a SHA-256
 
-The request is then kept with its `run` and the build `<image>@<digest>`, and the move runs that. A call sent again with its `Idempotency-Key` is answered with its request before anything is read from the git host, whatever the run publishes later. A run that is not such a build is answered `422` with each fact that differs. A git host that cannot be read, or a manifest that cannot be read as one, is answered `503`. Nothing is kept either way. `{"build": "..."}` is answered `422` for a product of this kind, and `{"run": ...}` for any other.
+The request is then kept with its `run` and the build `<image>@<digest>`, and the move runs that. A call sent again with its `Idempotency-Key` is answered with its request before anything is read from the git host, whatever the run publishes later. A literal digest and two different runs publishing that digest each get their own request and retry key. A run that is not such a build is answered `422` with each fact that differs. A git host that cannot be read, or a manifest that cannot be read as one, is answered `503`. Nothing is kept either way. `{"build": "..."}` is answered `422` for any product with a declared publisher, and `{"run": ...}` for one without a publisher.
+
+A website declares the same three source fields under `publisher` at the top of its product description. For example:
+
+```json
+{"publisher":{"repository":"cbusillo/sellyouroutboard","workflow":".github/workflows/build.yml","image":"ghcr.io/cbusillo/sellyouroutboard"}}
+```
+
+Odoo keeps its existing declaration under `odoo`. Declare the source once. A website without a publisher still accepts a literal build.
 
 Launchplane reads GitHub with the token in `LAUNCHPLANE_GIT_HOST_TOKEN`. `LAUNCHPLANE_GIT_HOST` names another address in place of `https://api.github.com`.
+
+On the control host, systemd reads the optional root-only (0600) file `/etc/launchplane/publisher.env`. The GitHub credential needs Actions read access to the publishing repositories. For private images set `LAUNCHPLANE_REGISTRY` to the registry hostname, `LAUNCHPLANE_REGISTRY_USER` to its login and `LAUNCHPLANE_REGISTRY_PASSWORD` to its read-only package token. Restart the service after changing these settings. The Docker client sends the registry login over the authenticated connection to the scratch daemon only for a build verified from a publishing run on that registry. A cache hit makes no registry request. The move fetches and verifies its build before taking a serving lane into maintenance. A fetch that fails or exceeds 180 seconds ends the request with its reason while the original keeps serving. The service journal reports the elapsed time of a completed pull.
+
+With the bed settings loaded, run `uv run pytest -q -s tests -k cold_published_build`. The watch uses the signed-in GitHub CLI on the operator's machine to read the publisher's independent answer. It runs the deployed service beside the ordinary bed service with a disposable empty Docker cache and a separate request database.
 
 **What runs is held to the digest.** At every reading, an instance whose build names a digest is compared with the image the host has for that digest. One that runs another image, or whose image the host no longer has, shows as wrong with `runs <image>, which is not its build`. A move to that build replaces it, and no move switches to it.
 
@@ -108,7 +120,6 @@ The data set of an Odoo lane has a files volume beside the database's: `launchpl
 ## Known and not fixed
 
 - **Launchplane on the test bed holds no key to GitHub.** The bed tests and the watch read the answers GitHub gave for two of TK's runs, served on the control container by `tests/recorded_git_host.py`. From the builder's Mac the same code read both runs from GitHub itself, 1.2 s a run. Granting the bed a key is Chris's.
-- **Launchplane cannot pull TK's image.** The image is private, and Launchplane sends Docker no registry login. The scratch host pulls with its own. A build that is not on the host fails the move with Docker's `No such image`. Launchplane also gives Docker 5 s to answer, and this pull took 36 s.
 - **The shared Odoo tools cannot start Odoo on a lane's login.** `run_odoo_startup.py` of `odoo-devkit` connects to the database `postgres`, which a lane's login is refused. It waited there until stopped, with 66 refusals in the server's log. So an instance runs Odoo's server directly, and none of that script's work is done: no install of missing modules, no website settings, no admin password. Its module update will meet the same refusal.
 - **A new lane cannot pass its first move.** The seed above is a person's work. The update of a release updates modules that are installed, and installs none.
 - **A build that needs its modules updated fails its check where the product declares no `update`.** TK's run 45359350705, four commits after the first, answered `500` at `/web/login` on data seeded from the first build. The lane kept serving.
