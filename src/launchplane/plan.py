@@ -165,7 +165,7 @@ def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: s
     # A copy kept offline is never the data a lane starts on by being there. One given a server may be what a release
     # switched to, so it counts.
     eligible = [pair for pair in lane.data_sets if not pair.set_aside]
-    if not eligible and lane.data_sets and not any(pair.first_start for pair in lane.data_sets):
+    if not eligible and lane.data_sets and not any(pair.first_start_generation for pair in lane.data_sets):
         return Stop("Every data set is set aside and this lane made none on first start. Retire the unwanted data by name.")
     names = sorted(pair.data_set for pair in eligible if pair.copy_of is None or pair.databases)
     if len(names) > 1:
@@ -178,14 +178,14 @@ def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: s
 
 def step_toward_ready(found: DataSet, kinds: set[Kind], lane: LaneReading, image: str, generation: str | None) -> Action:
     if Kind.NO_NETWORK in kinds:
-        return CreateDataSetNetwork(lane.product, lane.lane, found.data_set, generation)
+        return CreateDataSetNetwork(lane.product, lane.lane, found.data_set, found.first_start_generation or generation)
     if kinds & {Kind.NO_VOLUME, Kind.NO_FILES}:
         return CreateDataSetVolume(
             lane.product,
             lane.lane,
             found.data_set,
             files=Kind.NO_VOLUME not in kinds,
-            generation=generation if found.first_start else None,
+            generation=found.first_start_generation,
         )
     if Kind.NO_DATABASE in kinds:
         return CreateDatabase(lane.product, lane.lane, found.data_set, found.networks[0].name, found.volumes[0], image)
@@ -480,7 +480,7 @@ def prepare_instance(move: Move, receiving: RunningInstance | None) -> Action | 
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     found = lane.data_set(data_set)
-    if found and found.first_start and isinstance(generation := found.generation, str) and not was_initialized(move, found):
+    if found and (generation := found.first_start_generation) and not was_initialized(move, found):
         if generation == move.generation and odoo and odoo.first_start:
             return Initialize(move.target, found, generation, odoo.initialize(found.data_set))
         if found.initializer:
@@ -537,7 +537,7 @@ def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
     if not any(isinstance(event, Abandon) for event in move.done):
         return Abandon(move.lane.web_address, move.generation)
     for found in move.lane.data_sets:
-        if found.first_start and found.generation == move.generation and not found.set_aside and not was_initialized(move, found):
+        if found.first_start_generation == move.generation and not found.set_aside and not was_initialized(move, found):
             return Initialize(move.target, found, move.generation, ())
     put_back = put_back_or_what_is_left(move.judged, move.generation)
     return (login_step(move.judged, move.done) or put_back) if isinstance(put_back, Done) else put_back

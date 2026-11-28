@@ -127,13 +127,15 @@ def test_an_unreadable_completion_row_neither_starts_a_writer_nor_sets_the_pair_
 
 
 def test_set_aside_data_is_named_on_a_healthy_lane_and_does_not_create_an_ambiguous_choice() -> None:
-    aside = D1.model_copy(update={"data_set": "interrupted", "set_aside": "marker", "first_start": True, "databases": ()})
+    aside = D1.model_copy(
+        update={"data_set": "interrupted", "set_aside": "marker", "first_start_generation": GENERATION, "databases": ()}
+    )
     given = Given((OLD_WITH_FILES,), SERVING, data_sets=(D1_WITH_FILES, aside))
     judged = given.judged(None, TK)
     assert not judged.findings
     assert "set aside" in kept_notes(judged, [])[aside.data_set].lower()
     assert lane_data_set(given.reading(), None, "new") == D1.data_set
-    outsider = aside.model_copy(update={"first_start": False})
+    outsider = aside.model_copy(update={"first_start_generation": None})
     assert isinstance(lane_data_set(Given(data_sets=(outsider,)).reading(), None, "new"), Stop)
 
 

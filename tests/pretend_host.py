@@ -266,7 +266,12 @@ class PretendHost:
         self.networks[f"network-{data_set}"] = True
         network = HostNetwork(name=f"network-{data_set}", is_quiet=True)
         self.change_data_set(
-            product, lane, data_set, networks=(network,), generation=generation, first_start=data_set.startswith("first-")
+            product,
+            lane,
+            data_set,
+            networks=(network,),
+            generation=generation,
+            first_start_generation=generation if data_set.startswith("first-") else None,
         )
         self.record(f"network {data_set}")
 

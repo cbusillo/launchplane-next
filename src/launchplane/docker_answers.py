@@ -355,7 +355,7 @@ def data_sets_from(
     copy_of = {key: volume.labels[COPY_OF_LABEL] for key, volume in keyed if COPY_OF_LABEL in volume.labels}
     aside = {key: volume.name for key, volume in keyed if volume.labels.get(PART_LABEL) == "set-aside"}
     parts = [(key, part.labels or {}) for key, part in (*marked, *keyed) if key[2].startswith("first-")]
-    first = {key for key, labels in parts if GENERATION_LABEL in labels}
+    first = {key: labels[GENERATION_LABEL] for key, labels in parts if GENERATION_LABEL in labels}
     for key, labels in parts:
         generation = labels.get(GENERATION_LABEL, "")
         if key in first and (not is_generation(generation) or not key[2].startswith(f"first-{generation}-")):
@@ -373,7 +373,7 @@ def data_sets_from(
             volumes=tuple(sorted(by_volume.get(key, []))),
             databases=tuple(sorted(by_database.get(key, []), key=lambda database: database.container)),
             generation=made_by.get(key),
-            first_start=key in first,
+            first_start_generation=first.get(key),
             initializer=initializers.get(key),
             set_aside=aside.get(key),
             files=tuple(sorted(by_files.get(key, []))),

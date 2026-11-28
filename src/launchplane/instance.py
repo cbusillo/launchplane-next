@@ -117,7 +117,7 @@ class DataSet(BaseModel, frozen=True):
     # Stamped on the first part of it that is made: its network, or the volumes of a copy.
     generation: Stamp = None
     initializer: str | None = None
-    first_start: bool = False
+    first_start_generation: str | None = None
     set_aside: str | None = None
     copy_of: str | None = None
     copies: tuple[VolumeCopy, ...] = ()
