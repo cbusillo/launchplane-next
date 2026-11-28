@@ -69,22 +69,37 @@ SITE = Publication("cold-site", "cbusillo/sellyouroutboard", 44324709893, "676d0
 ODOO = Publication("cold-odoo", "cbusillo/odoo-tenant-tk", 46069914315, "785a68a9e55186a2c411c8151aebd5febfef79e4")
 
 
+def remove_watch() -> None:
+    on_control(
+        f'set -eu; if [ "$(systemctl show -p LoadState --value {UNIT}.service)" != not-found ]; then systemctl stop {UNIT}; fi; '
+        f"runuser -u postgres -- dropdb --if-exists {DATABASE}; rm -rf -- {FOLDER}"
+    )
+    on_scratch(
+        f"set -eu; existing=$(docker ps -aq --filter name='^/{DAEMON}$'); "
+        'if [ -n "$existing" ]; then docker rm -fv "$existing"; fi'
+    )
+
+
 @pytest.fixture
 def empty_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    command = f"flock -n /run/lock/{UNIT}.lock sh -c 'echo locked; cat >/dev/null'"
     with ExitStack() as cleanup:
+        lock = cleanup.enter_context(
+            subprocess.Popen([*bed.CONTROL_SHELL, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)  # noqa: S603
+        )
+        assert lock.stdout and lock.stdout.readline().strip() == "locked", "Another cold-fetch watch is using this bed."
+        remove_watch()
+        cleanup.callback(remove_watch)
         on_scratch(
             f"docker run -d --name {DAEMON} --privileged --env DOCKER_TLS_CERTDIR= -p 2377:2376 "
             "-v /etc/docker/tls:/bed-tls:ro docker:29-dind dockerd -H unix:///var/run/docker.sock -H tcp://0.0.0.0:2376 "
             "--tlsverify --tlscacert=/bed-tls/ca.pem --tlscert=/bed-tls/cert.pem --tlskey=/bed-tls/key.pem "
             "--bip=10.252.0.1/24 --default-address-pool=base=10.251.0.0/16,size=24"
         )
-        cleanup.callback(on_scratch, f"docker rm -fv {DAEMON}")
         on_scratch(f"for n in $(seq 60); do {DOCKER} info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1")
         assert not on_scratch(f"{DOCKER} image ls --all --quiet").strip()
         on_control(f"mkdir -m 755 {FOLDER}")
-        cleanup.callback(on_control, f"rm -r {FOLDER}")
         on_control(f"runuser -u postgres -- createdb -T template0 -E UTF8 --locale=C.UTF-8 -O launchplane {DATABASE}")
-        cleanup.callback(on_control, f"runuser -u postgres -- dropdb {DATABASE}")
         on_control(
             f"cat > {FOLDER}/host.env",
             given=f"LAUNCHPLANE_CONTAINER_HOST=tcp://{bed.SCRATCH_ADDRESS}:2377\n"
@@ -102,7 +117,6 @@ def empty_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             f"-p EnvironmentFile={FOLDER}/host.env "
             f"-p EnvironmentFile={FOLDER}/deny.env {SERVICE}/launchplane"
         )
-        cleanup.callback(on_control, f"systemctl stop {UNIT}")
         url = urlsplit(bed.LAUNCHPLANE_URL)
         monkeypatch.setattr(bed, "LAUNCHPLANE_URL", url._replace(netloc=f"{url.hostname}:{PORT}").geturl())
         wait_for(launchplane_answers, 30)

@@ -1,79 +1,137 @@
+import base64
+import json
 import secrets
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import docker
 import pytest
-from docker.errors import APIError, ImageNotFound
 
-from launchplane.container_host import ContainerHost
+from launchplane import host_images
+from launchplane.container_host import DOCKER_API_VERSION, ContainerHost
 from launchplane.docker_answers import ContainerHostRefused
 from launchplane.instance import LaneBuild
+from launchplane.judge import Work
+from launchplane.record import Asked, Record, Stands
+from launchplane.worker import Worker
+from tests.given_secrets import NO_SECRETS
+from tests.pretend_host import WEB_ADDRESS
 from tests.recorded_git_host import RUN, build_of
-from tests.recording_docker import RecordingApi, RecordingDocker
+from tests.test_updating import serving
+from tests.test_worker import CALLER, kept_of
 
 
-class PrivateRegistry(RecordingApi):
-    def __init__(self, docker: RecordingDocker, password: str) -> None:
-        super().__init__(docker.containers)
-        self.login = {"username": "reader", "password": password}
-        self.denial = ""
-        self.present: set[str] = set()
-        self.pulls: list[tuple[str, dict[str, str]]] = []
-        docker.images.get = self.get
-        docker.api = self
+@dataclass
+class Registry:
+    password: str
+    failure: str = ""
+    present: set[str] = field(default_factory=set[str])
+    pulls: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    release: threading.Event = field(default_factory=threading.Event)
 
-    def get(self, image: str) -> str:
-        if image not in self.present:
-            raise ImageNotFound(image)
-        return image
 
-    def pull(self, image: str, *, stream: bool, decode: bool, auth_config: dict[str, str]) -> list[dict[str, str]]:
-        assert stream and decode
-        self.pulls.append((image, auth_config))
-        reason = f"registry denied access for {self.login['password']}"
-        if self.denial == "http":
-            raise APIError(reason)
-        if self.denial or auth_config != self.login:
-            return [{"error": reason}]
-        self.present.add(image)
-        return []
+def handler(registry: Registry) -> type[BaseHTTPRequestHandler]:
+    class Engine(BaseHTTPRequestHandler):
+        def reply(self, status: int, body: object) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_GET(self) -> None:
+            if self.path == "/version":
+                self.reply(200, {"ApiVersion": DOCKER_API_VERSION})
+                return
+            image = unquote(urlsplit(self.path).path).split("/images/")[1].removesuffix("/json")
+            if image in registry.present:
+                self.reply(200, {"Id": image})
+            else:
+                self.reply(404, {"message": f"No such image: {image}"})
+
+        def do_POST(self) -> None:
+            image = parse_qs(urlsplit(self.path).query)["fromImage"][0]
+            auth = self.headers.get("X-Registry-Auth")
+            password = json.loads(base64.urlsafe_b64decode(auth))["password"] if auth else ""
+            registry.pulls.append((image, password))
+            if registry.failure == "stall":
+                self.send_response(200)
+                self.end_headers()
+                registry.release.wait(5)
+                return
+            if registry.failure == "broken stream":
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.write(b'{"status":"downloading"}\n')
+                return
+            if registry.failure or password != registry.password:
+                reason = f"access denied for {registry.password}"
+                self.reply(403 if registry.failure == "http" else 200, {"error": reason, "message": reason})
+                return
+            registry.present.add(image)
+            self.reply(200, {"status": "downloaded"})
+
+    return Engine
 
 
 @pytest.fixture
-def private_host(monkeypatch: pytest.MonkeyPatch) -> tuple[RecordingDocker, PrivateRegistry]:
-    docker = RecordingDocker()
-    password = secrets.token_hex(16)
+def private_host(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[ContainerHost, Registry]]:
+    registry = Registry(secrets.token_hex(16))
     monkeypatch.setenv("LAUNCHPLANE_REGISTRY", "ghcr.io")
     monkeypatch.setenv("LAUNCHPLANE_REGISTRY_USER", "reader")
-    monkeypatch.setenv("LAUNCHPLANE_REGISTRY_PASSWORD", password)
-    return docker, PrivateRegistry(docker, password)
+    monkeypatch.setenv("LAUNCHPLANE_REGISTRY_PASSWORD", registry.password)
+    with ThreadingHTTPServer(("127.0.0.1", 0), handler(registry)) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        address = f"http://127.0.0.1:{server.server_port}"
+        client = docker.DockerClient(base_url=address, version=DOCKER_API_VERSION)
+        try:
+            yield ContainerHost(client, address), registry
+        finally:
+            registry.release.set()
+            server.shutdown()
+            thread.join()
+            client.close()
 
 
-@pytest.mark.parametrize("denial", ["", "http", "stream"])
-def test_a_private_build_is_fetched_by_digest_or_refused_before_its_container_is_made(
-    private_host: tuple[RecordingDocker, PrivateRegistry], denial: str
+@pytest.mark.parametrize(
+    ("failure", "why"), [("http", "denied"), ("stream", "denied"), ("broken stream", "payload"), ("stall", "deadline")]
+)
+def test_a_failed_fetch_ends_the_updating_move_with_its_reason_while_the_original_keeps_serving(
+    private_host: tuple[ContainerHost, Registry], record: Record, failure: str, why: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    docker, registry = private_host
-    host = ContainerHost(docker.as_client(), "scratch")
-    target = LaneBuild(product="shop", lane="testing", build=build_of(RUN), published=True)
-    registry.denial = denial
-    if denial:
-        with pytest.raises(ContainerHostRefused, match="denied") as refusal:
-            host.start_instance(target, "candidate", None)
-        assert target.build in str(refusal.value) and registry.login["password"] not in str(refusal.value)
-        assert not docker.containers.by_name
-    else:
-        host.start_instance(target, "candidate", None)
-        host.images.ensure(target.build)
-        assert registry.login["password"] not in repr(docker.containers.by_name["candidate"].environment)
-    assert registry.pulls == [(target.build, registry.login)]
+    host, registry = private_host
+    lanes, proxy, original = serving()
+    registry.failure = failure
+    proxy.host.prepare_build = host.prepare_build
+    monkeypatch.setattr(host_images, "PULL_SECONDS", 0.25 if failure == "stall" else 3.0)
+    image = build_of(RUN)
+    request = record.write(Asked(product="site", lane="testing", work=Work.MOVE, build=image, run=RUN), CALLER, None)
+    assert Worker(record, lanes, NO_SECRETS).work_next()
+    kept = kept_of(record, request.id)
+    assert kept.stands is Stands.FAILED and len(kept.attempts) == 1
+    assert kept.error and image in kept.error and why in kept.error.lower() and registry.password not in kept.error
+    assert registry.pulls == [(image, registry.password)]
+    assert proxy.loaded_to(WEB_ADDRESS) == original and not proxy.host.actions
+
+
+def test_a_verified_cold_image_is_pulled_once_and_checked_on_the_host(private_host: tuple[ContainerHost, Registry]) -> None:
+    host, registry = private_host
+    target = LaneBuild(product="site", lane="testing", build=build_of(RUN), published=True)
+    host.prepare_build(target)
+    host.prepare_build(target)
+    assert registry.pulls == [(target.build, registry.password)]
 
 
 @pytest.mark.parametrize(("domain", "published"), [("ghcr.io.example", True), ("ghcr.io", False)])
 def test_only_a_verified_request_to_its_registry_gets_the_private_login(
-    private_host: tuple[RecordingDocker, PrivateRegistry], domain: str, *, published: bool
+    private_host: tuple[ContainerHost, Registry], domain: str, *, published: bool
 ) -> None:
-    docker, registry = private_host
+    host, registry = private_host
     image = build_of(RUN).replace("ghcr.io/", f"{domain}/")
-    host = ContainerHost(docker.as_client(), "scratch")
     with pytest.raises(ContainerHostRefused, match="denied"):
-        host.images.ensure(image, published=published)
-    assert registry.pulls == [(image, {})]
+        host.prepare_build(LaneBuild(product="site", lane="testing", build=image, published=published))
+    assert registry.pulls == [(image, "")]

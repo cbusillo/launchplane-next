@@ -194,6 +194,9 @@ class PretendHost:
                 self.replies_lost.remove(f"{verb} {container}")
                 raise ReadTimeout("the connection was lost before the reply")
 
+    def prepare_build(self, target: LaneBuild) -> None:
+        pass
+
     def start_instance(
         self, target: LaneBuild, container: str, use: DataSetUse | None, generation: str | None = None, by: Witness = NOBODY
     ) -> None:

@@ -62,6 +62,7 @@ type Lane = tuple[str, str]
 
 
 class InstanceHost(Protocol):
+    def prepare_build(self, target: LaneBuild) -> None: ...
     def read(self, lane: Lane | None = None) -> OnHost: ...
     def start_instance(self, to: LaneBuild, name: str, use: DataSetUse | None, generation: str | None, by: Witness, /) -> None: ...
     def start_background_service(
@@ -372,9 +373,23 @@ class Lanes:
     def move(self, target: LaneBuild, generation: str, attempt: int, witness: Witness = NOBODY) -> MoveResult:
         product = self.read_product(target.product)
         of = (target.model_copy(update={"run": product.run}), product, generation, attempt, witness)
+
+        def next_step(judged: Judgement, done: tuple[Event, ...], cancel: Cancel | None) -> updating.Decided:
+            move = self.release(judged, done, *of)
+            step = updating.decide(move, cancel)
+            if (
+                not done
+                and cancel is None
+                and move.gate.verdict is Verdict.NONE
+                and not move.lane.route.in_maintenance
+                and not isinstance(step, Done | Stop)
+            ):
+                self.host.prepare_build(target)
+            return step
+
         return settle(
             *self.judging(target.product, target.lane, product, Work.MOVE),
-            lambda judged, done, cancel: updating.decide(self.release(judged, done, *of), cancel),
+            next_step,
             partial(self.take_behind_back_soon, web_address_of(target.product, target.lane), with_logs=True),
             witness,
         )

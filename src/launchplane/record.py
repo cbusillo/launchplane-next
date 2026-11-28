@@ -328,7 +328,7 @@ class Sql:
     SAME_UNFINISHED: Final = """
     select * from request
     where (product, lane, work) = (%s, %s, %s) and build is not distinct from %s and delete_data_set is not distinct from %s
-        and stands in ('waiting', 'working') and cancel_asked_at is null
+        and run is not distinct from %s and stands in ('waiting', 'working') and cancel_asked_at is null
     order by id limit 1
     """
     WRITE: Final = """
@@ -457,7 +457,7 @@ def same_key(session: Session, gate: Gate, asked: Asked, idempotency_key: str | 
 def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
     if (kept := same_key(session, gate, asked, idempotency_key)) is not None:
         return kept
-    row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
+    row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked), asked.run)).fetchone()
     return None if row is None else keep_key(session, gate, idempotency_key, Request.model_validate(row))
 
 

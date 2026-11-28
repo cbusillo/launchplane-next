@@ -233,3 +233,24 @@ def test_a_sourced_website_keeps_only_the_digest_of_its_own_publishing_run(
     app = app_with(Builds(lambda _: website, builds_from(answers()).git_host), record)
     response = app.post(move, json={"run": RUN})
     assert (response.status_code, response.json()["build"]) == (202, build_of(RUN))
+
+
+def test_a_literal_digest_and_each_publishing_run_keep_their_own_request_and_retry_key(
+    builds_from: Callable[[Runs], Builds], record: Record
+) -> None:
+    move = "/lanes/site/testing/move"
+    digest = build_of(RUN)
+    literal = app_with(Builds(), record).post(move, json={"build": digest}, headers=KEY)
+    runs = answers()
+    runs[LATER_RUN]["manifest"]["image"]["digest"] = runs[RUN]["manifest"]["image"]["digest"]
+    app = app_with(builds_from(runs), record)
+    rows = [literal.json()["id"]]
+    for run in (RUN, LATER_RUN):
+        key = {"Idempotency-Key": str(run)}
+        first = app.post(move, json={"run": run}, headers=key)
+        again = app.post(move, json={"run": run}, headers=key)
+        assert (first.status_code, again.status_code) == (202, 202)
+        assert first.json()["build"] == digest and first.json()["run"] == run
+        assert first.json()["id"] == again.json()["id"]
+        rows.append(first.json()["id"])
+    assert len(set(rows)) == 3
