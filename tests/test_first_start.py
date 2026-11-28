@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +19,7 @@ from launchplane.docker_answers import CommandResult
 from launchplane.host_secrets import HostSecrets
 from launchplane.instance import InstanceState, LaneBuild
 from launchplane.judge import Condition
-from launchplane.odoo import FILES_PATH, SERVER, TEST_PASSWORD_VARIABLE
+from launchplane.odoo import FILES_PATH, MARK, SERVER, TEST_PASSWORD_VARIABLE
 from launchplane.product import Product, ProductError, ProductFolder, SecretFolder
 from launchplane.record import Gate
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream
@@ -292,7 +292,9 @@ def seeded(script: str) -> list[object]:
     return odoo.did
 
 
-FINISH_IT = "UPDATE launchplane.first_start SET finished = true"
+# The mark is one row the first start made, so the statement names no row.
+# noinspection SqlResolve,SqlWithoutWhere
+FINISH_IT = f"UPDATE {MARK} SET finished = true"
 
 
 def test_an_empty_database_is_marked_before_anything_is_installed_and_marked_finished_in_the_one_commit_of_its_seed(
@@ -309,8 +311,8 @@ def test_a_lane_given_no_password_keeps_no_default_one_and_gets_no_testing_login
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(TEST_PASSWORD_VARIABLE, raising=False)
-    first, again = (str(seeded(run_first_start(tmp_path / each).seed)[1]) for each in ("one", "two"))
-    assert (first.startswith("{'password': '"), len(first) >= 32 + len("{'password': ''}"), first != again) == (True, True, True)
+    first, again = (cast("dict[str, str]", seeded(run_first_start(tmp_path / each).seed)[1]) for each in ("one", "two"))
+    assert (list(first), len(first["password"]) >= 32, first != again) == (["password"], True, True)
 
 
 def test_a_first_start_cut_short_after_its_tables_were_made_is_made_again_from_nothing_and_then_finished(tmp_path: Path) -> None:
