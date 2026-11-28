@@ -4,10 +4,10 @@ from typing import Self
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from launchplane.build_source import Publisher
 from launchplane.instance import Run
 from launchplane.odoo import Odoo
 from launchplane.steps import Check
+from launchplane.workflow import Publisher
 
 
 class ProductError(Exception):

@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from launchplane.build_source import Publisher
 from launchplane.product import Product
+from launchplane.workflow import Publisher
 from tests import bed
 from tests.bed import ask, ask_and_wait, launchplane_answers, needs_test_bed, on_control, on_scratch, wait_for
 from tests.odoo_product import TK

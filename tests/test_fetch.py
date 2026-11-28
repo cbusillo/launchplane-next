@@ -40,7 +40,7 @@ def test_a_private_build_is_fetched_by_digest_or_refused_before_its_container_is
     monkeypatch.setattr(docker.images, "get", get)
     monkeypatch.setattr(docker.api, "pull", pull, raising=False)
     host = ContainerHost(docker.as_client(), "scratch")
-    target = LaneBuild(product="shop", lane="testing", build=reference)
+    target = LaneBuild(product="shop", lane="testing", build=reference, published=True)
     if denial:
         with pytest.raises(ContainerHostRefused, match="denied") as refusal:
             host.start_instance(target, "candidate", None)
@@ -53,7 +53,10 @@ def test_a_private_build_is_fetched_by_digest_or_refused_before_its_container_is
     assert pulled == [reference]
 
 
-def test_another_registry_never_receives_the_private_registry_login(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("registry", "published"), [("ghcr.io.example", True), ("ghcr.io", False)])
+def test_only_a_verified_request_to_its_registry_gets_the_private_login(
+    monkeypatch: pytest.MonkeyPatch, registry: str, *, published: bool
+) -> None:
     docker = RecordingDocker()
     monkeypatch.setenv("LAUNCHPLANE_REGISTRY", "ghcr.io")
     monkeypatch.setenv("LAUNCHPLANE_REGISTRY_USER", "reader")
@@ -66,5 +69,5 @@ def test_another_registry_never_receives_the_private_registry_login(monkeypatch:
 
     monkeypatch.setattr(docker.api, "pull", pull, raising=False)
     host = ContainerHost(docker.as_client(), "scratch")
-    host.images.fetch(build_of(RUN).replace("ghcr.io/", "ghcr.io.example/"))
+    host.images.fetch(build_of(RUN).replace("ghcr.io/", f"{registry}/"), published=published)
     assert supplied == [{}]

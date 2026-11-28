@@ -27,7 +27,7 @@ class HostImages:
         if self.login["password"]:
             secrets.note([self.login["password"]])
 
-    def ensure(self, image: str) -> None:
+    def ensure(self, image: str, *, published: bool = False) -> None:
         with suppress(ImageNotFound):
             self.client.images.get(image)
             return
@@ -35,15 +35,15 @@ class HostImages:
         started = time.monotonic()
         try:
             with attempting(action, self.address):
-                self.fetch(image)
+                self.fetch(image, published=published)
                 self.client.images.get(image)
         except ContainerHostRefused as error:
             raise ContainerHostRefused(cleaned(str(error), self.secrets.seen)) from None
         logging.getLogger(__name__).info("Fetched %s in %.2f s", image, time.monotonic() - started)
 
-    def fetch(self, image: str) -> None:
+    def fetch(self, image: str, *, published: bool) -> None:
         registry, _ = resolve_repository_name(image)
-        login = self.login if registry == self.registry and "@sha256:" in image else {}
+        login = self.login if published and registry == self.registry else {}
         # Docker streams the registry's answer with a separate timeout, including refusals inside an HTTP 200.
         events = self.client.api.pull(image, stream=True, decode=True, auth_config=login)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         for event in cast("Iterable[dict[str, str]]", events):

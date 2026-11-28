@@ -142,6 +142,7 @@ class RunOptions:
     ports: dict[int, int] = field(default_factory=dict[int, int])
     restart: RestartPolicy = STAYS_STOPPED_WHEN_STOPPED
     user: str | None = None
+    published: bool = False
 
 
 def endpoints(networks: dict[str, list[str]]) -> dict[str, EndpointConfig]:
@@ -165,7 +166,7 @@ def database_options(product: str, lane: str, data_set: str, network: str, volum
 
 def part_options(target: LaneBuild, container: str, part: Part, networks: list[str], command: list[str] | None) -> RunOptions:
     labels = {PRODUCT_LABEL: target.product, LANE_LABEL: target.lane, BUILD_LABEL: target.build, PART_LABEL: part}
-    return RunOptions(target.build, container, labels, {network: [] for network in networks}, command)
+    return RunOptions(target.build, container, labels, {network: [] for network in networks}, command, published=target.published)
 
 
 def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> RunOptions:
@@ -367,7 +368,7 @@ class ContainerHost:
         if LANE_NETWORK in options.networks:
             self.ensure_network(LANE_NETWORK, quiet=True)
         ready = options if use is None else on_data_set(options, use, login_on(use))
-        self.images.ensure(ready.image)
+        self.images.ensure(ready.image, published=ready.published)
         with sent(by, "make", ready.container):
             made = self.create(ready)
         with sent(by, "start", ready.container):

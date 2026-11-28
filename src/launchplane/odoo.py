@@ -2,9 +2,9 @@ import json
 
 from pydantic import BaseModel, Field
 
-from launchplane.build_source import Publisher
 from launchplane.data_set import DATABASE_NAME
 from launchplane.instance import Run
+from launchplane.workflow import Publisher
 
 # What every build of the kind is, as its shared base makes it: the server, who runs it and where it keeps its files.
 SERVER, USER, FILES_PATH = "/odoo/odoo-bin", "ubuntu", "/volumes/data"
