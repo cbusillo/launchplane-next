@@ -41,6 +41,7 @@ def handler(registry: Registry) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(json.dumps(body).encode())
 
+        # noinspection PyPep8Naming
         def do_GET(self) -> None:
             if self.path == "/version":
                 self.reply(200, {"ApiVersion": DOCKER_API_VERSION})
@@ -51,10 +52,11 @@ def handler(registry: Registry) -> type[BaseHTTPRequestHandler]:
             else:
                 self.reply(404, {"message": f"No such image: {image}"})
 
+        # noinspection PyPep8Naming
         def do_POST(self) -> None:
             image = parse_qs(urlsplit(self.path).query)["fromImage"][0]
             auth = self.headers.get("X-Registry-Auth")
-            password = json.loads(base64.urlsafe_b64decode(auth))["password"] if auth else ""
+            password = json.loads(base64.urlsafe_b64decode(auth))["password"] if isinstance(auth, str) else ""
             registry.pulls.append((image, password))
             if registry.failure == "stall":
                 self.send_response(200)
