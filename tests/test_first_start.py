@@ -61,6 +61,13 @@ class Bed:
     def web_starts(self) -> list[str]:
         return [each for each in self.host.actions if each.startswith("start site-")]
 
+    # Each request is worked within the call that asked for it, and what it says is cleaned of what was noted.
+    def asked_through_the_api(self) -> tuple[TestClient, PretendRecord]:
+        record = PretendRecord(gate=Gate(self.noted))
+        self.lanes.read_unfinished, self.lanes.read_ended = record.unfinished, record.ended_lately
+        worker = Worker(record, self.lanes, self.noted)
+        return TestClient(create_app(self.lanes.read_status, record, worker.worked_one, self.noted, self.lanes)), record
+
 
 def described_as(product: Product) -> Callable[[str], Product]:
     return lambda _product: product
@@ -142,10 +149,7 @@ def test_a_first_start_that_fails_saying_its_password_leaves_it_out_of_the_answe
     password = bed.kept.test_password("site", "testing")
     bed.host.updates_that_fail = {"site:b"}
     bed.host.failure_says = f"psycopg2.OperationalError: could not write the user {TEST_LOGIN} with password {password}"
-    record = PretendRecord(gate=Gate(bed.noted))
-    bed.lanes.read_unfinished, bed.lanes.read_ended = record.unfinished, record.ended_lately
-    worker = Worker(record, bed.lanes, bed.noted)
-    asking = TestClient(create_app(bed.lanes.read_status, record, worker.worked_one, bed.noted, bed.lanes))
+    asking, record = bed.asked_through_the_api()
     answer = asking.post("/lanes/site/testing/move?wait=1", json={"build": "site:b"})
     request, running = asking.get("/requests/1").text, asking.get("/running").text
     assert (answer.status_code, answer.json()["outcome"], bed.host.given_once) == (
@@ -331,10 +335,7 @@ def test_what_runs_the_first_start_is_no_instance_and_is_no_finding_while_it_run
 
 def test_the_card_of_a_lane_whose_first_start_failed_says_so_and_that_only_an_empty_data_set_is_initialized_again(bed: Bed) -> None:
     bed.host.updates_that_fail = {"site:b"}
-    record = PretendRecord(gate=Gate(bed.noted))
-    bed.lanes.read_unfinished, bed.lanes.read_ended = record.unfinished, record.ended_lately
-    worker = Worker(record, bed.lanes, bed.noted)
-    asking = TestClient(create_app(bed.lanes.read_status, record, worker.worked_one, bed.noted, bed.lanes))
+    asking, _ = bed.asked_through_the_api()
     assert asking.post("/lanes/site/testing/move?wait=1", json={"build": "site:b"}).status_code == 422
     [card] = asking.get("/running").json()["cards"]
     [found] = [row for row in card["rows"] if row["name"] == "Found"]

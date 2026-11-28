@@ -222,7 +222,7 @@ def card(product: str) -> dict[str, Any] | None:
     }
 
 
-def on_host(product: str) -> dict[str, list[str]]:
+def parts_of(product: str) -> dict[str, list[str]]:
     running = ask("/running")[1]
     return {
         "instances": [each["container"] for each in running["instances"] if each["product"] == product],
@@ -282,13 +282,13 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
     move_odoo = f"/lanes/{ODOO}/testing/move"
     said(
         "1. Two described products, and nothing of either on the host",
-        website=f"http://testing.{SITE}.test, {visit(SITE)}",
-        odoo=f"http://testing.{ODOO}.test/web/login, {visit(ODOO, '/web/login')}",
+        website=f"testing.{SITE}.test, {visit(SITE)}",
+        odoo=f"testing.{ODOO}.test/web/login, {visit(ODOO, '/web/login')}",
         cards=[card(SITE), card(ODOO)],
-        on_the_host=[on_host(SITE), on_host(ODOO)],
+        on_the_host=[parts_of(SITE), parts_of(ODOO)],
     )
     assert (visit(SITE), visit(ODOO, "/web/login")) == ("404", "404")
-    assert on_host(SITE) == on_host(ODOO) == {"instances": [], "data_sets": [], "visitors_sent_to": []}
+    assert parts_of(SITE) == parts_of(ODOO) == {"instances": [], "data_sets": [], "visitors_sent_to": []}
 
     status, site = move_lane(SITE, "testing", SITE_BUILD)
     said(
@@ -331,7 +331,7 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
 
     SignedIn(ODOO, "testing", TEST_LOGIN, password).call("res.partner", "create", [{"name": ROW}])
     [row] = read_signed_in(password)["rows"]
-    serving = on_host(ODOO)
+    serving = parts_of(ODOO)
 
     again_site = move_lane(SITE, "testing", SITE_BUILD)[1]
     same_request = ask(f"{move_odoo}?wait=230", {"run": RUN}, timeout=240, headers=key)[1]
@@ -342,12 +342,12 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         odoo_with_the_same_key=same_request["outcome"],
         odoo_as_a_new_request=again["outcome"],
         did=again["did"],
-        on_the_host=on_host(ODOO),
+        on_the_host=parts_of(ODOO),
         row=read_signed_in(password)["rows"],
     )
     assert (again_site["outcome"], again_site["container_receiving_visitors"]) == ("unchanged", site["container_receiving_visitors"])
     assert (same_request, again["outcome"], again["did"]) == (odoo, "unchanged", [])
-    assert (on_host(ODOO), read_signed_in(password)) == (serving, {"attachment": ATTACHMENT_BYTES, "rows": [row]})
+    assert (parts_of(ODOO), read_signed_in(password)) == (serving, {"attachment": ATTACHMENT_BYTES, "rows": [row]})
 
     # With no instance and no route, the first start runs again and finds the data: nothing the lane lacks seeds over it.
     assert retire(ODOO, "testing")[0] == 200
@@ -357,7 +357,7 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         "5. Retired with its data kept, and moved again",
         outcome=back["outcome"],
         first_start=first_starts(brought_back),
-        data_sets=on_host(ODOO)["data_sets"],
+        data_sets=parts_of(ODOO)["data_sets"],
         row=read_signed_in(password)["rows"],
         password_is_the_same=kept_password(ODOO, "testing") == password,
         default_admin_refused=default_admin_is_refused(ODOO, "testing"),
@@ -365,7 +365,7 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
     )
     assert (status, back["outcome"], len(first_starts(brought_back))) == (200, "switched", 1)
     assert (kept_password(ODOO, "testing"), default_admin_is_refused(ODOO, "testing")) == (password, True)
-    assert (on_host(ODOO)["data_sets"], read_signed_in(password)) == (
+    assert (parts_of(ODOO)["data_sets"], read_signed_in(password)) == (
         serving["data_sets"],
         {"attachment": ATTACHMENT_BYTES, "rows": [row]},
     )
@@ -386,12 +386,12 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         outcome=failed["answer"]["outcome"],
         error=failed["error"],
         visitor=visit(FAILING, "/web/login"),
-        on_the_host=on_host(FAILING),
+        on_the_host=parts_of(FAILING),
         card=card(FAILING),
     )
     assert (failed["stands"], failed["answer"]["outcome"], visit(FAILING, "/web/login")) == ("failed", "not initialized", "404")
     assert REFUSED in failed["error"]
-    assert (on_host(FAILING)["instances"], on_host(FAILING)["visitors_sent_to"]) == ([], [])
+    assert (parts_of(FAILING)["instances"], parts_of(FAILING)["visitors_sent_to"]) == ([], [])
     assert [each["did"] for each in failed["events"] if each["did"].startswith(("start the instance", "switch "))] == []
     assert card(FAILING) == {"reads": ["move failed"], "web_address": ["not answering"], "found": ["No instance receives visitors"]}
     assert kept_password(FAILING, "testing") not in str(failed)

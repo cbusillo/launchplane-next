@@ -220,9 +220,10 @@ def required_label(labels: dict[str, str], label: str, what: str) -> str:
 
 
 def part_of(summary: DockerContainerSummary) -> Part:
-    part = summary.labels.get(PART_LABEL, "web")
-    if part not in PARTS:
-        raise ContainerHostError(f"The container {summary.name} is marked as the part {part}, which Launchplane does not know.")
+    marked = summary.labels.get(PART_LABEL, "web")
+    part = next((each for each in PARTS if each == marked), None)
+    if part is None:
+        raise ContainerHostError(f"The container {summary.name} is marked as the part {marked}, which Launchplane does not know.")
     return part
 
 
