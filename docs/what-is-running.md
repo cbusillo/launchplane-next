@@ -13,7 +13,7 @@ Only containers carrying `launchplane.product` are Launchplane's. Any other cont
 | `launchplane.product` | the product's name |
 | `launchplane.lane` | `production`, `testing`, or the preview's name |
 | `launchplane.build` | the build it runs |
-| `launchplane.part` | `web`, `update`, `first-start`, `background-service` or `database`; a container without it is `web`. `update` is [the build run once to update a copy](odoo.md#a-release-that-updates), and `first-start` [the build run once on a data set before its first web start](odoo.md#the-first-start) |
+| `launchplane.part` | `web`, `update`, `first-start`, `background-service` or `database`; a container without it is `web`. `update` is [the build run once to update a copy](odoo.md#a-release-that-updates), and `first-start` [the build run once on a data set before its first web start](odoo.md#the-first-start), which is kept once it has ended |
 | `launchplane.data-set` | the data set it runs against or belongs to |
 | `launchplane.instance` | on a background service, the container of its instance's web part |
 | `launchplane.generation` | on a web part, a background service and a data set's network, the generation of the [release](the-move.md#what-it-does) that made it. One that is not a generation makes that part wrong, and nothing else. |
@@ -27,9 +27,9 @@ Data set networks and volumes carry the product, lane and data set labels too.
 
 | Field | Each entry has |
 | --- | --- |
-| `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `generation`, `other_image`, `is_update`, `is_first_start`, `receives_visitors_for`. An instance is its web part, or with `is_update` the build run once to update a copy, or with `is_first_start` the build run once before a first web start. Neither of those is a web part: it is on its data set's network alone and never receives visitors. `other_image` is `null` unless [it runs another image than its build's digest](odoo.md#a-build-is-a-publishing-run). A missing lane or build label is `null`. |
+| `instances` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `generation`, `other_image`, `is_update`, `receives_visitors_for`. An instance is its web part, or with `is_update` the build run once to update a copy, which is no web part: it is on its data set's network alone and never receives visitors. `other_image` is `null` unless [it runs another image than its build's digest](odoo.md#a-build-is-a-publishing-run). A missing lane or build label is `null`. |
 | `background_services` | `product`, `lane`, `build`, `container`, `state`, `networks`, `mounts`, `data_set`, `instance`, and `running_for_seconds` by Docker's clock, `null` unless it is running and not restarting or paused. |
-| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names, of the database), `files` (names, of [the files volume](odoo.md#the-data-set)) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`). An empty list is a missing part and two are two. For [a copy](copying.md#a-copy-on-the-host) also `copy_of`, `generation` and `copies`. |
+| `data_sets` | `product`, `lane`, `data_set`, `networks` (each `name` and `is_quiet`), `volumes` (names, of the database), `files` (names, of [the files volume](odoo.md#the-data-set)) and `databases` (each `container`, `state`, `networks`, `mounts`, `accepts_connections`, `exit_code`, `image`, `unheld_logins`), and `first_starts` (each `container` and `seeded`: see [the first start](odoo.md#the-first-start)). An empty list is a missing part and two are two. For [a copy](copying.md#a-copy-on-the-host) also `copy_of`, `generation` and `copies`. |
 | `networks` | every network on the host, with `name` and `is_quiet`. |
 | `web_addresses` | `web_address`, `product`, `lane`, `sends_to_container`, `answers`, `shows_back_soon_page`, `error`, and what the page shows for it: `says` and `standing`. |
 | `lanes` | the judgement on each lane: see [the judgement on a lane](data-sets.md#the-judgement-on-a-lane). |

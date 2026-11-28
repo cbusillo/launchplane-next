@@ -45,7 +45,7 @@ Whether a release is real is answered in one place, [the gate](#the-gate) on the
 | `repaired` | 200 | It already did, and the move put something right on the lane. `did` lists what, such as an instance left by a move that failed, stopped and removed. A request that renamed the routes file never answers this. A request taken up more than once answers for all its attempts: `did` then lists what each changed, in the words of the request's events, and a request whose last attempt changed nothing still answers `repaired`. |
 | `check failed` | 422 | Nothing switched. `error` has the check's error and the instance's last log lines. The instance is gone. |
 | `not updated` | 422 | Only for [a release that updates](odoo.md#a-release-that-updates): nothing switched, and the lane serves from its own data again. |
-| `not initialized` | 422 | Only for a product that declares [a first start](odoo.md#the-first-start): it failed, so no instance was started and nothing switched. |
+| `not initialized` | 422 | Only for a product that declares [a first start](odoo.md#the-first-start): it failed, so no instance was started and nothing switched. Its data set is set aside. |
 | `background service failed` | 422 | Only for a product with a background service, and only where nothing was switched: see [a move with data](data-sets.md#a-move-with-data). Under a release that is switched, the request stays working. |
 
 A move does not answer success while the lane's web address does not answer a request for `/` with success: it answers `503` with the sentence the status call has for it.
@@ -349,7 +349,7 @@ TK's real Odoo 20 build as a lane, from a build Launchplane verified, on a data 
 
 ```
 L=http://launchplane.shiny:8700; J='Content-Type: application/json'; V=http://docker-lp-scratch.shiny/; P=/lanes/watch-tk/testing
-export LAUNCHPLANE_URL=$L LAUNCHPLANE_CONTROL_SHELL='ssh root@launchplane.shiny' LAUNCHPLANE_SCRATCH_SHELL='ssh root@docker-lp-scratch.shiny'
+export LAUNCHPLANE_URL=$L
 said() { python3 -c 'import sys, json; a = json.load(sys.stdin); e = (a.get("error") or "").splitlines(); print(a.get("outcome"), a.get("build", ""), *a.get("did", []), *e[:1], *e[-3:-1], sep="\n")'; }
 uv run python -m tests.bed_odoo set-up-first-start watch-tk
 curl -s -X POST "$L$P/move" -H "$J" -d '{"build":"ghcr.io/cbusillo/odoo-tenant-tk:latest"}'
@@ -361,28 +361,28 @@ curl -s -X POST "$L$P/move" -H "$J" -d '{"build":"ghcr.io/cbusillo/odoo-tenant-t
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
 ```
 
-2. **A new lane serves from its first move, with nothing done by hand.** After about 55 s: `switched`, the build as `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…`, and four lines that each name a part: `made the network`, `the database volume`, `the files volume` and `the database server of the data set`. Then the `make`, `start` and `remove` of a container whose name ends `-first-start`, with its login `i_start`, and the `make` and `start` of the instance with its own login, `wrote the route` and `switch testing.watch-tk.test to` it.
+2. **A new lane serves from its first move, with nothing done by hand.** After about 55 s: `switched`, the build as `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…`, and four lines that each name a part: `made the network`, `the database volume`, `the files volume` and `the database server of the data set`. Then the `make` and `start` of a container whose name ends `-first-start`, with its login `i_start`, and the `make` and `start` of the instance with its own login, `wrote the route` and `switch testing.watch-tk.test to` it.
 
-   **The card** `watch-tk · testing`, while it works, reads `work under way` and has a row `First start`, `running`, for about 35 s, and no instance. **Afterwards** it reads `good`, and its web address `answering`. The request is `done`: `It ended as done.` and its lines, among them `run the first start on the data set` and its name `in` that container, then `start the instance`, the check and the switch. There is no row `Found` and no row `First start`. `Instance 1` shows the build by its digest, `running` and `active`, and the data set's server is `running`.
+   **The card** `watch-tk · testing`, while it works, reads `work under way`, with the data set's server and no instance for about 35 s. **Afterwards** it reads `good`, and its web address `answering`. The request is `done`: `It ended as done.` and its lines, among them `run the first start on the data set` and its name `in` that container, then `start the instance`, the check and the switch. There is no row `Found`. `Instance 1` shows the build by its digest, `running` and `active`, and the data set's server is `running`.
 
 ```
 uv run python -m tests.bed_odoo sign-in watch-tk
 curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
-ssh root@docker-lp-scratch.shiny 'docker ps --no-trunc --filter label=launchplane.product=watch-tk --format "{{.Names}} {{.Image}} {{.Mounts}}"'
+lp-scratch 'docker ps --no-trunc --filter label=launchplane.product=watch-tk --format "{{.Names}} {{.Image}} {{.Mounts}}"'
 ```
 
-3. **The testing login signs in, and Odoo's default one does not.** The first command reads the lane's password on the control container, shows it nowhere, and prints two lines: `signed in as lp-tester, attachment: 5b8e2378…`, the SHA-256 of the declared attachment's bytes read through that session at the web address, and `admin with Odoo's default password: refused`. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` with the volume `launchplane-data-…-files`, and the database server with `…-database`. Nothing named `-first-start` is left.
+3. **The testing login signs in, and Odoo's default one does not.** The first command reads the lane's password on the control container, shows it nowhere, and prints two lines: `signed in as lp-tester, attachment: 5b8e2378…`, the SHA-256 of the declared attachment's bytes read through that session at the web address, and `admin with Odoo's default password: refused`. The site answers `<title>Tonia Kovach | Coastal Towne Realty`. The last command shows the instance on `ghcr.io/cbusillo/odoo-tenant-tk@sha256:0e2ad09f…` with the volume `launchplane-data-…-files`, and the database server with `…-database`. With `--all` it also shows the first start, `Exited (0)`: it is kept as the record that the data set was seeded.
 
 ```
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45278647986}' | said
 ```
 
-4. **The same build again changes nothing.** `unchanged`, and no line: no first start is run on a lane that serves. **The card** is as at point 2, with this request `done` and the note `It ended as done.` alone. The first command of point 3 prints the same two lines.
+4. **The same build again changes nothing.** `unchanged`, and no line, after the serving instance was checked and signed in to once more. **The card** is as at point 2, with this request `done` and the note `It ended as done.` alone. The first command of point 3 prints the same two lines.
 
 ```
 F=/volumes/data/filestore/app/34/34d5bcdaa3ca7286418fae675e3339c20fe1accc
-W=$(ssh root@docker-lp-scratch.shiny 'docker ps --quiet --filter label=launchplane.product=watch-tk --filter label=launchplane.part=web')
-ssh root@docker-lp-scratch.shiny "docker exec $W mv $F /volumes/data/held"
+W=$(lp-scratch 'docker ps --quiet --filter label=launchplane.product=watch-tk --filter label=launchplane.part=web')
+lp-scratch "docker exec $W mv $F /volumes/data/held"
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
 curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
 ```
@@ -392,7 +392,7 @@ curl -s -H 'Host: testing.watch-tk.test' "$V" | grep -o '<title>[^<]*'
    **The card** still reads `good` and `answering`: the lane serves. The request is `failed`, and its note is that one sentence of the check and then its lines, with `check … at /web/login, refused` among them and no line of a log: the candidate's log speaks of no error. There is no row `Found`, and `Instance 1` is still the first build's, `running` and `active`.
 
 ```
-ssh root@docker-lp-scratch.shiny "docker exec $W mv /volumes/data/held $F"
+lp-scratch "docker exec $W mv /volumes/data/held $F"
 curl -s -X POST "$L$P/move?wait=110" -H "$J" -d '{"run":45291692474}' | said
 ```
 
@@ -408,21 +408,27 @@ uv run python -m tests.bed_odoo tear-down watch-tk
 
 ### The first-start watch
 
-A website and an Odoo product, each from its description and nothing else on the host, brought up by one move each. It is the last two tests of `tests/test_bed_odoo.py`, which ask every move through the API as any caller does, print each point as they reach it, wait 8 s after each so the page can be read, and put the bed back. It takes about four and a half minutes. It needs TK's first build on the scratch container and no other, and fails, never skips, where that build is missing and cannot be pulled.
+A website and an Odoo product, each from its description and nothing else on the host, brought up by one move each, and then what a failure, a kill and a login that does not open Odoo each leave. It is the last two tests of `tests/test_bed_odoo.py`, which ask every move through the API as any caller does, print each point as they reach it, wait 8 s after each so the page can be read, and put the bed back. It takes about eleven minutes. It needs TK's first build on the scratch container and no other, and fails, never skips, where that build is missing and cannot be pulled. No password is printed, and none is in anything the tests compare.
 
 ```
 open http://launchplane.shiny:8700/
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest -q -s tests/test_bed_odoo.py -k first_start_from_descriptions
 ```
 
-1. **Described, and nothing on the host.** The two web addresses, `testing.first-site.test` and `testing.first-odoo.test`, each answering `404`, and for each product no instance, no data set and no container visitors are sent to. **The page** has at most a card with one row for each, the retire that cleared the lane.
-2. **The website's first move.** `switched`, and the address answers as `nginx/1.30.6`. **The card** `first-site · testing` reads `good` and `answering`.
-3. **Odoo's first move, on its first request.** `switched` after about 53 s, with one line `run the first start on the data set`. `signed in as: lp-tester`, the SHA-256 of the declared attachment read through that session, and `default admin refused: True`. **The card** `first-odoo · testing` shows a row `First start` while it works, then reads `good` and `answering`.
-4. **Asked again.** The test first writes one invented contact through the session. Then the website answers `unchanged`; Odoo's move sent again with its `Idempotency-Key` is answered with the first request, and a new request for the same build answers `unchanged` with `did: []`. The same instance, the same data set, and the contact's id under `row`.
-5. **Retired with its data kept, and moved again.** `switched`, on the same data set, after a first start that found the data and changed nothing: the same `row`, `password is the same: True`, and the default administrator still refused.
-6. **The password file lost.** The test deletes the lane's password on the control container, retires the lane with its data kept and moves it again. `switched`, `password is another: True`, the same `row` read with the new password, and `the lost password is refused: True`: the first start found that the login no longer opened Odoo and set it again.
-7. **A first start that fails.** For the lane of a third description, `first-odoo-fails`, the test runs Launchplane [able to be held](#holding-a-move-and-interrupting-it), holds it before the first start, and has the empty database refuse every new table. The request is `failed`, `not initialized`, and `error` ends in Odoo's own `psycopg2.errors.RaiseException: the first-start watch lets no table be made in this database`. `visitor: 404`, no instance, and nobody is sent anywhere. **The card** `first-odoo-fails · testing` reads `move failed`, its web address `not answering`, and its row `Found` says `No instance receives visitors`, with the note that the first start failed, so no instance was started.
-8. **Killed while the first start ran.** The second test asks for Odoo's first move again on a lane with nothing, waits until the database has installed modules committed and is not marked finished, and kills Launchplane. `modules installed at the kill` is how many were committed. The same request ends `done`, `switched`, its attempts `interrupted` and `done`. `waited for` is the one line of the second attempt waiting for the first start the kill left running, and `stopped: []` says it stopped nothing that ran. `marked finished: t`, the attachment read as `lp-tester`, and the default administrator refused. **The card** afterwards reads `good` and `answering`.
+`on the host` is, for the product's lane: its instances, each data set with how its first starts ended (`True` seeded, `False` set aside), the data set it serves from, and the container visitors are sent to.
+
+1. **Described, and nothing on the host.** The two web addresses, `testing.first-site.test` and `testing.first-odoo.test`, each answering `404`, and nothing of either product on the host.
+2. **The website's first move.** `switched`, and the page at its address is nginx's own, `page: True`. **The card** `first-site · testing` reads `good` and `answering`.
+3. **Odoo's first move, on its first request.** `switched` after about 55 s, with one line `run the first start on the data set`, and one data set, `[True]`. In one session as `lp-tester` the test reads the declared attachment, whose SHA-256 it prints, and writes one invented contact. `default admin refused: True`, and `password said anywhere: False`. **The card** `first-odoo · testing` reads `good` and `answering`.
+4. **Asked again.** The website answers `unchanged`; Odoo's move sent again with its `Idempotency-Key` is answered with the first request, and a new request for the same build answers `unchanged` with `did: []`. The same instance and data set, and the contact's id under `tester reads`.
+5. **Retired with its data kept, and moved again.** `switched` on the same data set with `first start: []`: no first start is run on a data set the request did not make. The same contact.
+6. **The password file gone.** The test moves the lane's password aside on the control container. **The card** reads `wrong` and `not answering`, with `has no password kept on the control machine` under `found`. The same build asked again answers `check failed` with that reason, and `file made again: False`. The test moves the file back, and the card reads `good`.
+7. **The tester's password changed in Odoo.** The tester changes it, signed in. **The card** reads `wrong`, with `Odoo refused the testing login lp-tester.` The same build asked again answers `check failed`, and `changed password reads` is the contact, read with the new password: Launchplane wrote nothing over it. The test changes it back and waits for the card to read `good`, which can take a minute.
+8. **A first start that fails.** For the lane of a third description, `first-odoo-fails`, the test runs Launchplane [able to be held](#holding-a-move-and-interrupting-it), holds it before the first start, and has the empty database refuse every new table. The request is `failed`, `not initialized`, and `error` ends in Odoo's own `psycopg2.errors.RaiseException: the first-start watch lets no table be made in this database`. `visitor: 404`, no instance, nobody sent anywhere, and the data set `[False]`. **The card** `first-odoo-fails · testing` reads `move failed`, its web address `not answering`.
+9. **Asked again after a person repaired the data set that was set aside.** The test starts that data set's server by hand, takes the fault away, makes one table there and one file in its files volume, and asks for the same build again. `switched`, serving from a second data set, `[True]`, while the first stays `[False]` with the same volumes. `its repair: kept` and `repaired-by-a-person` among `its files` are read from the first after the second serves. **The card** reads `good`, and has a row for the data set that is set aside.
+10. **Launchplane killed while the first start ran.** The second test asks for Odoo's first move on a lane with nothing, waits until the database has installed modules committed, and kills Launchplane alone. The same request ends `done`, `switched`, its attempts `interrupted` and `done`, serving from the data set it began in, `[True]`.
+11. **Launchplane and the first start both killed.** The same, and with Launchplane down the test also kills the first start's container. The same request ends `done`, `switched`, serving from a second data set. The one it began in is `[False]`, with the same volumes, and holds no committed module.
+12. **Launchplane killed once the seed was committed.** Launchplane, [able to be held](#holding-a-move-and-interrupting-it), is killed where it is about to start the web part. The same request ends `done`, `switched`, on the data set that was seeded, with one first start, `[True]`.
 
 ### The copy watch
 

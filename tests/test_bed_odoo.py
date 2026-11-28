@@ -484,7 +484,8 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         card=card(FAILING),
     )
     assert (status, anew["outcome"], after["serves_from"] != [aside], after["data_sets"][aside]) == (200, "switched", True, [False])
-    assert (repair, file, volumes_of(FAILING, aside), len(after["data_sets"])) == ("kept", ["repaired-by-a-person"], kept_volumes, 2)
+    assert (repair, "repaired-by-a-person" in file, volumes_of(FAILING, aside)) == ("kept", True, kept_volumes)
+    assert len(after["data_sets"]) == 2
     assert (read_as_tester(FAILING), card(FAILING)) == ({"attachment": ATTACHMENT_BYTES, "rows": []}, GOOD)
 
 
