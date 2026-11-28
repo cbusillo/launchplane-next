@@ -67,6 +67,9 @@ def handler(registry: Registry) -> type[BaseHTTPRequestHandler]:
                 self.end_headers()
                 self.wfile.write(b'{"status":"downloading"}\n')
                 return
+            if registry.failure == "absent":
+                self.reply(200, {"status": "downloaded"})
+                return
             if registry.failure or password != registry.password:
                 reason = f"access denied for {registry.password}"
                 self.reply(403 if registry.failure == "http" else 200, {"error": reason, "message": reason})
@@ -98,7 +101,8 @@ def private_host(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[ContainerHos
 
 
 @pytest.mark.parametrize(
-    ("failure", "why"), [("http", "denied"), ("stream", "denied"), ("broken stream", "payload"), ("stall", "deadline")]
+    ("failure", "why"),
+    [("http", "denied"), ("stream", "denied"), ("broken stream", "payload"), ("stall", "deadline"), ("absent", "no such image")],
 )
 def test_a_failed_fetch_ends_the_updating_move_with_its_reason_while_the_original_keeps_serving(
     private_host: tuple[ContainerHost, Registry], record: Record, failure: str, why: str, monkeypatch: pytest.MonkeyPatch
