@@ -566,14 +566,7 @@ def serve() -> None:
     record = PostgresRecord(database(), host)
     kept = SecretFolder(Path(os.environ.get("LAUNCHPLANE_SECRETS", SECRETS_FOLDER)), host.secrets.note)
     kept.note_all()
-    lanes = Lanes(
-        host,
-        proxy,
-        products.read,
-        read_unfinished=record.unfinished,
-        read_ended=record.ended_lately,
-        read_test_password=kept.test_password,
-    )
+    lanes = Lanes(host, proxy, products.read, read_unfinished=record.unfinished, read_ended=record.ended_lately, passwords=kept)
     worker = Worker(record, lanes, host)
     worker.start()
     app = create_app(lanes.read_status, record, worker.wake, host, lanes, Builds(products.read))

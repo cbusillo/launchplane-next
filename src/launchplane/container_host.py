@@ -398,20 +398,21 @@ class ContainerHost:
 
     # The build, run once to its end as an instance of it runs on the data set: its settings, its files and a login. It is
     # on the data set's network alone, where no visitor is sent. Once it has ended and answered, it is removed.
-    # Each variable `given` holds a secret of its lane, and is marked as one on the container.
+    # Each variable `given` holds a secret of its lane, and is marked as one on the container. What ran an update is
+    # removed; what ran a first start is kept, ended, as the record of how it ended.
     def run_once(self, run: Update | Initialize, by: Witness = NOBODY, given: Mapping[str, str] | None = None) -> CommandResult:
         target, container, use, given = run.target, run.container, run.use, given or {}
         with attempting(f"Running {run.command[0]} of build {target.build} once in {container}", self.address):
             part = "update" if isinstance(run, Update) else "first-start"
             as_instance = self.instance_options(target, container, use, run.generation, part)
-            once = replace(as_instance, networks={use.network: []}, command=[*run.command], restart=RUNS_ONCE)
-            if given:
-                marked = once.labels | {SECRET_VARIABLES_LABEL: ",".join(given)}
-                once = replace(once, labels=marked, environment={**once.environment, **given})
+            marked = as_instance.labels | ({SECRET_VARIABLES_LABEL: ",".join(given)} if given else {})
+            once = replace(as_instance, networks={use.network: []}, command=[*run.command], restart=RUNS_ONCE, labels=marked)
+            once = replace(once, environment={**once.environment, **given})
             ran = self.run_part(once, use, lambda on: self.logins.make(container, on, by), by)
             exit_code = ran.wait(timeout=RUN_ONCE_DEADLINE_SECONDS)["StatusCode"]
             output = ran.logs(tail=LOG_TAIL_LINES).decode(errors="replace").strip()
-            self.retire_container(container, by)
+            if isinstance(run, Update):
+                self.retire_container(container, by)
         return CommandResult(exit_code=exit_code, output=output)
 
     def await_once(self, container: str) -> None:
@@ -536,7 +537,7 @@ class ContainerHost:
 
     def delete_data_set(self, found: DataSet) -> None:
         with attempting(f"Deleting the data set {found.data_set}", self.address):
-            for part in (*found.databases, *found.copies):
+            for part in (*found.databases, *found.copies, *found.first_starts):
                 self.retire_container(part.container)
             for network in found.networks:
                 with suppress(NotFound):
@@ -604,9 +605,9 @@ class ContainerHost:
             found = self.find_container(container)
             return found is not None and found.status == "running"
 
-    def run_in(self, container: str, command: list[str]) -> CommandResult:
+    def run_in(self, container: str, command: list[str], given: Mapping[str, str] | None = None) -> CommandResult:
         with attempting(f"Running {command[0]} in {container}", self.address):
-            return self.command_result_in(container, command)
+            return command_result(self.client.containers.get(container), command, given)
 
     def command_result_in(self, container: str, command: list[str]) -> CommandResult:
         return command_result(self.client.containers.get(container), command)

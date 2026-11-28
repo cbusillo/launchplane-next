@@ -15,6 +15,7 @@ from pydantic import AwareDatetime, BaseModel, Field, TypeAdapter, ValidationErr
 from launchplane.instance import (
     DataSet,
     DataSetDatabase,
+    FirstStartRun,
     HostNetwork,
     InstanceState,
     Mount,
@@ -254,7 +255,6 @@ def instance_from(summary: DockerContainerSummary) -> RunningInstance:
         mounts=mounts_of(summary),
         generation=generation_in(summary.labels, summary.name),
         is_update=part_of(summary) == "update",
-        is_first_start=part_of(summary) == "first-start",
     )
 
 
@@ -336,6 +336,11 @@ def volume_copy(summary: DockerContainerSummary, details: Mapping[str, DockerCon
     return VolumeCopy(container=summary.name, volume="".join(written[:1]), finished=finished, stopped=not state.running)
 
 
+def first_start_run(summary: DockerContainerSummary, details: Mapping[str, DockerContainerDetails]) -> FirstStartRun:
+    state = described(summary, details, "first start").state
+    return FirstStartRun(container=summary.name, seeded=None if state.running else (state.status, state.exit_code) == ("exited", 0))
+
+
 def network_from(network: DockerNetworkSummary) -> HostNetwork:
     return HostNetwork(name=network.name, is_quiet=is_quiet(network))
 
@@ -345,6 +350,7 @@ def data_sets_from(
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
     copies: Iterable[tuple[DataSetKey, VolumeCopy]],
+    first_starts: Iterable[tuple[DataSetKey, FirstStartRun]] = (),
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
@@ -357,6 +363,7 @@ def data_sets_from(
     by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) != "files")
     by_files = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) == "files")
     by_database = grouped(databases)
+    by_first_start = grouped(first_starts)
     return [
         DataSet(
             product=key[0],
@@ -369,6 +376,7 @@ def data_sets_from(
             files=tuple(sorted(by_files.get(key, []))),
             copy_of=copy_of.get(key),
             copies=tuple(sorted(by_copier.get(key, []), key=lambda copy: copy.container)),
+            first_starts=tuple(sorted(by_first_start.get(key, []), key=lambda each: each.container)),
         )
         for key in sorted(by_network.keys() | by_volume.keys() | by_files.keys() | by_database.keys(), key=str)
     ]
@@ -408,10 +416,12 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
         background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
     databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
     copies = [(data_set_key(summary.labels, summary.name), volume_copy(summary, details)) for summary in by_part["copier"]]
+    ran = by_part["first-start"]
+    first_starts = [(data_set_key(summary.labels, summary.name), first_start_run(summary, details)) for summary in ran]
     return OnHost(
-        instances=[instance_from(summary) for summary in (*by_part["web"], *by_part["update"], *by_part["first-start"])],
+        instances=[instance_from(summary) for summary in (*by_part["web"], *by_part["update"])],
         background_services=background_services,
-        data_sets=data_sets_from(databases, marked_networks, volume_list, copies),
+        data_sets=data_sets_from(databases, marked_networks, volume_list, copies, first_starts),
         networks=[network_from(network) for network in every_network],
     )
 
@@ -446,8 +456,8 @@ class CommandResult:
         return self.exit_code == 0
 
 
-def command_result(container: Container, command: list[str]) -> CommandResult:
-    result = container.exec_run(command)
+def command_result(container: Container, command: list[str], given: Mapping[str, str] | None = None) -> CommandResult:
+    result = container.exec_run(command, environment=dict(given)) if given else container.exec_run(command)
     exit_code, output = result.exit_code, result.output
     if exit_code is None or not isinstance(output, bytes):
         raise ContainerHostError(f"Running {command[0]} in {container.name} returned before the command finished.")

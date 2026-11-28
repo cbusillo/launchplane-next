@@ -25,66 +25,50 @@ UPDATE_DEADLINE_SECONDS = 600
 # How long installing the declared modules in an empty database may take.
 FIRST_START_DEADLINE_SECONDS = 600
 TEST_PASSWORD_VARIABLE = "LAUNCHPLANE_TEST_PASSWORD"  # noqa: S105 the name of the variable, not a password
-# Run by the build before its first web start. What there is to do is asked of the database itself, and of nothing else.
-# The first start marks a database as its own before it writes anything else to it, and marks it finished in the commit
-# that ends its work. It writes to an empty database alone, so nothing a person put anywhere is ever written over: one
-# that holds anything and was never marked is left as it is, whatever it lacks, and one marked and not finished fails the
-# move, since what an earlier first start left there cannot be told from what a person has put there since.
-# An empty one gets the declared modules, the declared attachment and an administrator nobody can sign in as with Odoo's
-# default password. In one that is finished, a testing login that does not open Odoo with the password given is set again.
-HELD_QUERY = "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace"
-MARK = "launchplane.first_start"
+# Run once by the build on a data set its own request made, before any web part starts there. It writes only where
+# nothing is: a table in any schema or a file in the files volume ends it with nothing changed. It installs the declared
+# modules, and then in one commit makes the testing login, the declared attachment as that login's own, and Odoo's
+# administrator one nobody signs in as. It ends with code 0 only after that commit, and says no password when it fails.
+HELD_QUERY = (
+    "SELECT count(*) FROM pg_class JOIN pg_namespace ON pg_namespace.oid = relnamespace "
+    "WHERE nspname !~ '^(pg_|information_schema$)'"
+)
 FIRST_START = """\
 set -e
-ask() {{ psql --no-psqlrc --quiet --tuples-only --no-align --set=ON_ERROR_STOP=1 --command="$1"; }}
-unmarked=$(ask "SELECT to_regclass('{mark}') IS NULL")
-finished=$([ "$unmarked" != f ] || ask "SELECT finished FROM {mark}")
-case "$unmarked$finished" in
-t)
-    held=$(ask "{held_query}")
-    if [ "$held" != 0 ]; then
-        echo "The database {database} holds $held tables and indexes no first start made, so nothing was initialized in it."
-        exit 0
-    fi
-    ask "CREATE SCHEMA launchplane; CREATE TABLE {mark} AS SELECT false AS finished"
-    timeout {deadline} {server} --init {modules} --stop-after-init --no-http
-    ;;
-ft)
-    if [ -z "${{{password_variable}:-}}" ]; then
-        echo "The first start of the database {database} finished earlier, so nothing was initialized in it."
-        exit 0
-    fi
-    ;;
-ff)
-    echo "An earlier first start of the database {database} began and did not finish. What it left there cannot be told \
-from what a person has put there since, so nothing was changed. Retire the lane naming this data set to delete, and the \
-next move makes a new one and initializes it."
+held=$(psql --no-psqlrc --quiet --tuples-only --no-align --set=ON_ERROR_STOP=1 --command="{held_query}")
+files=$(ls -A {files})
+if [ "$held" != 0 ] || [ -n "$files" ]; then
+    echo "The database {database} holds $held tables and indexes, and its files volume holds: ${{files:-nothing}}. A first \
+start writes only where both hold nothing, so nothing was changed."
     exit 1
-    ;;
-*)
-    echo "The database {database} did not say whether a first start has marked it, so nothing was changed in it."
-    exit 1
-    ;;
-esac
+fi
+timeout {deadline} {server} --init {modules} --stop-after-init --no-http
 exec {server} shell --no-http --log-level=error <<'SEED'
 import base64, json, os, secrets
-want = json.loads({want!r})
-password = os.environ.get("{password_variable}")
-signs_in = {{"login": want["test_login"], "password": password}} if password else {{"password": secrets.token_urlsafe(32)}}
-env.cr.execute("SELECT finished FROM {mark}")
-if not env.cr.fetchone()[0]:
-    raw = base64.b64decode(want["bytes"])
-    env["ir.attachment"].create({{"name": want["attachment"], "raw": raw, "mimetype": "application/octet-stream"}})
-    env.ref("base.user_admin").write(signs_in)
-    env.cr.execute("UPDATE {mark} SET finished = true")
-else:
-    env.cr.execute("SELECT password FROM res_users WHERE active AND login = %s", [want["test_login"]])
-    kept = env.cr.fetchone()
-    if not (kept and kept[0] and env["res.users"]._crypt_context().verify(password, kept[0])):
-        env.ref("base.user_admin").write(signs_in)
-        print("The testing login did not open the database {database} with the password kept for its lane, and was set again.")
-env.cr.commit()
+want, password = json.loads({want!r}), os.environ["{password_variable}"]
+try:
+    groups = [(6, 0, [env.ref(each).id for each in ("base.group_user", "base.group_partner_manager")])]
+    signs_in = {{"name": want["test_login"], "login": want["test_login"], "password": password, "group_ids": groups}}
+    tester = env["res.users"].create(signs_in)
+    file = {{"name": want["attachment"], "raw": base64.b64decode(want["bytes"]), "mimetype": "application/octet-stream"}}
+    env["ir.attachment"].with_user(tester).create(file)
+    env.ref("base.user_admin").password = secrets.token_urlsafe(32)
+    env.cr.commit()
+except Exception as error:
+    raise SystemExit(f"The seed failed: {{type(error).__name__}}: {{str(error).replace(password, '[the password]')}}")
 SEED
+"""
+# Run in an instance: one sign-in as a person makes it, asked of that instance alone. It succeeds only with a session.
+SIGN_IN = """\
+import json, os, sys, urllib.request
+ask = {{"jsonrpc": "2.0", "params": {{"db": {database!r}, "login": {login!r}, "password": os.environ["{password_variable}"]}}}}
+asked = urllib.request.Request("http://127.0.0.1:80/web/session/authenticate", json.dumps(ask).encode())
+asked.add_header("Content-Type", "application/json")
+try:
+    answer = json.load(urllib.request.urlopen(asked, timeout=20))
+except (OSError, ValueError) as error:
+    sys.exit(f"Odoo gave no answer to a sign-in: {{type(error).__name__}}.")
+sys.exit(None if (answer.get("result") or {{}}).get("uid") else "Odoo refused the testing login " + {login!r} + ".")
 """
 # Run by Odoo's own shell in the instance, so with the registry Odoo loads for its database: each declared module's
 # state, and the declared attachment read through Odoo from its file.
@@ -101,8 +85,8 @@ if read != [want["sha256"]]:
 """
 
 
-# What an empty data set of the product is given before its first web start: the bytes of the declared attachment, and the
-# name its administrator signs in with on a testing lane, with that lane's own password.
+# What a first start gives the data of a testing lane: the bytes of the declared attachment, and the name of the testing
+# login, which signs in with that lane's own password.
 class FirstStart(BaseModel, extra="forbid", frozen=True):
     attachment: Base64Bytes
     test_login: str = Field(min_length=1)
@@ -146,7 +130,7 @@ class Odoo(BaseModel, extra="forbid", frozen=True):
         want = {"attachment": self.attachment, "bytes": given.model_dump(mode="json")["attachment"], "test_login": given.test_login}
         script = FIRST_START.format(
             held_query=HELD_QUERY,
-            mark=MARK,
+            files=FILES_PATH,
             database=DATABASE_NAME,
             deadline=FIRST_START_DEADLINE_SECONDS,
             server=SERVER,
@@ -155,6 +139,13 @@ class Odoo(BaseModel, extra="forbid", frozen=True):
             password_variable=TEST_PASSWORD_VARIABLE,
         )
         return "sh", "-c", script
+
+    @property
+    def sign_in_command(self) -> tuple[str, ...]:
+        if self.first_start is None:
+            return ()
+        login = self.first_start.test_login
+        return "python3", "-c", SIGN_IN.format(database=DATABASE_NAME, login=login, password_variable=TEST_PASSWORD_VARIABLE)
 
     @property
     def check(self) -> tuple[str, ...]:

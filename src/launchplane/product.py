@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from launchplane.instance import Run, new_password
+from launchplane.instance import TESTING, Run, new_password
 from launchplane.odoo import TEST_PASSWORD_VARIABLE, Odoo
 from launchplane.steps import Check
 
@@ -40,15 +40,18 @@ class Product(BaseModel, extra="forbid", frozen=True):
     def update(self) -> tuple[str, ...]:
         return self.odoo.update_command if self.odoo is not None and self.odoo.update else ()
 
-    # What the kind runs once on a data set before its first web start, and the variable it reads the password of a
-    # testing lane's login from. With no command, the first instance starts on the data set as it is.
-    @property
-    def first_start(self) -> tuple[str, ...]:
-        return () if self.odoo is None else self.odoo.first_start_command
+    # What the kind runs once to initialize the data of this lane, where the product declares that and the lane is one
+    # that is initialized: with no command, an instance starts on its data set as it is.
+    def first_start(self, lane: str) -> tuple[str, ...]:
+        return self.odoo.first_start_command if self.odoo is not None and lane == TESTING else ()
+
+    # What the kind runs in an instance of this lane to sign in as its testing login, where it has one.
+    def sign_in(self, lane: str) -> tuple[str, ...]:
+        return self.odoo.sign_in_command if self.odoo is not None and lane == TESTING else ()
 
     @property
-    def test_password_variable(self) -> str | None:
-        return TEST_PASSWORD_VARIABLE if self.first_start else None
+    def test_password_variable(self) -> str:
+        return TEST_PASSWORD_VARIABLE
 
 
 @dataclass(frozen=True)
@@ -77,20 +80,33 @@ def on_disk(path: Path) -> None:
         os.close(opened)
 
 
-# The secrets Launchplane keeps for a lane, one file each, which only its own user reads. Each is told to `note` before
-# it is given to anyone, so nothing Launchplane answers, stores or logs carries it.
+# The password of each lane's testing login, one file each, which only Launchplane's own user reads. Each is told to
+# `note` before it is given to anyone, so nothing Launchplane answers, stores or logs carries it.
 @dataclass(frozen=True)
 class SecretFolder:
     folder: Path
     note: Callable[[Iterable[str]], None]
 
+    def path(self, product: str, lane: str) -> Path:
+        return self.folder / product / lane / "test-login"
+
     def note_all(self) -> None:
         self.note(path.read_text() for path in self.folder.glob("*/*/test-login"))
 
-    # The password of one lane's testing login: made the first time it is asked for, and the same from then on. A new
-    # one is on the disk, with the name it is found by, before anybody is given it.
-    def test_password(self, product: str, lane: str) -> str:
-        path = self.folder / product / lane / "test-login"
+    # Only looked up, for whoever proves the login: None where the lane has none kept.
+    def kept(self, product: str, lane: str) -> str | None:
+        try:
+            password = self.path(product, lane).read_text()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise ProductError(f"Reading the password of the testing login of {lane} of {product} failed: {error}") from error
+        self.note([password])
+        return password
+
+    # For a first start alone. A new one is on the disk, under the name it is found by, before anybody is given it.
+    def made(self, product: str, lane: str) -> str:
+        path = self.path(product, lane)
         try:
             if not path.exists():
                 path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -100,8 +116,6 @@ class SecretFolder:
                 on_disk(fresh)
                 fresh.replace(path)
                 on_disk(path.parent)
-            password = path.read_text()
         except OSError as error:
             raise ProductError(f"Keeping the password of the testing login of {lane} of {product} failed: {error}") from error
-        self.note([password])
-        return password
+        return self.kept(product, lane) or ""

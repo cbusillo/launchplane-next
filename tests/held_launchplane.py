@@ -13,7 +13,7 @@ import re
 import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -107,10 +107,10 @@ class HeldHost(Held, ContainerHost):
         super().__init__(client, address)
         self.logins = HeldLogins(client, address, self.secrets)
 
-    def run_in(self, container: str, command: list[str]) -> CommandResult:
+    def run_in(self, container: str, command: list[str], given: Mapping[str, str] | None = None) -> CommandResult:
         if held_once("interrupt-switch", repr(command)):
             command = ["env", f"PATH={M3_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", *command]
-        return super().run_in(container, command)
+        return super().run_in(container, command, given)
 
 
 class HeldProxy(Held, TraefikProxy):

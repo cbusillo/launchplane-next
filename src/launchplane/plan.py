@@ -1,10 +1,9 @@
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from launchplane.gate import Answer as GateAnswer
 from launchplane.instance import (
-    TESTING,
     DataSet,
     DataSetUse,
     InstanceState,
@@ -27,6 +26,7 @@ from launchplane.steps import (
     BackgroundServiceRefused,
     Cancel,
     CannotPutBack,
+    Check,
     CheckRefused,
     Command,
     CopyVolume,
@@ -53,6 +53,7 @@ from launchplane.steps import (
     Retire,
     RetireOutcome,
     RetireResult,
+    SignIn,
     StartBackgroundService,
     StartDatabase,
     StartInstance,
@@ -166,8 +167,9 @@ def lane_data_set(lane: LaneReading, receiving: RunningInstance | None, fresh: s
     if receiving is not None and receiving.data_set is not None:
         return receiving.data_set
     # A copy kept offline is never the data a lane starts on by being there. One given a server may be what a release
-    # switched to, so it counts.
-    names = sorted(data_set.data_set for data_set in lane.data_sets if data_set.copy_of is None or data_set.databases)
+    # switched to, so it counts. One set aside is never started on, whoever asks.
+    held = [each for each in lane.data_sets if (each.copy_of is None or each.databases) and not each.is_set_aside]
+    names = sorted(each.data_set for each in held)
     if len(names) > 1:
         return Stop(
             f"The lane has the data sets {', '.join(names)} and no instance receiving visitors that uses one, "
@@ -442,6 +444,10 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
     lane, candidate, done = move.lane, move.candidate, move.done
     if (wait := own_named_by_route(move)) is not None:
         return wait
+    # The server of a data set that was set aside is stopped, and its volumes are kept.
+    aside = [server.container for each in lane.data_sets if each.is_set_aside for server in each.databases]
+    if running := sorted(set(aside) - {each.container for each in lane.databases if each.state == InstanceState.STOPPED}):
+        return StopDatabase(running[0])
     refused = next((event for event in done if isinstance(event, CheckRefused | InitializeRefused)), None)
     if refused is not None:
         outcome = Outcome.CHECK_FAILED if isinstance(refused, CheckRefused) else Outcome.NOT_INITIALIZED
@@ -452,38 +458,44 @@ def prepare(move: Move) -> Step[MoveResult] | CannotPutBack:
         return switch_or_check(move, candidate)
     receiving = move.instance(lane.route.written)
     if receiving is not None and is_fit(move.judged, receiving, move.target):
-        return finish(move, receiving)
-    # A first start an attempt that was cut short left running is finishing its work, and stopping it would leave a
-    # database begun and not finished. So it is waited for, and goes once it has ended.
-    begun = next((each for each in lane.instances if each.is_first_start and each.state is InstanceState.RUNNING), None)
-    if begun is not None:
-        return AwaitFirstStart(begun.container)
+        # A lane with a testing login is as asked only while that login opens what it serves.
+        proof = check_of(move, receiving.container)
+        return finish(move, receiving) if proof.sign_in is None or proof in done else proof
     if (step := old_part_step(move, lane.route.written)) is not None:
         return step
     data_set = None if move.product.database is None else lane_data_set(lane, receiving, move.fresh.data_set)
     if isinstance(data_set, Stop):
         return data_set
-    use = prepared(move.judged, data_set, move.fresh.data_set, move.product, done, move.generation)
+    return start_step(move, data_set)
+
+
+# The instance a move starts, on the data set chosen for it, once that is ready.
+def start_step(move: Move, data_set: str | None) -> Action | Stop:
+    found = move.lane.data_set(data_set)
+    began = () if found is None else found.first_starts
+    # A first start an attempt that was cut short left running is finishing its work. It is waited for, never stopped.
+    if still := [each.container for each in began if each.seeded is None]:
+        return AwaitFirstStart(still[0])
+    use = prepared(move.judged, data_set, move.fresh.data_set, move.product, move.done, move.generation)
     if not (use is None or isinstance(use, DataSetUse)):
         return use
-    first = None if use is None or receiving is not None else first_start_step(move, use)
-    return first or StartInstance(move.target, move.fresh.container, use, move.generation)
+    # The kind's first start runs once, on a data set this request made and nothing has begun in. Any other data set,
+    # whatever it lacks, is started on as it is and checked.
+    command = move.product.first_start(move.target.lane)
+    if command and use is not None and found is not None and found.generation == move.generation and not began:
+        return Initialize(move.target, f"{move.fresh.container}-first-start", use, command, move.generation)
+    return StartInstance(move.target, move.fresh.container, use, move.generation)
 
 
-# The kind's first start goes before the first web start on a data set no instance serves from, once in an attempt. It
-# is not decided here whether the data is to be initialized: what runs asks the data itself, and nothing the lane has or
-# lacks is taken for leave to. Only a testing lane is given a testing login.
-def first_start_step(move: Move, use: DataSetUse) -> Initialize | None:
-    command = move.product.first_start
-    if not command or any(isinstance(event, Initialize) for event in move.done):
-        return None
-    variable = move.product.test_password_variable if move.target.lane == TESTING else None
-    return Initialize(move.target, f"{move.fresh.container}-first-start", use, command, move.generation, variable)
+def check_of(move: Move, container: str) -> Check:
+    command, lane = move.product.sign_in(move.target.lane), move.target
+    sign_in = SignIn(lane.product, lane.lane, command, move.product.test_password_variable) if command else None
+    return replace(move.product.check(container), sign_in=sign_in)
 
 
 def switch_or_check(move: Move, candidate: RunningInstance) -> Action | Stop:
     if not is_checked(candidate, move.product, move.done):
-        return move.product.check(candidate.container)
+        return check_of(move, candidate.container)
     problems = problems_switching_to(move.judged, candidate)
     if problems:
         return Stop(

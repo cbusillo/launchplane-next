@@ -26,6 +26,7 @@ from launchplane.instance import (
     DataSet,
     DataSetDatabase,
     DataSetUse,
+    FirstStartRun,
     HostNetwork,
     InstanceState,
     LaneBuild,
@@ -104,9 +105,15 @@ class PretendHost:
         # The builds whose update ends with an error, and those whose update runs and whose reply never comes.
         self.updates_that_fail: set[str | None] = set()
         self.updates_unanswered: set[str | None] = set()
-        # What a failing update or first start wrote last, and each set of secret variables one was given.
+        # What a failing update or first start wrote last, and each set of secrets one was handed.
         self.failure_says = "module not found"
         self.given_once: list[Mapping[str, str]] = []
+        # Whether a first start left running commits its seed before it ends.
+        self.left_running_seeds = True
+        # The instances Odoo refuses the testing login in, and what each sign-in was handed.
+        self.sign_ins_refused: set[str] = set()
+        self.signed_in_with: list[Mapping[str, str]] = []
+        self.sign_ins: list[str] = []
         # How often Docker has started each container again by itself.
         self.restarted: dict[str, int] = {}
         # Called once an update has ended, while its container is still on the host.
@@ -355,27 +362,57 @@ class PretendHost:
             self.record(f"retire {container}")
 
     # What runs once is on the host as an instance of its build for as long as it runs, and is removed once it answered.
-    def run_once(self, run: Update | Initialize, by: Witness = NOBODY, given: Mapping[str, str] | None = None) -> CommandResult:
-        target, container, use, first = run.target, run.container, run.use, isinstance(run, Initialize)
+    def ran_first_start(self, data_set: str, container: str, seeded: bool | None) -> None:
+        found = self.data_sets[data_set]
+        others = tuple(each for each in found.first_starts if each.container != container)
+        self.data_sets[data_set] = found.model_copy(
+            update={"first_starts": (*others, FirstStartRun(container=container, seeded=seeded))}
+        )
+
+    # What runs a first start is kept on the host with how it ended. Killed or unanswered, it is left running.
+    def first_start(self, run: Initialize, by: Witness, given: Mapping[str, str]) -> CommandResult:
+        container, data_set = run.container, run.use.data_set
+        self.change_login(by, "make", run.use.database_container, login_of(container))
+        with self.command(by, "make", container), self.command(by, "start", container):
+            self.ran_first_start(data_set, container, None)
+        self.given_once.append(given)
+        self.record(f"first start {container}")
+        if run.target.build in self.updates_unanswered:
+            raise ContainerHostError(f"Running {run.command[0]} in {container} on test failed: the reply was lost")
+        failed = run.target.build in self.updates_that_fail
+        self.ran_first_start(data_set, container, not failed)
+        return CommandResult(exit_code=1, output=self.failure_says) if failed else CommandResult(0, "")
+
+    def await_once(self, container: str) -> None:
+        self.record(f"await first start {container}")
+        [data_set] = [name for name, found in self.data_sets.items() if container in [each.container for each in found.first_starts]]
+        self.ran_first_start(data_set, container, self.left_running_seeds)
+
+    def run_in(self, container: str, command: list[str], given: Mapping[str, str] | None = None) -> CommandResult:
+        assert command
+        self.sign_ins.append(container)
+        self.signed_in_with.append(given or {})
+        refused = container in self.sign_ins_refused
+        return CommandResult(exit_code=1, output="Odoo refused the testing login.") if refused else CommandResult(0, "")
+
+    def run_once(self, update: Update | Initialize, by: Witness = NOBODY, given: Mapping[str, str] | None = None) -> CommandResult:
+        if isinstance(update, Initialize):
+            return self.first_start(update, by, given or {})
+        target, container, use, command = update.target, update.container, update.use, update.command
         self.change_login(by, "make", use.database_container, login_of(container))
         with self.command(by, "make", container), self.command(by, "start", container):
-            self.place(target, container, use=use, generation=run.generation)
-            alone = {"is_update": not first, "is_first_start": first, "networks": (use.network,)}
+            self.place(target, container, use=use, generation=update.generation)
+            alone = {"is_update": True, "networks": (use.network,)}
             self.instances[container] = self.instances[container].model_copy(update=alone)
-        self.given_once.append(given or {})
-        self.record(f"first start {container}" if first else f"update {container} with {' '.join(run.command)}")
+        self.record(f"update {container} with {' '.join(command)}")
         if target.build in self.updates_unanswered:
-            raise ContainerHostError(f"Running {run.command[0]} in {container} on test failed: the reply was lost")
+            raise ContainerHostError(f"Running {command[0]} in {container} on test failed: the reply was lost")
         self.change_part(container, InstanceState.STOPPED)
         self.once_the_update_ended()
         with self.command(by, "stop", container, already=True), self.command(by, "remove", container):
             del self.instances[container]
         failed = target.build in self.updates_that_fail
         return CommandResult(exit_code=1, output=self.failure_says) if failed else CommandResult(0, "")
-
-    def await_once(self, container: str) -> None:
-        self.record(f"await first start {container}")
-        self.change_part(container, InstanceState.STOPPED)
 
     def restarts(self, container: str) -> int:
         return self.restarted.get(container, 0)

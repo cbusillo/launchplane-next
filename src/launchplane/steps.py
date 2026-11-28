@@ -179,6 +179,15 @@ class StartInstance:
     generation: str | None = None
 
 
+# One sign-in as the testing login of a lane, run in an instance that is given that login's password in `variable`.
+@dataclass(frozen=True)
+class SignIn:
+    product: str
+    lane: str
+    command: tuple[str, ...]
+    variable: str
+
+
 # The instance answers at `health_path`, and then the `command` of its kind, run in it, succeeds.
 @dataclass(frozen=True)
 class Check:
@@ -187,6 +196,8 @@ class Check:
     command: tuple[str, ...] = ()
     # Asked of the candidate of a release that updates alone: it also fails if Docker has started it again since.
     first_process: bool = field(default=False, compare=False)
+    # Where the lane has a testing login: its sign-in, which must succeed in the instance too.
+    sign_in: SignIn | None = field(default=None, compare=False)
 
 
 # The update of the product's kind, run once to its end by the build in `container`, on a copy of the lane's data and
@@ -200,9 +211,8 @@ class Update:
     generation: str | None = None
 
 
-# The first start of the product's kind, run once to its end by the build in `container`, on a data set no instance
-# serves from and before one is started there. It changes only data that is empty. On a testing lane it is given the
-# password of the lane's testing login in `password_variable`.
+# The first start of the product's kind, run once by the build in `container` on a data set this request made, before any
+# instance is started there. Its container is kept as the record of how it ended.
 @dataclass(frozen=True)
 class Initialize:
     target: LaneBuild
@@ -210,10 +220,9 @@ class Initialize:
     use: DataSetUse
     command: tuple[str, ...]
     generation: str | None = None
-    password_variable: str | None = None
 
 
-# A first start found running, which an attempt that was cut short began: it is waited for to its end, never stopped.
+# A first start an earlier attempt left running is waited for to its end, never stopped.
 @dataclass(frozen=True)
 class AwaitFirstStart:
     container: str

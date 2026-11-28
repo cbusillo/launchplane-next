@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 LANE_NETWORK = "launchplane-lanes"
 LANE_DOMAIN = "test"
-# The one lane that is given a testing login.
+# The one lane whose data a first start may initialize, with a testing login.
 TESTING = "testing"
 BACK_SOON = "launchplane-back-soon"
 
@@ -67,16 +67,6 @@ class RunningInstance(BaseModel, frozen=True):
     other_image: str | None = None
     # The build run once to update a copy of the lane's data. It is no web part: it answers nobody and is sent nobody.
     is_update: bool = False
-    # The build run once on a data set before its first web start. It is no web part either.
-    is_first_start: bool = False
-
-    @property
-    def runs_once(self) -> bool:
-        return self.is_update or self.is_first_start
-
-    @property
-    def called(self) -> str:
-        return "update" if self.is_update else "first start" if self.is_first_start else "instance"
 
 
 class RunningBackgroundService(BaseModel, frozen=True):
@@ -118,6 +108,13 @@ class VolumeCopy(BaseModel, frozen=True):
     stopped: bool
 
 
+# The build run once on a data set before its first web start, kept on the host as the record of how it ended. `seeded`
+# is None while it runs. It ends with code 0 only once all it writes is committed.
+class FirstStartRun(BaseModel, frozen=True):
+    container: str
+    seeded: bool | None
+
+
 class DataSet(BaseModel, frozen=True):
     product: str
     lane: str | None
@@ -130,6 +127,12 @@ class DataSet(BaseModel, frozen=True):
     generation: Stamp = None
     copy_of: str | None = None
     copies: tuple[VolumeCopy, ...] = ()
+    first_starts: tuple[FirstStartRun, ...] = ()
+
+    # A first start began in it and ended before its seed was committed. It is kept, and no move starts anything on it.
+    @property
+    def is_set_aside(self) -> bool:
+        return any(each.seeded is False for each in self.first_starts)
 
     # Each of its volumes was written by one copier that finished, and nothing began a copy that did not finish.
     @property

@@ -85,7 +85,7 @@ def code(text: str) -> Piece:
     return Piece(text=text, drawn_as="code")
 
 
-# What a move that started nothing it left behind says of the lane it could not bring up, by how it ended.
+# What a move that left nothing of its own running says of the lane it could not bring up, by how it ended.
 LEFT_NOTHING = {
     Outcome.CHECK_FAILED: (
         "Request {id} started an instance that failed its check, so nothing was switched and that instance is gone. "
@@ -93,15 +93,13 @@ LEFT_NOTHING = {
     ),
     Outcome.NOT_INITIALIZED: (
         "Request {id} ran the first start of the lane's data, which failed, so no instance was started and nothing was "
-        "switched. A data set it began in is never initialized again: retire the lane naming that data set to delete, and "
-        "the next move makes a new one."
+        "switched. The data set it began in is set aside and kept, and asking again starts on a new one."
     ),
 }
 
 
 # The last request taken up for the lane, where it is a move that ended because its new instance failed its check or its
-# first start failed. Such a move stopped nowhere part way: nothing was switched and what it started is gone. One that
-# waits has changed nothing yet.
+# first start failed. Such a move stopped nowhere part way: nothing was switched. One that waits has changed nothing yet.
 def failed_check(requests: Sequence[Kept]) -> Kept | None:
     last = max((each for each in requests if each.attempts), key=lambda each: each.id, default=None)
     failed = last is not None and last.stands is Stands.FAILED and (last.answer or {}).get("outcome") in LEFT_NOTHING
@@ -319,17 +317,20 @@ def without_a_server(found: DataSet) -> str:
 
 GOES = "An old copy: the next release that switches deletes it."
 BEING_MADE = "A request at work on the lane is making it."
+SET_ASIDE = "Set aside: a first start began in it and did not finish. It is kept, and no move starts on it."
 
 
 # Said only of a lane with an instance receiving visitors. A copy is old only where no request at work made it.
 def kept_notes(judged: Judgement | None, requests: Sequence[Kept]) -> dict[str, str]:
+    data_sets = () if judged is None else judged.lane.data_sets
+    aside = {found.data_set: SET_ASIDE for found in data_sets if found.is_set_aside}
     if judged is None or judged.lane.active is None:
-        return {}
+        return aside
     at_work = {each.generation for each in requests if each.stands is Stands.WORKING}
-    return {
-        found.data_set: why_kept(judged.lane, found) or (BEING_MADE if found.generation in at_work else GOES)
-        for found in judged.lane.data_sets
+    kept = {
+        found.data_set: why_kept(judged.lane, found) or (BEING_MADE if found.generation in at_work else GOES) for found in data_sets
     }
+    return kept | aside
 
 
 def part_row(name: str, made_from: str, build: str | None, container: str, pills: list[Pill]) -> Row:
@@ -371,7 +372,7 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
             ],
             *[
                 part_row(
-                    each.called.capitalize() if each.runs_once else f"Instance {number}",
+                    "Update" if each.is_update else f"Instance {number}",
                     "build",
                     each.build,
                     each.container,

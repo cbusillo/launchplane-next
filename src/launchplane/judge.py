@@ -272,12 +272,12 @@ def stamp_findings(subject: str, stamp: Stamp) -> list[Found]:
 
 
 def instance_findings(instance: RunningInstance, of: Judged) -> list[Found]:
-    part, subject = f"The {instance.called} {instance.container}", instance.container
+    part, subject = f"The {'update' if instance.is_update else 'instance'} {instance.container}", instance.container
     serves = of.serving is not None and of.serving.container == subject
     active, other = of.lane.active, instance.other_image
     beside = active is not None and active.container != subject
-    # What runs once is on its data set's network alone: nobody is sent to it.
-    of_the_lane: set[str] = set() if instance.runs_once else {LANE_NETWORK}
+    # An update is on its data set's network alone: nobody is sent to it.
+    of_the_lane: set[str] = set() if instance.is_update else {LANE_NETWORK}
     networks = of_the_lane | of.network_names(instance.data_set)
     return [
         *([Found(Weight.WRONG, subject, Kind.NO_BUILD, f"{part} does not say which build it is")] if instance.build is None else []),
@@ -326,7 +326,8 @@ def database_findings(found: DataSet, database: DataSetDatabase, of: Judged) -> 
         own = tuple(Mount(source=volume, path=DATA_PATH) for volume in found.volumes) if of.product.database is not None else ()
         mounted = mount_findings(part, subject, database.mounts, own)
     return [
-        *database_state_findings(part, database, of, of.is_kept_offline(found.data_set)),
+        # The server of a data set that was set aside is meant to be stopped too.
+        *database_state_findings(part, database, of, of.is_kept_offline(found.data_set) or found.is_set_aside),
         *attachment_findings(part, subject, database.networks, names, of.lane),
         *mounted,
     ]
@@ -543,7 +544,7 @@ def route_findings(lane: LaneReading) -> list[Found]:
 
 # In maintenance no instance receives visitors, and a lane's one instance is the one that will again.
 def serving_instance(lane: LaneReading) -> RunningInstance | None:
-    web = [each for each in lane.instances if not each.runs_once]
+    web = [each for each in lane.instances if not each.is_update]
     if lane.active is not None or not lane.route.in_maintenance or len(web) != 1:
         return lane.active
     return web[0]

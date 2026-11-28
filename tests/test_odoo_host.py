@@ -30,6 +30,7 @@ from tests.test_container_host import (
     read,
 )
 from tests.test_container_host import container as listed
+from tests.test_copying import details
 from tests.test_proxy import ProxyHost, ticking
 
 DATABASE_VOLUME, FILES_VOLUME = "launchplane-data-d1-database", "launchplane-data-d1-files"
@@ -174,15 +175,19 @@ def test_what_runs_the_update_is_marked_and_read_as_an_update_and_not_as_a_web_p
     assert (found.container, found.is_update) == (UPDATER, True)
 
 
+STARTER = f"{WEB}-first-start"
+FIRST_START = TK_STARTING.first_start("testing")
+HANDED = {TEST_PASSWORD_VARIABLE: "the lane's own"}
+
+
 def first_start(host: ContainerHost, target: LaneBuild, use: DataSetUse) -> CommandResult:
-    run = Initialize(target, f"{WEB}-first-start", use, TK_STARTING.first_start, GENERATION, TEST_PASSWORD_VARIABLE)
-    return host.run_once(run, given={TEST_PASSWORD_VARIABLE: "the lane's own"})
+    return host.run_once(Initialize(target, STARTER, use, FIRST_START, GENERATION), given=HANDED)
 
 
 def test_the_first_start_runs_once_on_the_data_set_s_network_alone_with_its_password_marked_as_a_secret() -> None:
     command, options = made_from(TARGET.model_copy(update={"run": TK.run}), ON_D1, first_start)
     given, labels = cast("dict[str, str]", options["environment"]), cast("dict[str, str]", options["labels"])
-    assert (command, options["user"], options["restart_policy"]) == ([*TK_STARTING.first_start], "ubuntu", {"Name": "no"})
+    assert (command, options["user"], options["restart_policy"]) == ([*FIRST_START], "ubuntu", {"Name": "no"})
     assert list(cast("dict[str, object]", options["networking_config"])) == [DATA_SET_NETWORK]
     assert options["volumes"] == {FILES_VOLUME: {"bind": FILES_PATH, "mode": "rw"}}
     assert (given[TEST_PASSWORD_VARIABLE], given["PGUSER"], given["ODOO_MAX_CRON_THREADS"]) == ("the lane's own", "i_start", "0")
@@ -192,16 +197,35 @@ def test_the_first_start_runs_once_on_the_data_set_s_network_alone_with_its_pass
     )
 
 
-def test_what_runs_the_first_start_is_marked_and_read_as_a_first_start_and_not_as_an_update_or_a_web_part() -> None:
+def test_what_ran_a_first_start_is_kept_on_the_host_and_what_ran_an_update_is_removed() -> None:
     docker = RecordingDocker()
-    made_from(TARGET.model_copy(update={"run": TK.run}), ON_D1, first_start, docker)
-    listed_once = listed(f"{WEB}-first-start", "first-start", [DATA_SET_NETWORK]) | {"State": "running"}
-    [found] = read([listed_once], [network(True, QUIET_OPTIONS)], []).instances
-    assert (found.is_first_start, found.is_update, found.called) == (True, False, "first start")
+    made_from(TARGET, ON_D1, first_start, docker)
+    assert (docker.containers.by_name[STARTER].removed, docker.containers.by_name[STARTER].calls[-1]) == (False, "logs 20")
+    made_from(TARGET, ON_D1, update, docker)
+    assert docker.containers.by_name[UPDATER].removed
+
+
+def test_a_first_start_is_read_into_its_data_set_as_seeded_only_once_it_exited_with_code_0_and_never_as_an_instance() -> None:
+    names = ("done", "killed", "made", "running")
+    described = [
+        details("done", "exited"),
+        details("killed", "exited", 137),
+        details("made", "created"),
+        details("running", "running"),
+    ]
+    on_host = read([listed(each, "first-start", [DATA_SET_NETWORK]) for each in names], described=described)
+    [found] = on_host.data_sets
+    assert (on_host.instances, found.is_set_aside) == ([], True)
+    assert [(each.container, each.seeded) for each in found.first_starts] == [
+        ("done", True),
+        ("killed", False),
+        ("made", False),
+        ("running", None),
+    ]
 
 
 def test_a_first_start_ends_itself_before_the_host_stops_waiting_for_what_is_run_once() -> None:
-    assert f"timeout {FIRST_START_DEADLINE_SECONDS} " in TK_STARTING.first_start[2]
+    assert f"timeout {FIRST_START_DEADLINE_SECONDS} " in FIRST_START[2]
     assert FIRST_START_DEADLINE_SECONDS < RUN_ONCE_DEADLINE_SECONDS
 
 

@@ -20,6 +20,7 @@ from launchplane.instance import (
     OnHost,
     ProxySeen,
     Reading,
+    RunningInstance,
     Unread,
     Verdict,
     new_container_name,
@@ -85,7 +86,8 @@ class InstanceHost(Protocol):
     def read_log_tail(self, container: str) -> str: ...
     def restarts(self, container: str) -> int: ...
     def run_once(self, run: steps.Update | steps.Initialize, by: Witness, given: Mapping[str, str], /) -> CommandResult: ...
-    def await_once(self, container: str) -> None: ...
+    def await_once(self, container: str, /) -> None: ...
+    def run_in(self, container: str, command: list[str], given: Mapping[str, str], /) -> CommandResult: ...
 
 
 # What is asked of the gate. Every call answers the verdict that then holds for the generation.
@@ -110,7 +112,24 @@ class Proxy(Protocol):
 
 
 type ProductReader = Callable[[str], Product]
-type PasswordReader = Callable[[str, str], str]
+
+
+# The password of a lane's testing login: made for a first start alone, and only looked up to prove the login.
+class Passwords(Protocol):
+    def made(self, product: str, lane: str, /) -> str: ...
+    def kept(self, product: str, lane: str, /) -> str | None: ...
+
+
+class NoPasswords:
+    @staticmethod
+    def made(product: str, lane: str) -> str:
+        raise ProductError(f"Launchplane was given nowhere to keep the password of the testing login of {lane} of {product}.")
+
+    @staticmethod
+    def kept(_product: str, _lane: str) -> str | None:
+        return None
+
+
 type KeptReader = Callable[[], list[Kept]]
 
 
@@ -171,22 +190,16 @@ def fresh_names(target: LaneBuild) -> FreshNames:
     return FreshNames(container=new_container_name(target), data_set=new_data_set_name())
 
 
-# A lost reply is no answer: only what the command itself answered says it failed. `given` is each secret variable it holds.
-def run_once(host: InstanceHost, action: steps.Update | steps.Initialize, by: Witness, given: Mapping[str, str]) -> Event:
+# A lost reply is no answer: only what the command itself answered says it failed. `given` is each secret it is handed.
+def run_once(
+    host: InstanceHost, action: steps.Update | steps.Initialize, by: Witness, given: Mapping[str, str]
+) -> steps.Refused | None:
     ran = host.run_once(action, by, given)
     if ran.succeeded:
-        return action
+        return None
     what, refused = ("update", steps.UpdateRefused) if isinstance(action, steps.Update) else ("first start", steps.InitializeRefused)
     why = f"The {what} of the data, run in {action.container}, ended with code {ran.exit_code}."
     return refused(action.container, plan.failure_report(why, "\n".join(ran.output.splitlines()[-LOG_TAIL_LINES:])))
-
-
-def start_stopped(host: InstanceHost, action: steps.StartStopped, by: Witness) -> steps.StartRefused | None:
-    try:
-        host.start_part(action.container, by)
-    except ContainerHostRefused as error:
-        return steps.StartRefused(action.container, str(error))
-    return None
 
 
 TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
@@ -211,7 +224,6 @@ TAKE: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = {
     steps.GiveUp: lambda _host, _proxy, _step, _by: None,
     steps.CopyVolume: lambda host, _proxy, step, _by: host.copy_volume(step),
     steps.Update: lambda host, _proxy, step, by: run_once(host, step, by, {}),
-    steps.StartStopped: lambda host, _proxy, step, by: start_stopped(host, step, by),
     steps.AwaitFirstStart: observing()(lambda host, _proxy, step, _by: host.await_once(step.container)),
 }
 
@@ -309,9 +321,10 @@ class Lanes:
         name_fresh: Callable[[LaneBuild], FreshNames] = fresh_names,
         read_unfinished: KeptReader = lambda: [],
         read_ended: KeptReader = lambda: [],
-        read_test_password: PasswordReader = lambda _product, _lane: "",
+        passwords: Passwords | None = None,
     ) -> None:
-        self.read_test_password = read_test_password
+        self.passwords = passwords or NoPasswords()
+        self.taking: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = TAKE | {steps.Initialize: self.initialize}
         self.host = host
         self.proxy = proxy
         self.read_product = read_product
@@ -325,10 +338,10 @@ class Lanes:
         read_at = datetime.now(UTC)
         on_host = self.host.read(scope.lane) if scope.parts else None
         proxy = self.proxy.read()
-        return Reading(read_at, proxy, on_host, self.web_address_failures(proxy, scope) if scope.web_addresses else {})
+        return Reading(read_at, proxy, on_host, self.web_address_failures(proxy, scope, on_host) if scope.web_addresses else {})
 
     # Asked at once, so ones that hang cost one limit and not one each. One the proxy sends to no product is not asked.
-    def web_address_failures(self, proxy: ProxySeen, scope: Scope) -> dict[str, str | None]:
+    def web_address_failures(self, proxy: ProxySeen, scope: Scope, on_host: OnHost | None) -> dict[str, str | None]:
         only = None if scope.lane is None else web_address_of(*scope.lane)
         to_a_product = sorted(
             web_address
@@ -337,8 +350,20 @@ class Lanes:
         )
         if not (proxy.runs and to_a_product):
             return {}
+        serving = {each.container: each for each in ([] if on_host is None else on_host.instances)}
+        sent = [serving.get(proxy.sends_visitors_to()[each]) for each in to_a_product]
         with ThreadPoolExecutor(max_workers=len(to_a_product)) as pool:
-            return dict(zip(to_a_product, pool.map(self.proxy.why_web_address_fails, to_a_product), strict=True))
+            return dict(zip(to_a_product, pool.map(self.why_fails, to_a_product, sent), strict=True))
+
+    # A web address answers where a visitor gets a page and, on a lane with a testing login, that login opens it.
+    def why_fails(self, web_address: str, serving: RunningInstance | None) -> str | None:
+        why = self.proxy.why_web_address_fails(web_address)
+        product = None if serving is None else self.description_of(serving.product)
+        if why is not None or serving is None or serving.lane is None or not isinstance(product, Product):
+            return why
+        command = product.sign_in(serving.lane)
+        sign_in = steps.SignIn(serving.product, serving.lane, command, product.test_password_variable)
+        return self.why_sign_in_fails(sign_in, serving.container) if command else None
 
     def description_of(self, product: str) -> Product | ProductError:
         try:
@@ -515,14 +540,18 @@ class Lanes:
         if isinstance(action, steps.RemoveLogins):
             unread = self.host.remove_unheld_logins(action.database, witness)
             return action if unread is None else steps.LoginsUnread(action.database, str(unread))
+        if isinstance(action, steps.StartStopped):
+            try:
+                self.host.start_part(action.container, witness)
+            except ContainerHostRefused as error:
+                return steps.StartRefused(action.container, str(error))
+            return action
         if isinstance(action, steps.Switch):
             answer = self.proxy.switch(action.web_address, action.generation, action.attempt, action.container)
             return steps.Switched(action.container, answer == GateAnswer(Verdict.COMMITTED, action.container))
         if isinstance(action, steps.Discard):
             return self.discard(action, witness)
-        if isinstance(action, steps.Initialize):
-            return run_once(self.host, action, witness, self.test_login_of(action))
-        refused = TAKE[type(action)](self.host, self.proxy, action, witness)
+        refused = self.taking[type(action)](self.host, self.proxy, action, witness)
         return refused if isinstance(refused, steps.Refused) else action
 
     # Behind the back soon page Docker's no ends nothing: a copy refused is given up, and any other step is tried again
@@ -543,9 +572,19 @@ class Lanes:
                 raise
             raise Waiting(f"{error} The lane is behind the back soon page, so this is tried again until it is back.") from error
 
-    def test_login_of(self, action: steps.Initialize) -> dict[str, str]:
-        variable, target = action.password_variable, action.target
-        return {} if variable is None else {variable: self.read_test_password(target.product, target.lane)}
+    def initialize(self, host: InstanceHost, _proxy: Proxy, action: steps.Initialize, by: Witness) -> steps.Refused | None:
+        target, variable = action.target, self.read_product(action.target.product).test_password_variable
+        return run_once(host, action, by, {variable: self.passwords.made(target.product, target.lane)})
+
+    # Why the testing login of a lane does not open what `container` serves, asked of Odoo there. A lane whose password
+    # is not kept has a login nobody can prove.
+    def why_sign_in_fails(self, sign_in: steps.SignIn, container: str) -> str | None:
+        of = f"The testing login of {sign_in.lane} of {sign_in.product}"
+        password = self.passwords.kept(sign_in.product, sign_in.lane)
+        if password is None:
+            return f"{of} has no password kept on the control machine, so nobody can sign in with it."
+        ran = self.host.run_in(container, [*sign_in.command], {sign_in.variable: password})
+        return None if ran.succeeded else f"{of} does not open {container}: {ran.output}"
 
     def edit_route(self, action: steps.EditRoute, witness: Witness) -> Event:
         edit = self.proxy.edit(action.web_address, witness.generation, witness.attempt, action.read, action.to)
@@ -584,6 +623,8 @@ class Lanes:
             self.proxy.check_instance(check.container, check.health_path, check.command)
             if check.first_process and (restarts := self.host.restarts(check.container)):
                 raise CheckFailed(NOT_THE_FIRST.format(container=check.container, restarts=restarts))
+            if check.sign_in is not None and (why := self.why_sign_in_fails(check.sign_in, check.container)) is not None:
+                raise CheckFailed(why)
         except CheckFailed as error:
             return steps.CheckRefused(check.container, self.refusal(error, check.container, with_log=with_log))
         return check
