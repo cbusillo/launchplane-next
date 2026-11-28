@@ -50,7 +50,8 @@ def described_as(product: Product) -> Callable[[str], Product]:
     return lambda _product: product
 
 
-# Whether a text carries a secret, said as yes or no so that no failing test prints the secret it looked for.
+# Whether a text carries a secret. A test keeps the answer in a name before it asserts on it: a failing assertion shows
+# what it compared, and what a call inside it was given.
 def carries(secret: str, *said: object) -> bool:
     return any(secret in str(each) for each in said)
 
@@ -102,7 +103,8 @@ def test_the_first_move_runs_the_first_start_on_the_data_set_it_made_and_starts_
     assert (result.outcome, result.data_set, list(bed.host.instances)) == (Outcome.SWITCHED, "data-1", [new])
     [ran] = bed.host.data_sets["data-1"].first_starts
     assert (ran.seeded, set(bed.host.sign_ins), bed.password_is_kept()) == (True, {new}, True)
-    assert [each == bed.host.given_once[0] for each in bed.host.signed_in_with] == [True] * len(bed.host.sign_ins)
+    handed_the_same = [each == bed.host.given_once[0] for each in bed.host.signed_in_with]
+    assert handed_the_same == [True] * len(bed.host.sign_ins)
     assert [each.condition for each in bed.lanes.read_status().lanes] == [Condition.GOOD]
 
 
@@ -201,7 +203,8 @@ def test_a_candidate_the_testing_login_does_not_open_never_takes_the_route_and_n
     result = bed.lanes.move(BUILD_B, LATER, 1)
     assert (result.outcome, bed.proxy.loaded_to(WEB_ADDRESS), list(bed.host.instances)) == (Outcome.CHECK_FAILED, serving, [serving])
     assert "The testing login of testing of site does not open site-testing-" in (result.error or "")
-    assert (bed.kept.kept("site", "testing") == password, len(bed.host.given_once)) == (True, 1)
+    unchanged = bed.kept.kept("site", "testing") == password
+    assert (unchanged, len(bed.host.given_once)) == (True, 1)
 
 
 def test_the_same_build_asked_again_is_not_unchanged_while_the_testing_login_does_not_open_what_serves(bed: Bed) -> None:
@@ -243,7 +246,8 @@ def test_a_first_start_that_fails_saying_its_password_leaves_it_out_of_the_answe
     asking, record = bed.asked_through_the_api()
     answer = asking.post("/lanes/site/testing/move?wait=1", json={"build": "site:b"})
     said = (answer.text, asking.get("/requests/1").text, asking.get("/running").text, record.kept)
-    assert (answer.status_code, answer.json()["outcome"], carries(password, *said)) == (422, "not initialized", False)
+    leaked = carries(password, *said)
+    assert (answer.status_code, answer.json()["outcome"], leaked) == (422, "not initialized", False)
     [card] = asking.get("/running").json()["cards"]
     [found] = [row for row in card["rows"] if row["name"] == "Found"]
     assert ([pill["text"] for pill in card["pills"]], [pill["text"] for pill in found["pills"]]) == (
@@ -271,7 +275,8 @@ def test_a_sign_in_that_fails_saying_its_password_leaves_it_out_of_the_answer_th
     answer = asking.post("/lanes/site/testing/move?wait=1", json={"build": BUILD_A.build})
     said = (answer.text, asking.get("/requests/1").text, asking.get("/running").text, record.kept)
     password = bed.kept.kept("site", "testing") or ""
-    assert (answer.status_code, answer.json()["outcome"], carries(password, *said)) == (422, "check failed", False)
+    leaked = carries(password, *said)
+    assert (answer.status_code, answer.json()["outcome"], leaked) == (422, "check failed", False)
 
 
 def test_a_password_is_made_once_kept_where_only_launchplane_reads_it_and_on_the_disk_before_anybody_is_given_it(
@@ -293,8 +298,9 @@ def test_a_password_is_made_once_kept_where_only_launchplane_reads_it_and_on_the
         0o600,
         True,
     )
-    assert (kept.made("site", "testing"), kept.kept("site", "testing"), order[3:]) == (password, password, ["noted", "noted"])
-    assert len({password, kept.made("other", "testing"), kept.made("site", "preview")}) == 3
+    the_same = (kept.made("site", "testing"), kept.kept("site", "testing")) == (password, password)
+    each_its_own = len({password, kept.made("other", "testing"), kept.made("site", "preview")}) == 3
+    assert (the_same, each_its_own, order[3:5]) == (True, True, ["noted", "noted"])
 
 
 def test_every_password_kept_is_noted_when_launchplane_starts(tmp_path: Path) -> None:
@@ -432,11 +438,8 @@ def test_a_seed_that_fails_naming_the_password_says_why_without_it_and_commits_n
     odoo = OdooAsSeeded(refuses_users=True)
     with pytest.raises(SystemExit) as failed:
         seeded(run_first_start(tmp_path).seed, odoo, monkeypatch)
-    assert (carries(CANARY, failed.value), "the login may not be made with [the password]" in str(failed.value), odoo.did) == (
-        False,
-        True,
-        [],
-    )
+    leaked = carries(CANARY, failed.value)
+    assert (leaked, "the login may not be made with [the password]" in str(failed.value), odoo.did) == (False, True, [])
 
 
 @pytest.mark.parametrize(("held", "files"), [("1", ()), ("734", ()), ("0", ("filestore",)), ("3", ("a", "b"))])
@@ -504,3 +507,26 @@ def test_only_the_lane_testing_of_a_product_that_declares_a_first_start_has_one_
     assert [bool(TK_STARTING.first_start(each)) for each in lanes] == [bool(TK_STARTING.sign_in(each)) for each in lanes]
     assert [bool(TK_STARTING.sign_in(each)) for each in lanes] == [True, False, False]
     assert (TK.first_start("testing"), TK.sign_in("testing"), Product().first_start("testing")) == ((), (), ())
+
+
+WATCH_THAT_FAILS = f"""
+SECRET = "{CANARY}"
+
+
+def said_anywhere() -> bool:
+    return SECRET in "an answer that says " + SECRET
+
+
+def test_a_watch_that_finds_its_password_said():
+    leaked = said_anywhere()
+    assert leaked is False
+"""
+
+
+def test_a_watch_that_fails_on_a_password_it_found_prints_that_it_did_and_not_the_password(tmp_path: Path) -> None:
+    (tmp_path / "test_watch.py").write_text(WATCH_THAT_FAILS)
+    command = [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider", str(tmp_path / "test_watch.py")]
+    ran = subprocess.run(command, capture_output=True, text=True, check=False, cwd=tmp_path)  # noqa: S603
+    printed = ran.stdout + ran.stderr
+    leaked = CANARY in printed
+    assert (ran.returncode, "assert leaked is False" in printed, leaked) == (1, True, False)
