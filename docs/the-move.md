@@ -160,7 +160,7 @@ uv run pytest tests/test_interruptions.py -v
 LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_host_answers.py -v
 ```
 
-`LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_odoo.py -v` runs TK's real build as the lane `testing` of `test-bed-tk`: see [the TK watch](#the-tk-watch). Its last test, selected with `-k first_start_from_descriptions -s`, is [the first-start watch](#the-first-start-watch). `tests/test_bed_copy.py` copies that lane's data, whole and killed between its volumes: see [the copy watch](#the-copy-watch).
+`LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest tests/test_bed_odoo.py -v` runs TK's real build as the lane `testing` of `test-bed-tk`: see [the TK watch](#the-tk-watch). Its last two tests, selected with `-k first_start_from_descriptions -s`, are [the first-start watch](#the-first-start-watch). `tests/test_bed_copy.py` copies that lane's data, whole and killed between its volumes: see [the copy watch](#the-copy-watch).
 
 Which bed the tests run against is [chosen by settings](what-is-running.md#choosing-the-test-bed), and these lines name the first one. Builds A, B and C of `tests/test_bed_move.py` are `nginx:1.30.6-alpine`, `nginx:1.31.8-alpine` and `hashicorp/http-echo:1.0`. C listens on 5678, not 80, so it fails its check. The kill tests run `systemctl kill --signal=KILL launchplane` on the control container, and systemd starts it again. One lets Launchplane take the move up again by itself. The others end the request in the record while Launchplane is down, to leave the lane as a move that failed halfway does.
 
@@ -408,7 +408,7 @@ uv run python -m tests.bed_odoo tear-down watch-tk
 
 ### The first-start watch
 
-A website and an Odoo product, each from its description and nothing else on the host, brought up by one move each. It is the last test of `tests/test_bed_odoo.py`, which asks every move through the API as any caller does, prints each point as it reaches it, waits 8 s after each so the page can be read, and puts the bed back. It takes about two and a half minutes.
+A website and an Odoo product, each from its description and nothing else on the host, brought up by one move each. It is the last two tests of `tests/test_bed_odoo.py`, which ask every move through the API as any caller does, print each point as they reach it, wait 8 s after each so the page can be read, and put the bed back. It takes about four minutes. It needs TK's first build on the scratch container and no other, and fails, never skips, where that build is missing and cannot be pulled.
 
 ```
 open http://launchplane.shiny:8700/
@@ -421,6 +421,7 @@ LAUNCHPLANE_URL=http://launchplane.shiny:8700 uv run pytest -q -s tests/test_bed
 4. **Asked again.** The test first writes one invented contact through the session. Then the website answers `unchanged`; Odoo's move sent again with its `Idempotency-Key` is answered with the first request, and a new request for the same build answers `unchanged` with `did: []`. The same instance, the same data set, and the contact's id under `row`.
 5. **Retired with its data kept, and moved again.** `switched`, on the same data set, after a first start that found the data and changed nothing: the same `row`, `password is the same: True`, and the default administrator still refused.
 6. **A first start that fails.** For the lane of a third description, `first-odoo-fails`, the test runs Launchplane [able to be held](#holding-a-move-and-interrupting-it), holds it before the first start, and has the empty database refuse every new table. The request is `failed`, `not initialized`, and `error` ends in Odoo's own `psycopg2.errors.RaiseException: the first-start watch lets no table be made in this database`. `visitor: 404`, no instance, and nobody is sent anywhere. **The card** `first-odoo-fails · testing` reads `move failed`, its web address `not answering`, and its row `Found` says `No instance receives visitors`, with the note that the first start failed, so no instance was started.
+7. **Killed while the first start ran.** The second test asks for Odoo's first move again on a lane with nothing, waits until the database has installed modules committed and is not marked finished, and kills Launchplane. `modules installed at the kill` is how many were committed. The same request ends `done`, `switched`, its attempts `interrupted` and `done`: the second attempt removed the first start the kill left running and made its data again. `marked finished: t`, the attachment read as `lp-tester`, and the default administrator refused. **The card** afterwards reads `good` and `answering`.
 
 ### The copy watch
 

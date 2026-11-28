@@ -437,7 +437,7 @@ def test_first_start_from_descriptions_cut_short_by_a_kill_of_launchplane_is_mad
         "Killed while the first start ran, with modules committed and nothing seeded",
         modules_installed_at_the_kill=cut_short_with,
         request=ended["stands"],
-        outcome=(ended["answer"] or {}).get("outcome"),
+        outcome=ended["answer"] and ended["answer"]["outcome"],
         attempts=[each["ended"] for each in ended["attempts"]],
         first_start=first_starts(ended),
         marked_finished=in_odoos_database(MARKED_FINISHED),
