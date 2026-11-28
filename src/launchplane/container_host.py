@@ -1,16 +1,14 @@
-import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Set
+from collections.abc import Callable, Set
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import docker
-from docker.auth import resolve_repository_name
 from docker.errors import APIError, ImageNotFound, NotFound
 from docker.models.containers import Container
 from docker.tls import TLSConfig
@@ -60,6 +58,7 @@ from launchplane.docker_answers import (
     sent,
     tar_of,
 )
+from launchplane.host_images import HostImages
 from launchplane.host_logins import Filters, HostLogins
 from launchplane.host_secrets import SECRET_VARIABLES_LABEL, HostSecrets, logins_held, secrets_of
 from launchplane.instance import (
@@ -75,7 +74,6 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
-from launchplane.secret_boundary import cleaned
 from launchplane.steps import CopyVolume, Update
 from launchplane.telling import NOBODY, Said, Witness
 
@@ -206,13 +204,7 @@ class ContainerHost:
         self.sleep = sleep
         self.clock = clock
         self.secrets = HostSecrets()
-        self.registry = os.environ.get("LAUNCHPLANE_REGISTRY")
-        self.registry_login = {
-            "username": os.environ.get("LAUNCHPLANE_REGISTRY_USER", ""),
-            "password": os.environ.get("LAUNCHPLANE_REGISTRY_PASSWORD", ""),
-        }
-        if self.registry_login["password"]:
-            self.secrets.note([self.registry_login["password"]])
+        self.images = HostImages(client, address, self.secrets)
         self.logins = HostLogins(client, address, self.secrets)
         # Every lane shares the proxy, the back soon page and their networks. Each is looked for and made while this is
         # held and no longer, so two lanes that find one missing do not both make it.
@@ -332,23 +324,6 @@ class ContainerHost:
         except NotFound:
             return None
 
-    def ensure_image(self, image: str) -> None:
-        with suppress(ImageNotFound):
-            self.client.images.get(image)
-            return
-        registry, _ = resolve_repository_name(image)
-        login = self.registry_login if registry == self.registry and "@sha256:" in image else {}
-        started = self.clock()
-        with attempting(f"Fetching image {image}", self.address):
-            # Docker streams the registry's answer with a separate timeout, including refusals inside an HTTP 200.
-            events = cast("Iterable[dict[str, str]]", self.client.api.pull(image, stream=True, decode=True, auth_config=login))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            for event in events:
-                if reason := event.get("error"):
-                    reason = cleaned(reason, self.secrets.seen)
-                    raise ContainerHostRefused(f"Fetching image {image} on {self.address} was refused: {reason}")
-            self.client.images.get(image)
-        logging.getLogger(__name__).info("Fetched %s in %.2f s", image, self.clock() - started)
-
     def create_network(self, name: str, labels: dict[str, str] | None, *, quiet: bool) -> None:
         if quiet:
             options = {GATEWAY_MODE_OPTION: QUIET_GATEWAY_MODE}
@@ -392,7 +367,7 @@ class ContainerHost:
         if LANE_NETWORK in options.networks:
             self.ensure_network(LANE_NETWORK, quiet=True)
         ready = options if use is None else on_data_set(options, use, login_on(use))
-        self.ensure_image(ready.image)
+        self.images.ensure(ready.image)
         with sent(by, "make", ready.container):
             made = self.create(ready)
         with sent(by, "start", ready.container):
@@ -471,7 +446,7 @@ class ContainerHost:
             labels = data_set_labels(product, lane, data_set) | marks | copy | stamp_of(generation)
             # Fetched while the lane still serves, not behind the back soon page.
             if copy_of is not None:
-                self.ensure_image(COPIER_IMAGE)
+                self.images.ensure(COPIER_IMAGE)
             self.client.volumes.create(f"launchplane-data-{data_set}-{part}", labels=labels)
 
     # Whether anything can still write the volume is asked at the moment of the copy, of every container on the host.
@@ -501,7 +476,7 @@ class ContainerHost:
             throwaway_password = new_password()
             self.secrets.note([throwaway_password])
             options = database_options(product, lane, data_set, network, volume, image)
-            self.ensure_image(image)
+            self.images.ensure(image)
             self.start_set_up(self.create(replace(options, environment=server_environment(throwaway_password))))
 
     def start_database(self, container: str) -> None:
@@ -602,7 +577,7 @@ class ContainerHost:
                     self.ensure_network(helper.outside_network, quiet=False)
                 for network in helper.quiet_networks:
                     self.ensure_network(network, quiet=True)
-                self.ensure_image(helper.image)
+                self.images.ensure(helper.image)
                 self.create(helper_options(helper)).start()
             elif found.status != "running":
                 found.start()

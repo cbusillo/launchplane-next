@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from launchplane.build_source import Publisher
 from launchplane.product import Product
-from launchplane.publisher import Publisher
 from tests import bed
 from tests.bed import ask, ask_and_wait, launchplane_answers, needs_test_bed, on_control, on_scratch, wait_for
 from tests.odoo_product import TK
@@ -114,7 +114,7 @@ def check_delivery(publication: Publication, image: str) -> None:
     wait_for(lambda: ask(f"/requests/{kept['id']}")[1]["stands"] in ("failed", "done"), 600)
     received = json.loads(on_scratch(f"{DOCKER} image inspect --format '{{{{json .RepoDigests}}}}' {shlex.quote(image)}"))
     assert image in received, received
-    entries = on_control(f"journalctl -u {UNIT} -b -o cat --no-pager")
+    entries = on_control(f"journalctl -o cat --no-pager _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value {UNIT})")
     times = re.findall(rf"Fetched {re.escape(image)} in ([\d.]+) s", entries)
     assert times, f"The host has {image} but Launchplane did not report its pull time."
     host_image = next(ref for ref in received if ref == image)

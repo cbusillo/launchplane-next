@@ -214,7 +214,7 @@ def cleaned_log_config(secrets: Secrets) -> dict[str, Any]:
     for handler in config["handlers"].values():
         del handler["class"]
         handler["()"] = cleaned_stream
-    config["loggers"]["launchplane.container_host"] = {"level": "INFO"}
+    config["loggers"]["launchplane.host_images"] = {"level": "INFO"}
     config["root"] = {"handlers": ["default"], "level": "WARNING"}
     return config
 
