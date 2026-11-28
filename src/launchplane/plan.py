@@ -480,11 +480,11 @@ def prepare_instance(move: Move, receiving: RunningInstance | None) -> Action | 
     if not (use is None or isinstance(use, DataSetUse)):
         return use
     found = lane.data_set(data_set)
-    if found and (generation := found.first_start_generation) and not was_initialized(move, found):
-        if generation == move.generation and odoo and odoo.first_start:
-            return Initialize(move.target, found, generation, odoo.initialize(found.data_set))
+    if found and found.first_start_generation and not was_initialized(move, found):
+        if found.first_start_generation == move.generation and odoo and odoo.first_start:
+            return Initialize(move.target, found, odoo.initialize(found.data_set))
         if found.initializer:
-            return Initialize(move.target, found, generation, ())
+            return Initialize(move.target, found, ())
     return StartInstance(move.target, move.fresh.container, use, move.generation)
 
 
@@ -538,7 +538,7 @@ def put_lane_back(move: Move) -> Step[PutBack] | CannotPutBack:
         return Abandon(move.lane.web_address, move.generation)
     for found in move.lane.data_sets:
         if found.first_start_generation == move.generation and not found.set_aside and not was_initialized(move, found):
-            return Initialize(move.target, found, move.generation, ())
+            return Initialize(move.target, found, ())
     put_back = put_back_or_what_is_left(move.judged, move.generation)
     return (login_step(move.judged, move.done) or put_back) if isinstance(put_back, Done) else put_back
 

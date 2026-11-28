@@ -464,7 +464,7 @@ class ContainerHost:
 
     def set_aside(self, step: Initialize) -> None:
         pair = step.found.data_set
-        labels = data_set_labels(step.target.product, step.target.lane, pair) | stamp_of(step.generation)
+        labels = data_set_labels(step.target.product, step.target.lane, pair) | stamp_of(step.found.first_start_generation)
         labels[PART_LABEL] = "set-aside"
         marker = self.client.volumes.create(f"launchplane-data-{pair}-set-aside", labels=labels)
         if not labels.items() <= (marker.attrs.get("Labels") or {}).items():
@@ -478,7 +478,7 @@ class ContainerHost:
         if not schema.succeeded:
             raise ContainerHostError(f"Checking whether the database {database} is empty failed: {schema.output}")
         use = DataSetUse(found.data_set, found.networks[0].name, database, found.files[0])
-        options = self.instance_options(step.target, name, use, step.generation, "initializer")
+        options = self.instance_options(step.target, name, use, found.first_start_generation, "initializer")
         once = replace(options, networks={use.network: []}, command=list(step.command), restart=RUNS_ONCE)
         writer = self.run_part(once, use, lambda on: self.logins.make(name, on, by), by)
         while True:

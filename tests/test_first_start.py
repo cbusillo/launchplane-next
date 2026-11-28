@@ -84,7 +84,7 @@ def test_an_interrupted_writer_never_rejoins_and_only_its_commit_keeps_the_pair(
     start, aside = Mock(), Mock()
     monkeypatch.setattr(host, "run_initializer", start)
     monkeypatch.setattr(host, "set_aside", aside)
-    step = Initialize(BUILD_A, D1, GENERATION, () if cancel else ("install",))
+    step = Initialize(BUILD_A, D1, () if cancel else ("install",))
     host.initialize(step, Witness(cancel_asked=lambda: cancel))
     start.assert_not_called()
     assert aside.call_args_list == ([] if committed else [call(step)])
@@ -102,7 +102,7 @@ def test_a_known_initializer_error_is_reported_only_when_its_transaction_did_not
     install, aside = Mock(return_value="initialization refused"), Mock()
     monkeypatch.setattr(host, "run_initializer", install)
     monkeypatch.setattr(host, "set_aside", aside)
-    step = Initialize(BUILD_A, D1, GENERATION, ("install",))
+    step = Initialize(BUILD_A, D1, ("install",))
     if committed:
         host.initialize(step, NOBODY)
         aside.assert_not_called()
@@ -121,7 +121,7 @@ def test_an_unreadable_completion_row_neither_starts_a_writer_nor_sets_the_pair_
     monkeypatch.setattr(host, "run_initializer", install)
     monkeypatch.setattr(host, "set_aside", aside)
     with pytest.raises(ContainerHostError, match="connection lost"):
-        host.initialize(Initialize(BUILD_A, D1, GENERATION, ("install",)), NOBODY)
+        host.initialize(Initialize(BUILD_A, D1, ("install",)), NOBODY)
     install.assert_not_called()
     aside.assert_not_called()
 

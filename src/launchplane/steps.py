@@ -203,7 +203,6 @@ class Update:
 class Initialize:
     target: LaneBuild
     found: DataSet
-    generation: str
     command: tuple[str, ...]
 
 
