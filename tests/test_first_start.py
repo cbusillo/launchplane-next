@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from launchplane.container_host import ContainerHost, data_set_labels
-from launchplane.docker_answers import PART_LABEL, CommandResult, ContainerHostError, ContainerHostRefused
+from launchplane.docker_answers import GENERATION_LABEL, PART_LABEL, CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.page import kept_notes
 from launchplane.plan import lane_data_set
 from launchplane.product import Product
@@ -15,6 +15,7 @@ from tests.bed_odoo import ADMIN_PASSWORD
 from tests.odoo_product import ATTACHMENT_BYTES, TK, first_start_product
 from tests.pretend_host import D1, EARLIER, GENERATION, Given, lanes_on
 from tests.recording_docker import RecordingContainer, RecordingDocker
+from tests.test_container_host import read
 from tests.test_odoo_kind import BUILD_A, D1_WITH_FILES, OLD_WITH_FILES, SERVING
 
 
@@ -133,3 +134,20 @@ def test_set_aside_data_is_named_on_a_healthy_lane_and_does_not_create_an_ambigu
     assert lane_data_set(given.reading(), None, "new") == D1.data_set
     outsider = aside.model_copy(update={"first_start": False})
     assert isinstance(lane_data_set(Given(data_sets=(outsider,)).reading(), None, "new"), Stop)
+
+
+def test_a_refused_first_start_leaves_the_lane_without_web_or_a_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = Given().proxy()
+    monkeypatch.setattr(proxy.host, "initialize", Mock(side_effect=ContainerHostRefused("module installation refused")))
+    with pytest.raises(ContainerHostRefused, match="installation refused"):
+        lanes_on(proxy, first_start_product()).move(BUILD_A, GENERATION, 1)
+    assert proxy.host.instances == {} and proxy.written == {}
+
+
+def test_conflicting_first_start_labels_cannot_turn_an_existing_volume_into_a_virgin_pair() -> None:
+    pair = f"first-{GENERATION}-1"
+    labels = data_set_labels("site", "testing", pair)
+    database = {"Name": "database", "Labels": labels | {GENERATION_LABEL: GENERATION}}
+    files = {"Name": "files", "Labels": labels | {PART_LABEL: "files"}}
+    with pytest.raises(ContainerHostError, match="labels"):
+        read([], volumes=[database, files])

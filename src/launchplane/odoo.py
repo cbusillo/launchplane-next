@@ -64,7 +64,6 @@ class Odoo(BaseModel, extra="forbid", frozen=True):
     def initialize(self, pair: str) -> tuple[str, ...]:
         if self.first_start is None:
             return ()
-        attachment = self.first_start.model_dump(mode="json")["attachment"]
         install = shlex.join((SERVER, "--init", ",".join(self.modules), "--stop-after-init", "--no-http"))
         script = f"""\
 set -eu
@@ -72,8 +71,8 @@ entry=$(find {FILES_PATH} -mindepth 1 -printf x -quit)
 if [ -n "$entry" ]; then echo 'The files volume contains an entry. First start left it alone.'; exit 1; fi
 {install}
 exec {SERVER} shell --no-http --log-level=error <<'ODOO'
-import base64, secrets
-env["ir.attachment"].create({{"name": {self.attachment!r}, "raw": base64.b64decode({attachment!r})}})
+import secrets
+env["ir.attachment"].create({{"name": {self.attachment!r}, "raw": {self.first_start.attachment!r}}})
 env.ref("base.user_admin").password = secrets.token_urlsafe(48)
 env["ir.config_parameter"].set_str("launchplane.first_start", {pair!r})
 env.cr.commit()

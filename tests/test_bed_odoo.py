@@ -307,8 +307,8 @@ def test_first_start_recovers_from_the_committed_row(when: str, interruption: st
 
 
 @pytest.mark.usefixtures("described_first_starts")
-@pytest.mark.parametrize("plant_row", [True, False], ids=["row-and-file", "files-only"])
-def test_first_start_preserves_existing_contents(plant_row: bool) -> None:
+@pytest.mark.parametrize("planted", ["row-and-file", "files-only", "another-database", "empty-schema"])
+def test_first_start_preserves_existing_contents(planted: str) -> None:
     point = "before.host.initialize"
     hold(point)
     status, request = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
@@ -318,15 +318,25 @@ def test_first_start_preserves_existing_contents(plant_row: bool) -> None:
     pair = found["data_set"]
     [volume] = found["files"]
     mount = f"docker run --rm --network none -v {volume}:/files --entrypoint sh postgres:18-alpine -c "
-    on_scratch(mount + "'echo kept > /files/planted'")
-    if plant_row:
+    if planted in ("row-and-file", "files-only"):
+        on_scratch(mount + "'echo kept > /files/planted'")
+    if planted == "another-database":
+        query_pair(pair, "create database imported")
+    if planted == "empty-schema":
+        query_pair(pair, "create schema imported")
+    if planted == "row-and-file":
         query_pair(pair, "create schema planted; create table planted.note as select 'kept'::text as value")
     let_go(point)
     ended = request_ended(request["id"])
     assert ended["stands"] == "failed" and "set aside" in ended["error"]
     [kept] = first_start_pairs()
     assert kept["set_aside"] and kept["data_set"] == pair
-    assert on_scratch(mount + "'cat /files/planted'").strip() == "kept"
-    if plant_row:
+    if planted in ("row-and-file", "files-only"):
+        assert on_scratch(mount + "'cat /files/planted'").strip() == "kept"
+    if planted == "another-database":
+        assert query_pair(pair, "select datname from pg_database where datname = 'imported'") == "imported"
+    if planted == "empty-schema":
+        assert query_pair(pair, "select nspname from pg_namespace where nspname = 'imported'") == "imported"
+    if planted == "row-and-file":
         assert query_pair(pair, "select value from planted.note") == "kept"
     assert query_pair(pair, "select to_regclass('ir_module_module') is null") == "t"

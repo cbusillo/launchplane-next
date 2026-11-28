@@ -35,7 +35,6 @@ from launchplane.docker_answers import (
     DOCKER_CONTAINER_DETAILS,
     DOCKER_NETWORK,
     DOCKER_SYSTEM_TIME,
-    FIRST_START_LABEL,
     GATEWAY_MODE_OPTION,
     GENERATION_LABEL,
     INSTANCE_LABEL,
@@ -99,12 +98,16 @@ COPY_COMMAND = ["sh", "-c", f"cp -a --reflink=auto /from/. {DATA_PATH}/ && diff 
 # How long the host waits for what is run once. A command that must end sooner ends itself.
 RUN_ONCE_DEADLINE_SECONDS = 900
 EMPTY_DATABASE = """\
-dump() { pg_dump --username=postgres --schema-only --restrict-key=LaunchplaneFirstStart "$1"; }
-fresh=$(dump template1)
-actual=$(dump app)
-[ "$fresh" = "$actual" ] || exit 42
-large=$(psql -XAt --username=postgres --dbname=app -c 'select exists (select from pg_largeobject_metadata)')
-[ "$large" = f ] || exit 42
+dump() { pg_dump -U postgres --schema-only --restrict-key=LaunchplaneFirstStart "$@"; }
+query() { psql -XAt -v ON_ERROR_STOP=1 -U postgres -d "$1" -c "$2"; }
+other=$(query postgres "select datname from pg_database where datname not in ('template0','template1','postgres','app')")
+[ -z "$other" ] || exit 42
+fresh=$(dump --exclude-schema='*' template1)
+for db in template1 postgres app; do
+    actual=$(dump "$db")
+    large=$(query "$db" 'select exists (select from pg_largeobject_metadata)')
+    [ "$actual" = "$fresh" ] && [ "$large" = f ] || exit 42
+done
 """
 type RestartPolicy = Literal["always", "unless-stopped", "no"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
@@ -188,11 +191,6 @@ def on_data_set(options: RunOptions, use: DataSetUse, login: dict[str, str]) -> 
 # What a generation makes is stamped with it as it is made, so the host shows what each release started.
 def stamp_of(generation: str | None) -> dict[str, str]:
     return {} if generation is None else {GENERATION_LABEL: generation}
-
-
-def pair_stamp(data_set: str, generation: str | None) -> dict[str, str]:
-    first = {FIRST_START_LABEL: "true"} if generation and data_set.startswith(f"first-{generation}-") else {}
-    return stamp_of(generation) | first
 
 
 def helper_options(helper: HelperContainer) -> RunOptions:
@@ -466,10 +464,10 @@ class ContainerHost:
 
     def set_aside(self, step: Initialize) -> None:
         pair = step.found.data_set
-        labels = data_set_labels(step.target.product, step.target.lane, pair) | pair_stamp(pair, step.generation)
+        labels = data_set_labels(step.target.product, step.target.lane, pair) | stamp_of(step.generation)
         labels[PART_LABEL] = "set-aside"
         marker = self.client.volumes.create(f"launchplane-data-{pair}-set-aside", labels=labels)
-        if not labels.items() <= marker.attrs["Labels"].items():
+        if not labels.items() <= (marker.attrs.get("Labels") or {}).items():
             raise ContainerHostError(f"The set-aside marker of {pair} has conflicting labels. Its data was left alone.")
 
     def run_initializer(self, step: Initialize, name: str, database: str, by: Witness) -> str | None:
@@ -526,7 +524,7 @@ class ContainerHost:
 
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None:
         with attempting(f"Making the network of the data set {data_set}", self.address):
-            labels = data_set_labels(product, lane, data_set) | pair_stamp(data_set, generation)
+            labels = data_set_labels(product, lane, data_set) | stamp_of(generation)
             self.create_network(f"launchplane-data-{data_set}", labels, quiet=True)
 
     def create_data_set_volume(
@@ -535,7 +533,7 @@ class ContainerHost:
         part, marks = ("files", {PART_LABEL: "files"}) if files else ("database", {})
         with attempting(f"Making the {part} volume of the data set {data_set}", self.address):
             copy = {} if copy_of is None else {COPY_OF_LABEL: copy_of}
-            labels = data_set_labels(product, lane, data_set) | marks | copy | pair_stamp(data_set, generation)
+            labels = data_set_labels(product, lane, data_set) | marks | copy | stamp_of(generation)
             # Fetched while the lane still serves, not behind the back soon page.
             if copy_of is not None:
                 self.ensure_image(COPIER_IMAGE)

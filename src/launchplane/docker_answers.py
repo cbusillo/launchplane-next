@@ -36,7 +36,6 @@ PART_LABEL = "launchplane.part"
 DATA_SET_LABEL = "launchplane.data-set"
 INSTANCE_LABEL = "launchplane.instance"
 GENERATION_LABEL = "launchplane.generation"
-FIRST_START_LABEL = "launchplane.first-start"
 COPY_OF_LABEL = "launchplane.copy-of"
 GATEWAY_MODE_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
 QUIET_GATEWAY_MODE = "isolated"
@@ -355,11 +354,11 @@ def data_sets_from(
     made_by = {key: generation_in(volume.labels, f"the volume {volume.name}") for key, volume in stamped} | made_by
     copy_of = {key: volume.labels[COPY_OF_LABEL] for key, volume in keyed if COPY_OF_LABEL in volume.labels}
     aside = {key: volume.name for key, volume in keyed if volume.labels.get(PART_LABEL) == "set-aside"}
-    parts = [(key, part.labels or {}) for key, part in (*marked, *keyed)]
-    first = {key for key, labels in parts if FIRST_START_LABEL in labels}
+    parts = [(key, part.labels or {}) for key, part in (*marked, *keyed) if key[2].startswith("first-")]
+    first = {key for key, labels in parts if GENERATION_LABEL in labels}
     for key, labels in parts:
         generation = labels.get(GENERATION_LABEL, "")
-        if key in first and (FIRST_START_LABEL not in labels or not is_generation(generation) or generation != made_by.get(key)):
+        if key in first and (not is_generation(generation) or not key[2].startswith(f"first-{generation}-")):
             raise ContainerHostError(f"The first-start labels of data set {key[2]} disagree. Its data was left alone.")
     by_copier = grouped(copies)
     by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) not in ("files", "set-aside"))
