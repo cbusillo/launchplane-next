@@ -332,7 +332,7 @@ class Sql:
     order by id limit 1
     """
     WRITE: Final = """
-    insert into request (product, lane, work, build, delete_data_set, asked_by, generation, run)
+    insert into request (product, lane, work, build, delete_data_set, run, asked_by, generation)
     values (%s, %s, %s, %s, %s, %s, %s, %s) returning *
     """
     UNFINISHED: Final = "select * from request where stands in ('waiting', 'working') order by id"
@@ -436,7 +436,7 @@ def key_reused(written: Request) -> Refused:
 
 
 def said(asked: Asked) -> list[JsonValue]:
-    return [asked.product, asked.lane, asked.work.value, asked.build, asked.delete_data_set]
+    return [asked.product, asked.lane, asked.work.value, asked.build, asked.delete_data_set, asked.run]
 
 
 # The request a key is answered with is the one it is always answered with, however that request has ended since.
@@ -457,12 +457,12 @@ def same_key(session: Session, gate: Gate, asked: Asked, idempotency_key: str | 
 def same_as_written(session: Session, gate: Gate, asked: Asked, idempotency_key: str | None) -> Request | None:
     if (kept := same_key(session, gate, asked, idempotency_key)) is not None:
         return kept
-    row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked), asked.run)).fetchone()
+    row = session.execute(Sql.SAME_UNFINISHED, gate.sent(*said(asked))).fetchone()
     return None if row is None else keep_key(session, gate, idempotency_key, Request.model_validate(row))
 
 
 def write_new(session: Session, gate: Gate, asked: Asked, asked_by: str, idempotency_key: str | None) -> Request:
-    passed = gate.sent(*said(asked), asked_by, new_generation(), asked.run)
+    passed = gate.sent(*said(asked), asked_by, new_generation())
     waited = [row["id"] for row in session.execute(Sql.END_WAITING, gate.sent(asked.product, asked.lane)).fetchall()]
     new = Request.model_validate(session.execute(Sql.WRITE, passed).fetchone())
     session.execute(Sql.REPLACED_BY, gate.made(new.id, list[JsonValue](waited)))
