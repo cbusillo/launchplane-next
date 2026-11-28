@@ -120,16 +120,6 @@ class Passwords(Protocol):
     def kept(self, product: str, lane: str, /) -> str | None: ...
 
 
-class NoPasswords:
-    @staticmethod
-    def made(product: str, lane: str) -> str:
-        raise ProductError(f"Launchplane was given nowhere to keep the password of the testing login of {lane} of {product}.")
-
-    @staticmethod
-    def kept(_product: str, _lane: str) -> str | None:
-        return None
-
-
 type KeptReader = Callable[[], list[Kept]]
 
 
@@ -323,7 +313,7 @@ class Lanes:
         read_ended: KeptReader = lambda: [],
         passwords: Passwords | None = None,
     ) -> None:
-        self.passwords = passwords or NoPasswords()
+        self.passwords = passwords
         self.taking: dict[type, Callable[[InstanceHost, Proxy, Any, Witness], object]] = TAKE | {steps.Initialize: self.initialize}
         self.host = host
         self.proxy = proxy
@@ -574,13 +564,17 @@ class Lanes:
 
     def initialize(self, host: InstanceHost, _proxy: Proxy, action: steps.Initialize, by: Witness) -> steps.Refused | None:
         target, variable = action.target, self.read_product(action.target.product).test_password_variable
+        if self.passwords is None:
+            raise ProductError(
+                f"Launchplane has nowhere to keep the password of the testing login of {target.lane} of {target.product}."
+            )
         return run_once(host, action, by, {variable: self.passwords.made(target.product, target.lane)})
 
     # Why the testing login of a lane does not open what `container` serves, asked of Odoo there. A lane whose password
     # is not kept has a login nobody can prove.
     def why_sign_in_fails(self, sign_in: steps.SignIn, container: str) -> str | None:
         of = f"The testing login of {sign_in.lane} of {sign_in.product}"
-        password = self.passwords.kept(sign_in.product, sign_in.lane)
+        password = None if self.passwords is None else self.passwords.kept(sign_in.product, sign_in.lane)
         if password is None:
             return f"{of} has no password kept on the control machine, so nobody can sign in with it."
         ran = self.host.run_in(container, [*sign_in.command], {sign_in.variable: password})
