@@ -15,15 +15,17 @@ from launchplane.container_host import ContainerHost
 from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
 from launchplane.product import Product
 from launchplane.record import Record
+from launchplane.workflow import Publisher
 from tests.given_secrets import GivenSecrets
 from tests.odoo_product import TK
 from tests.pretend_host import PretendHost, PretendProxy
 from tests.pretend_record import PretendRecord
-from tests.recorded_git_host import IMAGE, LATER_RUN, RUN, answers, build_of, serve
+from tests.recorded_git_host import IMAGE, LATER_RUN, REPOSITORY, RUN, WORKFLOW, answers, build_of, serve
 from tests.recording_docker import RecordingDocker
 
 type Runs = dict[int, dict[str, Any]]
 FORK = "someone/odoo-tenant-tk"
+WEBSITE = Product(publisher=Publisher(repository=REPOSITORY, workflow=WORKFLOW, image=IMAGE))
 
 
 @pytest.fixture
@@ -222,15 +224,13 @@ def test_the_git_hosts_key_is_among_the_secrets_cleaned_from_every_answer_and_lo
 def test_a_sourced_website_keeps_only_the_digest_of_its_own_publishing_run(
     builds_from: Callable[[Runs], Builds], record: Record
 ) -> None:
-    assert TK.odoo is not None
-    website = Product.model_validate({"publisher": TK.odoo.model_dump(include={"repository", "workflow", "image"})})
     runs = with_manifest({"source_commit": "0" * 40})
-    app = app_with(Builds(lambda _: website, builds_from(runs).git_host), record)
+    app = app_with(Builds(lambda _: WEBSITE, builds_from(runs).git_host), record)
     move = "/lanes/site/testing/move"
     assert app.post(move, json={"build": "site:latest"}).status_code == 422
     assert app.post(move, json={"run": RUN}).status_code == 422
     assert record.unfinished() == []
-    app = app_with(Builds(lambda _: website, builds_from(answers()).git_host), record)
+    app = app_with(Builds(lambda _: WEBSITE, builds_from(answers()).git_host), record)
     response = app.post(move, json={"run": RUN})
     assert (response.status_code, response.json()["build"]) == (202, build_of(RUN))
 
@@ -243,7 +243,7 @@ def test_a_literal_digest_and_each_publishing_run_keep_their_own_request_and_ret
     literal = app_with(Builds(), record).post(move, json={"build": digest}, headers=KEY)
     runs = answers()
     runs[LATER_RUN]["manifest"]["image"]["digest"] = runs[RUN]["manifest"]["image"]["digest"]
-    app = app_with(builds_from(runs), record)
+    app = app_with(Builds(lambda _: WEBSITE, builds_from(runs).git_host), record)
     rows = [literal.json()["id"]]
     for run in (RUN, LATER_RUN):
         key = {"Idempotency-Key": str(run)}
@@ -254,3 +254,4 @@ def test_a_literal_digest_and_each_publishing_run_keep_their_own_request_and_ret
         assert first.json()["id"] == again.json()["id"]
         rows.append(first.json()["id"])
     assert len(set(rows)) == 3
+    assert app.post(move, json={"build": digest}, headers=KEY).json()["id"] == rows[0]
