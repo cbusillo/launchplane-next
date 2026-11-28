@@ -32,6 +32,7 @@ from tests.bed import (
 )
 from tests.bed_odoo import (
     CHANGED,
+    as_tester,
     change_tester_password,
     data_set_of,
     default_admin_is_refused,
@@ -40,13 +41,12 @@ from tests.bed_odoo import (
     lose_password,
     password_is_kept,
     pull_builds,
+    refuses_the_tester,
     retire_with_its_data,
     says_the_password,
     seed,
     serve_recorded_git_host,
     stop_recorded_git_host,
-    tester,
-    tester_is_refused,
 )
 from tests.odoo_product import ATTACHMENT_BYTES, ATTACHMENT_SHA256, TEST_LOGIN, TK_STARTING
 from tests.recorded_git_host import LATER_RUN, RUN, build_of
@@ -270,7 +270,7 @@ def first_starts(request: dict[str, Any]) -> list[str]:
 
 # What the tester reads in one session at the lane's web address: the declared attachment's bytes and each invented row.
 def read_as_tester(product: str = ODOO, password: str = "") -> dict[str, Any]:
-    signed_in = tester(product, "testing", password)
+    signed_in = as_tester(product, "testing", password)
     rows = signed_in.call("res.partner", "search_read", [("name", "=", ROW)], fields=["name"])
     return {"attachment": signed_in.attachment(), "rows": [each["id"] for each in rows]}
 
@@ -346,7 +346,7 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
     took = time.monotonic() - started
     assert (status, odoo["outcome"], odoo["build"]) == (200, "switched", build_of(RUN)), odoo
     request, serving = last_request(ODOO), parts_of(ODOO)
-    signed_in = tester(ODOO, "testing")
+    signed_in = as_tester(ODOO, "testing")
     read = signed_in.attachment()
     [row] = signed_in.call("res.partner", "create", [{"name": ROW}])
     leaked = says_the_password(ODOO, "testing", odoo, request, ask("/running")[1])
@@ -423,7 +423,7 @@ def test_first_start_from_descriptions_brings_up_a_website_and_an_initialized_od
         changed_password_reads=still_opens,
     )
     assert (changed == GOOD, status, refused["outcome"], still_opens) == (False, 422, "check failed", [row])
-    assert (f"Odoo refused the testing login {TEST_LOGIN}." in refused["error"], tester_is_refused(ODOO, "testing")) == (True, True)
+    assert (f"Odoo refused the testing login {TEST_LOGIN}." in refused["error"], refuses_the_tester(ODOO, "testing")) == (True, True)
     change_tester_password(ODOO, "testing", back=True)
     # Odoo answers nobody at an address that failed five sign-ins for a minute, so the card takes that long to read good.
     wait_for(lambda: card(ODOO) == GOOD, seconds=150)
@@ -499,6 +499,16 @@ def first_start_container() -> str:
     ).strip()
 
 
+# Odoo's first move asked and not waited for, once its first start has modules committed: the request, and its data set.
+def asked_and_begun() -> tuple[dict[str, Any], str]:
+    status, asked = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
+    assert status == 202, asked
+    wait_for(lambda: bool(first_start_container()), seconds=120)
+    began_in = data_set_of(ODOO, "testing")
+    wait_for(lambda: modules_are_committed(began_in), seconds=120)
+    return asked, began_in
+
+
 def ended_after_it_was_taken_up_again(request: int) -> dict[str, Any]:
     def taken_up_again_and_ended() -> bool:
         return ask(f"/requests/{request}")[1]["stands"] != "working"
@@ -510,11 +520,7 @@ def ended_after_it_was_taken_up_again(request: int) -> dict[str, Any]:
 @pytest.mark.usefixtures("described")
 def test_first_start_from_descriptions_killed_part_way_ends_with_one_lane_serving_from_one_seed() -> None:
     move_odoo = f"/lanes/{ODOO}/testing/move"
-    status, asked = ask(move_odoo, {"run": RUN})
-    assert status == 202, asked
-    wait_for(lambda: bool(first_start_container()), seconds=120)
-    began_in = data_set_of(ODOO, "testing")
-    wait_for(lambda: modules_are_committed(began_in), seconds=120)
+    asked, began_in = asked_and_begun()
     kill_launchplane()
     ended, after = ended_after_it_was_taken_up_again(asked["id"]), parts_of(ODOO)
     said(
@@ -540,11 +546,7 @@ def test_first_start_from_descriptions_killed_part_way_ends_with_one_lane_servin
     )
 
     retire_with_its_data(ODOO, "testing")
-    status, asked = ask(move_odoo, {"run": RUN})
-    assert status == 202, asked
-    wait_for(lambda: bool(first_start_container()), seconds=120)
-    began_in = data_set_of(ODOO, "testing")
-    wait_for(lambda: modules_are_committed(began_in), seconds=120)
+    asked, began_in = asked_and_begun()
     on_control("systemctl kill --signal=KILL launchplane; systemctl stop launchplane")
     on_scratch(f"docker kill {first_start_container()}")
     kept_volumes = volumes_of(ODOO, began_in)

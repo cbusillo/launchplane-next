@@ -258,9 +258,9 @@ def forget_test_password(product: str) -> None:
 
 
 # Whether what Launchplane said anywhere carries the lane's password. Only yes or no leaves this function.
-def says_the_password(product: str, lane: str, *said: object) -> bool:
+def says_the_password(product: str, lane: str, *said: dict[str, Any]) -> bool:
     password = kept_password(product, lane)
-    return any(password in str(each) for each in said)
+    return any(password in json.dumps(each) for each in said)
 
 
 def default_admin_is_refused(product: str, lane: str) -> bool:
@@ -272,13 +272,13 @@ def default_admin_is_refused(product: str, lane: str) -> bool:
 
 
 # The testing login signed in at the lane's web address, with the password kept for the lane or with `password`.
-def tester(product: str, lane: str, password: str = "") -> SignedIn:
+def as_tester(product: str, lane: str, password: str = "") -> SignedIn:
     return SignedIn(product, lane, TEST_LOGIN, password or kept_password(product, lane))
 
 
-def tester_is_refused(product: str, lane: str, password: str = "") -> bool:
+def refuses_the_tester(product: str, lane: str, password: str = "") -> bool:
     try:
-        tester(product, lane, password)
+        as_tester(product, lane, password)
     except SystemExit as refused:
         return "Access Denied" in str(refused)
     return False
@@ -288,7 +288,7 @@ def tester_is_refused(product: str, lane: str, password: str = "") -> bool:
 def change_tester_password(product: str, lane: str, *, back: bool = False) -> None:
     kept = kept_password(product, lane)
     old, new = (CHANGED, kept) if back else (kept, CHANGED)
-    tester(product, lane, old).call("res.users", "change_password", old, new)
+    as_tester(product, lane, old).call("res.users", "change_password", old, new)
 
 
 # The description is what holds a lane to verified builds and to its check, so it outlives everything of the lane.
@@ -317,7 +317,7 @@ def show(do: str, product: str, lane: str, text: str) -> bool:
     elif do == "show-copy":
         shown(read_copy(next(each for each in copies_of(product, lane) if each["data_set"] == text)))
     elif do == "sign-in":
-        read = hashlib.sha256(tester(product, lane).attachment()).hexdigest()
+        read = hashlib.sha256(as_tester(product, lane).attachment()).hexdigest()
         refused = "refused" if default_admin_is_refused(product, lane) else "signed in"
         shown({f"signed in as {TEST_LOGIN}, attachment": read, f"{ADMIN_LOGIN} with Odoo's default password": refused})
     if do in ("lead", "write", "show"):

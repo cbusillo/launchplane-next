@@ -52,8 +52,8 @@ def described_as(product: Product) -> Callable[[str], Product]:
 
 # Whether a text carries a secret. A test keeps the answer in a name before it asserts on it: a failing assertion shows
 # what it compared, and what a call inside it was given.
-def carries(secret: str, *said: object) -> bool:
-    return any(secret in str(each) for each in said)
+def carries(secret: str, *said: str) -> bool:
+    return any(secret in each for each in said)
 
 
 @dataclass
@@ -152,8 +152,8 @@ def test_a_move_killed_anywhere_ends_with_one_lane_serving_from_one_seed_and_nev
         bed.lanes.move(BUILD_A, GENERATION, 1)
     bed.host.killed_after = None
     result = bed.lanes.move(BUILD_A, GENERATION, 2)
-    seeded = [name for name, each in bed.host.data_sets.items() if [ran.seeded for ran in each.first_starts] == [True]]
-    assert (result.outcome, seeded, len(bed.host.instances)) == (Outcome.SWITCHED, [bed.serving_data_set()], 1)
+    with_a_seed = [name for name, each in bed.host.data_sets.items() if [ran.seeded for ran in each.first_starts] == [True]]
+    assert (result.outcome, with_a_seed, len(bed.host.instances)) == (Outcome.SWITCHED, [bed.serving_data_set()], 1)
     assert all(len(each.first_starts) <= 1 for each in bed.host.data_sets.values())
     cut_short_while_seeding = killed_after == BEFORE_THE_FIRST_START + 1 and not left_running_seeds
     assert (len(bed.host.data_sets), bed.serving_data_set() != "data-1") == ((2, True) if cut_short_while_seeding else (1, False))
@@ -245,7 +245,7 @@ def test_a_first_start_that_fails_saying_its_password_leaves_it_out_of_the_answe
     bed.host.failure_says = f"psycopg2.OperationalError: could not write the user {TEST_LOGIN} with password {password}"
     asking, record = bed.asked_through_the_api()
     answer = asking.post("/lanes/site/testing/move?wait=1", json={"build": "site:b"})
-    said = (answer.text, asking.get("/requests/1").text, asking.get("/running").text, record.kept)
+    said = (answer.text, asking.get("/requests/1").text, asking.get("/running").text, str(record.kept))
     leaked = carries(password, *said)
     assert (answer.status_code, answer.json()["outcome"], leaked) == (422, "not initialized", False)
     [card] = asking.get("/running").json()["cards"]
@@ -273,7 +273,7 @@ def test_a_sign_in_that_fails_saying_its_password_leaves_it_out_of_the_answer_th
     monkeypatch.setattr(bed.host, "run_in", refuse_saying_the_password)
     asking, record = bed.asked_through_the_api()
     answer = asking.post("/lanes/site/testing/move?wait=1", json={"build": BUILD_A.build})
-    said = (answer.text, asking.get("/requests/1").text, asking.get("/running").text, record.kept)
+    said = (answer.text, asking.get("/requests/1").text, asking.get("/running").text, str(record.kept))
     password = bed.kept.kept("site", "testing") or ""
     leaked = carries(password, *said)
     assert (answer.status_code, answer.json()["outcome"], leaked) == (422, "check failed", False)
@@ -407,7 +407,8 @@ class OdooAsSeeded:
 
     def __setattr__(self, name: str, value: object) -> None:
         if name == "password":
-            self.did.append((self.model, "password", len(str(value)) >= 32 and value != os.environ[TEST_PASSWORD_VARIABLE]))
+            random = isinstance(value, str) and len(value) >= 32 and value != os.environ[TEST_PASSWORD_VARIABLE]
+            self.did.append((self.model, "password", random))
         else:
             object.__setattr__(self, name, value)
 
@@ -438,7 +439,7 @@ def test_a_seed_that_fails_naming_the_password_says_why_without_it_and_commits_n
     odoo = OdooAsSeeded(refuses_users=True)
     with pytest.raises(SystemExit) as failed:
         seeded(run_first_start(tmp_path).seed, odoo, monkeypatch)
-    leaked = carries(CANARY, failed.value)
+    leaked = carries(CANARY, str(failed.value))
     assert (leaked, "the login may not be made with [the password]" in str(failed.value), odoo.did) == (False, True, [])
 
 
