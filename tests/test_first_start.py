@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, Mock, call
 import pytest
 from pydantic import ValidationError
 
+from launchplane.act import Stopped
 from launchplane.container_host import ContainerHost, data_set_labels
 from launchplane.docker_answers import GENERATION_LABEL, PART_LABEL, CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.page import kept_notes
@@ -151,3 +152,11 @@ def test_conflicting_first_start_labels_cannot_turn_an_existing_volume_into_a_vi
     files = {"Name": "files", "Labels": labels | {PART_LABEL: "files"}}
     with pytest.raises(ContainerHostError, match="labels"):
         read([], volumes=[database, files])
+
+
+def test_retiring_a_set_aside_pair_still_refuses_to_delete_ambiguous_volumes() -> None:
+    found = D1.model_copy(update={"set_aside": "marker", "volumes": ("one", "other")})
+    proxy = Given(data_sets=(found,)).proxy()
+    with pytest.raises(Stopped, match="which is its data is not known"):
+        lanes_on(proxy).retire(found.product, "testing", found.data_set)
+    assert proxy.host.data_sets[found.data_set].volumes == found.volumes

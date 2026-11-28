@@ -333,9 +333,12 @@ def database_findings(found: DataSet, database: DataSetDatabase, of: Judged) -> 
 
 
 def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
-    if found.set_aside and not any(each.data_set == found.data_set for each in of.lane.instances):
-        return []
     part, subject = f"The data set {found.data_set}", found.data_set
+    doubled = [
+        Found(Weight.WRONG, subject, Kind.DOUBLED, f"{part} has {parts} where it must have one") for parts in doubled_parts(found)
+    ]
+    if found.set_aside and not any(each.data_set == subject for each in of.lane.instances):
+        return doubled
     missing = [
         (kind, word)
         for kind, word, parts in (
@@ -350,10 +353,7 @@ def data_set_findings(found: DataSet, of: Judged) -> list[Found]:
         missing.append((Kind.NO_FILES, "files volume"))
     return [
         *stamp_findings(subject, found.generation),
-        *[
-            Found(Weight.WRONG, subject, Kind.DOUBLED, f"{part} has {doubled} where it must have one")
-            for doubled in doubled_parts(found)
-        ],
+        *doubled,
         *[Found(Weight.UNFINISHED, subject, kind, f"{part} has no {word}") for kind, word in missing],
         *[
             Found(Weight.WRONG, subject, Kind.NOT_QUIET, f"{part}'s network {network.name} is not quiet")
