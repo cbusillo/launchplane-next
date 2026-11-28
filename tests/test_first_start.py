@@ -19,7 +19,7 @@ from launchplane.docker_answers import CommandResult
 from launchplane.host_secrets import HostSecrets
 from launchplane.instance import InstanceState, LaneBuild
 from launchplane.judge import Condition
-from launchplane.odoo import FILES_PATH, MARK, SERVER, TEST_PASSWORD_VARIABLE
+from launchplane.odoo import FILES_PATH, SERVER, TEST_PASSWORD_VARIABLE
 from launchplane.product import Product, ProductError, ProductFolder, SecretFolder
 from launchplane.record import Gate
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream
@@ -294,7 +294,7 @@ def seeded(script: str) -> list[object]:
 
 # The mark is one row the first start made, so the statement names no row.
 # noinspection SqlResolve,SqlWithoutWhere
-FINISH_IT = f"UPDATE {MARK} SET finished = true"
+FINISH_IT = "UPDATE launchplane.first_start SET finished = true"
 
 
 def test_an_empty_database_is_marked_before_anything_is_installed_and_marked_finished_in_the_one_commit_of_its_seed(
