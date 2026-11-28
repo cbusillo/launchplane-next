@@ -3,7 +3,6 @@ import os
 import time
 from collections.abc import Iterable
 from contextlib import suppress
-from typing import cast
 
 from docker import DockerClient
 from docker.auth import resolve_repository_name
@@ -35,17 +34,16 @@ class HostImages:
         started = time.monotonic()
         try:
             with attempting(action, self.address):
-                self.fetch(image, published=published)
+                for event in self.pull(image, published=published):
+                    if reason := event.get("error"):
+                        raise APIError(reason)
                 self.client.images.get(image)
         except ContainerHostRefused as error:
             raise ContainerHostRefused(cleaned(str(error), self.secrets.seen)) from None
         logging.getLogger(__name__).info("Fetched %s in %.2f s", image, time.monotonic() - started)
 
-    def fetch(self, image: str, *, published: bool) -> None:
+    def pull(self, image: str, *, published: bool) -> Iterable[dict[str, str]]:
         registry, _ = resolve_repository_name(image)
         login = self.login if published and registry == self.registry else {}
         # Docker streams the registry's answer with a separate timeout, including refusals inside an HTTP 200.
-        events = self.client.api.pull(image, stream=True, decode=True, auth_config=login)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        for event in cast("Iterable[dict[str, str]]", events):
-            if reason := event.get("error"):
-                raise APIError(reason)
+        return self.client.api.pull(image, stream=True, decode=True, auth_config=login)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]

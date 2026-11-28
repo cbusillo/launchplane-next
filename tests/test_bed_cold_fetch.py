@@ -103,7 +103,8 @@ def empty_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             f"-p EnvironmentFile={FOLDER}/deny.env {SERVICE}/launchplane"
         )
         cleanup.callback(on_control, f"systemctl stop {UNIT}")
-        monkeypatch.setattr(bed, "LAUNCHPLANE_URL", f"http://{urlsplit(bed.LAUNCHPLANE_URL).hostname}:{PORT}")
+        url = urlsplit(bed.LAUNCHPLANE_URL)
+        monkeypatch.setattr(bed, "LAUNCHPLANE_URL", url._replace(netloc=f"{url.hostname}:{PORT}").geturl())
         wait_for(launchplane_answers, 30)
         yield
 
