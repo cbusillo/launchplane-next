@@ -19,7 +19,7 @@ from launchplane.docker_answers import CommandResult
 from launchplane.host_secrets import HostSecrets
 from launchplane.instance import InstanceState, LaneBuild
 from launchplane.judge import Condition
-from launchplane.odoo import FILES_PATH, SERVER, TEST_PASSWORD_VARIABLE
+from launchplane.odoo import FILES_PATH, MARK, SERVER, TEST_PASSWORD_VARIABLE
 from launchplane.product import Product, ProductError, ProductFolder, SecretFolder
 from launchplane.record import Gate
 from launchplane.secret_boundary import SECRET_REMOVED, CleanedStream
@@ -276,9 +276,10 @@ class OdooAsSeeded:
         return SimpleNamespace(execute=self.execute, fetchone=lambda: self.answer.pop(), commit=lambda: self.did.append("commit"))
 
     def execute(self, statement: str, given: list[str] | None = None) -> None:
-        if statement == "SELECT finished FROM launchplane.first_start":
+        asks, of = statement.startswith("SELECT "), statement.split(" FROM ")[-1].split()[0]
+        if asks and of == MARK:
             self.answer.append((self.finished,))
-        elif statement.startswith("SELECT password FROM res_users WHERE active AND login = "):
+        elif asks and of == "res_users":
             assert given == [TEST_LOGIN]
             self.answer.append((self.opens_with and f"hash of {self.opens_with}",))
         else:
