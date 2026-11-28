@@ -48,7 +48,17 @@ from launchplane.instance import (
 from launchplane.judge import Judgement, Work, judge
 from launchplane.product import BackgroundService, Database, Product, ProductError
 from launchplane.proxy import CheckFailed, ProxyError
-from launchplane.steps import CopyResult, CopyVolume, FreshNames, MaintenanceResult, MoveResult, RetireResult, Update, Verb
+from launchplane.steps import (
+    CopyResult,
+    CopyVolume,
+    FreshNames,
+    Initialize,
+    MaintenanceResult,
+    MoveResult,
+    RetireResult,
+    Update,
+    Verb,
+)
 from launchplane.telling import NOBODY, Said, Witness
 
 WEB_ADDRESS = "testing.site.test"
@@ -255,7 +265,9 @@ class PretendHost:
     def create_data_set_network(self, product: str, lane: str, data_set: str, generation: str | None = None) -> None:
         self.networks[f"network-{data_set}"] = True
         network = HostNetwork(name=f"network-{data_set}", is_quiet=True)
-        self.change_data_set(product, lane, data_set, networks=(network,), generation=generation)
+        self.change_data_set(
+            product, lane, data_set, networks=(network,), generation=generation, first_start=data_set.startswith("first-")
+        )
         self.record(f"network {data_set}")
 
     def create_data_set_volume(
@@ -269,6 +281,9 @@ class PretendHost:
         self.record(f"{'files' if files else 'volume'} {data_set}")
 
     # As Docker keeps it: the copier stays, and says whether it ran to its end. One that is refused wrote a part.
+    def initialize(self, step: Initialize, by: Witness) -> None:
+        self.record(f"initialize {step.found.data_set}")
+
     def copy_volume(self, copy: CopyVolume) -> None:
         refused = copy.destination in self.copies_refused
         copier = VolumeCopy(container=f"{copy.destination}-copier", volume=copy.destination, finished=not refused, stopped=True)

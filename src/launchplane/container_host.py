@@ -23,7 +23,6 @@ from launchplane.data_set import (
     READY_COMMAND,
     SET_UP_PATH,
     SET_UP_SCRIPT,
-    SETTLE_WRITER,
     THROWAWAY_PASSWORD_VARIABLE,
     login_of,
     psql_command,
@@ -446,23 +445,21 @@ class ContainerHost:
             if found.databases[0].state == InstanceState.STOPPED:
                 self.start_database(database)
             self.await_database(database)
-            command = psql_command(SETTLE_WRITER, login=login_of(name))
-            if writer is not None and self.run_in(database, command).output.strip() != "t":
-                raise ContainerHostError(f"The writer of {pair} has not settled. Its data was left alone.")
             refusal = None
-            if writer is None and step.command and not self.first_start_committed(database, pair):
+            check = psql_command(FIRST_START_COMMITTED, pair=pair, login=login_of(name))
+            if writer is None and step.command and not self.first_start_committed(database, check):
                 refusal = self.run_initializer(step, name, database, by)
-            committed = self.first_start_committed(database, pair)
+            committed = self.first_start_committed(database, check)
             if not committed:
                 self.set_aside(step)
             self.retire_container(name, by)
         if refusal is not None and not committed and not by.cancel_asked():
             raise ContainerHostRefused(f"The first start of {pair} failed. The pair was set aside. {refusal}")
 
-    def first_start_committed(self, database: str, pair: str) -> bool:
-        result = self.run_in(database, psql_command(FIRST_START_COMMITTED, pair=pair))
+    def first_start_committed(self, database: str, check: list[str]) -> bool:
+        result = self.run_in(database, check)
         if not result.succeeded or result.output.strip() not in ("t", "f"):
-            raise ContainerHostError(f"Reading the first-start commit of {pair} failed: {result.output}")
+            raise ContainerHostError(f"Reading the first-start commit in {database} failed: {result.output}")
         return result.output.strip() == "t"
 
     def set_aside(self, step: Initialize) -> None:
@@ -484,7 +481,12 @@ class ContainerHost:
         while True:
             writer.reload()
             if writer.status in STOPPED:
-                return writer.logs(tail=LOG_TAIL_LINES).decode(errors="replace") or "The initializer ended without a completion row."
+                code = writer.wait()["StatusCode"]
+                return (
+                    (writer.logs(tail=LOG_TAIL_LINES).decode(errors="replace") or f"Initializer exited {code}.")
+                    if 0 < code < 128
+                    else None
+                )
             by.hold()
             if by.cancel_asked():
                 writer.stop(timeout=RETIRE_GRACE_SECONDS)

@@ -75,7 +75,7 @@ exec {SERVER} shell --no-http --log-level=error <<'ODOO'
 import base64, secrets
 env["ir.attachment"].create({{"name": {self.attachment!r}, "raw": base64.b64decode({attachment!r})}})
 env.ref("base.user_admin").password = secrets.token_urlsafe(48)
-env["ir.config_parameter"].set_param("launchplane.first_start", {pair!r})
+env["ir.config_parameter"].set_str("launchplane.first_start", {pair!r})
 env.cr.commit()
 ODOO
 """

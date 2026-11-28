@@ -1,4 +1,5 @@
 import hashlib
+import shlex
 import subprocess
 import uuid
 from collections.abc import Iterator
@@ -9,7 +10,22 @@ import pytest
 
 from launchplane.odoo import FILES_PATH, USER
 from launchplane.product import Product
-from tests.bed import ask, ask_and_wait, needs_test_bed, on_control, on_scratch, remove_product_copies, retire
+from tests.bed import (
+    ask,
+    ask_and_wait,
+    hold,
+    kill_held_launchplane,
+    launchplane_held,
+    let_go,
+    needs_test_bed,
+    on_control,
+    on_scratch,
+    remove_product_copies,
+    request_ended,
+    retire,
+    wait_for,
+    wait_until_stopped_at,
+)
 from tests.bed_odoo import (
     SignedIn,
     data_set_of,
@@ -178,7 +194,8 @@ def described_first_starts() -> Iterator[None]:
         describe(SITE, Product())
         for product in (ODOO, FAILING):
             describe(product, first_start_product())
-        yield
+        with launchplane_held():
+            yield
     finally:
         for product in (SITE, ODOO, FAILING):
             retire_with_its_data(product, LANE)
@@ -216,3 +233,86 @@ def test_first_start_from_descriptions() -> None:
         [],
     )
     print(f"Both repeat asks kept {container} on {moved['data_set']}.", flush=True)  # noqa: T201
+    hold("first-start-refuse")
+    status, refused = ask(f"/lanes/{FAILING}/testing/move?wait=230", {"run": RUN}, 240)
+    assert status == 503 and "The bed refused the final transaction." in refused["error"], refused
+    assert on_scratch(f"curl -s -o /dev/null -w '%{{http_code}}' -H 'Host: testing.{FAILING}.test' http://127.0.0.1/") == "404"
+    assert all(part["product"] != FAILING for part in ask("/running")[1]["instances"])
+    print("Forced initializer refusal left its data set aside and its address returned 404.", flush=True)  # noqa: T201
+
+
+def first_start_pairs() -> list[dict[str, Any]]:
+    return [pair for pair in ask("/running")[1]["data_sets"] if pair["product"] == ODOO]
+
+
+def query_pair(pair: str, sql: str) -> str:
+    database = f"{ODOO}-{LANE}-database-{pair}"
+    return on_scratch(f"docker exec {database} psql -XAt -v ON_ERROR_STOP=1 -U postgres -d app -c {shlex.quote(sql)}").strip()
+
+
+@pytest.mark.usefixtures("described_first_starts")
+@pytest.mark.parametrize(("when", "interruption"), [("before", "launchplane"), ("before", "docker"), ("after", "launchplane")])
+def test_first_start_recovers_from_the_committed_row(when: str, interruption: str) -> None:
+    hold(f"first-start-{when}")
+    status, requested = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
+    assert status == 202
+    select_writer = f"docker ps -q --filter label=launchplane.product={ODOO} --filter label=launchplane.part=initializer"
+
+    def at_commit() -> bool:
+        return (
+            on_scratch(
+                f'writer=$({select_writer}); [ -n "$writer" ] && docker exec "$writer" test -e /tmp/held-at-commit && echo held || true'
+            ).strip()
+            == "held"
+        )
+
+    wait_for(at_commit, 160)
+    [old] = first_start_pairs()
+    pair = old["data_set"]
+    modules = query_pair(pair, "select count(*) from ir_module_module where state = 'installed'")
+    assert int(modules) > 0
+    if interruption == "launchplane":
+        kill_held_launchplane()
+    else:
+        on_scratch("systemctl restart docker")
+    ended = request_ended(requested["id"])
+    assert ended["stands"] == "done", ended["error"]
+    pairs = first_start_pairs()
+    [active] = [each for each in pairs if each["data_set"] == ended["answer"]["data_set"]]
+    assert not active["set_aside"]
+    if when == "before":
+        [kept] = [each for each in pairs if each["set_aside"]]
+        assert kept["data_set"] == pair != active["data_set"]
+        assert (kept["volumes"], kept["files"]) == (old["volumes"], old["files"])
+        assert query_pair(pair, "select count(*) from ir_module_module where state = 'installed'") == modules
+    else:
+        assert [active["data_set"]] == [each["data_set"] for each in pairs] == [pair]
+    [card] = [each for each in ask("/running")[1]["cards"] if each["title"] == f"{ODOO} · testing"]
+    assert [pill["text"] for pill in card["pills"]] == ["good"]
+    print(f"{interruption} restarted {when} commit. Started on {pair}, serving from {active['data_set']}.", flush=True)  # noqa: T201
+
+
+@pytest.mark.usefixtures("described_first_starts")
+@pytest.mark.parametrize("plant_row", [True, False], ids=["row-and-file", "files-only"])
+def test_first_start_preserves_existing_contents(plant_row: bool) -> None:
+    point = "before.host.initialize"
+    hold(point)
+    status, request = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
+    assert status == 202
+    wait_until_stopped_at(point)
+    [found] = first_start_pairs()
+    pair = found["data_set"]
+    [volume] = found["files"]
+    mount = f"docker run --rm --network none -v {volume}:/files --entrypoint sh postgres:18-alpine -c "
+    on_scratch(mount + "'echo kept > /files/planted'")
+    if plant_row:
+        query_pair(pair, "create schema planted; create table planted.note as select 'kept'::text as value")
+    let_go(point)
+    ended = request_ended(request["id"])
+    assert ended["stands"] == "failed" and "set aside" in ended["error"]
+    [kept] = first_start_pairs()
+    assert kept["set_aside"] and kept["data_set"] == pair
+    assert on_scratch(mount + "'cat /files/planted'").strip() == "kept"
+    if plant_row:
+        assert query_pair(pair, "select value from planted.note") == "kept"
+    assert query_pair(pair, "select to_regclass('ir_module_module') is null") == "t"
