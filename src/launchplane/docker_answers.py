@@ -345,6 +345,7 @@ def data_sets_from(
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
     copies: Iterable[tuple[DataSetKey, VolumeCopy]],
+    initializers: Mapping[DataSetKey, str],
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
@@ -354,14 +355,11 @@ def data_sets_from(
     made_by = {key: generation_in(volume.labels, f"the volume {volume.name}") for key, volume in stamped} | made_by
     copy_of = {key: volume.labels[COPY_OF_LABEL] for key, volume in keyed if COPY_OF_LABEL in volume.labels}
     aside = {key: volume.name for key, volume in keyed if volume.labels.get(PART_LABEL) == "set-aside"}
-    first = {key for key, network in marked if FIRST_START_LABEL in (network.labels or {})}
-    first.update(key for key, volume in keyed if FIRST_START_LABEL in volume.labels)
-    for key, labels in [(k, n.labels or {}) for k, n in marked] + [(k, v.labels) for k, v in keyed]:
-        if key in first and (
-            FIRST_START_LABEL not in labels
-            or not isinstance(made_by.get(key), str)
-            or labels.get(GENERATION_LABEL) != made_by.get(key)
-        ):
+    parts = [(key, part.labels or {}) for key, part in (*marked, *keyed)]
+    first = {key for key, labels in parts if FIRST_START_LABEL in labels}
+    for key, labels in parts:
+        generation = labels.get(GENERATION_LABEL, "")
+        if key in first and (FIRST_START_LABEL not in labels or not is_generation(generation) or generation != made_by.get(key)):
             raise ContainerHostError(f"The first-start labels of data set {key[2]} disagree. Its data was left alone.")
     by_copier = grouped(copies)
     by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) not in ("files", "set-aside"))
@@ -377,6 +375,7 @@ def data_sets_from(
             databases=tuple(sorted(by_database.get(key, []), key=lambda database: database.container)),
             generation=made_by.get(key),
             first_start=key in first,
+            initializer=initializers.get(key),
             set_aside=aside.get(key),
             files=tuple(sorted(by_files.get(key, []))),
             copy_of=copy_of.get(key),
@@ -420,10 +419,11 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
         background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
     databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
     copies = [(data_set_key(summary.labels, summary.name), volume_copy(summary, details)) for summary in by_part["copier"]]
+    initializers = {data_set_key(summary.labels, summary.name): summary.name for summary in by_part["initializer"]}
     return OnHost(
         instances=[instance_from(summary) for summary in (*by_part["web"], *by_part["update"])],
         background_services=background_services,
-        data_sets=data_sets_from(databases, marked_networks, volume_list, copies),
+        data_sets=data_sets_from(databases, marked_networks, volume_list, copies, initializers),
         networks=[network_from(network) for network in every_network],
     )
 

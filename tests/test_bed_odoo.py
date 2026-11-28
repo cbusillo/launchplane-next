@@ -36,9 +36,8 @@ from tests.bed_odoo import (
     serve_recorded_git_host,
     stop_recorded_git_host,
 )
-from tests.odoo_product import ATTACHMENT_SHA256
+from tests.odoo_product import ATTACHMENT_SHA256, first_start_product
 from tests.recorded_git_host import LATER_RUN, RUN, build_of
-from tests.test_first_start import first_start_product
 
 pytestmark = needs_test_bed
 
@@ -251,7 +250,10 @@ def query_pair(pair: str, sql: str) -> str:
 
 
 @pytest.mark.usefixtures("described_first_starts")
-@pytest.mark.parametrize(("when", "interruption"), [("before", "launchplane"), ("before", "docker"), ("after", "launchplane")])
+@pytest.mark.parametrize(
+    ("when", "interruption"),
+    [("before", "launchplane"), ("before", "docker"), ("after", "launchplane"), ("before", "cancel"), ("after", "cancel")],
+)
 def test_first_start_recovers_from_the_committed_row(when: str, interruption: str) -> None:
     hold(f"first-start-{when}")
     status, requested = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
@@ -261,7 +263,8 @@ def test_first_start_recovers_from_the_committed_row(when: str, interruption: st
     def at_commit() -> bool:
         return (
             on_scratch(
-                f'writer=$({select_writer}); [ -n "$writer" ] && docker exec "$writer" test -e /tmp/held-at-commit && echo held || true'
+                f'writer=$({select_writer}); [ -n "$writer" ] && '
+                'docker exec "$writer" test -e /tmp/held-at-commit && echo held || true'
             ).strip()
             == "held"
         )
@@ -273,12 +276,23 @@ def test_first_start_recovers_from_the_committed_row(when: str, interruption: st
     assert int(modules) > 0
     if interruption == "launchplane":
         kill_held_launchplane()
-    else:
+    elif interruption == "docker":
         on_scratch("systemctl restart docker")
+    else:
+        assert ask(f"/requests/{requested['id']}/cancel", {})[0] == 202
     ended = request_ended(requested["id"])
-    assert ended["stands"] == "done", ended["error"]
+    if interruption == "cancel":
+        assert ended["stands"] == "cancelled"
+        [left] = first_start_pairs()
+        assert left["data_set"] == pair and bool(left["set_aside"]) == (when == "before")
+        assert not any(each["product"] == ODOO for each in ask("/running")[1]["instances"])
+        status, moved = ask_and_wait(f"/lanes/{ODOO}/testing/move", {"run": RUN}, 240)
+        assert status == 200, moved
+    else:
+        assert ended["stands"] == "done", ended["error"]
+        moved = ended["answer"]
     pairs = first_start_pairs()
-    [active] = [each for each in pairs if each["data_set"] == ended["answer"]["data_set"]]
+    [active] = [each for each in pairs if each["data_set"] == moved["data_set"]]
     assert not active["set_aside"]
     if when == "before":
         [kept] = [each for each in pairs if each["set_aside"]]
@@ -289,7 +303,7 @@ def test_first_start_recovers_from_the_committed_row(when: str, interruption: st
         assert [active["data_set"]] == [each["data_set"] for each in pairs] == [pair]
     [card] = [each for each in ask("/running")[1]["cards"] if each["title"] == f"{ODOO} · testing"]
     assert [pill["text"] for pill in card["pills"]] == ["good"]
-    print(f"{interruption} restarted {when} commit. Started on {pair}, serving from {active['data_set']}.", flush=True)  # noqa: T201
+    print(f"{interruption} {when} commit. Started on {pair}, serving from {active['data_set']}.", flush=True)  # noqa: T201
 
 
 @pytest.mark.usefixtures("described_first_starts")

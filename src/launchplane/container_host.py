@@ -308,6 +308,8 @@ class ContainerHost:
             raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
     def probed(self, found: DataSet, held: Set[str]) -> DataSet:
+        if found.set_aside:
+            return found
         databases = tuple(self.asked(each, held) if each.state == InstanceState.RUNNING else each for each in found.databases)
         return found.model_copy(update={"databases": databases})
 
@@ -465,7 +467,10 @@ class ContainerHost:
     def set_aside(self, step: Initialize) -> None:
         pair = step.found.data_set
         labels = data_set_labels(step.target.product, step.target.lane, pair) | pair_stamp(pair, step.generation)
-        self.client.volumes.create(f"launchplane-data-{pair}-set-aside", labels=labels | {PART_LABEL: "set-aside"})
+        labels[PART_LABEL] = "set-aside"
+        marker = self.client.volumes.create(f"launchplane-data-{pair}-set-aside", labels=labels)
+        if not labels.items() <= marker.attrs["Labels"].items():
+            raise ContainerHostError(f"The set-aside marker of {pair} has conflicting labels. Its data was left alone.")
 
     def run_initializer(self, step: Initialize, name: str, database: str, by: Witness) -> str | None:
         found = step.found
@@ -482,11 +487,9 @@ class ContainerHost:
             writer.reload()
             if writer.status in STOPPED:
                 code = writer.wait()["StatusCode"]
-                return (
-                    (writer.logs(tail=LOG_TAIL_LINES).decode(errors="replace") or f"Initializer exited {code}.")
-                    if 0 < code < 128
-                    else None
-                )
+                if 0 < code < 128:
+                    return writer.logs(tail=LOG_TAIL_LINES).decode(errors="replace") or f"Initializer exited {code}."
+                return None
             by.hold()
             if by.cancel_asked():
                 writer.stop(timeout=RETIRE_GRACE_SECONDS)
@@ -609,6 +612,8 @@ class ContainerHost:
 
     def delete_data_set(self, found: DataSet) -> None:
         with attempting(f"Deleting the data set {found.data_set}", self.address):
+            if found.initializer:
+                self.retire_container(found.initializer)
             for part in (*found.databases, *found.copies):
                 self.retire_container(part.container)
             for network in found.networks:

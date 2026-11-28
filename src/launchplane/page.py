@@ -379,7 +379,11 @@ def lane_card(entry: WebAddressJudged, status: Status) -> Card:
                     "image",
                     each.image,
                     " ".join(filter(None, (each.container, kept.get(found.data_set)))),
-                    [state_pill(each.state, each.container)],
+                    [
+                        Pill(text="set aside", tone=Standing.ON_PURPOSE)
+                        if found.set_aside
+                        else state_pill(each.state, each.container)
+                    ],
                 )
                 for found in data_sets
                 for each in found.databases

@@ -116,6 +116,7 @@ class DataSet(BaseModel, frozen=True):
     files: tuple[str, ...] = ()
     # Stamped on the first part of it that is made: its network, or the volumes of a copy.
     generation: Stamp = None
+    initializer: str | None = None
     first_start: bool = False
     set_aside: str | None = None
     copy_of: str | None = None
