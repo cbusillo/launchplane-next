@@ -1,14 +1,16 @@
+import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Set
+from collections.abc import Callable, Iterable, Set
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import docker
+from docker.auth import resolve_repository_name
 from docker.errors import APIError, ImageNotFound, NotFound
 from docker.models.containers import Container
 from docker.tls import TLSConfig
@@ -73,6 +75,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
+from launchplane.secret_boundary import cleaned
 from launchplane.steps import CopyVolume, Update
 from launchplane.telling import NOBODY, Said, Witness
 
@@ -203,6 +206,13 @@ class ContainerHost:
         self.sleep = sleep
         self.clock = clock
         self.secrets = HostSecrets()
+        self.registry = os.environ.get("LAUNCHPLANE_REGISTRY")
+        self.registry_login = {
+            "username": os.environ.get("LAUNCHPLANE_REGISTRY_USER", ""),
+            "password": os.environ.get("LAUNCHPLANE_REGISTRY_PASSWORD", ""),
+        }
+        if self.registry_login["password"]:
+            self.secrets.note([self.registry_login["password"]])
         self.logins = HostLogins(client, address, self.secrets)
         # Every lane shares the proxy, the back soon page and their networks. Each is looked for and made while this is
         # held and no longer, so two lanes that find one missing do not both make it.
@@ -323,10 +333,21 @@ class ContainerHost:
             return None
 
     def ensure_image(self, image: str) -> None:
-        try:
+        with suppress(ImageNotFound):
             self.client.images.get(image)
-        except ImageNotFound:
-            self.client.images.pull(image)
+            return
+        registry, _ = resolve_repository_name(image)
+        login = self.registry_login if registry == self.registry and "@sha256:" in image else {}
+        started = self.clock()
+        with attempting(f"Fetching image {image}", self.address):
+            # Docker streams the registry's answer with a separate timeout, including refusals inside an HTTP 200.
+            events = cast("Iterable[dict[str, str]]", self.client.api.pull(image, stream=True, decode=True, auth_config=login))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            for event in events:
+                if reason := event.get("error"):
+                    reason = cleaned(reason, self.secrets.seen)
+                    raise ContainerHostRefused(f"Fetching image {image} on {self.address} was refused: {reason}")
+            self.client.images.get(image)
+        logging.getLogger(__name__).info("Fetched %s in %.2f s", image, self.clock() - started)
 
     def create_network(self, name: str, labels: dict[str, str] | None, *, quiet: bool) -> None:
         if quiet:

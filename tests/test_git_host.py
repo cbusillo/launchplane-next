@@ -13,6 +13,7 @@ from launchplane.act import Lanes
 from launchplane.api import create_app
 from launchplane.container_host import ContainerHost
 from launchplane.git_host import TOKEN_VARIABLE, Builds, GitHostError, NotABuild
+from launchplane.product import Product
 from launchplane.record import Record
 from tests.given_secrets import GivenSecrets
 from tests.odoo_product import TK
@@ -216,3 +217,19 @@ def test_the_git_hosts_key_is_among_the_secrets_cleaned_from_every_answer_and_lo
     monkeypatch.setattr(api.logging.config, "dictConfig", nothing)
     api.serve()
     assert "a-key-to-the-git-host" in host.secrets_seen()
+
+
+def test_a_sourced_website_keeps_only_the_digest_of_its_own_publishing_run(
+    builds_from: Callable[[Runs], Builds], record: Record
+) -> None:
+    assert TK.odoo is not None
+    website = Product.model_validate({"publisher": TK.odoo.model_dump(include={"repository", "workflow", "image"})})
+    runs = with_manifest({"source_commit": "0" * 40})
+    app = app_with(Builds(lambda _: website, builds_from(runs).git_host), record)
+    move = "/lanes/site/testing/move"
+    assert app.post(move, json={"build": "site:latest"}).status_code == 422
+    assert app.post(move, json={"run": RUN}).status_code == 422
+    assert record.unfinished() == []
+    app = app_with(Builds(lambda _: website, builds_from(answers()).git_host), record)
+    response = app.post(move, json={"run": RUN})
+    assert (response.status_code, response.json()["build"]) == (202, build_of(RUN))

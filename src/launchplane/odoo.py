@@ -1,9 +1,10 @@
 import json
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from launchplane.data_set import DATABASE_NAME
 from launchplane.instance import Run
+from launchplane.publisher import Publisher
 
 # What every build of the kind is, as its shared base makes it: the server, who runs it and where it keeps its files.
 SERVER, USER, FILES_PATH = "/odoo/odoo-bin", "ubuntu", "/volumes/data"
@@ -36,16 +37,13 @@ if read != [want["sha256"]]:
 
 
 # What a product of the kind declares for itself. Its builds are runs of `workflow` in `repository`, published to `image`.
-class Odoo(BaseModel, extra="forbid", frozen=True):
-    repository: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
-    workflow: str
-    image: str
+class Odoo(Publisher, frozen=True):
     addons_path: list[str] = Field(min_length=1)
     modules: list[str] = Field(min_length=1)
     attachment: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     # The modules a release to another build updates, on a copy of the lane's data. With none, a release copies nothing.
-    update: list[str] = []
+    update: list[str] = Field(default_factory=list)
 
     @property
     def run(self) -> Run:

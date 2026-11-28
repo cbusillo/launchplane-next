@@ -41,7 +41,8 @@ class Builds:
     git_host: GitHub[Any] = field(default_factory=from_environment)
 
     def asked(self, product: str, build: str | None, run: int | None) -> str:
-        source = self.read_product(product).odoo
+        description = self.read_product(product)
+        source = description.odoo or description.publisher
         if source is not None and run is not None and build is None:
             return self.published(source.repository, source.workflow, source.image, run)
         if source is None and build is not None and run is None:

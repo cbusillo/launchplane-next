@@ -10,6 +10,7 @@ StartLimitBurst=10
 User=launchplane
 WorkingDirectory=/var/lib/launchplane
 EnvironmentFile=/etc/launchplane/bed.env
+EnvironmentFile=-/etc/launchplane/publisher.env
 Environment=LAUNCHPLANE_CONTAINER_HOST_CREDENTIALS=/var/lib/launchplane/tls
 Environment=LAUNCHPLANE_LISTEN_ADDRESS=0.0.0.0
 Environment=LAUNCHPLANE_LISTEN_PORT=8700

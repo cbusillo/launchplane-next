@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from launchplane.instance import Run
 from launchplane.odoo import Odoo
+from launchplane.publisher import Publisher
 from launchplane.steps import Check
 
 
@@ -21,10 +23,17 @@ class BackgroundService(BaseModel, extra="forbid", frozen=True):
 
 
 class Product(BaseModel, extra="forbid", frozen=True):
+    publisher: Publisher | None = None
     health_path: str = Field(default="/", pattern=r"^/[^\s]*$")
     database: Database | None = None
     background_service: BackgroundService | None = None
     odoo: Odoo | None = None
+
+    @model_validator(mode="after")
+    def check_one_publisher(self) -> Self:
+        if self.publisher is not None and self.odoo is not None:
+            raise ValueError("Declare the Odoo publisher once, in odoo.")
+        return self
 
     @property
     def run(self) -> Run:
