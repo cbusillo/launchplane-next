@@ -213,7 +213,8 @@ def test_a_first_start_is_read_into_its_data_set_as_seeded_only_once_it_exited_w
         details("made", "created"),
         details("running", "running"),
     ]
-    on_host = read([listed(each, "first-start", [DATA_SET_NETWORK]) for each in names], described=described)
+    volumes = [{"Name": DATABASE_VOLUME, "Labels": DATA_SET_LABELS}]
+    on_host = read([listed(each, "first-start", [DATA_SET_NETWORK]) for each in names], volumes=volumes, described=described)
     [found] = on_host.data_sets
     assert (on_host.instances, found.is_set_aside) == ([], True)
     assert [(each.container, each.seeded) for each in found.first_starts] == [
