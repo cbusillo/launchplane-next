@@ -249,6 +249,6 @@ On November 27, on the scratch host, the first move of a new lane of TK's build 
 | Of that, the first start on the empty database: 85 modules, the attachment and the login | 35.5 s |
 | Of that, the web part from its start to its check passed | 8.7 s |
 | A move to the build already serving, which checks and signs in to the serving instance | Not measured |
-| `tests/test_bed_odoo.py -k first_start_from_descriptions`, 2 tests with 8 s of reading time after each of their 12 points | 5 min 18 s and 4 min 55 s, each test run by itself |
+| `tests/test_bed_odoo.py -k first_start_from_descriptions`, 2 tests with 8 s of reading time after each of their 12 points | 5 min 18 s and 4 min 55 s, each test run by itself. Run together later, 16 min 47 s, 8 min each |
 
 How long an interruption is acceptable is not decided (README, open question 2).

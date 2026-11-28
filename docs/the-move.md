@@ -408,7 +408,7 @@ uv run python -m tests.bed_odoo tear-down watch-tk
 
 ### The first-start watch
 
-A website and an Odoo product, each from its description and nothing else on the host, brought up by one move each, and then what a failure, a kill and a login that does not open Odoo each leave. It is the last two tests of `tests/test_bed_odoo.py`, which ask every move through the API as any caller does, print each point as they reach it, wait 8 s after each so the page can be read, and put the bed back. It takes about eleven minutes. It needs TK's first build on the scratch container and no other, and fails, never skips, where that build is missing and cannot be pulled. No password is printed, and none is in anything the tests compare.
+A website and an Odoo product, each from its description and nothing else on the host, brought up by one move each, and then what a failure, a kill and a login that does not open Odoo each leave. It is the last two tests of `tests/test_bed_odoo.py`, which ask every move through the API as any caller does, print each point as they reach it, wait 8 s after each so the page can be read, and put the bed back. It took ten to seventeen minutes. It needs TK's first build on the scratch container and no other, and fails, never skips, where that build is missing and cannot be pulled. No password is printed, and none is in anything the tests compare.
 
 ```
 open http://launchplane.shiny:8700/
