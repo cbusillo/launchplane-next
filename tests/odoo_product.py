@@ -1,3 +1,5 @@
+import base64
+
 from launchplane.odoo import Odoo
 from launchplane.product import Database, Product
 from tests.recorded_git_host import IMAGE, REPOSITORY, WORKFLOW
@@ -35,3 +37,9 @@ TK = Product(
 )
 # The same product once its releases update a module on a copy of the lane's data.
 TK_UPDATING = TK.model_copy(update={"odoo": TK.odoo and TK.odoo.model_copy(update={"update": ["tk_website"]})})
+
+
+def first_start_product(content: bytes = ATTACHMENT_BYTES) -> Product:
+    description = TK.model_dump(mode="json")
+    description["odoo"]["first_start"] = {"attachment": base64.b64encode(content).decode()}
+    return Product.model_validate(description)

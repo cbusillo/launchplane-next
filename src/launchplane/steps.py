@@ -199,6 +199,13 @@ class Update:
     generation: str | None = None
 
 
+@dataclass(frozen=True)
+class Initialize:
+    target: LaneBuild
+    found: DataSet
+    command: tuple[str, ...]
+
+
 # The gate makes it only from the routes file as it was `read`. With nothing `to` send visitors to, the route is removed.
 @dataclass(frozen=True)
 class EditRoute:
@@ -424,6 +431,7 @@ type Action = (
     | RemoveLogins
     | Check
     | Update
+    | Initialize
     | AwaitBackgroundService
     | StopPart
     | StopDatabase

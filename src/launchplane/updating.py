@@ -91,6 +91,8 @@ def frozen_step(move: Move, of: Copying, cancel: steps.Cancel | None) -> Decided
 # The one rule of what a lane keeps of its data: why this data set stays, or None for a copy that goes once a release
 # has switched. Nothing is known to go while no instance receives visitors on a data set of the lane.
 def why_kept(lane: LaneReading, found: DataSet) -> str | None:
+    if found.set_aside:
+        return "Set aside. Retire this data set by name to delete it."
     active = lane.active
     serving = None if active is None else lane.data_set(active.data_set)
     if serving is None:

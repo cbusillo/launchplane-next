@@ -95,7 +95,6 @@ These are requirements even though the finish-line test does not show them.
 
 - Search engines are told not to index any lane except real production. A prelaunch production site is not indexed either.
 - Sign-in through Authentik lives in shared code, so any product can use it.
-- A site that is not yet released often needs a seeded test login, including sites that are not Odoo.
 - Image scanning belongs to the product's own build. Launchplane does not scan.
 - The container host and the git host each sit behind one small piece, so either can be replaced. Nothing outside that piece names Docker, a file system or a particular host.
 - A backup can be restored on a different host than the one that made it.

@@ -42,7 +42,7 @@ QUIET_GATEWAY_MODE = "isolated"
 MOST_READS = 3
 
 type DockerState = Literal["created", "running", "paused", "restarting", "removing", "exited", "dead"]
-type Part = Literal["web", "update", "background-service", "database", "copier"]
+type Part = Literal["web", "update", "background-service", "database", "copier", "initializer"]
 
 INSTANCE_STATE_FOR_DOCKER_STATE: dict[DockerState, InstanceState] = {
     "created": InstanceState.STOPPED,
@@ -220,7 +220,7 @@ def required_label(labels: dict[str, str], label: str, what: str) -> str:
 
 def part_of(summary: DockerContainerSummary) -> Part:
     part = summary.labels.get(PART_LABEL, "web")
-    if part not in ("web", "update", "background-service", "database", "copier"):
+    if part not in ("web", "update", "background-service", "database", "copier", "initializer"):
         raise ContainerHostError(f"The container {summary.name} is marked as the part {part}, which Launchplane does not know.")
     return part
 
@@ -344,6 +344,7 @@ def data_sets_from(
     networks: Iterable[DockerNetworkSummary],
     volumes: Iterable[DockerVolumeSummary],
     copies: Iterable[tuple[DataSetKey, VolumeCopy]],
+    initializers: Mapping[DataSetKey, str],
 ) -> list[DataSet]:
     marked = [(data_set_key(network.labels or {}, f"the network {network.name}"), network) for network in networks]
     by_network = grouped((key, network_from(network)) for key, network in marked)
@@ -352,8 +353,15 @@ def data_sets_from(
     stamped = [(key, volume) for key, volume in keyed if GENERATION_LABEL in volume.labels]
     made_by = {key: generation_in(volume.labels, f"the volume {volume.name}") for key, volume in stamped} | made_by
     copy_of = {key: volume.labels[COPY_OF_LABEL] for key, volume in keyed if COPY_OF_LABEL in volume.labels}
+    aside = {key: volume.name for key, volume in keyed if volume.labels.get(PART_LABEL) == "set-aside"}
+    parts = [(key, part.labels or {}) for key, part in (*marked, *keyed) if key[2].startswith("first-")]
+    first = {key: labels[GENERATION_LABEL] for key, labels in parts if GENERATION_LABEL in labels}
+    for key, labels in parts:
+        generation = labels.get(GENERATION_LABEL, "")
+        if key in first and (not is_generation(generation) or not key[2].startswith(f"first-{generation}-")):
+            raise ContainerHostError(f"The first-start labels of data set {key[2]} disagree. Its data was left alone.")
     by_copier = grouped(copies)
-    by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) != "files")
+    by_volume = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) not in ("files", "set-aside"))
     by_files = grouped((key, volume.name) for key, volume in keyed if volume.labels.get(PART_LABEL) == "files")
     by_database = grouped(databases)
     return [
@@ -365,11 +373,14 @@ def data_sets_from(
             volumes=tuple(sorted(by_volume.get(key, []))),
             databases=tuple(sorted(by_database.get(key, []), key=lambda database: database.container)),
             generation=made_by.get(key),
+            first_start_generation=first.get(key),
+            initializer=initializers.get(key),
+            set_aside=aside.get(key),
             files=tuple(sorted(by_files.get(key, []))),
             copy_of=copy_of.get(key),
             copies=tuple(sorted(by_copier.get(key, []), key=lambda copy: copy.container)),
         )
-        for key in sorted(by_network.keys() | by_volume.keys() | by_files.keys() | by_database.keys(), key=str)
+        for key in sorted(by_network.keys() | by_volume.keys() | by_files.keys() | by_database.keys() | aside.keys(), key=str)
     ]
 
 
@@ -396,7 +407,7 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
     volume_list = checked(DOCKER_VOLUME_LIST, volumes, "volume list").volumes or []
     marked_networks = [network for network in every_network if PRODUCT_LABEL in (network.labels or {})]
     by_part: dict[Part, list[DockerContainerSummary]] = {
-        name: [] for name in ("web", "update", "background-service", "database", "copier")
+        name: [] for name in ("web", "update", "background-service", "database", "copier", "initializer")
     }
     for summary in found.summaries:
         by_part[part_of(summary)].append(summary)
@@ -407,10 +418,11 @@ def on_host_from(found: Listed, networks: object, volumes: object, system: objec
         background_services = [background_service_from(summary, details, now) for summary in by_part["background-service"]]
     databases = [(data_set_key(summary.labels, summary.name), database_part(summary, details)) for summary in by_part["database"]]
     copies = [(data_set_key(summary.labels, summary.name), volume_copy(summary, details)) for summary in by_part["copier"]]
+    initializers = {data_set_key(summary.labels, summary.name): summary.name for summary in by_part["initializer"]}
     return OnHost(
         instances=[instance_from(summary) for summary in (*by_part["web"], *by_part["update"])],
         background_services=background_services,
-        data_sets=data_sets_from(databases, marked_networks, volume_list, copies),
+        data_sets=data_sets_from(databases, marked_networks, volume_list, copies, initializers),
         networks=[network_from(network) for network in every_network],
     )
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from uuid import NAMESPACE_OID, uuid5
 
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
@@ -18,10 +19,13 @@ from launchplane.data_set import (
     CLIENT_PASSWORD_VARIABLE,
     DATA_PATH,
     DATABASE_ADDRESS,
+    FIRST_START_COMMITTED,
     READY_COMMAND,
     SET_UP_PATH,
     SET_UP_SCRIPT,
     THROWAWAY_PASSWORD_VARIABLE,
+    login_of,
+    psql_command,
     server_environment,
 )
 from launchplane.docker_answers import (
@@ -73,7 +77,7 @@ from launchplane.instance import (
     background_service_container_of,
     new_password,
 )
-from launchplane.steps import CopyVolume, Update
+from launchplane.steps import CopyVolume, Initialize, Update
 from launchplane.telling import NOBODY, Said, Witness
 
 DOCKER_API_VERSION = "1.47"
@@ -93,6 +97,18 @@ COPIER_IMAGE = "debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af67
 COPY_COMMAND = ["sh", "-c", f"cp -a --reflink=auto /from/. {DATA_PATH}/ && diff -r --no-dereference /from {DATA_PATH} && sync"]
 # How long the host waits for what is run once. A command that must end sooner ends itself.
 RUN_ONCE_DEADLINE_SECONDS = 900
+EMPTY_DATABASE = """\
+dump() { pg_dump -U postgres --schema-only --restrict-key=LaunchplaneFirstStart "$@"; }
+query() { psql -XAt -v ON_ERROR_STOP=1 -U postgres -d "$1" -c "$2"; }
+other=$(query postgres "select datname from pg_database where datname not in ('template0','template1','postgres','app')")
+[ -z "$other" ] || exit 42
+fresh=$(dump --exclude-schema='*' template1)
+for db in template1 postgres app; do
+    actual=$(dump "$db")
+    large=$(query "$db" 'select exists (select from pg_largeobject_metadata)')
+    [ "$actual" = "$fresh" ] && [ "$large" = f ] || exit 42
+done
+"""
 type RestartPolicy = Literal["always", "unless-stopped", "no"]
 # Docker starts a container with this policy again when it crashes, and not one that was stopped through Docker.
 STAYS_STOPPED_WHEN_STOPPED: RestartPolicy = "unless-stopped"
@@ -290,6 +306,8 @@ class ContainerHost:
             raise TornRead(f"{container} was listed, and Docker refused to describe it: {error}") from error
 
     def probed(self, found: DataSet, held: Set[str]) -> DataSet:
+        if found.set_aside:
+            return found
         databases = tuple(self.asked(each, held) if each.state == InstanceState.RUNNING else each for each in found.databases)
         return found.model_copy(update={"databases": databases})
 
@@ -408,6 +426,74 @@ class ContainerHost:
             self.retire_container(container, by)
         return CommandResult(exit_code=exit_code, output=output)
 
+    def initialize(self, step: Initialize, by: Witness) -> None:
+        found, pair = step.found, step.found.data_set
+        name = f"initializer-{uuid5(NAMESPACE_OID, pair).hex}"
+        with observing(), attempting(f"Resolving the first start of {pair}", self.address):
+            writer = self.find_container(name)
+            if writer is not None:
+                expected = data_set_labels(step.target.product, step.target.lane, pair) | {PART_LABEL: "initializer"}
+                if not expected.items() <= writer.labels.items():
+                    raise ContainerHostError(f"The container named {name} does not belong to this first start.")
+                writer.stop(timeout=RETIRE_GRACE_SECONDS)
+            if not found.databases:
+                if writer is not None:
+                    raise ContainerHostError(f"The database of initializer {name} is missing. Its commit cannot be read.")
+                self.set_aside(step)
+                return
+            database = found.databases[0].container
+            if found.databases[0].state == InstanceState.STOPPED:
+                self.start_database(database)
+            self.await_database(database)
+            refusal = None
+            check = psql_command(FIRST_START_COMMITTED, pair=pair, login=login_of(name))
+            if writer is None and step.command and not self.first_start_committed(database, check):
+                refusal = self.run_initializer(step, name, database, by)
+            committed = self.first_start_committed(database, check)
+            if not committed:
+                self.set_aside(step)
+            self.retire_container(name, by)
+        if refusal is not None and not committed and not by.cancel_asked():
+            raise ContainerHostRefused(f"The first start of {pair} failed. The pair was set aside. {refusal}")
+
+    def first_start_committed(self, database: str, check: list[str]) -> bool:
+        result = self.run_in(database, check)
+        if not result.succeeded or result.output.strip() not in ("t", "f"):
+            raise ContainerHostError(f"Reading the first-start commit in {database} failed: {result.output}")
+        return result.output.strip() == "t"
+
+    def set_aside(self, step: Initialize) -> None:
+        pair = step.found.data_set
+        labels = data_set_labels(step.target.product, step.target.lane, pair) | stamp_of(step.found.first_start_generation)
+        labels[PART_LABEL] = "set-aside"
+        marker = self.client.volumes.create(f"launchplane-data-{pair}-set-aside", labels=labels)
+        if not labels.items() <= (marker.attrs.get("Labels") or {}).items():
+            raise ContainerHostError(f"The set-aside marker of {pair} has conflicting labels. Its data was left alone.")
+
+    def run_initializer(self, step: Initialize, name: str, database: str, by: Witness) -> str | None:
+        found = step.found
+        schema = self.run_in(database, ["sh", "-ec", EMPTY_DATABASE])
+        if schema.exit_code == 42:
+            return "The database holds data or schema objects beyond a fresh database."
+        if not schema.succeeded:
+            raise ContainerHostError(f"Checking whether the database {database} is empty failed: {schema.output}")
+        use = DataSetUse(found.data_set, found.networks[0].name, database, found.files[0])
+        options = self.instance_options(step.target, name, use, found.first_start_generation, "initializer")
+        once = replace(options, networks={use.network: []}, command=list(step.command), restart=RUNS_ONCE)
+        writer = self.run_part(once, use, lambda on: self.logins.make(name, on, by), by)
+        while True:
+            writer.reload()
+            if writer.status in STOPPED:
+                code = writer.wait()["StatusCode"]
+                if 0 < code < 128:
+                    return writer.logs(tail=LOG_TAIL_LINES).decode(errors="replace") or f"Initializer exited {code}."
+                return None
+            by.hold()
+            if by.cancel_asked():
+                writer.stop(timeout=RETIRE_GRACE_SECONDS)
+                return None
+            self.sleep(POLL_SECONDS)
+
     def start_background_service(
         self,
         target: LaneBuild,
@@ -524,13 +610,15 @@ class ContainerHost:
 
     def delete_data_set(self, found: DataSet) -> None:
         with attempting(f"Deleting the data set {found.data_set}", self.address):
+            if found.initializer:
+                self.retire_container(found.initializer)
             for part in (*found.databases, *found.copies):
                 self.retire_container(part.container)
             for network in found.networks:
                 with suppress(NotFound):
                     self.client.networks.get(network.name).remove()
             # Last, since a copy is known as one by its volumes: one Docker refuses to delete whole is still read as a copy.
-            for volume in (*found.volumes, *found.files):
+            for volume in (*found.volumes, *found.files, *((found.set_aside,) if found.set_aside else ())):
                 with suppress(NotFound):
                     self.client.volumes.get(volume).remove()
 

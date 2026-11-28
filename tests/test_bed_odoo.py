@@ -1,5 +1,7 @@
 import hashlib
+import shlex
 import subprocess
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -7,9 +9,34 @@ from typing import Any
 import pytest
 
 from launchplane.odoo import FILES_PATH, USER
-from tests.bed import ask, ask_and_wait, needs_test_bed, on_scratch, remove_product_copies, retire
-from tests.bed_odoo import data_set_of, describe, pull_builds, seed, serve_recorded_git_host, stop_recorded_git_host
-from tests.odoo_product import ATTACHMENT_SHA256
+from launchplane.product import Product
+from tests.bed import (
+    ask,
+    ask_and_wait,
+    hold,
+    kill_held_launchplane,
+    launchplane_held,
+    let_go,
+    needs_test_bed,
+    on_control,
+    on_scratch,
+    remove_product_copies,
+    request_ended,
+    retire,
+    wait_for,
+    wait_until_stopped_at,
+)
+from tests.bed_odoo import (
+    SignedIn,
+    data_set_of,
+    describe,
+    pull_builds,
+    retire_with_its_data,
+    seed,
+    serve_recorded_git_host,
+    stop_recorded_git_host,
+)
+from tests.odoo_product import ATTACHMENT_SHA256, first_start_product
 from tests.recorded_git_host import LATER_RUN, RUN, build_of
 
 pytestmark = needs_test_bed
@@ -152,3 +179,164 @@ def test_a_missing_attachment_file_fails_the_check_of_the_next_build_and_the_lan
     assert (instance["container"], instance["build"]) == (story.serving, build_of(RUN))
     with_the_file_back = move_to(LATER_RUN)
     assert (with_the_file_back["outcome"], with_the_file_back["build"]) == ("switched", build_of(LATER_RUN))
+
+
+SITE, ODOO, FAILING = "step78-website", "step78-odoo", "step78-refused"
+
+
+@pytest.fixture
+def described_first_starts() -> Iterator[None]:
+    serve_recorded_git_host()
+    try:
+        for product in (SITE, ODOO, FAILING):
+            retire_with_its_data(product, LANE)
+        describe(SITE, Product())
+        for product in (ODOO, FAILING):
+            describe(product, first_start_product())
+        with launchplane_held():
+            yield
+    finally:
+        for product in (SITE, ODOO, FAILING):
+            retire_with_its_data(product, LANE)
+            on_control(f"rm -f /var/lib/launchplane/products/{product}.json")
+        stop_recorded_git_host()
+
+
+@pytest.mark.usefixtures("described_first_starts")
+def test_first_start_from_descriptions() -> None:
+    print(f"Website at testing.{SITE}.test and Odoo at testing.{ODOO}.test/web/login", flush=True)  # noqa: T201
+    assert ask_and_wait(f"/lanes/{SITE}/testing/move", {"build": "nginx:1.30.6-alpine"})[0] == 200
+    page = on_scratch(f"curl -fsS -H 'Host: testing.{SITE}.test' http://127.0.0.1/")
+    assert "Welcome to nginx!" in page
+    print("Website serves its welcome page.", flush=True)  # noqa: T201
+    move = f"/lanes/{ODOO}/testing/move?wait=230"
+    headers = {"Idempotency-Key": str(uuid.uuid4())}
+    status, moved = ask(move, {"run": RUN}, 240, headers)
+    assert status == 200 and moved.get("outcome") == "switched", moved
+    container = moved["container_receiving_visitors"]
+    login_page = on_scratch(f"curl -fsS -H 'Host: testing.{ODOO}.test' http://127.0.0.1/web/login")
+    assert "password" in login_page
+    with pytest.raises(SystemExit, match="Access Denied"):
+        SignedIn(ODOO, LANE)
+    database = f"{ODOO}-{LANE}-database-{moved['data_set']}"
+    path = on_scratch(f'docker exec {database} psql -U postgres -d app -Atc "{STORED_FILE}"').strip()
+    digest = on_scratch(f"docker exec {container} sha256sum {FILES_PATH}/filestore/app/{path}").split()[0]
+    assert digest == ATTACHMENT_SHA256
+    print(f"Odoo serves its login page, refuses admin/admin, and its attachment reads back as {digest}.", flush=True)  # noqa: T201
+    assert ask(move, {"run": RUN}, 240, headers) == (200, moved)
+    _, again = ask(move, {"run": RUN}, 240)
+    assert (again["outcome"], again["data_set"], again["container_receiving_visitors"], again["did"]) == (
+        "unchanged",
+        moved["data_set"],
+        container,
+        [],
+    )
+    print(f"Both repeat asks kept {container} on {moved['data_set']}.", flush=True)  # noqa: T201
+    hold("first-start-refuse")
+    status, refused = ask(f"/lanes/{FAILING}/testing/move?wait=230", {"run": RUN}, 240)
+    assert status == 503 and "The bed refused the final transaction." in refused["error"], refused
+    assert on_scratch(f"curl -s -o /dev/null -w '%{{http_code}}' -H 'Host: testing.{FAILING}.test' http://127.0.0.1/") == "404"
+    assert all(part["product"] != FAILING for part in ask("/running")[1]["instances"])
+    print("Forced initializer refusal left its data set aside and its address returned 404.", flush=True)  # noqa: T201
+
+
+def first_start_pairs() -> list[dict[str, Any]]:
+    return [pair for pair in ask("/running")[1]["data_sets"] if pair["product"] == ODOO]
+
+
+def query_pair(pair: str, sql: str) -> str:
+    database = f"{ODOO}-{LANE}-database-{pair}"
+    return on_scratch(f"docker exec {database} psql -XAt -v ON_ERROR_STOP=1 -U postgres -d app -c {shlex.quote(sql)}").strip()
+
+
+@pytest.mark.usefixtures("described_first_starts")
+@pytest.mark.parametrize(
+    ("when", "interruption"),
+    [("before", "launchplane"), ("before", "docker"), ("after", "launchplane"), ("before", "cancel"), ("after", "cancel")],
+)
+def test_first_start_recovers_from_the_committed_row(when: str, interruption: str) -> None:
+    hold(f"first-start-{when}")
+    status, requested = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
+    assert status == 202
+    select_writer = f"docker ps -q --filter label=launchplane.product={ODOO} --filter label=launchplane.part=initializer"
+
+    def at_commit() -> bool:
+        return (
+            on_scratch(
+                f'writer=$({select_writer}); [ -n "$writer" ] && '
+                'docker exec "$writer" test -e /tmp/held-at-commit && echo held || true'
+            ).strip()
+            == "held"
+        )
+
+    wait_for(at_commit, 160)
+    [old] = first_start_pairs()
+    pair = old["data_set"]
+    modules = query_pair(pair, "select count(*) from ir_module_module where state = 'installed'")
+    assert int(modules) > 0
+    if interruption == "launchplane":
+        kill_held_launchplane()
+    elif interruption == "docker":
+        on_scratch("systemctl restart docker")
+    else:
+        assert ask(f"/requests/{requested['id']}/cancel", {})[0] == 202
+    ended = request_ended(requested["id"])
+    if interruption == "cancel":
+        assert ended["stands"] == "cancelled"
+        [left] = first_start_pairs()
+        assert left["data_set"] == pair and bool(left["set_aside"]) == (when == "before")
+        assert not any(each["product"] == ODOO for each in ask("/running")[1]["instances"])
+        status, moved = ask_and_wait(f"/lanes/{ODOO}/testing/move", {"run": RUN}, 240)
+        assert status == 200, moved
+    else:
+        assert ended["stands"] == "done", ended["error"]
+        moved = ended["answer"]
+    pairs = first_start_pairs()
+    [active] = [each for each in pairs if each["data_set"] == moved["data_set"]]
+    assert not active["set_aside"]
+    if when == "before":
+        [kept] = [each for each in pairs if each["set_aside"]]
+        assert kept["data_set"] == pair != active["data_set"]
+        assert (kept["volumes"], kept["files"]) == (old["volumes"], old["files"])
+        assert query_pair(pair, "select count(*) from ir_module_module where state = 'installed'") == modules
+    else:
+        assert [active["data_set"]] == [each["data_set"] for each in pairs] == [pair]
+    [card] = [each for each in ask("/running")[1]["cards"] if each["title"] == f"{ODOO} · testing"]
+    assert [pill["text"] for pill in card["pills"]] == ["good"]
+    print(f"{interruption} {when} commit. Started on {pair}, serving from {active['data_set']}.", flush=True)  # noqa: T201
+
+
+@pytest.mark.usefixtures("described_first_starts")
+@pytest.mark.parametrize("planted", ["row-and-file", "files-only", "another-database", "empty-schema"])
+def test_first_start_preserves_existing_contents(planted: str) -> None:
+    point = "before.host.initialize"
+    hold(point)
+    status, request = ask(f"/lanes/{ODOO}/testing/move", {"run": RUN})
+    assert status == 202
+    wait_until_stopped_at(point)
+    [found] = first_start_pairs()
+    pair = found["data_set"]
+    [volume] = found["files"]
+    mount = f"docker run --rm --network none -v {volume}:/files --entrypoint sh postgres:18-alpine -c "
+    if planted in ("row-and-file", "files-only"):
+        on_scratch(mount + "'echo kept > /files/planted'")
+    if planted == "another-database":
+        query_pair(pair, "create database imported")
+    if planted == "empty-schema":
+        query_pair(pair, "create schema imported")
+    if planted == "row-and-file":
+        query_pair(pair, "create schema planted; create table planted.note as select 'kept'::text as value")
+    let_go(point)
+    ended = request_ended(request["id"])
+    assert ended["stands"] == "failed" and "set aside" in ended["error"]
+    [kept] = first_start_pairs()
+    assert kept["set_aside"] and kept["data_set"] == pair
+    if planted in ("row-and-file", "files-only"):
+        assert on_scratch(mount + "'cat /files/planted'").strip() == "kept"
+    if planted == "another-database":
+        assert query_pair(pair, "select datname from pg_database where datname = 'imported'") == "imported"
+    if planted == "empty-schema":
+        assert query_pair(pair, "select nspname from pg_namespace where nspname = 'imported'") == "imported"
+    if planted == "row-and-file":
+        assert query_pair(pair, "select value from planted.note") == "kept"
+    assert query_pair(pair, "select to_regclass('ir_module_module') is null") == "t"

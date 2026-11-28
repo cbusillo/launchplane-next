@@ -116,6 +116,9 @@ class DataSet(BaseModel, frozen=True):
     files: tuple[str, ...] = ()
     # Stamped on the first part of it that is made: its network, or the volumes of a copy.
     generation: Stamp = None
+    initializer: str | None = None
+    first_start_generation: str | None = None
+    set_aside: str | None = None
     copy_of: str | None = None
     copies: tuple[VolumeCopy, ...] = ()
 
@@ -278,7 +281,7 @@ class LaneReading:
 
     @property
     def databases(self) -> list[DataSetDatabase]:
-        return [database for found in self.data_sets for database in found.databases]
+        return [database for found in self.data_sets if not found.set_aside for database in found.databases]
 
     def data_set(self, name: str | None) -> DataSet | None:
         return next((found for found in self.data_sets if found.data_set == name), None)

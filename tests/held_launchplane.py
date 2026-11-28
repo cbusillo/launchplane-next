@@ -14,6 +14,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,10 +22,11 @@ from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
 import docker
+from docker.models.containers import Container
 
 from launchplane import api
 from launchplane.act import Lanes
-from launchplane.container_host import ContainerHost
+from launchplane.container_host import ContainerHost, RunOptions
 from launchplane.docker_answers import CommandResult, ContainerHostError, ContainerHostRefused
 from launchplane.host_logins import HostLogins
 from launchplane.proxy import PROXY_NAME, ROUTES_FOLDER, TraefikProxy
@@ -32,7 +34,9 @@ from launchplane.record import PostgresRecord
 
 HOLDS = Path(os.environ.get("LAUNCHPLANE_HOLDS", "/var/lib/launchplane/holds"))
 PORT = int(os.environ.get("LAUNCHPLANE_HOLDS_PORT", "8701"))
-POINT = re.compile(r"(before|after|lose|fail|refuse)\.(host|logins|proxy|record|lanes)\.[a-z_]+|proxy-delivery|interrupt-switch")
+POINT = re.compile(
+    r"(before|after|lose|fail|refuse)\.(host|logins|proxy|record|lanes)\.[a-z_]+|proxy-delivery|interrupt-switch|first-start-(?:before|after|refuse)"
+)
 M3_BIN = "/tmp/launchplane-m3-bin"  # noqa: S108 inside the test proxy
 PROXY_DELIVERY = "proxy-delivery"
 # Traefik reads every file of its routes folder or none: one it cannot read keeps it on the routes it has loaded.
@@ -106,6 +110,21 @@ class HeldHost(Held, ContainerHost):
     def __init__(self, client: docker.DockerClient, address: str) -> None:
         super().__init__(client, address)
         self.logins = HeldLogins(client, address, self.secrets)
+
+    def create(self, options: RunOptions) -> Container:
+        command = options.command
+        if command and options.labels.get("launchplane.part") == "initializer":
+            commit = "env.cr.commit()"
+            pause_at_commit = "from pathlib import Path\nimport time\nPath('/tmp/held-at-commit').touch()\ntime.sleep(300)"
+            for when, replacement in (
+                ("before", f"{pause_at_commit}\n{commit}"),
+                ("after", f"{commit}\n{pause_at_commit}"),
+                ("refuse", "raise SystemExit('The bed refused the final transaction.')"),
+            ):
+                if held_once(f"first-start-{when}", options.container):
+                    assert commit in command[-1]
+                    options = replace(options, command=[*command[:-1], command[-1].replace(commit, replacement)])
+        return super().create(options)
 
     def run_in(self, container: str, command: list[str]) -> CommandResult:
         if held_once("interrupt-switch", repr(command)):

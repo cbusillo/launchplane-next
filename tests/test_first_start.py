@@ -1,0 +1,164 @@
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, call
+
+import pytest
+from pydantic import ValidationError
+
+from launchplane.act import Stopped
+from launchplane.container_host import ContainerHost, data_set_labels
+from launchplane.docker_answers import GENERATION_LABEL, PART_LABEL, CommandResult, ContainerHostError, ContainerHostRefused
+from launchplane.page import kept_notes
+from launchplane.plan import lane_data_set
+from launchplane.product import Product
+from launchplane.steps import Initialize, Stop
+from launchplane.telling import NOBODY, Witness
+from tests.bed_odoo import ADMIN_PASSWORD
+from tests.odoo_product import ATTACHMENT, ATTACHMENT_BYTES, TK, first_start_product
+from tests.pretend_host import D1, EARLIER, GENERATION, Given, lanes_on
+from tests.recording_docker import RecordingContainer, RecordingDocker
+from tests.test_container_host import read
+from tests.test_odoo_kind import BUILD_A, D1_WITH_FILES, OLD_WITH_FILES, SERVING
+
+
+def test_a_description_can_supply_the_bytes_its_unattended_first_start_checks() -> None:
+    product = first_start_product()
+    assert product.odoo is not None and product.odoo.first_start is not None
+    assert product.odoo.first_start.attachment == ATTACHMENT_BYTES
+    with pytest.raises(ValidationError, match="SHA-256"):
+        first_start_product(b"other bytes")
+
+
+@pytest.mark.parametrize("product", [first_start_product(), TK, Product()], ids=["opt-in", "legacy", "website"])
+def test_only_an_opted_in_first_move_initializes_before_web_and_repeats_leave_it_alone(product: Product) -> None:
+    proxy = Given().proxy()
+    lanes = lanes_on(proxy, product)
+    result = lanes.move(BUILD_A, GENERATION, 1)
+    actions = proxy.host.actions
+    starts = [action for action in actions if action.startswith("initialize ")]
+    assert starts == ([f"initialize {result.data_set}"] if product.odoo and product.odoo.first_start else [])
+    if starts:
+        assert actions.index(starts[0]) < actions.index(f"start {result.container_receiving_visitors}")
+    actions.clear()
+    lanes.read_status()
+    assert lanes.move(BUILD_A, EARLIER, 1).container_receiving_visitors == result.container_receiving_visitors
+    assert not actions
+
+
+def test_factory_password_is_gone_when_the_attachment_and_completion_row_commit() -> None:
+    odoo = first_start_product().odoo
+    assert odoo is not None
+    transaction = odoo.initialize("one")[-1].split("<<'ODOO'\n")[1].removesuffix("ODOO\n")
+    env = MagicMock()
+    factory = SimpleNamespace(password=ADMIN_PASSWORD)
+    attachment, parameters = Mock(), Mock()
+    env.ref.return_value = factory
+    env.__getitem__.side_effect = {"ir.attachment": attachment, "ir.config_parameter": parameters}.__getitem__
+
+    def commit() -> None:
+        assert factory.password != ADMIN_PASSWORD
+        attachment.create.assert_called_once_with({"name": ATTACHMENT, "raw": ATTACHMENT_BYTES})
+        parameters.set_str.assert_called_once_with("launchplane.first_start", "one")
+
+    env.cr.commit.side_effect = commit
+    exec(transaction, {"env": env})  # noqa: S102 run the transaction against the recording cursor
+    env.cr.commit.assert_called_once()
+    env.ref.assert_called_with("base.user_admin")
+
+
+@pytest.mark.parametrize("state", ["running", "exited"])
+@pytest.mark.parametrize("committed", [True, False])
+@pytest.mark.parametrize("cancel", [True, False])
+def test_an_interrupted_writer_never_rejoins_and_only_its_commit_keeps_the_pair(
+    state: str, committed: bool, cancel: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = ContainerHost(RecordingDocker().as_client(), "bed")
+    writer = RecordingContainer("old", data_set_labels("site", "testing", "d1") | {PART_LABEL: "initializer"}, [], {}, status=state)
+    monkeypatch.setattr(host, "find_container", Mock(return_value=writer))
+    monkeypatch.setattr(host, "await_database", Mock())
+
+    def read_commit(_database: str, _command: list[str]) -> CommandResult:
+        assert writer.status == "exited"
+        return CommandResult(0, "t" if committed else "f")
+
+    monkeypatch.setattr(host, "run_in", read_commit)
+    start, aside = Mock(), Mock()
+    monkeypatch.setattr(host, "run_initializer", start)
+    monkeypatch.setattr(host, "set_aside", aside)
+    step = Initialize(BUILD_A, D1, () if cancel else ("install",))
+    host.initialize(step, Witness(cancel_asked=lambda: cancel))
+    start.assert_not_called()
+    assert aside.call_args_list == ([] if committed else [call(step)])
+    assert writer.removed
+
+
+@pytest.mark.parametrize("committed", [True, False])
+def test_a_known_initializer_error_is_reported_only_when_its_transaction_did_not_commit(
+    committed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = ContainerHost(RecordingDocker().as_client(), "bed")
+    monkeypatch.setattr(host, "await_database", Mock())
+    responses = iter([False, committed])
+    monkeypatch.setattr(host, "first_start_committed", Mock(side_effect=responses))
+    install, aside = Mock(return_value="initialization refused"), Mock()
+    monkeypatch.setattr(host, "run_initializer", install)
+    monkeypatch.setattr(host, "set_aside", aside)
+    step = Initialize(BUILD_A, D1, ("install",))
+    if committed:
+        host.initialize(step, NOBODY)
+        aside.assert_not_called()
+    else:
+        with pytest.raises(ContainerHostRefused, match="initialization refused"):
+            host.initialize(step, NOBODY)
+        aside.assert_called_once_with(step)
+    install.assert_called_once()
+
+
+def test_an_unreadable_completion_row_neither_starts_a_writer_nor_sets_the_pair_aside(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = ContainerHost(RecordingDocker().as_client(), "bed")
+    monkeypatch.setattr(host, "await_database", Mock())
+    monkeypatch.setattr(host, "run_in", Mock(return_value=CommandResult(1, "connection lost")))
+    install, aside = Mock(), Mock()
+    monkeypatch.setattr(host, "run_initializer", install)
+    monkeypatch.setattr(host, "set_aside", aside)
+    with pytest.raises(ContainerHostError, match="connection lost"):
+        host.initialize(Initialize(BUILD_A, D1, ("install",)), NOBODY)
+    install.assert_not_called()
+    aside.assert_not_called()
+
+
+def test_set_aside_data_is_named_on_a_healthy_lane_and_does_not_create_an_ambiguous_choice() -> None:
+    aside = D1.model_copy(
+        update={"data_set": "interrupted", "set_aside": "marker", "first_start_generation": GENERATION, "databases": ()}
+    )
+    given = Given((OLD_WITH_FILES,), SERVING, data_sets=(D1_WITH_FILES, aside))
+    judged = given.judged(None, TK)
+    assert not judged.findings
+    assert "set aside" in kept_notes(judged, [])[aside.data_set].lower()
+    assert lane_data_set(given.reading(), None, "new") == D1.data_set
+    outsider = aside.model_copy(update={"first_start_generation": None})
+    assert isinstance(lane_data_set(Given(data_sets=(outsider,)).reading(), None, "new"), Stop)
+
+
+def test_a_refused_first_start_leaves_the_lane_without_web_or_a_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = Given().proxy()
+    monkeypatch.setattr(proxy.host, "initialize", Mock(side_effect=ContainerHostRefused("module installation refused")))
+    with pytest.raises(ContainerHostRefused, match="installation refused"):
+        lanes_on(proxy, first_start_product()).move(BUILD_A, GENERATION, 1)
+    assert proxy.host.instances == {} and proxy.written == {}
+
+
+def test_conflicting_first_start_labels_cannot_turn_an_existing_volume_into_a_virgin_pair() -> None:
+    pair = f"first-{GENERATION}-1"
+    labels = data_set_labels("site", "testing", pair)
+    database = {"Name": "database", "Labels": labels | {GENERATION_LABEL: GENERATION}}
+    files = {"Name": "files", "Labels": labels | {PART_LABEL: "files"}}
+    with pytest.raises(ContainerHostError, match="labels"):
+        read([], volumes=[database, files])
+
+
+def test_retiring_a_set_aside_pair_still_refuses_to_delete_ambiguous_volumes() -> None:
+    found = D1.model_copy(update={"set_aside": "marker", "volumes": ("one", "other")})
+    proxy = Given(data_sets=(found,)).proxy()
+    with pytest.raises(Stopped, match="which is its data is not known"):
+        lanes_on(proxy).retire(found.product, "testing", found.data_set)
+    assert proxy.host.data_sets[found.data_set].volumes == found.volumes
